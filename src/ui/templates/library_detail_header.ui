@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Library Detail View Header Template
+
+  Header section for artist/album detail views.
+  Contains: back button, optional album art, title, artist link or info label.
+
+  For album detail: show album_art, use artist_link button
+  For artist detail: hide album_art, use info_label
+-->
+<interface>
+  <object class="GtkBox" id="detail_header">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">12</property>
+
+    <!-- Back button -->
+    <child>
+      <object class="GtkButton" id="back_button">
+        <property name="icon-name">go-previous-symbolic</property>
+        <property name="valign">start</property>
+        <style>
+          <class name="flat"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Album art (hidden for artist detail) -->
+    <child>
+      <object class="GtkImage" id="album_art">
+        <property name="icon-name">media-optical-symbolic</property>
+        <property name="pixel-size">120</property>
+        <property name="visible">false</property>
+        <style>
+          <class name="library-album-art-large"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Info box -->
+    <child>
+      <object class="GtkBox" id="info_box">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+        <property name="valign">center</property>
+
+        <!-- Title -->
+        <child>
+          <object class="GtkLabel" id="title">
+            <property name="xalign">0</property>
+            <property name="ellipsize">end</property>
+            <style>
+              <class name="library-title"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Artist link button (for album detail) -->
+        <child>
+          <object class="GtkButton" id="artist_link">
+            <property name="halign">start</property>
+            <property name="visible">false</property>
+            <style>
+              <class name="flat"/>
+              <class name="artist-link"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Info label (for artist detail) -->
+        <child>
+          <object class="GtkLabel" id="info_label">
+            <property name="xalign">0</property>
+            <property name="visible">false</property>
+            <style>
+              <class name="library-subtitle"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

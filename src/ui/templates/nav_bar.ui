@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Navigation bar - loaded via GtkBuilder in window.c
+  Uses GtkToggleButton + stateful action for automatic :checked state management.
+  CSS styles :checked state via .nav-item:checked selector.
+-->
+<interface>
+  <object class="GtkBox" id="nav_bar">
+    <property name="orientation">vertical</property>
+    <style>
+      <class name="nav-bar"/>
+    </style>
+
+    <child>
+      <object class="GtkToggleButton">
+        <property name="action-name">win.navigate</property>
+        <property name="action-target">'search'</property>
+        <style><class name="nav-item"/></style>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">2</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">system-search-symbolic</property>
+                <property name="pixel-size">20</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">SEARCH</property>
+                <style><class name="nav-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkToggleButton">
+        <property name="action-name">win.navigate</property>
+        <property name="action-target">'artists'</property>
+        <style><class name="nav-item"/></style>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">2</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">avatar-default-symbolic</property>
+                <property name="pixel-size">20</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">ARTISTS</property>
+                <style><class name="nav-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkToggleButton">
+        <property name="action-name">win.navigate</property>
+        <property name="action-target">'albums'</property>
+        <style><class name="nav-item"/></style>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">2</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">media-optical-symbolic</property>
+                <property name="pixel-size">20</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">ALBUMS</property>
+                <style><class name="nav-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkToggleButton">
+        <property name="action-name">win.navigate</property>
+        <property name="action-target">'libraries'</property>
+        <style><class name="nav-item"/></style>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">2</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">drive-harddisk-symbolic</property>
+                <property name="pixel-size">20</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">LIBS</property>
+                <style><class name="nav-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Spacer -->
+    <child>
+      <object class="GtkBox">
+        <property name="vexpand">true</property>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkSeparator">
+        <property name="orientation">horizontal</property>
+        <style><class name="nav-separator"/></style>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkToggleButton">
+        <property name="action-name">win.navigate</property>
+        <property name="action-target">'settings'</property>
+        <style><class name="nav-item"/></style>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">2</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">emblem-system-symbolic</property>
+                <property name="pixel-size">20</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">SETTINGS</property>
+                <style><class name="nav-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkToggleButton">
+        <property name="action-name">win.navigate</property>
+        <property name="action-target">'perf'</property>
+        <style><class name="nav-item"/></style>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">2</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">utilities-system-monitor-symbolic</property>
+                <property name="pixel-size">20</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">PERF</property>
+                <style><class name="nav-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkToggleButton">
+        <property name="action-name">win.navigate</property>
+        <property name="action-target">'help'</property>
+        <style><class name="nav-item"/></style>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">2</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">help-about-symbolic</property>
+                <property name="pixel-size">20</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">HELP</property>
+                <style><class name="nav-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

@@ -1,0 +1,562 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="UiChannelStrip" parent="GtkWidget">
+    <child>
+      <object class="GtkBox" id="main_box">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">8</property>
+
+        <!-- Channel number badge (fixed left anchor, top-aligned) -->
+        <child>
+          <object class="GtkLabel" id="channel_label">
+            <property name="label">1</property>
+            <property name="valign">start</property>
+            <style>
+              <class name="channel-number"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Main vertical container: content + seek row -->
+        <child>
+          <object class="GtkBox" id="main_vbox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+
+            <!-- Top section: display panel + right column -->
+            <child>
+              <object class="GtkBox" id="content_hbox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">8</property>
+                <property name="vexpand">true</property>
+
+                <!-- Display panel: inset "LCD module" with song info + time -->
+                <child>
+                  <object class="GtkFrame" id="display_panel">
+                    <property name="hexpand">true</property>
+                    <property name="vexpand">true</property>
+                    <style>
+                      <class name="display-panel"/>
+                    </style>
+                    <child>
+                      <object class="GtkBox" id="display_inner">
+                        <property name="orientation">horizontal</property>
+                        <property name="spacing">12</property>
+                        <style>
+                          <class name="display-inner"/>
+                        </style>
+
+                        <!-- Left column: Song info (main content) -->
+                        <child>
+                          <object class="GtkBox" id="info_box">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">0</property>
+                            <property name="hexpand">true</property>
+                            <property name="vexpand">true</property>
+
+                            <!-- Top group: Title, Artist, Album -->
+                            <child>
+                              <object class="GtkBox" id="info_top">
+                                <property name="orientation">vertical</property>
+                                <property name="spacing">2</property>
+                                <property name="valign">start</property>
+
+                                <!-- Song title (marquee scroll) -->
+                                <child>
+                                  <object class="GtkScrolledWindow" id="title_scroll">
+                                    <property name="hscrollbar-policy">external</property>
+                                    <property name="vscrollbar-policy">never</property>
+                                    <child>
+                                      <object class="GtkLabel" id="title_label">
+                                        <property name="label">No file loaded</property>
+                                        <property name="xalign">0</property>
+                                        <property name="single-line-mode">true</property>
+                                        <style>
+                                          <class name="song-title"/>
+                                        </style>
+                                      </object>
+                                    </child>
+                                  </object>
+                                </child>
+
+                                <!-- Artist name -->
+                                <child>
+                                  <object class="GtkBox" id="artist_row">
+                                    <property name="orientation">horizontal</property>
+                                    <child>
+                                      <object class="GtkLabel" id="artist_label">
+                                        <property name="label"></property>
+                                        <property name="xalign">0</property>
+                                        <property name="ellipsize">end</property>
+                                        <property name="hexpand">true</property>
+                                        <style>
+                                          <class name="artist-link"/>
+                                        </style>
+                                      </object>
+                                    </child>
+                                  </object>
+                                </child>
+
+                                <!-- Album name -->
+                                <child>
+                                  <object class="GtkBox" id="album_row">
+                                    <property name="orientation">horizontal</property>
+                                    <child>
+                                      <object class="GtkLabel" id="album_label">
+                                        <property name="label"></property>
+                                        <property name="xalign">0</property>
+                                        <property name="ellipsize">end</property>
+                                        <property name="hexpand">true</property>
+                                        <style>
+                                          <class name="album-link"/>
+                                        </style>
+                                      </object>
+                                    </child>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+
+                            <!-- Spacer -->
+                            <child>
+                              <object class="GtkBox">
+                                <property name="vexpand">true</property>
+                              </object>
+                            </child>
+
+                            <!-- Bottom: Next track preview -->
+                            <child>
+                              <object class="GtkLabel" id="next_track_label">
+                                <property name="label"></property>
+                                <property name="xalign">0</property>
+                                <property name="ellipsize">end</property>
+                                <property name="valign">end</property>
+                                <style>
+                                  <class name="next-track"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+
+                        <!-- Right column: Metrics (narrow) -->
+                        <child>
+                          <object class="GtkBox" id="metrics_column">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">0</property>
+                            <property name="halign">end</property>
+                            <property name="vexpand">true</property>
+                            <style>
+                              <class name="metrics-column"/>
+                            </style>
+
+                            <!-- Top group: Countdown and Count-up -->
+                            <child>
+                              <object class="GtkBox" id="metrics_top">
+                                <property name="orientation">vertical</property>
+                                <property name="spacing">2</property>
+                                <property name="valign">start</property>
+                                <property name="halign">end</property>
+
+                                <!-- Countdown (time remaining) -->
+                                <child>
+                                  <object class="GtkLabel" id="time_label">
+                                    <property name="label">-0:00.00</property>
+                                    <property name="halign">end</property>
+                                    <property name="xalign">1</property>
+                                    <style>
+                                      <class name="time-remaining"/>
+                                    </style>
+                                  </object>
+                                </child>
+
+                                <!-- Count-up (elapsed time) -->
+                                <child>
+                                  <object class="GtkLabel" id="time_elapsed_label">
+                                    <property name="label">0:00.00</property>
+                                    <property name="halign">end</property>
+                                    <property name="xalign">1</property>
+                                    <style>
+                                      <class name="time-elapsed"/>
+                                    </style>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+
+                            <!-- Spacer -->
+                            <child>
+                              <object class="GtkBox">
+                                <property name="vexpand">true</property>
+                              </object>
+                            </child>
+
+                            <!-- Bottom group: Track position and Next duration -->
+                            <child>
+                              <object class="GtkBox" id="metrics_bottom">
+                                <property name="orientation">vertical</property>
+                                <property name="spacing">2</property>
+                                <property name="valign">end</property>
+                                <property name="halign">end</property>
+
+                                <!-- Track position (e.g., 3/12) -->
+                                <child>
+                                  <object class="GtkLabel" id="track_position_label">
+                                    <property name="label"></property>
+                                    <property name="halign">end</property>
+                                    <property name="xalign">1</property>
+                                    <style>
+                                      <class name="track-position"/>
+                                    </style>
+                                  </object>
+                                </child>
+
+                                <!-- Next track duration -->
+                                <child>
+                                  <object class="GtkLabel" id="next_track_duration_label">
+                                    <property name="label"></property>
+                                    <property name="halign">end</property>
+                                    <property name="xalign">1</property>
+                                    <style>
+                                      <class name="next-track-duration"/>
+                                    </style>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <!-- Right column: transport grid (top) + spectrum (fills remaining height) -->
+                <child>
+                  <object class="GtkBox" id="right_column">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <property name="vexpand">true</property>
+                    <style>
+                      <class name="right-column"/>
+                    </style>
+
+                    <!-- Transport grid (2x2, top-aligned) -->
+                    <child>
+                      <object class="GtkBox" id="transport_grid">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">2</property>
+                        <style>
+                          <class name="transport-grid"/>
+                        </style>
+
+                        <!-- Top row: Repeat, Autoplay -->
+                        <child>
+                          <object class="GtkBox" id="transport_row_1">
+                            <property name="orientation">horizontal</property>
+                            <property name="spacing">2</property>
+                            <property name="homogeneous">true</property>
+                            <child>
+                              <object class="GtkToggleButton" id="repeat_btn">
+                                <property name="icon-name">media-playlist-repeat-symbolic</property>
+                                <property name="tooltip-text">Repeat</property>
+                                <style>
+                                  <class name="transport-btn"/>
+                                  <class name="repeat-button"/>
+                                </style>
+                                <signal name="toggled" handler="on_repeat"/>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="autoplay_btn">
+                                <property name="icon-name">media-skip-forward-symbolic</property>
+                                <property name="tooltip-text">Autoplay (continue to next track)</property>
+                                <property name="active">true</property>
+                                <style>
+                                  <class name="transport-btn"/>
+                                  <class name="autoplay-button"/>
+                                </style>
+                                <signal name="toggled" handler="on_autoplay"/>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+
+                        <!-- Bottom row: Preview, Queue -->
+                        <child>
+                          <object class="GtkBox" id="transport_row_2">
+                            <property name="orientation">horizontal</property>
+                            <property name="spacing">2</property>
+                            <property name="homogeneous">true</property>
+                            <child>
+                              <object class="GtkToggleButton" id="preview_btn">
+                                <property name="label">P</property>
+                                <property name="tooltip-text">Preview (PFL)</property>
+                                <style>
+                                  <class name="transport-btn"/>
+                                </style>
+                                <signal name="toggled" handler="on_preview"/>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="queue_btn">
+                                <property name="label">Q</property>
+                                <property name="tooltip-text">Queue track</property>
+                                <style>
+                                  <class name="transport-btn"/>
+                                </style>
+                                <signal name="clicked" handler="on_queue"/>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+
+                    <!-- Spectrum placeholder - added dynamically, fills remaining height -->
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Skip/Shuttle row (full width, above seek bar) -->
+            <child>
+              <object class="GtkBox" id="skip_shuttle_row">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">8</property>
+                <style>
+                  <class name="skip-shuttle-row"/>
+                </style>
+
+                <!-- Previous track button -->
+                <child>
+                  <object class="GtkButton" id="prev_track_btn">
+                    <property name="icon-name">media-skip-backward-symbolic</property>
+                    <property name="tooltip-text">Previous track</property>
+                    <property name="sensitive">false</property>
+                    <style>
+                      <class name="btn-xs"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Skip buttons (linked group) with play/pause in center -->
+                <child>
+                  <object class="GtkBox" id="skip_box">
+                    <property name="orientation">horizontal</property>
+                    <style>
+                      <class name="linked"/>
+                    </style>
+                    <child>
+                      <object class="GtkButton" id="skip_back_15">
+                        <property name="label">-15</property>
+                        <property name="tooltip-text">Skip back 15 seconds</property>
+                        <style>
+                          <class name="btn-xs"/>
+                        </style>
+                        <signal name="clicked" handler="on_skip_clicked"/>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="skip_back_5">
+                        <property name="label">-5</property>
+                        <property name="tooltip-text">Skip back 5 seconds</property>
+                        <style>
+                          <class name="btn-xs"/>
+                        </style>
+                        <signal name="clicked" handler="on_skip_clicked"/>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="play_btn">
+                        <property name="icon-name">media-playback-start-symbolic</property>
+                        <property name="tooltip-text">Play/Pause</property>
+                        <style>
+                          <class name="btn-xs"/>
+                        </style>
+                        <signal name="clicked" handler="on_play_pause"/>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="stop_btn">
+                        <property name="icon-name">media-playback-stop-symbolic</property>
+                        <property name="tooltip-text">Stop</property>
+                        <style>
+                          <class name="btn-xs"/>
+                        </style>
+                        <signal name="clicked" handler="on_stop"/>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="skip_fwd_5">
+                        <property name="label">+5</property>
+                        <property name="tooltip-text">Skip forward 5 seconds</property>
+                        <style>
+                          <class name="btn-xs"/>
+                        </style>
+                        <signal name="clicked" handler="on_skip_clicked"/>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="skip_fwd_15">
+                        <property name="label">+15</property>
+                        <property name="tooltip-text">Skip forward 15 seconds</property>
+                        <style>
+                          <class name="btn-xs"/>
+                        </style>
+                        <signal name="clicked" handler="on_skip_clicked"/>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <!-- Next track button -->
+                <child>
+                  <object class="GtkButton" id="next_track_btn">
+                    <property name="icon-name">media-skip-forward-symbolic</property>
+                    <property name="tooltip-text">Next track</property>
+                    <property name="sensitive">false</property>
+                    <style>
+                      <class name="btn-xs"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Shuttle container -->
+                <child>
+                  <object class="GtkBox" id="shuttle_box">
+                    <property name="orientation">horizontal</property>
+                    <property name="spacing">6</property>
+                    <property name="hexpand">true</property>
+                    <style>
+                      <class name="channel-shuttle-container"/>
+                    </style>
+                    <child>
+                      <object class="GtkScale" id="shuttle_scale">
+                        <property name="orientation">horizontal</property>
+                        <property name="hexpand">true</property>
+                        <property name="draw-value">false</property>
+                        <property name="tooltip-text">Shuttle: drag to change speed, release to return to normal</property>
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">-2</property>
+                            <property name="upper">3</property>
+                            <property name="step-increment">0.1</property>
+                            <property name="value">0</property>
+                          </object>
+                        </property>
+                        <style>
+                          <class name="channel-shuttle-scale"/>
+                        </style>
+                        <signal name="value-changed" handler="on_shuttle_value_changed"/>
+                      </object>
+                    </child>
+                    <!-- Right side: speed display + pitched toggle stacked vertically -->
+                    <child>
+                      <object class="GtkBox" id="shuttle_info_box">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">2</property>
+                        <property name="valign">center</property>
+                        <style>
+                          <class name="shuttle-info-box"/>
+                        </style>
+                        <child>
+                          <object class="GtkLabel" id="shuttle_label">
+                            <property name="label">1.0x</property>
+                            <property name="halign">center</property>
+                            <style>
+                              <class name="channel-shuttle-label"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="shuttle_mode_btn">
+                            <property name="label">OFF</property>
+                            <property name="tooltip-text">Shuttle mode: OFF / KEYLOCK (pitch preserved) / PITCHED (vinyl)</property>
+                            <style>
+                              <class name="shuttle-mode-btn"/>
+                              <class name="shuttle-mode-off"/>
+                            </style>
+                            <signal name="clicked" handler="on_shuttle_mode_clicked"/>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Seek row: vertical container with seek bar on top, time labels below -->
+            <child>
+              <object class="GtkBox" id="seek_row">
+                <property name="orientation">vertical</property>
+                <property name="spacing">2</property>
+                <property name="hexpand">true</property>
+                <property name="valign">end</property>
+                <style>
+                  <class name="seek-row"/>
+                </style>
+
+                <!-- Seek bar (full width) -->
+                <child>
+                  <object class="GtkScale" id="seek_bar">
+                    <property name="orientation">horizontal</property>
+                    <property name="hexpand">true</property>
+                    <property name="draw-value">false</property>
+                    <property name="adjustment">
+                      <object class="GtkAdjustment">
+                        <property name="lower">0</property>
+                        <property name="upper">1</property>
+                        <property name="step-increment">0.001</property>
+                      </object>
+                    </property>
+                    <style>
+                      <class name="seek-bar"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Time labels row below -->
+                <child>
+                  <object class="GtkBox" id="seek_times_row">
+                    <property name="orientation">horizontal</property>
+                    <property name="hexpand">true</property>
+                    <style>
+                      <class name="seek-times-row"/>
+                    </style>
+
+                    <!-- Start time label (0:00) -->
+                    <child>
+                      <object class="GtkLabel" id="seek_time_start">
+                        <property name="label">0:00</property>
+                        <property name="halign">start</property>
+                        <style>
+                          <class name="seek-time"/>
+                        </style>
+                      </object>
+                    </child>
+
+                    <!-- End time label (total duration) -->
+                    <child>
+                      <object class="GtkLabel" id="seek_time_end">
+                        <property name="label">--:--</property>
+                        <property name="hexpand">true</property>
+                        <property name="halign">end</property>
+                        <style>
+                          <class name="seek-time"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Library List View Template
+
+  Complete container for Artists, Albums, and Songs main views.
+  C code:
+  - Sets title text based on view type
+  - Shows/hides sort_buttons (albums) or column_headers (songs)
+  - Creates and adds ListView to scroll window
+  - Connects signals
+-->
+<interface>
+  <object class="GtkBox" id="container">
+    <property name="orientation">vertical</property>
+    <property name="spacing">8</property>
+    <property name="margin-start">16</property>
+    <property name="margin-end">16</property>
+    <property name="margin-top">16</property>
+
+    <!-- Title -->
+    <child>
+      <object class="GtkLabel" id="title">
+        <property name="label">Title</property>
+        <property name="xalign">0</property>
+        <style>
+          <class name="library-title"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Subtitle (item count) -->
+    <child>
+      <object class="GtkLabel" id="subtitle">
+        <property name="label">Loading...</property>
+        <property name="xalign">0</property>
+        <style>
+          <class name="library-subtitle"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Sort buttons (hidden by default, shown for albums view) -->
+    <child>
+      <object class="GtkBox" id="sort_buttons">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">4</property>
+        <property name="margin-top">4</property>
+        <property name="margin-bottom">8</property>
+        <property name="visible">false</property>
+        <child>
+          <object class="GtkButton" id="sort_title">
+            <property name="label">Title</property>
+            <style>
+              <class name="sort-button"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="sort_year">
+            <property name="label">Year</property>
+            <style>
+              <class name="sort-button"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="sort_artist">
+            <property name="label">Artist</property>
+            <style>
+              <class name="sort-button"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="sort_added">
+            <property name="label">Added</property>
+            <style>
+              <class name="sort-button"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Column headers placeholder (for songs view, inserted by C code) -->
+
+    <!-- Scroll window -->
+    <child>
+      <object class="GtkScrolledWindow" id="scroll">
+        <property name="vexpand">true</property>
+      </object>
+    </child>
+  </object>
+</interface>

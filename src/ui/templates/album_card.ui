@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Quadrature Album Card Template
+
+  Self-contained album display for artist detail view.
+  Includes: header with art/metadata, track list with optional disc headers, see-all link.
+
+  C code loads this template, populates metadata, and adds track rows to track_list.
+  Disc headers are added as needed by toggling visibility.
+-->
+<interface>
+  <object class="GtkBox" id="album_card">
+    <property name="orientation">vertical</property>
+    <property name="spacing">0</property>
+    <style>
+      <class name="album-card"/>
+    </style>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         CARD HEADER: Art + Metadata + Navigate Arrow
+         ═══════════════════════════════════════════════════════════════════ -->
+    <child>
+      <object class="GtkBox" id="card_header">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">16</property>
+        <property name="margin-bottom">8</property>
+
+        <!-- Album Art (250x250) -->
+        <child>
+          <object class="GtkImage" id="card_art">
+            <property name="icon-name">media-optical-symbolic</property>
+            <property name="pixel-size">250</property>
+            <style>
+              <class name="album-card-art"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Metadata Box -->
+        <child>
+          <object class="GtkBox" id="card_info">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <property name="valign">start</property>
+            <property name="margin-top">4</property>
+
+            <!-- Album Title -->
+            <child>
+              <object class="GtkLabel" id="card_title">
+                <property name="label">Album Title</property>
+                <property name="xalign">0</property>
+                <property name="wrap">true</property>
+                <property name="wrap-mode">word-char</property>
+                <property name="max-width-chars">35</property>
+                <style>
+                  <class name="album-card-title"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Year -->
+            <child>
+              <object class="GtkLabel" id="card_year">
+                <property name="label">2024</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="album-card-year"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Stats (track count, duration) -->
+            <child>
+              <object class="GtkLabel" id="card_stats">
+                <property name="label">12 tracks - 45:32</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="album-card-stats"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Genre (optional) -->
+            <child>
+              <object class="GtkLabel" id="card_genre">
+                <property name="label">Rock</property>
+                <property name="xalign">0</property>
+                <property name="visible">false</property>
+                <style>
+                  <class name="album-card-genre"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Navigate Arrow -->
+        <child>
+          <object class="GtkButton" id="card_navigate_btn">
+            <property name="valign">center</property>
+            <property name="tooltip-text">View album details</property>
+            <style>
+              <class name="flat"/>
+              <class name="album-card-arrow"/>
+            </style>
+            <child>
+              <object class="GtkImage">
+                <property name="icon-name">go-next-symbolic</property>
+                <property name="pixel-size">24</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         TRACK LIST: Container for track rows (populated by C code)
+         Offset to align with metadata column (past 250px art + 16px spacing)
+         ═══════════════════════════════════════════════════════════════════ -->
+    <child>
+      <object class="GtkBox" id="track_list">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+        <property name="margin-start">266</property>
+        <style>
+          <class name="album-card-tracks"/>
+        </style>
+        <!-- Track rows added here by C code using the track_row template below -->
+      </object>
+    </child>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SEE ALL LINK: Shows when album has more than preview tracks
+         ═══════════════════════════════════════════════════════════════════ -->
+    <child>
+      <object class="GtkButton" id="card_see_all_btn">
+        <property name="halign">start</property>
+        <property name="margin-start">266</property>
+        <property name="margin-top">4</property>
+        <property name="visible">false</property>
+        <style>
+          <class name="flat"/>
+          <class name="see-all-link"/>
+        </style>
+        <child>
+          <object class="GtkLabel" id="card_see_all_label">
+            <property name="label">...see all 17 tracks</property>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <object class="GtkBox" id="search_view">
+    <property name="orientation">vertical</property>
+    <property name="spacing">8</property>
+    <style>
+      <class name="view-container"/>
+    </style>
+
+    <!-- Search entry -->
+    <child>
+      <object class="GtkSearchEntry" id="search_entry">
+        <property name="placeholder-text">Search tracks, artists, albums...</property>
+        <style>
+          <class name="search-entry"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Filter buttons -->
+    <child>
+      <object class="GtkBox" id="search_filters">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">4</property>
+        <property name="margin-top">8</property>
+        <child>
+          <object class="GtkButton" id="filter_all">
+            <property name="label">All</property>
+            <style>
+              <class name="search-filter"/>
+              <class name="search-filter-active"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="filter_artists">
+            <property name="label">Artists</property>
+            <style>
+              <class name="search-filter"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="filter_albums">
+            <property name="label">Albums</property>
+            <style>
+              <class name="search-filter"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="filter_songs">
+            <property name="label">Songs</property>
+            <style>
+              <class name="search-filter"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Scrollable results area -->
+    <child>
+      <object class="GtkScrolledWindow">
+        <property name="vexpand">true</property>
+        <child>
+          <object class="GtkBox" id="search_content">
+            <property name="orientation">vertical</property>
+            <property name="spacing">0</property>
+
+            <!-- Empty state label -->
+            <child>
+              <object class="GtkLabel" id="search_empty_label">
+                <property name="label">Type to search...</property>
+                <property name="opacity">0.5</property>
+                <property name="halign">center</property>
+                <property name="valign">center</property>
+                <property name="vexpand">true</property>
+              </object>
+            </child>
+
+            <!-- Results container (initially hidden) -->
+            <child>
+              <object class="GtkBox" id="search_results_box">
+                <property name="orientation">vertical</property>
+                <property name="spacing">16</property>
+                <property name="visible">false</property>
+                <style>
+                  <class name="content-padded"/>
+                </style>
+
+                <!-- Artists section -->
+                <child>
+                  <object class="GtkBox" id="search_artists_section">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <style>
+                      <class name="search-results-section"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Albums section -->
+                <child>
+                  <object class="GtkBox" id="search_albums_section">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <style>
+                      <class name="search-results-section"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Tracks section -->
+                <child>
+                  <object class="GtkBox" id="search_tracks_section">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <style>
+                      <class name="search-results-section"/>
+                    </style>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

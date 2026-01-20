@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Preview Track Row Template
+
+  Used in album cards to show track previews.
+  Each instantiation via gtk_builder_new_from_resource() creates a new row.
+-->
+<interface>
+  <object class="GtkBox" id="row">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">8</property>
+    <style>
+      <class name="preview-track-row"/>
+    </style>
+    <child>
+      <object class="GtkLabel" id="track_num">
+        <property name="valign">center</property>
+        <property name="width-chars">2</property>
+        <property name="xalign">1</property>
+        <style>
+          <class name="preview-track-num"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="track_title">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <style>
+          <class name="preview-track-title"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="track_duration">
+        <property name="valign">center</property>
+        <style>
+          <class name="preview-track-duration"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>

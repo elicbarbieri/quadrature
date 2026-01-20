@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Quadrature
+GenericName=Music Player
+Comment=Four-channel DJ music player
+Exec=quadrature %U
+Icon=quadrature
+Terminal=false
+Categories=Audio;AudioVideo;Player;Music;
+Keywords=music;player;dj;audio;mixer;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/aac;audio/mp4;audio/x-m4a;audio/wav;audio/x-wav;
+StartupNotify=true
+StartupWMClass=quadrature

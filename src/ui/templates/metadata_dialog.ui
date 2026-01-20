@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Quadrature Metadata Dialog Template
+  Shows detailed track metadata with Copy JSON functionality.
+-->
+<interface>
+  <object class="GtkWindow" id="metadata_dialog">
+    <property name="title">Track Metadata</property>
+    <property name="default-width">450</property>
+    <property name="default-height">500</property>
+    <property name="resizable">true</property>
+    <property name="modal">false</property>
+    <child>
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+        <!-- Header bar -->
+        <child>
+          <object class="GtkHeaderBar" id="header_bar">
+            <property name="show-title-buttons">true</property>
+            <child type="start">
+              <object class="GtkButton" id="copy_json_btn">
+                <property name="label">Copy JSON</property>
+                <property name="tooltip-text">Copy all metadata as JSON</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <!-- Main content -->
+        <child>
+          <object class="GtkScrolledWindow">
+            <property name="vexpand">true</property>
+            <property name="hscrollbar-policy">never</property>
+            <child>
+              <object class="GtkBox" id="content_box">
+                <property name="orientation">vertical</property>
+                <property name="spacing">16</property>
+                <property name="margin-start">16</property>
+                <property name="margin-end">16</property>
+                <property name="margin-top">16</property>
+                <property name="margin-bottom">16</property>
+                <!-- File Info Section -->
+                <child>
+                  <object class="GtkBox" id="file_section">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">8</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">FILE</property>
+                        <property name="xalign">0</property>
+                        <style>
+                          <class name="metadata-section-header"/>
+                        </style>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="file_info_box">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">4</property>
+                        <style>
+                          <class name="metadata-section"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <!-- Audio Format Section -->
+                <child>
+                  <object class="GtkBox" id="format_section">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">8</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">FORMAT</property>
+                        <property name="xalign">0</property>
+                        <style>
+                          <class name="metadata-section-header"/>
+                        </style>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="format_info_box">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">4</property>
+                        <style>
+                          <class name="metadata-section"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <!-- Tags Section -->
+                <child>
+                  <object class="GtkBox" id="tags_section">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">8</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">TAGS</property>
+                        <property name="xalign">0</property>
+                        <style>
+                          <class name="metadata-section-header"/>
+                        </style>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkBox" id="tags_info_box">
+                        <property name="orientation">vertical</property>
+                        <property name="spacing">4</property>
+                        <style>
+                          <class name="metadata-section"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

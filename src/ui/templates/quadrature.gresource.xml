@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/quadrature/ui">
+    <!-- Stylesheets -->
+    <file>quadrature.css</file>
+
+    <!-- Main window -->
+    <file>quadrature_window.ui</file>
+
+    <!-- Widgets -->
+    <file>channel_strip.ui</file>
+    <file>nav_bar.ui</file>
+
+    <!-- Content views -->
+    <file>search_view.ui</file>
+    <file>library_list_view.ui</file>
+    <file>libraries_view.ui</file>
+    <file>settings_view.ui</file>
+    <file>help_view.ui</file>
+    <file>detail_view.ui</file>
+
+    <!-- Library row templates -->
+    <file>library_artist_row.ui</file>
+    <file>library_album_row.ui</file>
+    <file>library_track_row.ui</file>
+    <file>song_list_view.ui</file>
+
+    <!-- Detail view templates -->
+    <file>album_card.ui</file>
+    <file>preview_track_row.ui</file>
+    <file>disc_header.ui</file>
+    <file>sort_buttons.ui</file>
+    <file>library_detail_header.ui</file>
+    <file>library_detail_container.ui</file>
+  </gresource>
+</gresources>

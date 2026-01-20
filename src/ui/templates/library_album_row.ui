@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Album row template for library list views -->
+<interface>
+  <object class="GtkBox" id="row">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">12</property>
+    <style>
+      <class name="library-row"/>
+      <class name="library-album-row"/>
+    </style>
+
+    <!-- Album art -->
+    <child>
+      <object class="GtkImage" id="art">
+        <property name="icon-name">media-optical-symbolic</property>
+        <property name="pixel-size">48</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="library-album-art"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Text box -->
+    <child>
+      <object class="GtkBox" id="text_box">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+        <property name="valign">center</property>
+        <child>
+          <object class="GtkLabel" id="title">
+            <property name="xalign">0</property>
+            <property name="ellipsize">end</property>
+            <style>
+              <class name="library-row-title"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="subtitle">
+            <property name="xalign">0</property>
+            <property name="ellipsize">end</property>
+            <style>
+              <class name="library-row-subtitle"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Track count -->
+    <child>
+      <object class="GtkLabel" id="count">
+        <property name="valign">center</property>
+        <style>
+          <class name="library-row-count"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>

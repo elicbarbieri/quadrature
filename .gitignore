@@ -1,0 +1,72 @@
+# Build directories
+build/
+cmake-build-*/
+
+# CMake artifacts (root level - if cmake run in source dir)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CPackConfig.cmake
+CPackSourceConfig.cmake
+CTestTestfile.cmake
+Testing/
+bin/
+
+# Compiled test/example binaries in root
+test_*
+!test_*/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Editor/LSP cache
+.cache/
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Object files
+*.o
+*.obj
+
+# Qt generated files
+*_moc.cpp
+*_qrc.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Documentation generated files
+docs/html/
+docs/latex/
+*.doxygen_sqlite3
+
+# Third party dependencies
+!third_party/cava/
+
+# Nix build artifacts
+result
+result-*
+.direnv/
+
+.claude/

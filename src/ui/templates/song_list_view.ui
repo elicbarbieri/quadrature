@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Song List View Template
+
+  Contains column headers and row template for songs table view.
+  Columns: [art][title][album][artist][year][duration][track#][disc#]
+
+  Usage:
+  - Load column_headers once for the view header
+  - Load row template via gtk_builder_new_from_resource() for each list item
+-->
+<interface>
+  <!-- Column headers -->
+  <object class="GtkBox" id="column_headers">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">8</property>
+    <style>
+      <class name="column-headers"/>
+    </style>
+
+    <!-- Art column (fixed 48px) -->
+    <child>
+      <object class="GtkLabel">
+        <property name="label"></property>
+        <property name="width-chars">6</property>
+        <style>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Title column (flexible) -->
+    <child>
+      <object class="GtkButton" id="col_title">
+        <property name="label">TITLE</property>
+        <style>
+          <class name="flat"/>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Album column (flexible) -->
+    <child>
+      <object class="GtkButton" id="col_album">
+        <property name="label">ALBUM</property>
+        <style>
+          <class name="flat"/>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Artist column (flexible) -->
+    <child>
+      <object class="GtkButton" id="col_artist">
+        <property name="label">ARTIST</property>
+        <style>
+          <class name="flat"/>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Year column (fixed) -->
+    <child>
+      <object class="GtkButton" id="col_year">
+        <property name="label">YEAR</property>
+        <style>
+          <class name="flat"/>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Duration column (fixed) -->
+    <child>
+      <object class="GtkButton" id="col_duration">
+        <property name="label">DUR</property>
+        <style>
+          <class name="flat"/>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Track# column (fixed) -->
+    <child>
+      <object class="GtkButton" id="col_track">
+        <property name="label">#</property>
+        <style>
+          <class name="flat"/>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Disc# column (fixed) -->
+    <child>
+      <object class="GtkButton" id="col_disc">
+        <property name="label">DISC</property>
+        <style>
+          <class name="flat"/>
+          <class name="column-header"/>
+        </style>
+      </object>
+    </child>
+  </object>
+
+  <!-- Row template for list items -->
+  <object class="GtkBox" id="row">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">8</property>
+    <style>
+      <class name="library-row"/>
+      <class name="song-list-row"/>
+    </style>
+
+    <!-- Album art (48x48) -->
+    <child>
+      <object class="GtkImage" id="art">
+        <property name="icon-name">media-optical-symbolic</property>
+        <property name="pixel-size">48</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="library-album-art"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Title (flexible) -->
+    <child>
+      <object class="GtkLabel" id="title">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="library-row-title"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Album (flexible) -->
+    <child>
+      <object class="GtkLabel" id="album">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="library-row-subtitle"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Artist with featured artists (flexible) -->
+    <child>
+      <object class="GtkLabel" id="artist">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="library-row-subtitle"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Year (fixed width) -->
+    <child>
+      <object class="GtkLabel" id="year">
+        <property name="valign">center</property>
+        <property name="width-chars">4</property>
+        <style>
+          <class name="library-row-subtitle"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Duration (fixed width) -->
+    <child>
+      <object class="GtkLabel" id="duration">
+        <property name="valign">center</property>
+        <property name="width-chars">5</property>
+        <style>
+          <class name="library-row-duration"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Track# (fixed width) -->
+    <child>
+      <object class="GtkLabel" id="track_num">
+        <property name="valign">center</property>
+        <property name="width-chars">3</property>
+        <style>
+          <class name="library-row-track-num"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Disc# (fixed width) -->
+    <child>
+      <object class="GtkLabel" id="disc_num">
+        <property name="valign">center</property>
+        <property name="width-chars">3</property>
+        <style>
+          <class name="library-row-track-num"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>

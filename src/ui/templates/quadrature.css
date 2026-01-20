@@ -1,0 +1,2166 @@
+/* Quadrature Audio Player - GTK4 Stylesheet */
+
+/* ==================== Color Palette Reference ==================== */
+/*
+ * GTK4 CSS doesn't support CSS variables, so colors are used directly.
+ * This reference documents the color scheme for consistency.
+ *
+ * Background colors:
+ *   bg-dark:       #1e1e1e  (main content area)
+ *   bg-darker:     #1a1a1a  (channels panel)
+ *   bg-darkest:    #151515  (nav bar)
+ *   bg-elevated:   #282828  (channel strips, cards)
+ *   bg-input:      #2a2a2a  (entry fields)
+ *   bg-button:     #3a3a3a  (buttons)
+ *   bg-hover:      #4a4a4a  (button hover)
+ *
+ * Accent colors:
+ *   accent-cyan:   #00d4ff  (primary accent, active states)
+ *   accent-orange: #ff9500  (preview/PFL mode)
+ *   accent-red:    #ff3333  (time warning, errors)
+ *   accent-green:  #33cc33  (safe meter levels)
+ *   accent-yellow: #ffcc00  (warning meter levels)
+ *
+ * Text colors:
+ *   text-primary:   #e0e0e0
+ *   text-secondary: #aaaaaa
+ *   text-muted:     #888888
+ *   text-dim:       #666666
+ *
+ * Border colors:
+ *   border-default: #555555
+ *   border-subtle:  #444444
+ *   border-muted:   #333333
+ *
+ * Level meter colors (in C code for 60fps performance):
+ *   meter-green:  rgb(51, 204, 51)   0.2, 0.8, 0.2
+ *   meter-yellow: rgb(255, 204, 51)  1.0, 0.8, 0.2
+ *   meter-red:    rgb(255, 51, 51)   1.0, 0.2, 0.2
+ *   meter-hold:   rgba(255, 255, 255, 0.9)
+ *   meter-bg:     rgb(26, 26, 31)    0.1, 0.1, 0.12
+ *
+ * Spectrum display colors (in C code for 60fps performance):
+ *   spectrum-bar: #00d4ff (same as accent-cyan)
+ */
+
+/* ==================== Common Layout Classes ==================== */
+
+/* Standard view container with 16px padding */
+.view-container {
+    padding: 16px;
+}
+
+/* Standard content area with 4px padding */
+.content-padded {
+    padding: 4px;
+}
+
+/* Standard 8px padding */
+.padding-8 {
+    padding: 8px;
+}
+
+/* ==================== Button Size Utilities ==================== */
+/*
+ * Standardized button sizes for consistency across the UI.
+ * Use these instead of defining min-width/min-height per component.
+ */
+
+/* Extra small: compact controls (skip buttons, track nav, play/stop) */
+.btn-xs {
+    min-width: 28px;
+    min-height: 24px;
+    padding: 2px 4px;
+    font-size: 10px;
+    font-weight: bold;
+    border-radius: 4px;
+}
+
+/* Small: transport grid buttons */
+.btn-sm {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+}
+
+/* Medium: transport bar buttons */
+.btn-md {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 4px 8px;
+}
+
+/* Large: prominent buttons (play/pause) */
+.btn-lg {
+    min-width: 48px;
+    min-height: 48px;
+    padding: 6px 12px;
+}
+
+/* ==================== Toggle Button Active State ==================== */
+/*
+ * Universal active state for toggle/filter buttons.
+ * Apply alongside base button class for cyan highlight.
+ */
+
+.btn-active,
+.btn-active:hover {
+    background-color: #00d4ff;
+    color: #000000;
+    border-color: #00d4ff;
+}
+
+.btn-active:hover {
+    background-color: #33ddff;
+}
+
+/* ==================== Text Color Utilities ==================== */
+/*
+ * Semantic text colors matching the palette reference.
+ * Use these instead of hardcoding colors in component styles.
+ */
+
+.text-primary { color: #e0e0e0; }
+.text-secondary { color: #aaaaaa; }
+.text-muted { color: #888888; }
+.text-dim { color: #666666; }
+.text-accent { color: #00d4ff; }
+.text-error { color: #ff3333; }
+.text-success { color: #33cc33; }
+.text-warning { color: #ff9500; }
+
+/* ==================== Typography Utilities ==================== */
+/*
+ * Common text patterns used across the UI.
+ */
+
+/* Primary title text (14px, medium weight) */
+.text-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+/* Subtitle/meta text (12px, muted) */
+.text-subtitle {
+    font-size: 12px;
+    color: #888888;
+}
+
+/* Small label text (11-12px, dim, often uppercase) */
+.text-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #666666;
+    letter-spacing: 0.5px;
+}
+
+/* Monospace text for durations, times, codes */
+.text-mono {
+    font-family: monospace;
+}
+
+/* ==================== List Row Base ==================== */
+/*
+ * Unified row styling for all list views.
+ * Combine with height modifiers: .list-row-compact, .list-row-artwork
+ */
+
+.list-row {
+    padding: 2px 12px;
+    border-radius: 6px;
+}
+
+.list-row:hover {
+    background-color: #2a2a2a;
+}
+
+.list-row-selected {
+    background-color: rgba(0, 212, 255, 0.12);
+}
+
+/* Compact rows (tracks in album detail) */
+.list-row-compact {
+    min-height: 36px;
+    padding: 6px 12px;
+}
+
+/* Standard rows (table views) */
+.list-row-standard {
+    min-height: 44px;
+    padding: 8px 16px;
+}
+
+/* Rows with 48px artwork */
+.list-row-artwork {
+    min-height: 52px;
+    padding: 2px 16px;
+}
+
+/* ==================== Card/Section Base ==================== */
+/*
+ * Elevated container styling for cards and sections.
+ */
+
+.card {
+    background-color: #282828;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+}
+
+.card:hover {
+    border-color: #555555;
+}
+
+/* ==================== Album Art Utilities ==================== */
+/*
+ * Consolidated album art sizing. All share bg-color and border-radius.
+ */
+
+.art-base {
+    background-color: #333333;
+    border-radius: 4px;
+}
+
+/* 48x48 thumbnail (list views) */
+.art-thumb {
+    min-width: 48px;
+    min-height: 48px;
+    background-color: #333333;
+    border-radius: 4px;
+}
+
+/* 120x120 large (detail views) */
+.art-large {
+    min-width: 120px;
+    min-height: 120px;
+    background-color: #333333;
+    border-radius: 8px;
+}
+
+/* ==================== Navigation Bar ==================== */
+
+.nav-bar {
+    background-color: #151515;
+    min-width: 56px;
+}
+
+.nav-item {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 8px 4px;
+    min-width: 56px;
+    min-height: 56px;
+    color: #888888;
+    border-left: 3px solid transparent;
+}
+
+.nav-item:hover {
+    color: #aaaaaa;
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.nav-item:checked {
+    color: #00d4ff;
+    border-left: 3px solid #00d4ff;
+    background-color: rgba(0, 212, 255, 0.1);
+}
+
+.nav-icon {
+    color: inherit;
+}
+
+.nav-label {
+    font-size: 10px;
+    font-weight: 500;
+    color: inherit;
+}
+
+.nav-separator {
+    background-color: #333333;
+    min-height: 1px;
+    margin: 8px;
+}
+
+/* ==================== Library Content ==================== */
+
+.library-content {
+    background-color: #1e1e1e;
+    min-width: 200px;  /* Allow aggressive shrinking so fixed panels get priority */
+}
+
+.library-header {
+    margin-bottom: 4px;
+}
+
+.library-title {
+    font-size: 24px;
+    font-weight: bold;
+    color: #e0e0e0;
+}
+
+.library-subtitle {
+    font-size: 14px;
+    color: #888888;
+    margin-bottom: 8px;
+}
+
+.library-back {
+    background: transparent;
+    border: none;
+    color: #00d4ff;
+    padding: 4px 8px;
+    margin-bottom: 8px;
+}
+
+.library-back:hover {
+    background-color: rgba(0, 212, 255, 0.1);
+}
+
+.library-section {
+    padding: 12px;
+    background-color: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+}
+
+.library-section-header,
+.search-results-section-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: #666666;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.library-list {
+    background: transparent;
+}
+
+/* ==================== Search ==================== */
+
+.search-entry {
+    font-size: 14px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background-color: #2a2a2a;
+    border: 1px solid #444444;
+    color: #e0e0e0;
+    min-height: 40px;
+}
+
+.search-entry:focus {
+    border-color: #00d4ff;
+    box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.2);
+}
+
+.search-results {
+    padding: 8px 0;
+}
+
+.search-section {
+    margin-bottom: 16px;
+}
+
+.recent-searches {
+    padding: 8px;
+}
+
+/* ==================== Search Filters ==================== */
+
+.search-filters {
+    margin-bottom: 8px;
+}
+
+.search-filter {
+    background-color: #444444;
+    color: #888888;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    min-height: 32px;
+}
+
+.search-filter:hover {
+    background-color: #555555;
+    color: #aaaaaa;
+}
+
+.search-filter-active,
+.search-filter-active:hover {
+    background-color: #00d4ff;
+    color: #000000;
+}
+
+.search-filter-active:hover {
+    background-color: #33ddff;
+}
+
+/* ==================== Sort Buttons ==================== */
+
+.sort-button {
+    background-color: #3a3a3a;
+    color: #888888;
+    border: 1px solid #555555;
+    border-radius: 4px;
+    padding: 4px 8px;
+    min-width: 40px;
+    font-size: 12px;
+}
+
+.sort-button:hover {
+    background-color: #4a4a4a;
+    color: #aaaaaa;
+}
+
+.sort-button-active {
+    background-color: #00d4ff;
+    color: #000000;
+    border-color: #00d4ff;
+}
+
+.sort-button-active:hover {
+    background-color: #33ddff;
+}
+
+/* ==================== Unified Detail View ==================== */
+
+/* Detail view back button */
+.detail-back {
+    color: #00d4ff;
+    padding: 4px 8px;
+}
+
+.detail-back:hover {
+    background-color: rgba(0, 212, 255, 0.1);
+}
+
+/* Detail view title (28px bold uppercase) */
+.detail-title {
+    font-size: 28px;
+    font-weight: bold;
+    text-transform: uppercase;
+    color: #e0e0e0;
+    letter-spacing: 0.5px;
+}
+
+/* Detail view meta info (14px muted) */
+.detail-meta {
+    font-size: 14px;
+    color: #888888;
+}
+
+/* Featuring label */
+.detail-featuring-label {
+    font-size: 13px;
+    color: #666666;
+}
+
+/* Section headers (ALBUMS, APPEARS ON) */
+.detail-section-header {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #666666;
+    letter-spacing: 1px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #333333;
+}
+
+/* Album art in detail view (250x250, rounded) */
+.detail-album-art {
+    min-width: 250px;
+    min-height: 250px;
+    border-radius: 8px;
+    background-color: #333333;
+}
+
+/* ==================== Album Card (Artist Detail) ==================== */
+
+.album-card {
+    padding: 16px;
+    background-color: #282828;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+}
+
+.album-card:hover {
+    border-color: #555555;
+}
+
+.album-card-art {
+    min-width: 250px;
+    min-height: 250px;
+    border-radius: 8px;
+    background-color: #333333;
+}
+
+.album-card-title {
+    font-size: 16px;
+    font-weight: bold;
+    text-transform: uppercase;
+    color: #e0e0e0;
+    letter-spacing: 0.3px;
+}
+
+.album-card-year {
+    font-size: 13px;
+    color: #888888;
+}
+
+.album-card-stats {
+    font-size: 12px;
+    color: #666666;
+}
+
+.album-card-genre {
+    font-size: 12px;
+    color: #555555;
+}
+
+.album-card-arrow {
+    color: #555555;
+    min-width: 40px;
+    min-height: 40px;
+}
+
+.album-card-arrow:hover {
+    color: #00d4ff;
+    background-color: rgba(0, 212, 255, 0.1);
+}
+
+.album-card-tracks {
+    padding: 8px 0;
+}
+
+/* ==================== Preview Track Row (Album Card) ==================== */
+
+.preview-track-row {
+    min-height: 28px;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.preview-track-row:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.preview-track-num {
+    font-size: 12px;
+    color: #666666;
+    min-width: 20px;
+}
+
+.preview-track-title {
+    font-size: 13px;
+    color: #e0e0e0;
+}
+
+.preview-track-duration {
+    font-size: 12px;
+    color: #666666;
+    font-family: monospace;
+}
+
+/* ==================== See All Link ==================== */
+
+.see-all-link {
+    color: #00d4ff;
+    font-size: 13px;
+    padding: 4px 8px;
+}
+
+.see-all-link:hover {
+    background-color: rgba(0, 212, 255, 0.1);
+    text-decoration: underline;
+}
+
+/* ==================== Toggle Buttons (Albums/Tracks) ==================== */
+
+.toggle-btn {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 6px 12px;
+    min-height: 28px;
+    background-color: #3a3a3a;
+    color: #888888;
+    border: 1px solid #555555;
+}
+
+.toggle-btn:hover {
+    background-color: #4a4a4a;
+    color: #aaaaaa;
+}
+
+.toggle-btn:checked {
+    background-color: #00d4ff;
+    color: #000000;
+    border-color: #00d4ff;
+}
+
+.toggle-btn:checked:hover {
+    background-color: #33ddff;
+}
+
+/* ==================== Disc Headers (Multi-disc Albums) ==================== */
+
+.disc-header-row {
+    padding: 12px 8px 8px 8px;
+    margin-top: 8px;
+    border-top: 1px solid #333333;
+}
+
+.disc-header-row:first-child {
+    margin-top: 0;
+    border-top: none;
+    padding-top: 0;
+}
+
+.disc-header-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #666666;
+    letter-spacing: 0.5px;
+}
+
+/* ==================== Album Row ==================== */
+
+.album-row {
+    padding: 2px 12px;
+    border-radius: 4px;
+    min-height: 52px;
+}
+
+.album-row:hover {
+    background-color: #2a2a2a;
+}
+
+.album-row-selected {
+    background-color: rgba(0, 212, 255, 0.12);
+}
+
+/* ==================== Album Art ==================== */
+
+.album-art,
+.album-art-thumb,
+.album-art-placeholder {
+    border-radius: 4px;
+    background-color: #333333;
+}
+
+.album-art-thumb {
+    min-width: 48px;
+    min-height: 48px;
+}
+
+.album-art-full {
+    min-width: 120px;
+    min-height: 120px;
+    border-radius: 6px;
+    background-color: #333333;
+    border: none;
+}
+
+.album-art-loading {
+    background-color: #333333;
+    border-radius: 4px;
+    animation: artwork-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes artwork-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 0.8; }
+}
+
+/* Artwork loading animation class */
+.artwork-loading {
+    animation: artwork-pulse 1.2s ease-in-out infinite;
+}
+
+/* Title text pattern: 14px medium weight, primary color */
+.album-title,
+.artist-name,
+.library-row-title,
+.library-card-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+/* Channel strip song title (50% larger than base 14px) */
+.song-title {
+    font-size: 21px;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+/* Meta/subtitle pattern: 12px, muted color */
+.album-meta,
+.artist-meta,
+.song-meta,
+.library-row-subtitle {
+    font-size: 12px;
+    color: #888888;
+}
+
+/* Dim text pattern: 12px, dim color */
+.album-year {
+    font-size: 12px;
+    color: #666666;
+}
+
+/* ==================== Artist Row ==================== */
+
+.artist-row {
+    padding: 2px 12px;
+    border-radius: 4px;
+    min-height: 52px;
+}
+
+.artist-row:hover {
+    background-color: #2a2a2a;
+}
+
+.artist-row-selected {
+    background-color: rgba(0, 212, 255, 0.12);
+}
+
+/* ==================== Song Row ==================== */
+
+.song-row {
+    padding: 2px 12px;
+    border-radius: 4px;
+    min-height: 52px;
+}
+
+.song-row:hover {
+    background-color: #2a2a2a;
+}
+
+.song-row-selected {
+    background-color: rgba(0, 212, 255, 0.12);
+}
+
+.song-row-compact {
+    min-height: 36px;
+    padding: 6px 12px;
+}
+
+/* Monospace number pattern (durations, track numbers) */
+.song-duration,
+.library-row-duration {
+    font-size: 12px;
+    color: #666666;
+    font-family: monospace;
+}
+
+.song-track-num {
+    font-size: 12px;
+    color: #666666;
+    min-width: 24px;
+}
+
+/* ==================== Channel Strip ==================== */
+
+channel-strip {
+    border: 3px solid #555555;
+    border-radius: 6px;
+    background-color: #282828;
+    min-height: 96px;
+}
+
+channel-strip > box {
+    padding: 8px;
+}
+
+.channel-strip {
+    border: 3px solid #555555;
+    border-radius: 6px;
+    padding: 4px;
+    background-color: #282828;
+    min-height: 96px;
+}
+
+
+/* Preview/PFL state - orange border */
+channel-strip.channel-strip-preview {
+    border-color: #ff9500;
+    border-width: 3px;
+    box-shadow: 0 0 12px rgba(255, 149, 0, 0.4);
+}
+
+/* Queued state - pulsing white to green, ready for on-air */
+@keyframes queue-pulse {
+    0%, 100% {
+        border-color: #ffffff;
+    }
+    50% {
+        border-color: #00cc66;
+    }
+}
+
+channel-strip.channel-strip-queued {
+    border-width: 3px;
+    animation: queue-pulse 1s ease-in-out infinite;
+}
+
+/* On-Air state - solid green, live broadcast */
+channel-strip.channel-strip-on-air {
+    border-color: #00cc66;
+    border-width: 3px;
+    box-shadow: 0 0 12px rgba(0, 204, 102, 0.5);
+}
+
+/* Unconfigured channel - light red border, no output device assigned */
+channel-strip.channel-strip-unconfigured {
+    border-color: #ff6666;
+    border-width: 3px;
+    box-shadow: 0 0 8px rgba(255, 102, 102, 0.3);
+    opacity: 0.7;
+}
+
+channel-strip.channel-strip-unconfigured .channel-number {
+    color: #888888;
+}
+
+/* Invalid device state - dark red, device was configured but is now missing */
+channel-strip.channel-strip-invalid {
+    border-color: #993333;
+    border-width: 3px;
+    box-shadow: 0 0 8px rgba(153, 51, 51, 0.4);
+}
+
+.channel-number {
+    font-size: 24px;
+    font-weight: bold;
+    min-width: 48px;
+    color: #ffffff;
+    padding-top: 4px;
+    transition: color 200ms ease-out, text-shadow 200ms ease-out;
+}
+
+/* Focused channel - cyan number with glow animation */
+@keyframes channel-number-glow {
+    0%, 100% {
+        text-shadow: 0 0 8px rgba(0, 212, 255, 0.6),
+                     0 0 16px rgba(0, 212, 255, 0.4);
+    }
+    50% {
+        text-shadow: 0 0 12px rgba(0, 212, 255, 0.8),
+                     0 0 24px rgba(0, 212, 255, 0.5);
+    }
+}
+
+channel-strip.channel-strip-focused .channel-number {
+    color: #00d4ff;
+    animation: channel-number-glow 2s ease-in-out infinite;
+}
+
+/* Channel status messages (for error states) */
+.channel-status {
+    font-size: 13px;
+    font-weight: 500;
+    padding: 4px 8px;
+}
+
+.status-unconfigured {
+    color: #ff6666;
+}
+
+.status-invalid {
+    color: #993333;
+}
+
+/* ==================== Display Panel (LCD Module) ==================== */
+
+.display-panel {
+    background-color: #1a1a1a;
+    border: 1px solid #333333;
+    border-radius: 4px;
+    padding: 0;
+}
+
+.display-panel > * {
+    background-color: transparent;
+}
+
+.display-inner {
+    background-color: transparent;
+    padding: 6px 10px;
+}
+
+/* ==================== Right Column (Transport Grid + Spectrum) ==================== */
+
+.right-column {
+    min-width: 70px;
+}
+
+/* ==================== Transport Grid (2x2) ==================== */
+
+.transport-grid {
+    margin-bottom: 4px;
+}
+
+.transport-btn {
+    min-width: 32px;
+    min-height: 32px;
+    font-weight: bold;
+    border-radius: 4px;
+    padding: 4px;
+}
+
+/* ==================== Repeat Button ==================== */
+
+.repeat-button:checked {
+    border-color: #00d4ff;
+    color: #00d4ff;
+}
+
+.repeat-button:checked:hover {
+    border-color: #33ddff;
+    color: #33ddff;
+}
+
+/* ==================== Autoplay Button ==================== */
+
+.autoplay-button:checked {
+    border-color: #00cc66;
+    color: #00cc66;
+}
+
+.autoplay-button:checked:hover {
+    border-color: #33dd88;
+    color: #33dd88;
+}
+
+/* ==================== Spectrum Display (Full Height) ==================== */
+
+.spectrum-display {
+    min-width: 64px;
+    background-color: transparent;
+}
+
+/* ==================== Artist/Album Info ==================== */
+
+.artist-album {
+    font-size: 12px;
+    color: #888888;
+}
+
+/* ==================== Metrics Column ==================== */
+
+.metrics-column {
+    min-width: 70px;
+}
+
+/* ==================== Time Display ==================== */
+
+.time-remaining {
+    font-family: monospace;
+    font-size: 21px;
+    font-weight: bold;
+    color: #aaaaaa;
+}
+
+.time-elapsed {
+    font-family: monospace;
+    font-size: 21px;
+    font-weight: bold;
+    color: #66aa66;
+}
+
+.next-track-duration {
+    font-family: monospace;
+    font-size: 13px;
+    color: #666666;
+}
+
+.time-warning {
+    color: #ff3333;
+    animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1.0; }
+    50% { opacity: 0.5; }
+}
+
+/* ==================== Transport Buttons ==================== */
+
+.linked > button {
+    border-radius: 0;
+    margin: 0;
+    min-width: 36px;
+    min-height: 36px;
+}
+
+.linked > button:first-child {
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+}
+
+.linked > button:last-child {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+
+/* ==================== Transport Button Active States ==================== */
+/* Applied via callbacks to .transport-btn buttons */
+
+/* Orange active state for preview/PFL mode */
+.preview-active,
+.preview-active:hover {
+    background-color: #ff9500;
+    color: #ffffff;
+    border-color: #ff9500;
+}
+
+.preview-active:hover {
+    background-color: #ffaa33;
+}
+
+/* ==================== Seek Row Container ==================== */
+
+.seek-row {
+    padding: 8px 0 4px 0;  /* More vertical padding for better touch targets */
+}
+
+/* Time labels row below seek bar */
+.seek-times-row {
+    padding: 0;
+}
+
+/* Time labels (start/end) */
+.seek-time {
+    font-family: monospace;
+    font-size: 11px;
+    color: #666666;
+}
+
+/* ==================== Seek Bar ==================== */
+
+.seek-bar {
+    padding: 0;
+    margin: 0;
+}
+
+.seek-bar trough {
+    min-height: 6px;
+    border-radius: 3px;
+    background-color: #2a2a2a;
+}
+
+.seek-bar highlight {
+    background-color: #00d4ff;
+    border-radius: 3px;
+}
+
+.seek-bar slider {
+    min-width: 14px;
+    min-height: 14px;
+    border-radius: 7px;
+    background-color: #ffffff;
+    border: 2px solid #00d4ff;
+    margin: -4px;
+    transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.seek-bar slider:hover {
+    box-shadow: 0 0 8px rgba(0, 212, 255, 0.6);
+    transform: scale(1.3);
+}
+
+.seek-bar:disabled slider {
+    background-color: #555555;
+    border-color: #444444;
+}
+
+/* ==================== Level Meter ==================== */
+
+.level-meter {
+    background-color: #1a1a1a;
+    border-radius: 3px;
+}
+
+/* ==================== Spectrum Display Bottom ==================== */
+
+.spectrum-display-bottom {
+    background-color: transparent;
+    min-width: 120px;
+    min-height: 24px;
+}
+
+/* ==================== Channels Panel ==================== */
+
+.channels-panel {
+    background-color: #1a1a1a;
+    /* Width controlled by gtk_widget_set_size_request() in C code */
+}
+
+/* ==================== Help View ==================== */
+
+.help-shortcuts {
+    font-family: monospace;
+    font-size: 12px;
+    color: #cccccc;
+    line-height: 1.6;
+}
+
+/* ==================== Settings ==================== */
+
+.settings-section {
+    padding: 16px;
+    background-color: rgba(255, 255, 255, 0.02);
+    border-radius: 8px;
+    margin-bottom: 16px;
+}
+
+/* Channel settings frames */
+.settings-channel-frame {
+    background-color: #282828;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+
+.settings-channel-frame > label {
+    font-size: 14px;
+    font-weight: 600;
+    color: #00d4ff;
+    padding: 0 8px;
+    margin-left: 8px;
+}
+
+/* Settings form labels */
+.settings-label {
+    font-size: 13px;
+    color: #aaaaaa;
+    min-width: 120px;
+}
+
+/* Settings entry fields */
+.settings-entry {
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.settings-entry:disabled {
+    opacity: 0.5;
+}
+
+/* ==================== Library Cards (Libraries View) ==================== */
+
+.library-card {
+    padding: 12px 16px;
+    background-color: #282828;
+    border-radius: 8px;
+    border: 1px solid #3a3a3a;
+    margin-bottom: 8px;
+}
+
+.library-card:hover {
+    border-color: #555555;
+}
+
+.library-card-name {
+    font-weight: 600;
+}
+
+.library-card-path {
+    font-size: 12px;
+    color: #888888;
+    font-family: monospace;
+}
+
+.library-card-action {
+    padding: 4px 10px;
+    font-size: 12px;
+    min-height: 24px;
+}
+
+.library-status {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.library-status-online,
+.library-status-ready {
+    color: #4ade80;
+    background-color: rgba(74, 222, 128, 0.1);
+}
+
+.library-status-indexing,
+.library-status-checking {
+    color: #60a5fa;
+    background-color: rgba(96, 165, 250, 0.1);
+}
+
+.library-status-error {
+    color: #f87171;
+    background-color: rgba(248, 113, 113, 0.1);
+}
+
+.library-status-offline,
+.library-status-new {
+    color: #6b7280;
+    background-color: rgba(107, 114, 128, 0.1);
+}
+
+.library-progress {
+    min-height: 6px;
+    border-radius: 3px;
+    margin-top: 4px;
+}
+
+.library-progress trough {
+    min-height: 6px;
+    background-color: #3a3a3a;
+    border-radius: 3px;
+}
+
+.library-progress progress {
+    min-height: 6px;
+    background-color: #60a5fa;
+    border-radius: 3px;
+}
+
+.library-indexing-indicator {
+    padding: 4px 8px;
+    background-color: rgba(96, 165, 250, 0.1);
+    border-radius: 4px;
+}
+
+.library-indexing-text {
+    font-size: 12px;
+    color: #60a5fa;
+}
+
+/* ==================== Indexing Progress Section ==================== */
+
+.progress-section {
+    padding: 16px;
+    background-color: #282828;
+    border-radius: 8px;
+    border: 1px solid #3a3a3a;
+    margin-bottom: 16px;
+}
+
+.progress-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-bottom: 12px;
+}
+
+.progress-phase {
+    margin-bottom: 16px;
+}
+
+.progress-phase:last-child {
+    margin-bottom: 0;
+}
+
+.progress-phase-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: #e0e0e0;
+    margin-bottom: 4px;
+}
+
+.progress-phase-bar {
+    min-height: 8px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+}
+
+.progress-phase-bar trough {
+    min-height: 8px;
+    background-color: #3a3a3a;
+    border-radius: 4px;
+}
+
+.progress-phase-bar progress {
+    min-height: 8px;
+    background-color: #00d4ff;
+    border-radius: 4px;
+}
+
+.progress-phase-label {
+    font-size: 12px;
+    color: #aaaaaa;
+}
+
+.progress-phase-rate {
+    font-size: 11px;
+    color: #666666;
+}
+
+/* Dimmed phase (inactive) */
+.progress-phase-dim .progress-phase-title {
+    color: #666666;
+}
+
+.progress-phase-dim .progress-phase-bar trough {
+    background-color: #2a2a2a;
+}
+
+.progress-phase-dim .progress-phase-bar progress {
+    background-color: #555555;
+}
+
+.progress-phase-dim .progress-phase-label {
+    color: #555555;
+}
+
+.progress-phase-dim .progress-phase-rate {
+    color: #444444;
+}
+
+/* Active phase (currently running) */
+.progress-phase-active .progress-phase-title {
+    color: #00d4ff;
+}
+
+/* Complete phase */
+.progress-phase-complete .progress-phase-bar progress {
+    background-color: #4ade80;
+}
+
+/* ==================== Empty States ==================== */
+
+.empty-state {
+    padding: 32px;
+    color: #888888;
+}
+
+.empty-state-title {
+    font-size: 18px;
+    font-weight: 500;
+    color: #aaaaaa;
+    margin-bottom: 8px;
+}
+
+.empty-state-subtitle {
+    font-size: 14px;
+    color: #666666;
+}
+
+/* ==================== Scrollbars ==================== */
+
+scrollbar {
+    background-color: transparent;
+}
+
+scrollbar slider {
+    min-width: 8px;
+    min-height: 8px;
+    border-radius: 4px;
+    background-color: #555555;
+}
+
+scrollbar slider:hover {
+    background-color: #777777;
+}
+
+scrollbar slider:active {
+    background-color: #00d4ff;
+}
+
+/* ==================== Buttons ==================== */
+
+button {
+    background-color: #3a3a3a;
+    color: #e0e0e0;
+    border: 1px solid #555555;
+    border-radius: 6px;
+    padding: 6px 12px;
+}
+
+button:hover {
+    background-color: #4a4a4a;
+    border-color: #666666;
+}
+
+button:active {
+    background-color: #2a2a2a;
+}
+
+button:disabled {
+    opacity: 0.5;
+}
+
+button.flat {
+    background: transparent;
+    border: none;
+    color: #00d4ff;
+    padding: 4px 8px;
+}
+
+button.flat:hover {
+    background-color: rgba(0, 212, 255, 0.1);
+}
+
+/* ==================== Check Buttons ==================== */
+
+checkbutton {
+    color: #e0e0e0;
+}
+
+checkbutton check {
+    background-color: #3a3a3a;
+    border: 1px solid #555555;
+    border-radius: 4px;
+}
+
+checkbutton check:checked {
+    background-color: #00d4ff;
+    border-color: #00d4ff;
+}
+
+/* ==================== Entries ==================== */
+
+entry {
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    border: 1px solid #444444;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+
+entry:focus {
+    border-color: #00d4ff;
+}
+
+/* ==================== Drop Downs ==================== */
+
+dropdown {
+    background-color: #3a3a3a;
+    border: 1px solid #555555;
+    border-radius: 6px;
+    color: #e0e0e0;
+}
+
+dropdown:hover {
+    background-color: #4a4a4a;
+}
+
+/* ==================== Separators ==================== */
+
+separator {
+    background-color: #333333;
+    min-width: 1px;
+    min-height: 1px;
+}
+
+/* ==================== Window ==================== */
+
+window {
+    background-color: #1e1e1e;
+}
+
+/* ==================== Album Art Strip (Artist Rows) ==================== */
+
+.album-art-strip {
+    margin-end: 4px;
+}
+
+.album-art-strip-thumb,
+.album-art-list {
+    min-width: 48px;
+    min-height: 48px;
+    border-radius: 4px;
+    background-color: #333333;
+}
+
+/* Detail album art - native size, scaled by widget constraints */
+.album-art-detail {
+    border-radius: 8px;
+    background-color: #333333;
+}
+
+/* ==================== Column Headers (Table View) ==================== */
+
+.column-headers {
+    border-bottom: 1px solid #333333;
+    background-color: #222222;
+    padding: 4px 8px;
+}
+
+.column-header {
+    background: transparent;
+    color: #666666;
+    font-size: 11px;
+    font-weight: 600;
+    border: none;
+    padding: 4px 8px;
+    min-height: 24px;
+    letter-spacing: 0.3px;
+}
+
+.column-header:hover {
+    color: #888888;
+    background: transparent;
+}
+
+.column-header-active {
+    color: #00d4ff;
+}
+
+/* Sort indicators handled in C code - GTK4 doesn't support ::after content */
+
+/* ==================== Disc Headers (Multi-disc Albums) ==================== */
+
+.disc-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: #666666;
+    border-top: 1px solid #333333;
+    padding: 8px 12px 4px 12px;
+    margin-top: 8px;
+}
+
+.disc-header:first-child {
+    margin-top: 0;
+    border-top: none;
+}
+
+/* ==================== Artist Link ==================== */
+
+.artist-link {
+    color: #00d4ff;
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    font-weight: normal;
+}
+
+.artist-link:hover {
+    color: #33ddff;
+    background: transparent;
+    text-decoration: underline;
+}
+
+/* ==================== Library Row Styles ==================== */
+
+.library-row {
+    padding: 2px 12px;
+    border-radius: 6px;
+}
+
+.library-row:hover {
+    background-color: #2a2a2a;
+}
+
+/* Album row - 48px artwork + minimal padding */
+.library-album-row {
+    min-height: 52px;
+    padding: 2px 16px;
+}
+
+/* Artist row - 48px artwork + minimal padding */
+.library-artist-row {
+    min-height: 52px;
+    padding: 2px 16px;
+}
+
+/* Track row (album detail) - compact */
+.library-track-row {
+    min-height: 44px;
+    padding: 8px 16px;
+}
+
+/* Dim text at 12px (counts, details, secondary info) */
+.library-row-count,
+.library-card-detail {
+    font-size: 12px;
+    color: #666666;
+}
+
+.library-row-duration {
+    min-width: 48px;
+}
+
+.library-row-count {
+    min-width: 40px;
+    padding-right: 4px;
+}
+
+.library-row-track-num {
+    font-size: 13px;
+    color: #666666;
+    min-width: 32px;
+}
+
+.library-row-arrow {
+    color: #555555;
+    min-width: 24px;
+    padding-left: 8px;
+}
+
+.library-album-art {
+    min-width: 48px;
+    min-height: 48px;
+    border-radius: 4px;
+    background-color: #333333;
+}
+
+.library-album-art-large {
+    min-width: 120px;
+    min-height: 120px;
+    border-radius: 8px;
+    background-color: #333333;
+}
+
+/* ==================== Search Results Section ==================== */
+
+.search-results-section {
+    margin-bottom: 16px;
+}
+
+.search-results-section-header {
+    padding-left: 4px;
+}
+
+.search-result-row {
+    padding: 2px 16px;
+    border-radius: 6px;
+    min-height: 52px;
+}
+
+.search-result-row:hover {
+    background-color: #2a2a2a;
+}
+
+/* Search result album row with art */
+.search-album-row {
+    min-height: 52px;
+}
+
+/* Search result track row with art */
+.search-track-row {
+    min-height: 52px;
+    padding: 2px 16px;
+}
+
+/* ==================== Table Row (Songs Table View) ==================== */
+
+.table-row {
+    padding: 6px 8px;
+    border-radius: 2px;
+    min-height: 44px;
+}
+
+.table-row:hover {
+    background-color: #2a2a2a;
+}
+
+.table-cell {
+    font-size: 13px;
+    color: #e0e0e0;
+}
+
+.table-cell-muted {
+    color: #888888;
+}
+
+.table-cell-number {
+    font-family: monospace;
+}
+
+/* ==================== Toast Notifications ==================== */
+
+.toast-notification {
+    background-color: rgba(40, 40, 40, 0.95);
+    border: 1px solid #555555;
+    border-radius: 8px;
+    padding: 12px 20px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.toast-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+/* ==================== Transport Bar ==================== */
+
+transport-bar {
+    background-color: #222222;
+    border-top: 1px solid #333333;
+    padding: 8px 12px;
+}
+
+.transport-bar-inner {
+    padding: 0;
+}
+
+.transport-bar-btn {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 4px 8px;
+    font-weight: bold;
+    font-size: 12px;
+}
+
+.play-pause-btn {
+    min-width: 48px;
+    min-height: 48px;
+    background-color: #00d4ff;
+    color: #000000;
+    border: none;
+}
+
+.play-pause-btn:hover {
+    background-color: #33ddff;
+}
+
+.shuttle-container {
+    padding: 0 8px;
+}
+
+.shuttle-label {
+    font-family: monospace;
+    font-size: 12px;
+    font-weight: bold;
+    color: #00d4ff;
+    min-width: 60px;
+}
+
+/* Base shuttle scale styling (shared by transport bar and channel strip) */
+
+.shuttle-scale trough,
+.channel-shuttle-scale trough {
+    background: linear-gradient(to right, #ff6b6b, #333333 45%, #333333 55%, #4ecdc4);
+}
+
+.shuttle-scale highlight,
+.channel-shuttle-scale highlight {
+    background: transparent;
+}
+
+.shuttle-scale slider,
+.channel-shuttle-scale slider {
+    background: white;
+    border: 2px solid #00d4ff;
+    border-radius: 50%;
+    transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.shuttle-scale slider:hover,
+.channel-shuttle-scale slider:hover {
+    transform: scale(1.3);
+}
+
+.shuttle-scale:disabled slider,
+.channel-shuttle-scale:disabled slider {
+    background-color: #555555;
+    border-color: #444444;
+    box-shadow: none;
+}
+
+/* Transport bar shuttle (larger) */
+.shuttle-scale {
+    min-width: 150px;
+}
+
+.shuttle-scale trough {
+    min-height: 8px;
+    border-radius: 4px;
+}
+
+.shuttle-scale slider {
+    min-width: 16px;
+    min-height: 16px;
+    margin: -4px;
+    box-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
+}
+
+.shuttle-scale slider:hover {
+    box-shadow: 0 0 12px rgba(0, 212, 255, 0.6);
+}
+
+/* ==================== Per-Channel Skip/Shuttle Controls ==================== */
+
+.skip-shuttle-row {
+    margin-top: 4px;
+}
+
+.channel-shuttle-container {
+    padding: 0 4px;
+}
+
+.channel-shuttle-label {
+    font-family: monospace;
+    font-size: 10px;
+    font-weight: bold;
+    color: #00d4ff;
+    padding: 0 2px;
+}
+
+/* Per-channel shuttle scale (compact size overrides) */
+.channel-shuttle-scale {
+    min-width: 60px;
+}
+
+.channel-shuttle-scale trough {
+    min-height: 6px;
+    border-radius: 3px;
+}
+
+.channel-shuttle-scale slider {
+    min-width: 12px;
+    min-height: 12px;
+    margin: -3px;
+    box-shadow: 0 0 6px rgba(0, 212, 255, 0.4);
+}
+
+.channel-shuttle-scale slider:hover {
+    box-shadow: 0 0 10px rgba(0, 212, 255, 0.6);
+}
+
+/* Shuttle mode button (3-state: OFF / KEYLOCK / PITCHED) */
+.shuttle-mode-btn {
+    min-height: 14px;
+    min-width: 32px;
+    padding: 0 4px;
+    font-size: 7px;
+    font-weight: bold;
+    border-radius: 2px;
+    border: 1px solid #444444;
+}
+
+/* OFF state - light gray */
+.shuttle-mode-off {
+    background-color: #333333;
+    color: #888888;
+    border-color: #444444;
+}
+
+.shuttle-mode-off:hover {
+    background-color: #444444;
+    color: #aaaaaa;
+}
+
+/* KEYLOCK state - green (pitch preserved) */
+.shuttle-mode-keylock {
+    background-color: #1a3a1a;
+    border-color: #33cc33;
+    color: #33cc33;
+}
+
+.shuttle-mode-keylock:hover {
+    background-color: #2a4a2a;
+    color: #44dd44;
+}
+
+/* PITCHED state - cyan (turntable/vinyl) */
+.shuttle-mode-pitched {
+    background-color: #1a3a4a;
+    border-color: #00d4ff;
+    color: #00d4ff;
+}
+
+.shuttle-mode-pitched:hover {
+    background-color: #2a4a5a;
+    color: #33ddff;
+}
+
+/* ==================== Album Context Display ==================== */
+
+/* Interactive display elements - brighten + scale on hover */
+.album-link, .artist-link {
+    font-size: 18px;
+    color: #888888;
+    opacity: 0.9;
+    transition: opacity 150ms ease-out, color 150ms ease-out;
+}
+
+.album-link:hover, .artist-link:hover {
+    opacity: 1.0;
+    color: #00d4ff;
+}
+
+.next-track {
+    font-size: 17px;
+    color: #666666;
+    opacity: 0.8;
+    transition: opacity 150ms ease-out, color 150ms ease-out;
+}
+
+.next-track:hover {
+    opacity: 1.0;
+    color: #888888;
+}
+
+/* Non-interactive next track state */
+.next-track-inactive {
+    opacity: 0.5;
+}
+
+.next-track-inactive:hover {
+    opacity: 0.5;
+    color: #666666;
+}
+
+/* Track position (non-interactive) */
+.track-position {
+    font-family: monospace;
+    font-size: 13px;
+    color: #666666;
+}
+
+/* ==================== Metadata Dialog ==================== */
+
+.metadata-section-header {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: #666666;
+}
+
+.metadata-section {
+    background-color: #282828;
+    border-radius: 6px;
+    padding: 12px;
+}
+
+.metadata-label {
+    font-size: 12px;
+    color: #888888;
+    font-weight: 500;
+}
+
+.metadata-value {
+    font-size: 12px;
+    color: #e0e0e0;
+}
+
+.metadata-value.dim-label {
+    color: #666666;
+    font-style: italic;
+}
+
+/* ==================== Errors View ==================== */
+
+.errors-tree-row {
+    padding: 8px 12px;
+    min-height: 36px;
+}
+
+.errors-tree-row:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.error-artist-row {
+    font-weight: 600;
+    color: #e0e0e0;
+}
+
+.error-album-row {
+    color: #aaaaaa;
+    padding-left: 24px;
+}
+
+.error-track-row {
+    color: #888888;
+    padding-left: 48px;
+    font-size: 12px;
+}
+
+.error-badge {
+    background-color: rgba(255, 107, 107, 0.2);
+    color: #ff6b6b;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    min-width: 20px;
+}
+
+.error-badge-warning {
+    background-color: #ff9500;
+}
+
+.error-badge-info {
+    background-color: #666666;
+}
+
+.error-type-label {
+    font-size: 11px;
+    color: #888888;
+}
+
+.error-expected {
+    color: #33cc33;
+}
+
+.error-actual {
+    color: #ff3333;
+}
+
+/* Nav bar error badge */
+.nav-badge {
+    background-color: #ff3333;
+    color: white;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 4px;
+    border-radius: 8px;
+    min-width: 14px;
+}
+
+/* Track info button */
+.track-info-btn {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 4px;
+    opacity: 0.4;
+    transition: opacity 150ms ease-out;
+}
+
+.track-info-btn:hover {
+    opacity: 1.0;
+}
+
+.library-track-row:hover .track-info-btn {
+    opacity: 0.7;
+}
+
+/* ==================== Errors Overlay ==================== */
+
+.errors-overlay-backdrop {
+    background-color: #1e1e1e;
+}
+
+.errors-overlay-panel {
+    background-color: #1e1e1e;
+    margin: 16px;
+}
+
+.errors-overlay-header {
+    padding: 0 0 12px 0;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #333333;
+}
+
+.errors-overlay-title {
+    font-size: 24px;
+    font-weight: bold;
+    color: #e0e0e0;
+}
+
+.errors-overlay-close {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+    border-radius: 6px;
+    background: #3a3a3a;
+    border: 1px solid #555555;
+    color: #aaaaaa;
+}
+
+.errors-overlay-close:hover {
+    background-color: #4a4a4a;
+    color: #ffffff;
+}
+
+/* Errors tree styles */
+.errors-tree-row {
+    padding: 6px 8px;
+    min-height: 32px;
+}
+
+.error-folder-row {
+    color: #e0e0e0;
+    font-weight: 500;
+    font-size: 14px;
+}
+
+.error-folder-row image {
+    opacity: 0;
+    min-width: 0;
+    min-height: 0;
+}
+
+.error-item-row {
+    color: #aaaaaa;
+    font-size: 13px;
+}
+
+.error-item-row image {
+    color: #ff6b6b;
+    min-width: 16px;
+}
+
+.error-item-row label {
+    color: #aaaaaa;
+}
+
+/* ==================== Performance Dashboard ==================== */
+
+.perf-chart {
+    background-color: #1a1a1a;
+    border-radius: 8px;
+    padding: 8px;
+    min-height: 150px;
+}
+
+.perf-chart-title {
+    font-size: 12px;
+    font-weight: bold;
+    color: #888888;
+    margin-bottom: 4px;
+}
+
+.perf-percentile {
+    font-family: monospace;
+    font-size: 11px;
+    color: #00d4ff;
+}
+
+.perf-health-ok {
+    color: #33cc33;
+}
+
+.perf-health-warn {
+    color: #ffcc00;
+}
+
+.perf-health-error {
+    color: #ff3333;
+}
+
+.perf-log {
+    font-family: monospace;
+    font-size: 11px;
+    background-color: #0d0d0d;
+    color: #cccccc;
+    padding: 8px;
+}
+
+.perf-log-debug {
+    color: #888888;
+}
+
+.perf-log-info {
+    color: #cccccc;
+}
+
+.perf-log-warn {
+    color: #ffcc00;
+}
+
+.perf-log-error {
+    color: #ff3333;
+}
+
+.perf-tooltip {
+    font-family: monospace;
+    font-size: 11px;
+    padding: 6px;
+}

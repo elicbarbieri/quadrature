@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <object class="GtkBox" id="help_view">
+    <property name="orientation">vertical</property>
+    <property name="spacing">8</property>
+    <style>
+      <class name="view-container"/>
+    </style>
+
+    <!-- Title -->
+    <child>
+      <object class="GtkLabel">
+        <property name="label">Help</property>
+        <property name="xalign">0</property>
+        <style>
+          <class name="library-title"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Scrollable content -->
+    <child>
+      <object class="GtkScrolledWindow">
+        <property name="vexpand">true</property>
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">16</property>
+            <property name="margin-top">16</property>
+
+            <!-- Keyboard shortcuts section -->
+            <child>
+              <object class="GtkLabel">
+                <property name="label">KEYBOARD SHORTCUTS</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="library-section-header"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">1-4          Select channel
+F1-F4        Play channel
+Shift+F1-F4  Stop channel
+Ctrl+F       Focus search</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="help-shortcuts"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- About section -->
+            <child>
+              <object class="GtkLabel">
+                <property name="label">ABOUT</property>
+                <property name="xalign">0</property>
+                <property name="margin-top">16</property>
+                <style>
+                  <class name="library-section-header"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Quadrature v0.1.0
+4-Channel Broadcast Audio Player</property>
+                <property name="xalign">0</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Artist row template for library list views -->
+<interface>
+  <object class="GtkBox" id="row">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">12</property>
+    <style>
+      <class name="library-row"/>
+      <class name="library-artist-row"/>
+    </style>
+
+    <!-- Text box -->
+    <child>
+      <object class="GtkBox" id="text_box">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+        <property name="valign">center</property>
+        <child>
+          <object class="GtkLabel" id="title">
+            <property name="xalign">0</property>
+            <property name="ellipsize">end</property>
+            <style>
+              <class name="library-row-title"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="subtitle">
+            <property name="xalign">0</property>
+            <property name="ellipsize">end</property>
+            <style>
+              <class name="library-row-subtitle"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Album art strip (dynamically populated) -->
+    <child>
+      <object class="GtkBox" id="art_strip">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">4</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="album-art-strip"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Navigation arrow -->
+    <child>
+      <object class="GtkImage" id="arrow">
+        <property name="icon-name">go-next-symbolic</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="library-row-arrow"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>

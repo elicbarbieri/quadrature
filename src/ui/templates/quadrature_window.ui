@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="UiWindow" parent="GtkApplicationWindow">
+    <property name="title">Quadrature</property>
+    <property name="default-width">1280</property>
+    <property name="default-height">600</property>
+
+    <!-- Root overlay for toast notifications -->
+    <child>
+      <object class="GtkOverlay" id="root_overlay">
+
+        <!-- Main horizontal layout -->
+        <child>
+          <object class="GtkBox" id="main_box">
+            <property name="orientation">horizontal</property>
+
+            <!-- Nav bar placeholder (custom widget created programmatically) -->
+
+            <!-- Content stack overlay (for errors panel) -->
+            <child>
+              <object class="GtkOverlay" id="content_overlay">
+                <property name="hexpand">true</property>
+
+                <!-- Content stack -->
+                <child>
+                  <object class="GtkStack" id="content_stack">
+                    <property name="transition-type">crossfade</property>
+                    <style>
+                      <class name="library-content"/>
+                    </style>
+                    <!-- Views added programmatically -->
+                  </object>
+                </child>
+
+                <!-- Errors overlay (hidden initially) -->
+                <child type="overlay">
+                  <object class="GtkBox" id="errors_overlay">
+                    <property name="orientation">vertical</property>
+                    <property name="visible">false</property>
+                    <property name="vexpand">true</property>
+                    <style>
+                      <class name="errors-overlay-backdrop"/>
+                    </style>
+
+                    <child>
+                      <object class="GtkBox" id="errors_panel">
+                        <property name="orientation">vertical</property>
+                        <property name="vexpand">true</property>
+                        <style>
+                          <class name="errors-overlay-panel"/>
+                        </style>
+
+                        <!-- Header with title and close button -->
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">horizontal</property>
+                            <style>
+                              <class name="errors-overlay-header"/>
+                            </style>
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Library Errors</property>
+                                <property name="xalign">0</property>
+                                <style>
+                                  <class name="errors-overlay-title"/>
+                                </style>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="errors_close_btn">
+                                <property name="icon-name">window-close-symbolic</property>
+                                <style>
+                                  <class name="errors-overlay-close"/>
+                                </style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+
+                        <!-- Errors view container (view added programmatically) -->
+                        <child>
+                          <object class="GtkBox" id="errors_view_container">
+                            <property name="orientation">vertical</property>
+                            <property name="vexpand">true</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Separator -->
+            <child>
+              <object class="GtkSeparator">
+                <property name="orientation">vertical</property>
+              </object>
+            </child>
+
+            <!-- Channels panel - fixed width, does not expand -->
+            <child>
+              <object class="GtkBox" id="channels_panel">
+                <property name="orientation">vertical</property>
+                <property name="spacing">4</property>
+                <style>
+                  <class name="channels-panel"/>
+                </style>
+
+                <!-- Channel strips container - margins inside fixed width -->
+                <child>
+                  <object class="GtkBox" id="channel_strips_box">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">4</property>
+                    <property name="vexpand">true</property>
+                    <property name="margin-start">8</property>
+                    <property name="margin-end">8</property>
+                    <property name="margin-top">8</property>
+                    <property name="margin-bottom">8</property>
+                    <!-- Channel strips added programmatically -->
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Toast notification (hidden initially) -->
+        <child type="overlay">
+          <object class="GtkBox" id="toast_overlay">
+            <property name="orientation">horizontal</property>
+            <property name="halign">center</property>
+            <property name="valign">start</property>
+            <property name="margin-top">20</property>
+            <property name="visible">false</property>
+            <style>
+              <class name="toast-notification"/>
+            </style>
+            <child>
+              <object class="GtkLabel" id="toast_label">
+                <style>
+                  <class name="toast-label"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

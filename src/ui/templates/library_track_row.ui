@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Track row template for album detail views -->
+<interface>
+  <object class="GtkBox" id="row">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">12</property>
+    <style>
+      <class name="library-row"/>
+      <class name="library-track-row"/>
+    </style>
+
+    <!-- Track number -->
+    <child>
+      <object class="GtkLabel" id="track_num">
+        <property name="valign">center</property>
+        <property name="width-chars">3</property>
+        <style>
+          <class name="library-row-track-num"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Text box (title only for detail view) -->
+    <child>
+      <object class="GtkBox" id="text_box">
+        <property name="orientation">vertical</property>
+        <property name="spacing">2</property>
+        <property name="valign">center</property>
+        <child>
+          <object class="GtkLabel" id="title">
+            <property name="xalign">0</property>
+            <property name="ellipsize">end</property>
+            <style>
+              <class name="library-row-title"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Duration -->
+    <child>
+      <object class="GtkLabel" id="duration">
+        <property name="valign">center</property>
+        <style>
+          <class name="library-row-duration"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Info button (metadata popup) -->
+    <child>
+      <object class="GtkButton" id="info_btn">
+        <property name="valign">center</property>
+        <property name="tooltip-text">Show track metadata</property>
+        <property name="has-frame">false</property>
+        <child>
+          <object class="GtkImage">
+            <property name="icon-name">help-about-symbolic</property>
+            <property name="pixel-size">14</property>
+          </object>
+        </child>
+        <style>
+          <class name="flat"/>
+          <class name="track-info-btn"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>
