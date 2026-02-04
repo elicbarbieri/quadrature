@@ -20,8 +20,10 @@
 
 struct _UiSpectrum {
     GtkWidget parent;
-    float bars[MAX_BARS];
-    float smoothed[MAX_BARS];
+    float bars_left[MAX_BARS];
+    float bars_right[MAX_BARS];
+    float smoothed_left[MAX_BARS];
+    float smoothed_right[MAX_BARS];
     int num_bars;
 };
 
@@ -33,16 +35,15 @@ static void ui_spectrum_snapshot(GtkWidget *widget, GtkSnapshot *snap) {
     int h = gtk_widget_get_height(widget);
     if (w <= 0 || h <= 0 || s->num_bars <= 0) return;
 
-    /* Mirrored cava-style: bass in center, bars extend up and down */
+    /* Dual-channel: left channel on left side (bass at center),
+     * right channel on right side (bass at center), bars extend up and down */
     float cy = h / 2.0f;
-    float max_h = fmaxf(cy - 1.0f, 1.0f);  /* ensure at least 1px bar height */
+    float max_h = fmaxf(cy - 1.0f, 1.0f);
 
     /* Calculate how many bars fit with minimum bar width */
-    /* total_bars * (bar_width + gap) - gap <= width */
-    /* total_bars <= (width + gap) / (bar_width + gap) */
     int max_total = (int)((w + BAR_GAP) / (MIN_BAR_WIDTH + BAR_GAP));
-    int max_half = max_total / 2;  /* mirrored, so half on each side */
-    if (max_half < 1) max_half = 1;  /* always show at least 1 bar */
+    int max_half = max_total / 2;
+    if (max_half < 1) max_half = 1;
     int num_bars = (max_half < s->num_bars) ? max_half : s->num_bars;
 
     int total = num_bars * 2;
@@ -50,33 +51,39 @@ static void ui_spectrum_snapshot(GtkWidget *widget, GtkSnapshot *snap) {
     float bw = fmaxf(MIN_BAR_WIDTH, (w - gap_total) / total);
 
     for (int i = 0; i < num_bars; i++) {
-        float val = fmaxf(s->smoothed[i], 0.03f);
-        float bar_h = max_h * val;
-        float alpha = 0.7f + val * 0.3f;
-        GdkRGBA c = {UI_COLOR_CYAN.red, UI_COLOR_CYAN.green, UI_COLOR_CYAN.blue, alpha};
+        /* Left side: left audio channel, reversed (bass at center) */
+        float lval = fmaxf(s->smoothed_left[i], 0.03f);
+        float l_bar_h = max_h * lval;
+        float l_alpha = 0.7f + lval * 0.3f;
+        GdkRGBA lc = {UI_COLOR_CYAN.red, UI_COLOR_CYAN.green, UI_COLOR_CYAN.blue, l_alpha};
 
-        /* Left side: reversed (bass at center) */
         int li = num_bars - 1 - i;
         float lx = li * (bw + BAR_GAP);
+        float ly = cy - l_bar_h;
+        float lth = l_bar_h * 2.0f;
 
-        /* Right side: normal (bass at center) */
-        float rx = (num_bars + i) * (bw + BAR_GAP);
-
-        float y = cy - bar_h;
-        float th = bar_h * 2.0f;
-
-        graphene_rect_t lr = GRAPHENE_RECT_INIT(lx, y, bw, th);
+        graphene_rect_t lr = GRAPHENE_RECT_INIT(lx, ly, bw, lth);
         GskRoundedRect lrr;
         gsk_rounded_rect_init_from_rect(&lrr, &lr, BAR_RADIUS);
         gtk_snapshot_push_rounded_clip(snap, &lrr);
-        gtk_snapshot_append_color(snap, &c, &lr);
+        gtk_snapshot_append_color(snap, &lc, &lr);
         gtk_snapshot_pop(snap);
 
-        graphene_rect_t rr = GRAPHENE_RECT_INIT(rx, y, bw, th);
+        /* Right side: right audio channel, normal (bass at center) */
+        float rval = fmaxf(s->smoothed_right[i], 0.03f);
+        float r_bar_h = max_h * rval;
+        float r_alpha = 0.7f + rval * 0.3f;
+        GdkRGBA rc = {UI_COLOR_CYAN.red, UI_COLOR_CYAN.green, UI_COLOR_CYAN.blue, r_alpha};
+
+        float rx = (num_bars + i) * (bw + BAR_GAP);
+        float ry = cy - r_bar_h;
+        float rth = r_bar_h * 2.0f;
+
+        graphene_rect_t rr = GRAPHENE_RECT_INIT(rx, ry, bw, rth);
         GskRoundedRect rrr;
         gsk_rounded_rect_init_from_rect(&rrr, &rr, BAR_RADIUS);
         gtk_snapshot_push_rounded_clip(snap, &rrr);
-        gtk_snapshot_append_color(snap, &c, &rr);
+        gtk_snapshot_append_color(snap, &rc, &rr);
         gtk_snapshot_pop(snap);
     }
 }
@@ -103,8 +110,10 @@ static void ui_spectrum_class_init(UiSpectrumClass *klass) {
 
 static void ui_spectrum_init(UiSpectrum *s) {
     s->num_bars = SPECTRUM_BARS;
-    memset(s->bars, 0, sizeof(s->bars));
-    memset(s->smoothed, 0, sizeof(s->smoothed));
+    memset(s->bars_left, 0, sizeof(s->bars_left));
+    memset(s->bars_right, 0, sizeof(s->bars_right));
+    memset(s->smoothed_left, 0, sizeof(s->smoothed_left));
+    memset(s->smoothed_right, 0, sizeof(s->smoothed_right));
 }
 
 GtkWidget *ui_spectrum_new(int num_bars) {
@@ -115,19 +124,27 @@ GtkWidget *ui_spectrum_new(int num_bars) {
     return GTK_WIDGET(s);
 }
 
-void ui_spectrum_set_bars(UiSpectrum *s, const float *bars, int count) {
+void ui_spectrum_set_bars(UiSpectrum *s, const float *left, const float *right, int count) {
     g_return_if_fail(UI_IS_SPECTRUM(s));
-    if (!bars || count <= 0) return;
+    if (!left || !right || count <= 0) return;
 
     int n = MIN(count, s->num_bars);
     for (int i = 0; i < n; i++) {
-        float target = CLAMP(bars[i], 0.0f, 1.0f);
-        float cur = s->smoothed[i];
-        /* Fast attack, slow release */
-        s->smoothed[i] = (target > cur)
-            ? cur + (target - cur) * 0.5f
-            : cur + (target - cur) * 0.15f;
-        s->bars[i] = target;
+        /* Left channel: fast attack, slow release */
+        float lt = CLAMP(left[i], 0.0f, 1.0f);
+        float lc = s->smoothed_left[i];
+        s->smoothed_left[i] = (lt > lc)
+            ? lc + (lt - lc) * 0.5f
+            : lc + (lt - lc) * 0.15f;
+        s->bars_left[i] = lt;
+
+        /* Right channel: fast attack, slow release */
+        float rt = CLAMP(right[i], 0.0f, 1.0f);
+        float rc = s->smoothed_right[i];
+        s->smoothed_right[i] = (rt > rc)
+            ? rc + (rt - rc) * 0.5f
+            : rc + (rt - rc) * 0.15f;
+        s->bars_right[i] = rt;
     }
     gtk_widget_queue_draw(GTK_WIDGET(s));
 }

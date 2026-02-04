@@ -1,15 +1,20 @@
 /**
- * Four-phase indexer implementation.
+ * Five-phase indexer implementation.
  *
  * Phase 1 - SCAN: Fast directory walk, builds work queue
- * Phase 2 - METADATA: Parallel extraction with GThreadPool
+ * Phase 2 - METADATA: Parallel extraction with GThreadPool + fingerprinting
  * Phase 3 - ARTWORK: Parallel image processing
- * Phase 4 - FINALIZE: Batch DB updates
+ * Phase 4 - RESOLVE: MusicBrainz resolution via local PG (optional)
+ * Phase 5 - FINALIZE: Batch DB updates
  */
 
-#include "quadrature/indexer/indexer.h"
-#include "quadrature/database/database.h"
+#include "quadrature/quadrature_indexer.h"
+#include "quadrature/quadrature_database.h"
 #include "internal.h"
+
+#ifdef HAVE_MUSICBRAINZ
+#include "quadrature/quadrature_musicbrainz.h"
+#endif
 
 #include <glib.h>
 #include <stdlib.h>
@@ -23,7 +28,7 @@
 #include <time.h>
 
 #define MAX_PATHS 64
-#define DEFAULT_ART_SIZE 300
+#define DEFAULT_ART_SIZE 48
 #define ALBUM_MTIME_PAGE_SIZE 1000
 #define PROGRESS_THROTTLE_US (100 * 1000)  // 100ms
 #define DIR_SCAN_INITIAL_CAPACITY 64
@@ -259,6 +264,11 @@ struct indexer {
 
     char current_path[INDEXER_PATH_MAX];
     pthread_mutex_t lock;  // Protects current_path and phase_start_time
+
+    // AcoustID / MusicBrainz config
+    bool fingerprint_tracks;
+    bool mb_resolve;
+    char* pg_conninfo;
 };
 
 // =============================================================================
@@ -481,10 +491,7 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
             if (value) {
                 db_album_mtime_t* cached = value;
                 if (cached->last_updated_at == dir_stat.st_mtime) {
-                    // Unchanged - mark tracks seen and skip
-                    for (size_t i = 0; i < disc_info_count; i++) {
-                        db_mark_tracks_seen(idx->db, disc_infos[i].path, idx->scan_timestamp);
-                    }
+                    // Unchanged - skip
                     atomic_fetch_add(&idx->files_unchanged, total_files);
                     needs_processing = false;
                 }
@@ -528,8 +535,7 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
             if (value) {
                 db_album_mtime_t* cached = value;
                 if (cached->last_updated_at == dir_stat.st_mtime) {
-                    // Unchanged - mark tracks seen and skip
-                    db_mark_tracks_seen(idx->db, dir_path, idx->scan_timestamp);
+                    // Unchanged - skip
                     atomic_fetch_add(&idx->files_unchanged, scan.file_count);
                     needs_processing = false;
                 }
@@ -644,15 +650,21 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
         return;
     }
 
-    // Extract metadata and build folder album context
-    folder_album_context_t* album_ctx = folder_album_context_new(dir_path);
-    extended_metadata_t* all_meta = g_new0(extended_metadata_t, scan.file_count);
-
+    // Extract basic metadata from each file
+    index_item_t* items = g_new0(index_item_t, scan.file_count);
     size_t valid_count = 0;
+    const char* first_artist = NULL;
+    const char* first_album_artist = NULL;
+
     for (size_t i = 0; i < scan.file_count && !atomic_load(&idx->cancel_flag); i++) {
-        quadrature_result_t res = extract_extended_metadata(scan.files[i], &all_meta[i]);
+        quadrature_result_t res = extract_audio_metadata(scan.files[i], &items[i]);
         if (res == QUADRATURE_OK) {
-            folder_album_context_add_track(album_ctx, &all_meta[i]);
+            if (!first_artist && items[i].artist) {
+                first_artist = items[i].artist;
+            }
+            if (!first_album_artist && items[i].album_artist) {
+                first_album_artist = items[i].album_artist;
+            }
             valid_count++;
         } else {
             const char* filename = strrchr(scan.files[i], '/');
@@ -670,74 +682,93 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
     }
 
     if (valid_count == 0 || atomic_load(&idx->cancel_flag)) {
-        for (size_t i = 0; i < scan.file_count; i++) extended_metadata_free(&all_meta[i]);
-        g_free(all_meta);
-        folder_album_context_free(album_ctx);
+        for (size_t i = 0; i < scan.file_count; i++) index_item_free(&items[i]);
+        g_free(items);
         dir_scan_result_free(&scan);
         work->success = false;
         return;
     }
 
-    folder_album_finalize(album_ctx);
+    // Album title = folder name
+    // Album artist: prefer ALBUMARTIST tag, fall back to first track's ARTIST tag
+    const char* folder_name = strrchr(dir_path, '/');
+    folder_name = folder_name ? folder_name + 1 : dir_path;
+    const char* album_artist = first_album_artist ? first_album_artist
+                             : first_artist ? first_artist
+                             : "Unknown Artist";
 
-    // Write to database (sequential per album)
-    int64_t artist_id = db_get_or_create_artist(idx->db, folder_album_get_artist(album_ctx));
+    int64_t artist_id = db_get_or_create_artist(idx->db, album_artist);
     if (artist_id < 0) {
-        log_indexer_error(idx, dir_path, "Failed to create artist: %s", folder_album_get_artist(album_ctx));
-        for (size_t i = 0; i < scan.file_count; i++) extended_metadata_free(&all_meta[i]);
-        g_free(all_meta);
-        folder_album_context_free(album_ctx);
+        log_indexer_error(idx, dir_path, "Failed to create artist: %s", album_artist);
+        for (size_t i = 0; i < scan.file_count; i++) index_item_free(&items[i]);
+        g_free(items);
         dir_scan_result_free(&scan);
         work->success = false;
         return;
-    }
-
-    int64_t album_artist_id = 0;
-    if (folder_album_is_compilation(album_ctx)) {
-        album_artist_id = db_get_or_create_artist(idx->db, "Various Artists");
     }
 
     int64_t album_id = 0;
     quadrature_result_t album_res = db_upsert_folder_album(idx->db,
-        folder_album_get_directory_path(album_ctx),
-        folder_album_get_title(album_ctx),
-        artist_id, album_artist_id,
-        folder_album_is_compilation(album_ctx),
-        folder_album_get_year(album_ctx),
-        &album_id);
+        dir_path, folder_name, artist_id, 0, false, 0, &album_id);
 
     if (album_res != QUADRATURE_OK || album_id <= 0) {
-        log_indexer_error(idx, dir_path, "Failed to create album: %s", folder_album_get_title(album_ctx));
-        for (size_t i = 0; i < scan.file_count; i++) extended_metadata_free(&all_meta[i]);
-        g_free(all_meta);
-        folder_album_context_free(album_ctx);
+        log_indexer_error(idx, dir_path, "Failed to create album: %s", folder_name);
+        for (size_t i = 0; i < scan.file_count; i++) index_item_free(&items[i]);
+        g_free(items);
         dir_scan_result_free(&scan);
         work->success = false;
         return;
     }
 
-    // Insert tracks using the album_id from db_upsert_folder_album
+    // Insert tracks
     db_begin_transaction(idx->db);
     for (size_t i = 0; i < scan.file_count; i++) {
-        if (!all_meta[i].path) continue;
+        if (!items[i].path) continue;
 
         db_index_item_t db_item = {
-            .path = all_meta[i].path,
-            .title = all_meta[i].title,
-            .artist = all_meta[i].artist,
-            .album = folder_album_get_title(album_ctx),
-            .duration_ms = all_meta[i].duration_ms,
-            .track_num = all_meta[i].track_num,
-            .disc_num = all_meta[i].disc_num,  // Use metadata disc_num (default 1)
-            .year = all_meta[i].year > 0 ? all_meta[i].year : folder_album_get_year(album_ctx),
+            .path = items[i].path,
+            .title = items[i].title,
+            .album = folder_name,
+            .duration_ms = items[i].duration_ms,
+            .track_num = items[i].track_num,
+            .disc_num = items[i].disc_num > 0 ? items[i].disc_num : 1,
+            .year = items[i].year,
             .mtime = scan.stats[i].st_mtime,
-            .size = scan.stats[i].st_size
+            .genre = items[i].genre,
+            .metadata_json = NULL,
         };
 
-        if (db_upsert_track_with_album(idx->db, &db_item, album_id, idx->scan_timestamp) == QUADRATURE_OK) {
+        int64_t track_id = 0;
+        if (db_upsert_track_with_album(idx->db, &db_item, album_id, &track_id) == QUADRATURE_OK) {
             atomic_fetch_add(&idx->files_new, 1);
+
+            // Set track artist in junction table (required for db_get_track artist resolution)
+            if (track_id > 0) {
+                const char* track_artist_name = items[i].artist ? items[i].artist : album_artist;
+                int64_t track_artist_id = db_get_or_create_artist(idx->db, track_artist_name);
+                if (track_artist_id > 0) {
+                    db_track_artist_t ta = {
+                        .artist_id = track_artist_id,
+                        .role = ARTIST_ROLE_PRIMARY,
+                        .position = 0,
+                    };
+                    db_set_track_artists(idx->db, track_id, &ta, 1);
+                }
+            }
+
+#ifdef HAVE_MUSICBRAINZ
+            // Generate and cache fingerprint for MB resolution
+            if (track_id > 0 && idx->fingerprint_tracks) {
+                mb_fingerprint_t fp;
+                if (mb_fingerprint_generate(db_item.path, &fp) == QUADRATURE_OK) {
+                    db_set_track_fingerprint(idx->db, track_id, fp.fingerprint, fp.duration);
+                    mb_fingerprint_free(&fp);
+                }
+            }
+#endif
         } else {
-            log_indexer_error(idx, db_item.path, "Failed to save track: %s", db_item.title ? db_item.title : "(unknown)");
+            log_indexer_error(idx, db_item.path, "Failed to save track: %s",
+                db_item.title ? db_item.title : "(unknown)");
         }
     }
     db_commit(idx->db);
@@ -749,9 +780,8 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
     work->success = true;
 
     // Cleanup
-    for (size_t i = 0; i < scan.file_count; i++) extended_metadata_free(&all_meta[i]);
-    g_free(all_meta);
-    folder_album_context_free(album_ctx);
+    for (size_t i = 0; i < scan.file_count; i++) index_item_free(&items[i]);
+    g_free(items);
     dir_scan_result_free(&scan);
 }
 
@@ -759,15 +789,14 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
 static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
     const char* album_dir = work->item->dir_path;
 
-    // Create folder album context using the parent (album) directory
-    folder_album_context_t* album_ctx = folder_album_context_new(album_dir);
-
     // Collect all tracks from all disc directories
     GPtrArray* all_scans = g_ptr_array_new();       // Array of dir_scan_result_t*
-    GPtrArray* all_metadata = g_ptr_array_new();    // Array of extended_metadata_t*
-    GArray* disc_numbers = g_array_new(FALSE, FALSE, sizeof(uint16_t));  // Disc number for each scan
+    GPtrArray* all_items = g_ptr_array_new();       // Array of index_item_t*
+    GArray* disc_numbers = g_array_new(FALSE, FALSE, sizeof(uint16_t));
 
     size_t valid_count = 0;
+    const char* first_artist = NULL;
+    const char* first_album_artist = NULL;
 
     for (size_t d = 0; d < work->item->disc_count && !atomic_load(&idx->cancel_flag); d++) {
         const char* disc_dir = work->item->disc_dirs[d];
@@ -781,14 +810,19 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
             continue;
         }
 
-        extended_metadata_t* disc_meta = g_new0(extended_metadata_t, scan->file_count);
+        index_item_t* disc_items = g_new0(index_item_t, scan->file_count);
 
         for (size_t i = 0; i < scan->file_count && !atomic_load(&idx->cancel_flag); i++) {
-            quadrature_result_t res = extract_extended_metadata(scan->files[i], &disc_meta[i]);
+            quadrature_result_t res = extract_audio_metadata(scan->files[i], &disc_items[i]);
             if (res == QUADRATURE_OK) {
                 // Override disc_num from folder name (more reliable than embedded metadata)
-                disc_meta[i].disc_num = disc_num;
-                folder_album_context_add_track(album_ctx, &disc_meta[i]);
+                disc_items[i].disc_num = disc_num;
+                if (!first_artist && disc_items[i].artist) {
+                    first_artist = disc_items[i].artist;
+                }
+                if (!first_album_artist && disc_items[i].album_artist) {
+                    first_album_artist = disc_items[i].album_artist;
+                }
                 valid_count++;
             } else {
                 const char* filename = strrchr(scan->files[i], '/');
@@ -806,89 +840,108 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
         }
 
         g_ptr_array_add(all_scans, scan);
-        g_ptr_array_add(all_metadata, disc_meta);
+        g_ptr_array_add(all_items, disc_items);
         g_array_append_val(disc_numbers, disc_num);
     }
 
     if (valid_count == 0 || atomic_load(&idx->cancel_flag)) {
-        // Cleanup and fail
         for (guint s = 0; s < all_scans->len; s++) {
             dir_scan_result_t* scan = g_ptr_array_index(all_scans, s);
-            extended_metadata_t* meta = g_ptr_array_index(all_metadata, s);
-            for (size_t i = 0; i < scan->file_count; i++) extended_metadata_free(&meta[i]);
-            g_free(meta);
+            index_item_t* items = g_ptr_array_index(all_items, s);
+            for (size_t i = 0; i < scan->file_count; i++) index_item_free(&items[i]);
+            g_free(items);
             dir_scan_result_free(scan);
             g_free(scan);
         }
         g_ptr_array_free(all_scans, TRUE);
-        g_ptr_array_free(all_metadata, TRUE);
+        g_ptr_array_free(all_items, TRUE);
         g_array_free(disc_numbers, TRUE);
-        folder_album_context_free(album_ctx);
         work->success = false;
         return;
     }
 
-    folder_album_finalize(album_ctx);
+    // Album title = folder name
+    // Album artist: prefer ALBUMARTIST tag, fall back to first track's ARTIST tag
+    const char* folder_name = strrchr(album_dir, '/');
+    folder_name = folder_name ? folder_name + 1 : album_dir;
+    const char* album_artist = first_album_artist ? first_album_artist
+                             : first_artist ? first_artist
+                             : "Unknown Artist";
 
-    // Create album record using parent directory path
-    int64_t artist_id = db_get_or_create_artist(idx->db, folder_album_get_artist(album_ctx));
+    int64_t artist_id = db_get_or_create_artist(idx->db, album_artist);
     if (artist_id < 0) {
-        log_indexer_error(idx, album_dir, "Failed to create artist: %s", folder_album_get_artist(album_ctx));
+        log_indexer_error(idx, album_dir, "Failed to create artist: %s", album_artist);
         goto cleanup_fail;
-    }
-
-    int64_t album_artist_id = 0;
-    if (folder_album_is_compilation(album_ctx)) {
-        album_artist_id = db_get_or_create_artist(idx->db, "Various Artists");
     }
 
     int64_t album_id = 0;
     quadrature_result_t album_res = db_upsert_folder_album(idx->db,
-        album_dir,  // Use parent directory as album path
-        folder_album_get_title(album_ctx),
-        artist_id, album_artist_id,
-        folder_album_is_compilation(album_ctx),
-        folder_album_get_year(album_ctx),
-        &album_id);
+        album_dir, folder_name, artist_id, 0, false, 0, &album_id);
 
     if (album_res != QUADRATURE_OK || album_id <= 0) {
-        log_indexer_error(idx, album_dir, "Failed to create album: %s", folder_album_get_title(album_ctx));
+        log_indexer_error(idx, album_dir, "Failed to create album: %s", folder_name);
         goto cleanup_fail;
     }
 
-    // Insert tracks from all discs using the album_id from db_upsert_folder_album
+    // Insert tracks from all discs
     db_begin_transaction(idx->db);
     for (guint s = 0; s < all_scans->len; s++) {
         dir_scan_result_t* scan = g_ptr_array_index(all_scans, s);
-        extended_metadata_t* meta = g_ptr_array_index(all_metadata, s);
+        index_item_t* items = g_ptr_array_index(all_items, s);
 
         for (size_t i = 0; i < scan->file_count; i++) {
-            if (!meta[i].path) continue;
+            if (!items[i].path) continue;
 
             db_index_item_t db_item = {
-                .path = meta[i].path,
-                .title = meta[i].title,
-                .artist = meta[i].artist,
-                .album = folder_album_get_title(album_ctx),
-                .duration_ms = meta[i].duration_ms,
-                .track_num = meta[i].track_num,
-                .disc_num = meta[i].disc_num,  // Set from folder name
-                .year = meta[i].year > 0 ? meta[i].year : folder_album_get_year(album_ctx),
+                .path = items[i].path,
+                .title = items[i].title,
+                .album = folder_name,
+                .duration_ms = items[i].duration_ms,
+                .track_num = items[i].track_num,
+                .disc_num = items[i].disc_num > 0 ? items[i].disc_num : 1,
+                .year = items[i].year,
                 .mtime = scan->stats[i].st_mtime,
-                .size = scan->stats[i].st_size
+                .genre = items[i].genre,
+                .metadata_json = NULL,
             };
 
-            if (db_upsert_track_with_album(idx->db, &db_item, album_id, idx->scan_timestamp) == QUADRATURE_OK) {
+            int64_t track_id = 0;
+            if (db_upsert_track_with_album(idx->db, &db_item, album_id, &track_id) == QUADRATURE_OK) {
                 atomic_fetch_add(&idx->files_new, 1);
+
+                // Set track artist in junction table (required for db_get_track artist resolution)
+                if (track_id > 0) {
+                    const char* track_artist_name = items[i].artist ? items[i].artist : album_artist;
+                    int64_t track_artist_id = db_get_or_create_artist(idx->db, track_artist_name);
+                    if (track_artist_id > 0) {
+                        db_track_artist_t ta = {
+                            .artist_id = track_artist_id,
+                            .role = ARTIST_ROLE_PRIMARY,
+                            .position = 0,
+                        };
+                        db_set_track_artists(idx->db, track_id, &ta, 1);
+                    }
+                }
+
+#ifdef HAVE_MUSICBRAINZ
+                // Generate and cache fingerprint for MB resolution
+                if (track_id > 0 && idx->fingerprint_tracks) {
+                    mb_fingerprint_t fp;
+                    if (mb_fingerprint_generate(db_item.path, &fp) == QUADRATURE_OK) {
+                        db_set_track_fingerprint(idx->db, track_id, fp.fingerprint, fp.duration);
+                        mb_fingerprint_free(&fp);
+                    }
+                }
+#endif
             } else {
-                log_indexer_error(idx, db_item.path, "Failed to save track: %s", db_item.title ? db_item.title : "(unknown)");
+                log_indexer_error(idx, db_item.path, "Failed to save track: %s",
+                    db_item.title ? db_item.title : "(unknown)");
             }
         }
     }
     db_commit(idx->db);
 
     // Record result for artwork and finalize phases
-    // Use parent directory for artwork lookup
     work->result->album_id = album_id;
     work->result->mtime = work->item->dir_mtime;
     work->result->path = g_strdup(album_dir);
@@ -897,31 +950,29 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
     // Cleanup success path
     for (guint s = 0; s < all_scans->len; s++) {
         dir_scan_result_t* scan = g_ptr_array_index(all_scans, s);
-        extended_metadata_t* meta = g_ptr_array_index(all_metadata, s);
-        for (size_t i = 0; i < scan->file_count; i++) extended_metadata_free(&meta[i]);
-        g_free(meta);
+        index_item_t* items = g_ptr_array_index(all_items, s);
+        for (size_t i = 0; i < scan->file_count; i++) index_item_free(&items[i]);
+        g_free(items);
         dir_scan_result_free(scan);
         g_free(scan);
     }
     g_ptr_array_free(all_scans, TRUE);
-    g_ptr_array_free(all_metadata, TRUE);
+    g_ptr_array_free(all_items, TRUE);
     g_array_free(disc_numbers, TRUE);
-    folder_album_context_free(album_ctx);
     return;
 
 cleanup_fail:
     for (guint s = 0; s < all_scans->len; s++) {
         dir_scan_result_t* scan = g_ptr_array_index(all_scans, s);
-        extended_metadata_t* meta = g_ptr_array_index(all_metadata, s);
-        for (size_t i = 0; i < scan->file_count; i++) extended_metadata_free(&meta[i]);
-        g_free(meta);
+        index_item_t* items = g_ptr_array_index(all_items, s);
+        for (size_t i = 0; i < scan->file_count; i++) index_item_free(&items[i]);
+        g_free(items);
         dir_scan_result_free(scan);
         g_free(scan);
     }
     g_ptr_array_free(all_scans, TRUE);
-    g_ptr_array_free(all_metadata, TRUE);
+    g_ptr_array_free(all_items, TRUE);
     g_array_free(disc_numbers, TRUE);
-    folder_album_context_free(album_ctx);
     work->success = false;
 }
 
@@ -1026,7 +1077,13 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
     if (!idx->process_artwork) return;
 
     char atlas_path[INDEXER_PATH_MAX];
-    snprintf(atlas_path, sizeof(atlas_path), "%s/quadrature/artwork.atlas", g_get_user_data_dir());
+    snprintf(atlas_path, sizeof(atlas_path), "%s/quadrature/art/%dpx/artwork.atlas",
+             g_get_user_data_dir(), idx->art_size);
+
+    // Ensure atlas directory exists
+    char *atlas_dir = g_path_get_dirname(atlas_path);
+    g_mkdir_with_parents(atlas_dir, 0755);
+    g_free(atlas_dir);
 
     // Open existing atlas to preserve unchanged entries
     artwork_atlas_reader_t* existing_atlas = artwork_atlas_reader_open(atlas_path);
@@ -1143,15 +1200,6 @@ static void phase_finalize(indexer_t* idx, processed_album_t* albums, size_t alb
         g_free(mtimes);
     }
 
-    // Delete tracks not seen in this scan
-    size_t before, after;
-    db_get_track_count(idx->db, &before);
-    db_delete_unseen_tracks(idx->db, idx->scan_timestamp);
-    db_get_track_count(idx->db, &after);
-    if (before > after) {
-        atomic_store(&idx->files_deleted, before - after);
-    }
-
     // Update watch paths
     for (size_t i = 0; i < idx->path_count; i++) {
         db_update_watch_path_scanned(idx->db, idx->paths[i], idx->scan_timestamp);
@@ -1190,7 +1238,21 @@ static void* indexer_worker(void* arg) {
     phase_artwork(idx, processed, processed_count);
     if (atomic_load(&idx->cancel_flag)) goto cancelled;
 
-    // Phase 4: FINALIZE
+    // Phase 4: RESOLVE (MusicBrainz, optional)
+#ifdef HAVE_MUSICBRAINZ
+    if (idx->mb_resolve && idx->pg_conninfo && idx->pg_conninfo[0]) {
+        set_phase(idx, INDEXER_PHASE_RESOLVE);
+        mb_resolver_options_t opts = { .pg_conninfo = idx->pg_conninfo };
+        mb_resolver_t* resolver = NULL;
+        if (mb_resolver_create(&resolver, idx->db, &opts, NULL, NULL) == QUADRATURE_OK) {
+            mb_resolver_run(resolver);
+            mb_resolver_destroy(resolver);
+        }
+    }
+#endif
+    if (atomic_load(&idx->cancel_flag)) goto cancelled;
+
+    // Phase 5: FINALIZE
     phase_finalize(idx, processed, processed_count);
 
     set_phase(idx, INDEXER_PHASE_COMPLETE);
@@ -1233,6 +1295,9 @@ quadrature_result_t indexer_create(indexer_t** out, const indexer_config_t* conf
     if (config) {
         idx->callback = config->callback;
         idx->user_data = config->user_data;
+        idx->fingerprint_tracks = config->fingerprint_tracks;
+        idx->mb_resolve = config->mb_resolve;
+        idx->pg_conninfo = config->pg_conninfo ? strdup(config->pg_conninfo) : NULL;
     }
 
     pthread_mutex_init(&idx->lock, NULL);
@@ -1245,6 +1310,7 @@ void indexer_destroy(indexer_t* idx) {
     indexer_cancel(idx);
     indexer_wait(idx);
     for (size_t i = 0; i < idx->path_count; i++) free(idx->paths[i]);
+    free(idx->pg_conninfo);
     pthread_mutex_destroy(&idx->lock);
     free(idx);
 }

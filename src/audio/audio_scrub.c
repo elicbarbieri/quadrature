@@ -159,6 +159,9 @@ struct audio_scrubber {
 
     /* Configuration */
     uint32_t sample_rate;
+
+    /* Scrubber RT stat (atomic — written in callback, read from UI) */
+    atomic_uint_fast64_t stats_underflows;   /* Rubberband couldn't fill requested frames */
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -316,6 +319,8 @@ quadrature_result_t audio_scrubber_create(uint32_t sample_rate, audio_scrubber_t
     s->rb_input[0] = s->rb_input[1] = NULL;
     s->rb_output[0] = s->rb_output[1] = NULL;
 
+    atomic_store(&s->stats_underflows, 0);
+
     *out = s;
     return QUADRATURE_OK;
 }
@@ -332,7 +337,7 @@ void audio_scrubber_destroy(audio_scrubber_t *s) {
 }
 
 void audio_scrubber_flush(audio_scrubber_t *s) {
-    if (!s) return;
+    g_assert(s != NULL);
 
     float current_speed = atomic_load(&s->speed);
     shuttle_mode_t mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
@@ -376,19 +381,19 @@ void audio_scrubber_flush(audio_scrubber_t *s) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 void audio_scrubber_set_speed(audio_scrubber_t *s, float speed) {
-    if (!s) return;
+    g_assert(s != NULL);
     if (speed < -4.0f) speed = -4.0f;
     if (speed > 4.0f) speed = 4.0f;
     atomic_store(&s->speed, speed);
 }
 
 void audio_scrubber_set_position(audio_scrubber_t *s, int64_t position) {
-    if (!s) return;
+    g_assert(s != NULL);
     atomic_store(&s->position, position);
 }
 
 void audio_scrubber_set_shuttle_mode(audio_scrubber_t *s, shuttle_mode_t mode) {
-    if (!s) return;
+    g_assert(s != NULL);
     atomic_store(&s->shuttle_mode, (int)mode);
 }
 
@@ -397,18 +402,23 @@ void audio_scrubber_set_shuttle_mode(audio_scrubber_t *s, shuttle_mode_t mode) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 float audio_scrubber_get_speed(const audio_scrubber_t *s) {
-    if (!s) return 1.0f;
+    g_assert(s != NULL);
     return atomic_load(&s->speed);
 }
 
 int64_t audio_scrubber_get_position(const audio_scrubber_t *s) {
-    if (!s) return 0;
+    g_assert(s != NULL);
     return atomic_load(&s->position);
 }
 
 shuttle_mode_t audio_scrubber_get_shuttle_mode(const audio_scrubber_t *s) {
-    if (!s) return SHUTTLE_MODE_OFF;
+    g_assert(s != NULL);
     return (shuttle_mode_t)atomic_load(&s->shuttle_mode);
+}
+
+uint64_t audio_scrubber_get_underflows(const audio_scrubber_t *s) {
+    g_assert(s != NULL);
+    return atomic_load_explicit(&s->stats_underflows, memory_order_relaxed);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -545,6 +555,7 @@ static uint32_t process_rubberband(audio_scrubber_t *s,
 
     /* Zero-pad if not enough (shouldn't happen in normal operation) */
     if (got < frames) {
+        atomic_fetch_add_explicit(&s->stats_underflows, 1, memory_order_relaxed);
         memset(output + got * 2, 0, (frames - got) * 2 * sizeof(float));
     }
 

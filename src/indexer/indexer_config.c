@@ -4,6 +4,6 @@
  * Currently a stub - config file support not yet implemented.
  */
 
-#include "quadrature/core/types.h"
+#include "quadrature/quadrature.h"
 
 // Config functions will be implemented when needed

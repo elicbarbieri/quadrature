@@ -203,6 +203,59 @@
             </child>
           </object>
         </child>
+
+        <!-- Resolve Phase (MusicBrainz) -->
+        <child>
+          <object class="GtkBox" id="resolve_phase_container">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <property name="visible">false</property>
+            <style>
+              <class name="progress-phase"/>
+              <class name="progress-phase-dim"/>
+            </style>
+            <child>
+              <object class="GtkLabel" id="resolve_phase_title">
+                <property name="label">MusicBrainz resolution</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="progress-phase-title"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkProgressBar" id="resolve_phase_bar">
+                <style>
+                  <class name="progress-phase-bar"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">8</property>
+                <child>
+                  <object class="GtkLabel" id="resolve_phase_label">
+                    <property name="label">Waiting...</property>
+                    <property name="xalign">0</property>
+                    <style>
+                      <class name="progress-phase-label"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="resolve_phase_rate">
+                    <property name="label"></property>
+                    <property name="xalign">1</property>
+                    <style>
+                      <class name="progress-phase-rate"/>
+                    </style>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
       </object>
     </child>
 

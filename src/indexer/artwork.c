@@ -8,7 +8,6 @@
 
 #include <glib.h>
 #include "internal.h"
-#include "quadrature/artwork_atlas.h"
 
 #include <stdlib.h>
 #include <string.h>

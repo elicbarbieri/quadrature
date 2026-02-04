@@ -1,5 +1,4 @@
 #include "internal.h"
-#include "quadrature/audio/audio_spectrum.h"
 
 #include <glib.h>
 #include "cavacore.h"
@@ -22,10 +21,10 @@ static void* spectrum_thread(void* arg) {
             if (!chan->plan || !player->spectrum_buffer || !chan->read_buffer)
                 continue;
 
-            /* Decay bars when not playing */
+            /* Decay bars when not playing (both L and R channels) */
             channel_state_t state = atomic_load(&player->state);
             if (state != CHANNEL_PLAYING) {
-                for (int b = 0; b < SPECTRUM_BARS; b++) {
+                for (int b = 0; b < SPECTRUM_BARS * 2; b++) {
                     float cur = atomic_load(&player->spectrum_bars[b]);
                     if (cur > 0.001f) {
                         atomic_store(&player->spectrum_bars[b], cur * DECAY_FACTOR);
@@ -69,13 +68,19 @@ static void* spectrum_thread(void* arg) {
 
                 chan->input_buffer_fill = 0;
 
-                /* Write results to player's spectrum_bars (atomic) */
+                /* Write stereo results to player's spectrum_bars (atomic)
+                 * cavacore outputs: [0..num_bars-1] = left, [num_bars..2*num_bars-1] = right
+                 * We store: [0..SPECTRUM_BARS-1] = left, [SPECTRUM_BARS..2*SPECTRUM_BARS-1] = right */
                 int bars_per_channel = s->num_bars;
                 for (int b = 0; b < bars_per_channel && b < SPECTRUM_BARS; b++) {
-                    float val = (float)(chan->output_bars[b] + chan->output_bars[bars_per_channel + b]) / 2.0f;
-                    if (val < 0.0f) val = 0.0f;
-                    if (val > 1.0f) val = 1.0f;
-                    atomic_store(&player->spectrum_bars[b], val);
+                    float left = (float)chan->output_bars[b];
+                    float right = (float)chan->output_bars[bars_per_channel + b];
+                    if (left < 0.0f) left = 0.0f;
+                    if (left > 1.0f) left = 1.0f;
+                    if (right < 0.0f) right = 0.0f;
+                    if (right > 1.0f) right = 1.0f;
+                    atomic_store(&player->spectrum_bars[b], left);
+                    atomic_store(&player->spectrum_bars[SPECTRUM_BARS + b], right);
                 }
 
                 any_processed = true;
@@ -171,6 +176,6 @@ void spectrum_destroy(spectrum_analyzer_t* s) {
 }
 
 bool spectrum_is_running(spectrum_analyzer_t* s) {
-    if (!s) return false;
+    g_assert(s != NULL);
     return atomic_load(&s->running);
 }

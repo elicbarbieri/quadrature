@@ -2,14 +2,14 @@
  * Quadrature Library Module - Internal Header
  *
  * Single consolidated header for the library browsing subsystem.
- * Provides: cache, lazy list model, and view factories.
+ * All data is sourced from the foundation layer library_cache_t.
  */
 
 #ifndef QUADRATURE_UI_LIBRARY_INTERNAL_H
 #define QUADRATURE_UI_LIBRARY_INTERNAL_H
 
 #include <gtk/gtk.h>
-#include "quadrature/database/database.h"
+#include "quadrature/quadrature_library.h"
 
 G_BEGIN_DECLS
 
@@ -18,13 +18,9 @@ G_BEGIN_DECLS
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 #define LIBRARY_PAGE_SIZE 50
-#define LIBRARY_CACHE_MAX_PAGES 100
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Library Item - Unified GObject for all library entities
- *
- * Single type handles artists, albums, and tracks. Uses tagged fields
- * to avoid multiple GObject type registrations and reduce complexity.
+ * Entity Kind Enum (for navigation and view type identification)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 typedef enum {
@@ -32,113 +28,6 @@ typedef enum {
     LIBRARY_ITEM_ALBUM,
     LIBRARY_ITEM_TRACK,
 } LibraryItemKind;
-
-#define LIBRARY_TYPE_ITEM (library_item_get_type())
-G_DECLARE_FINAL_TYPE(LibraryItem, library_item, LIBRARY, ITEM, GObject)
-
-struct _LibraryItem {
-    GObject parent;
-    LibraryItemKind kind;
-    gboolean placeholder;    /* TRUE if awaiting data fetch */
-    gboolean is_disc_header; /* TRUE for disc separator rows */
-
-    int64_t id;
-    char *name;            /* Artist name, album title, or track title */
-    char *secondary;       /* Album: artist name; Track: artist */
-    char *tertiary;        /* Track: album name */
-    char *path;            /* Track: file path */
-
-    int64_t parent_id;     /* Album: artist_id; Track: album_id */
-    int64_t artist_id;     /* Track: artist_id for navigation */
-    uint32_t duration_ms;  /* Track only */
-    uint16_t track_num;    /* Track only */
-    uint16_t disc_num;     /* Track only (default 1) */
-    uint16_t year;         /* Album or track */
-    size_t count1;         /* Artist: album_count; Album: track_count */
-    size_t count2;         /* Artist: track_count */
-};
-
-/* Constructors */
-LibraryItem *library_item_new_placeholder(LibraryItemKind kind);
-LibraryItem *library_item_new_artist(const db_artist_t *a);
-LibraryItem *library_item_new_album(const db_album_t *a);
-LibraryItem *library_item_new_track(const db_track_t *t);
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Library Cache - LRU cache for paginated data
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-/* Cache namespaces for composite keys */
-typedef enum {
-    CACHE_PAGE_ARTIST,      /* Artist pages by offset */
-    CACHE_PAGE_ALBUM,       /* Album pages by offset */
-    CACHE_PAGE_TRACK,       /* Track pages by offset */
-    CACHE_DETAIL_ALBUM,     /* Albums by artist_id */
-    CACHE_DETAIL_TRACK,     /* Tracks by album_id */
-} CacheNamespace;
-
-typedef struct _LibraryCache LibraryCache;
-
-LibraryCache *library_cache_new(void);
-void library_cache_free(LibraryCache *cache);
-void library_cache_invalidate(LibraryCache *cache);
-
-/* Page queries - returns cached data or NULL if miss */
-gboolean library_cache_get_page(LibraryCache *cache,
-                                 LibraryItemKind kind,
-                                 size_t offset,
-                                 GPtrArray **out,      /* Array of LibraryItem* */
-                                 size_t *total);
-
-/* Store page in cache */
-void library_cache_put_page(LibraryCache *cache,
-                             LibraryItemKind kind,
-                             size_t offset,
-                             GPtrArray *items,        /* Takes ownership */
-                             size_t total);
-
-/* Detail queries (albums by artist, tracks by album) */
-gboolean library_cache_get_detail(LibraryCache *cache,
-                                   LibraryItemKind kind,
-                                   int64_t parent_id,
-                                   GPtrArray **out);
-
-void library_cache_put_detail(LibraryCache *cache,
-                               LibraryItemKind kind,
-                               int64_t parent_id,
-                               GPtrArray *items);
-
-/* Unified cache operations (used internally) */
-gboolean library_cache_get(LibraryCache *cache, CacheNamespace ns,
-                           int64_t key, GPtrArray **out, size_t *total);
-void library_cache_put(LibraryCache *cache, CacheNamespace ns,
-                       int64_t key, GPtrArray *items, size_t total);
-
-/* Cached totals */
-gboolean library_cache_get_total(LibraryCache *cache, LibraryItemKind kind, size_t *total);
-void library_cache_set_total(LibraryCache *cache, LibraryItemKind kind, size_t total);
-
-/* Statistics (interval-based: counters reset after each reporting cycle) */
-void library_cache_enable_stats_reporting(LibraryCache *cache, gboolean enable);
-void library_cache_get_stats(LibraryCache *cache, size_t *hits, size_t *misses,
-                              size_t *evictions);
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Library Model - Lazy-loading GListModel
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-#define LIBRARY_TYPE_MODEL (library_model_get_type())
-G_DECLARE_FINAL_TYPE(LibraryModel, library_model, LIBRARY, MODEL, GObject)
-
-LibraryModel *library_model_new(LibraryItemKind kind,
-                                 quadrature_db_t *db,
-                                 LibraryCache *cache);
-
-void library_model_refresh(LibraryModel *model);
-void library_model_prefetch(LibraryModel *model, size_t offset);
-LibraryItemKind library_model_get_kind(LibraryModel *model);
-void library_model_set_sort(LibraryModel *model, db_sort_t sort);
-db_sort_t library_model_get_sort(LibraryModel *model);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Artwork Manager (see artwork_manager.h for full API)
@@ -168,10 +57,66 @@ typedef struct {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 typedef enum {
-    DETAIL_STATE_EMPTY,
     DETAIL_STATE_ALBUM,
     DETAIL_STATE_ARTIST,
 } DetailState;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Row Interaction Handlers
+ *
+ * Standard callbacks for row interactions. Used by all library row types.
+ * Selection is handled by GTK's GtkSelectionModel (automatic).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    void (*on_activate)(int64_t entity_id, gpointer data);  /* primary: double-click / Enter */
+    void (*on_secondary)(int64_t entity_id, gpointer data); /* secondary: right-click */
+    gpointer user_data;
+} RowCallbacks;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * GObject Items for GListStore (cache-owned data wrappers)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define QUAD_TYPE_ARTIST_ITEM (quad_artist_item_get_type())
+G_DECLARE_FINAL_TYPE(QuadArtistItem, quad_artist_item, QUAD, ARTIST_ITEM, GObject)
+struct _QuadArtistItem { GObject parent; const library_artist_info_t *info; };
+QuadArtistItem *quad_artist_item_new(const library_artist_info_t *info);
+
+#define QUAD_TYPE_ALBUM_ITEM (quad_album_item_get_type())
+G_DECLARE_FINAL_TYPE(QuadAlbumItem, quad_album_item, QUAD, ALBUM_ITEM, GObject)
+struct _QuadAlbumItem { GObject parent; const library_album_info_t *info; };
+QuadAlbumItem *quad_album_item_new(const library_album_info_t *info);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * LazyList — Virtualized list with scroll monitoring
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct _LazyList LazyList;
+
+/* Factory callbacks provided by the consumer */
+typedef struct {
+    void (*setup)(GtkListItemFactory *f, GtkListItem *li, gpointer data);
+    void (*bind)(GtkListItemFactory *f, GtkListItem *li, gpointer data);
+    void (*unbind)(GtkListItemFactory *f, GtkListItem *li, gpointer data);
+    void (*activate)(guint position, gpointer data);
+    gpointer user_data;
+} LazyListCallbacks;
+
+/* Create lazy list. item_type is the GObject type stored in the GListStore. */
+LazyList *lazy_list_new(GType item_type, const LazyListCallbacks *cbs);
+
+/* Destroy */
+void lazy_list_free(LazyList *ll);
+
+/* Get the GtkListView widget (to add as child of scroll window) */
+GtkWidget *lazy_list_get_widget(LazyList *ll);
+
+/* Get the GListStore for population */
+GListStore *lazy_list_get_store(LazyList *ll);
+
+/* Attach scroll monitoring to a GtkScrolledWindow */
+void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Library Views - GTK4 list views for browsing
@@ -185,51 +130,53 @@ typedef struct {
 
 /* Callbacks for view interactions */
 typedef struct {
+    /* High-level actions */
     void (*on_navigate)(LibraryItemKind kind, int64_t id, gpointer data);
     void (*on_play)(const char *path, const char *title,
                     const char *artist, const char *album,
                     int64_t track_id, gpointer data);
     void (*on_back)(gpointer data);
-    /* Called when album detail is loaded - use for audio preloading */
     void (*on_album_loaded)(int64_t album_id, const LibraryTrackInfo *tracks,
                             size_t count, gpointer data);
-    /* Called when info button is clicked on track row */
     void (*on_track_info)(int64_t track_id, gpointer data);
+    void (*on_load_to_channel)(int channel, int64_t track_id, gpointer data); /* 1-4 hotkeys */
+
+    /* Row-level callbacks for each entity type */
+    RowCallbacks track_cbs;        /* Search/list tracks: activate navigates to album */
+    RowCallbacks album_track_cbs;  /* Album detail tracks: no activate (already viewing album) */
+    RowCallbacks album_cbs;
+    RowCallbacks artist_cbs;
+
     gpointer user_data;
 } LibraryCallbacks;
 
-/* Main list views (lazy loading) */
+/* Main list views */
 GtkWidget *library_view_new(LibraryItemKind kind,
-                             quadrature_db_t *db,
-                             LibraryCache *cache,
+                             library_cache_t *cache,
                              ArtworkManager *art_mgr,
                              const LibraryCallbacks *cbs);
 
-/* Detail views (direct queries) - DEPRECATED, use unified detail view */
-GtkWidget *library_detail_view_new(LibraryItemKind kind,
-                                    quadrature_db_t *db,
-                                    LibraryCache *cache,
-                                    ArtworkManager *art_mgr,
-                                    const LibraryCallbacks *cbs);
-
-void library_detail_view_set_id(GtkWidget *view, int64_t id);
-
 /* Unified Detail View - single widget handling empty/album/artist states */
-GtkWidget *library_unified_detail_view_new(quadrature_db_t *db,
-                                            LibraryCache *cache,
+GtkWidget *library_unified_detail_view_new(library_cache_t *cache,
                                             ArtworkManager *art_mgr,
                                             const LibraryCallbacks *cbs);
 
 void library_unified_detail_navigate_to_artist(GtkWidget *view, int64_t artist_id,
                                                 const char *source_view);
 void library_unified_detail_navigate_to_album(GtkWidget *view, int64_t album_id,
-                                               const char *source_view);
-void library_unified_detail_show_empty(GtkWidget *view);
+                                               const char *source_view,
+                                               int64_t select_track_id);
+
 gboolean library_unified_detail_go_back(GtkWidget *view);
+void library_unified_detail_clear_nav(GtkWidget *view);
 DetailState library_unified_detail_get_state(GtkWidget *view);
+GtkWidget *library_unified_detail_get_track_list(GtkWidget *view);
 
 /* Refresh current view data */
 void library_view_refresh(GtkWidget *view);
+
+/* Clear all filters (genre/year/search text) and repopulate */
+void library_view_clear_filters(GtkWidget *view);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Errors View - Tree view of indexer errors by folder structure

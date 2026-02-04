@@ -1,141 +1,156 @@
 /**
- * AcoustID fingerprint lookup.
+ * AcoustID fingerprint lookup via local PostgreSQL (pg_acoustid).
  *
- * Queries the AcoustID web service to match audio fingerprints
- * to MusicBrainz recording/release IDs.
+ * Replaces the HTTP-based AcoustID web service with a direct query
+ * against a local PostgreSQL database containing the AcoustID dataset.
+ *
+ * Decodes base64 chromaprint fingerprint, formats as PG int4[] literal,
+ * and uses the acoustid_compare2 function + GIN index for matching.
  */
 
 #include "internal.h"
-#include <json-glib/json-glib.h>
+#include <chromaprint.h>
+#include <libpq-fe.h>
 #include <string.h>
 
 // =============================================================================
-// URL Building
+// Fingerprint Decoding
 // =============================================================================
 
-static char* build_lookup_url(const char* api_key,
-                               const mb_fingerprint_t* fingerprint) {
-    // URL-encode the fingerprint (it's base64, so mostly safe, but be careful)
-    char* encoded_fp = g_uri_escape_string(fingerprint->fingerprint, NULL, FALSE);
+/**
+ * Decode a base64 chromaprint fingerprint into a raw int32 array.
+ * Returns the number of elements, or 0 on failure.
+ */
+static size_t decode_fingerprint(const char* encoded, int duration,
+                                  int32_t** raw_out) {
+    int32_t* raw = NULL;
+    int size = 0;
 
-    char* url = g_strdup_printf(
-        "%s?client=%s&duration=%d&fingerprint=%s&meta=recordings+releases",
-        ACOUSTID_API_URL,
-        api_key,
-        fingerprint->duration,
-        encoded_fp
-    );
+    int ok = chromaprint_decode_fingerprint(encoded, strlen(encoded),
+                                             (uint32_t**)&raw, &size,
+                                             NULL, 0);
+    if (!ok || !raw || size <= 0) {
+        if (raw) chromaprint_dealloc(raw);
+        return 0;
+    }
 
-    g_free(encoded_fp);
-    return url;
+    (void)duration;  // Duration used for query filtering, not decoding
+
+    *raw_out = raw;
+    return (size_t)size;
+}
+
+/**
+ * Format raw int32 fingerprint as a PostgreSQL int4[] literal.
+ * Example output: "{12345,-67890,11111}"
+ */
+static char* format_pg_array(const int32_t* raw, size_t count) {
+    // Estimate: each int32 is max 11 chars + comma + braces
+    size_t buf_size = count * 13 + 3;
+    char* buf = g_malloc(buf_size);
+    size_t pos = 0;
+
+    buf[pos++] = '{';
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) buf[pos++] = ',';
+        pos += (size_t)snprintf(buf + pos, buf_size - pos, "%d", raw[i]);
+    }
+    buf[pos++] = '}';
+    buf[pos] = '\0';
+
+    return buf;
 }
 
 // =============================================================================
-// Response Parsing
+// Public API
 // =============================================================================
 
-static void parse_acoustid_response(const char* json_str,
-                                     mb_acoustid_response_t* response) {
-    JsonParser* parser = json_parser_new();
-
-    GError* error = NULL;
-    if (!json_parser_load_from_data(parser, json_str, -1, &error)) {
-        g_warning("Failed to parse AcoustID JSON: %s", error->message);
-        g_error_free(error);
-        g_object_unref(parser);
-        return;
+quadrature_result_t mb_acoustid_lookup(mb_pg_client_t* client,
+                                        const mb_fingerprint_t* fingerprint,
+                                        mb_acoustid_response_t* response) {
+    if (!client || !fingerprint || !response) {
+        return QUADRATURE_ERROR_INVALID_PARAM;
     }
 
-    JsonNode* root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root)) {
-        g_object_unref(parser);
-        return;
+    if (!fingerprint->fingerprint || fingerprint->duration <= 0) {
+        return QUADRATURE_ERROR_INVALID_PARAM;
     }
 
-    JsonObject* root_obj = json_node_get_object(root);
+    memset(response, 0, sizeof(mb_acoustid_response_t));
 
-    // Check status
-    if (json_object_has_member(root_obj, "status")) {
-        const char* status = json_object_get_string_member(root_obj, "status");
-        if (g_strcmp0(status, "ok") != 0) {
-            g_warning("AcoustID returned status: %s", status);
-            g_object_unref(parser);
-            return;
-        }
+    // Decode base64 fingerprint to raw int32 array
+    int32_t* raw = NULL;
+    size_t raw_count = decode_fingerprint(fingerprint->fingerprint,
+                                           fingerprint->duration, &raw);
+    if (raw_count == 0) {
+        g_warning("mb_acoustid_lookup: failed to decode fingerprint");
+        return QUADRATURE_ERROR_INTERNAL;
     }
 
-    // Get results array
-    if (!json_object_has_member(root_obj, "results")) {
-        g_object_unref(parser);
-        return;
+    // Format as PG array literal
+    char* pg_array = format_pg_array(raw, raw_count);
+    chromaprint_dealloc(raw);
+
+    // Duration string for query parameter
+    char duration_str[16];
+    snprintf(duration_str, sizeof(duration_str), "%d", fingerprint->duration);
+
+    // Query: find fingerprint matches using acoustid_compare2,
+    // then join to get recording and release IDs
+    const char* query =
+        "SELECT DISTINCT r.gid::text AS recording_id, "
+        "       rl.gid::text AS release_id, "
+        "       acoustid_compare2($1::int4[], f.fingerprint, 80) AS score "
+        "FROM fingerprint f "
+        "JOIN track t ON t.id = f.track_id "
+        "JOIN track_mbid tm ON tm.track_id = t.id "
+        "JOIN recording rec ON rec.id = tm.mbid "
+        "JOIN musicbrainz.recording r ON r.id = rec.id "
+        "LEFT JOIN musicbrainz.track mt ON mt.recording = r.id "
+        "LEFT JOIN musicbrainz.medium m ON m.id = mt.medium "
+        "LEFT JOIN musicbrainz.release rl ON rl.id = m.release "
+        "WHERE f.length BETWEEN ($2::int - 7) AND ($2::int + 7) "
+        "  AND acoustid_compare2($1::int4[], f.fingerprint, 80) > 0 "
+        "ORDER BY score DESC "
+        "LIMIT 50";
+
+    const char* params[2] = { pg_array, duration_str };
+
+    PGresult* result = (PGresult*)mb_pg_exec(client, query, 2, params);
+    g_free(pg_array);
+
+    if (!result || PQresultStatus(result) != PGRES_TUPLES_OK) {
+        g_warning("mb_acoustid_lookup: query failed: %s",
+                  result ? PQresultErrorMessage(result) : "NULL result");
+        if (result) PQclear(result);
+        return QUADRATURE_ERROR_INTERNAL;
     }
 
-    JsonArray* results = json_object_get_array_member(root_obj, "results");
-    if (!results) {
-        g_object_unref(parser);
-        return;
+    int nrows = PQntuples(result);
+    if (nrows == 0) {
+        PQclear(result);
+        return QUADRATURE_OK;  // No matches, but not an error
     }
 
-    // Collect all recordings from all results
+    // Parse results
     GPtrArray* all_results = g_ptr_array_new();
 
-    guint result_count = json_array_get_length(results);
-    for (guint i = 0; i < result_count; i++) {
-        JsonNode* result_node = json_array_get_element(results, i);
-        if (!JSON_NODE_HOLDS_OBJECT(result_node)) continue;
+    for (int i = 0; i < nrows; i++) {
+        const char* recording_id = PQgetvalue(result, i, 0);
+        const char* release_id = PQgetisnull(result, i, 1) ? NULL : PQgetvalue(result, i, 1);
+        const char* score_str = PQgetvalue(result, i, 2);
 
-        JsonObject* result_obj = json_node_get_object(result_node);
+        mb_acoustid_result_t* entry = g_new0(mb_acoustid_result_t, 1);
+        entry->recording_id = g_strdup(recording_id);
+        entry->release_id = release_id ? g_strdup(release_id) : NULL;
+        entry->score = score_str ? (float)g_ascii_strtod(score_str, NULL) / 100.0f : 0.0f;
 
-        // Get score for this result
-        double score = 0.0;
-        if (json_object_has_member(result_obj, "score")) {
-            score = json_object_get_double_member(result_obj, "score");
-        }
-
-        // Get recordings
-        if (!json_object_has_member(result_obj, "recordings")) continue;
-
-        JsonArray* recordings = json_object_get_array_member(result_obj, "recordings");
-        if (!recordings) continue;
-
-        guint rec_count = json_array_get_length(recordings);
-        for (guint j = 0; j < rec_count; j++) {
-            JsonNode* rec_node = json_array_get_element(recordings, j);
-            if (!JSON_NODE_HOLDS_OBJECT(rec_node)) continue;
-
-            JsonObject* rec_obj = json_node_get_object(rec_node);
-
-            // Get recording ID
-            if (!json_object_has_member(rec_obj, "id")) continue;
-            const char* recording_id = json_object_get_string_member(rec_obj, "id");
-            if (!recording_id) continue;
-
-            // Get first release ID if available
-            const char* release_id = NULL;
-            if (json_object_has_member(rec_obj, "releases")) {
-                JsonArray* releases = json_object_get_array_member(rec_obj, "releases");
-                if (releases && json_array_get_length(releases) > 0) {
-                    JsonNode* rel_node = json_array_get_element(releases, 0);
-                    if (JSON_NODE_HOLDS_OBJECT(rel_node)) {
-                        JsonObject* rel_obj = json_node_get_object(rel_node);
-                        if (json_object_has_member(rel_obj, "id")) {
-                            release_id = json_object_get_string_member(rel_obj, "id");
-                        }
-                    }
-                }
-            }
-
-            // Create result entry
-            mb_acoustid_result_t* entry = g_new0(mb_acoustid_result_t, 1);
-            entry->recording_id = g_strdup(recording_id);
-            entry->release_id = release_id ? g_strdup(release_id) : NULL;
-            entry->score = (float)score;
-
-            g_ptr_array_add(all_results, entry);
-        }
+        g_ptr_array_add(all_results, entry);
     }
 
-    // Convert to array
+    PQclear(result);
+
+    // Convert to flat array
     if (all_results->len > 0) {
         response->results = g_new0(mb_acoustid_result_t, all_results->len);
         response->count = all_results->len;
@@ -148,45 +163,6 @@ static void parse_acoustid_response(const char* json_str,
     }
 
     g_ptr_array_free(all_results, TRUE);
-    g_object_unref(parser);
-}
-
-// =============================================================================
-// Public API
-// =============================================================================
-
-quadrature_result_t mb_acoustid_lookup(mb_http_client_t* client,
-                                        const char* api_key,
-                                        const mb_fingerprint_t* fingerprint,
-                                        mb_acoustid_response_t* response) {
-    if (!client || !api_key || !fingerprint || !response) {
-        return QUADRATURE_ERROR_INVALID_PARAM;
-    }
-
-    if (!fingerprint->fingerprint || fingerprint->duration <= 0) {
-        return QUADRATURE_ERROR_INVALID_PARAM;
-    }
-
-    memset(response, 0, sizeof(mb_acoustid_response_t));
-
-    // Build URL
-    char* url = build_lookup_url(api_key, fingerprint);
-
-    // Make request
-    char* json_response = NULL;
-    size_t response_len = 0;
-    quadrature_result_t result = mb_http_get(client, url, MB_RATE_ACOUSTID,
-                                              &json_response, &response_len);
-    g_free(url);
-
-    if (result != QUADRATURE_OK) {
-        return result;
-    }
-
-    // Parse response
-    parse_acoustid_response(json_response, response);
-    g_free(json_response);
-
     return QUADRATURE_OK;
 }
 

@@ -70,6 +70,41 @@ if (res != QUADRATURE_OK) {
 }
 ```
 
+### Defensive Programming (NASA-Style)
+
+**Crash on invariant violations. No silent fallbacks.**
+
+- Use `g_assert()` or `g_error()` to enforce design invariants
+- Never silently ignore invalid state - crash immediately with clear error
+- Remove redundant fallback logic that masks bugs
+- If a precondition is violated, crash with a descriptive message
+- Prefer "fail fast" over "fail safe" during development
+
+```c
+// GOOD: Crash on invariant violation
+void audio_cache_lock(audio_cache_t* cache, int64_t track_id) {
+    audio_buffer_t* buffer = g_hash_table_lookup(cache->buffers, &track_id);
+    if (!buffer) {
+        g_error("audio_cache_lock: track %" G_GINT64_FORMAT " not loaded - "
+                "call audio_cache_load() first", track_id);
+    }
+    atomic_fetch_add(&buffer->lock_count, 1);
+}
+
+// BAD: Silent fallback that hides bugs
+void audio_cache_lock(audio_cache_t* cache, int64_t track_id) {
+    audio_buffer_t* buffer = g_hash_table_lookup(cache->buffers, &track_id);
+    if (buffer) {  // Silently does nothing if not found!
+        atomic_fetch_add(&buffer->lock_count, 1);
+    }
+}
+```
+
+**API contracts must be explicit:**
+- Document preconditions in comments
+- Enforce preconditions with asserts
+- Caller is responsible for meeting preconditions
+
 ### Indexer Architecture
 
 Four-phase queue-based design (~100-200 lines core logic):

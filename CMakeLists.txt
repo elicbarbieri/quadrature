@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_UI "Build GTK4 user interface" OFF)
 option(BUILD_TESTS "Build test suite" OFF)
 option(BUILD_INDEXER "Build indexer daemon" OFF)
-option(BUILD_MUSICBRAINZ "Build MusicBrainz enrichment support" OFF)
+option(BUILD_MUSICBRAINZ "Build MusicBrainz/AcoustID support" OFF)
 option(BUILD_PRODUCTION "Production build with install targets" OFF)
 
 # Build mode: DEBUG (local only) or BROADCAST (full features)
@@ -54,12 +54,11 @@ pkg_check_modules(FFTW3 REQUIRED fftw3)
 pkg_check_modules(VIPS REQUIRED vips)
 pkg_check_modules(RUBBERBAND REQUIRED rubberband>=3.0)
 
-# MusicBrainz enrichment dependencies (optional)
+# MusicBrainz resolution dependencies (optional)
 if(BUILD_MUSICBRAINZ)
-    pkg_check_modules(SOUP REQUIRED libsoup-3.0)
     pkg_check_modules(CHROMAPRINT REQUIRED libchromaprint)
     pkg_check_modules(TAGLIB REQUIRED taglib)
-    pkg_check_modules(JSON_GLIB REQUIRED json-glib-1.0)
+    pkg_check_modules(LIBPQ REQUIRED libpq)
 endif()
 
 # Include dirs
@@ -78,17 +77,16 @@ include_directories(
 # MusicBrainz include dirs (optional)
 if(BUILD_MUSICBRAINZ)
     include_directories(
-        ${SOUP_INCLUDE_DIRS}
         ${CHROMAPRINT_INCLUDE_DIRS}
         ${TAGLIB_INCLUDE_DIRS}
-        ${JSON_GLIB_INCLUDE_DIRS}
+        ${LIBPQ_INCLUDE_DIRS}
     )
 endif()
 
 # Core sources (audio pipeline with PipeWire + FFmpeg)
 set(CORE_SOURCES
     src/audio/audio_pipeline.c
-    src/audio/audio_buffer_store.c
+    src/audio/audio_cache.c
     src/audio/audio_scrub.c
     src/audio/audio_spectrum.c
     src/audio/audio_devices.c
@@ -105,7 +103,7 @@ set(DATABASE_SOURCES
 
 # Library sources
 set(LIBRARY_SOURCES
-    src/library/library_source.c
+    src/library/library_cache.c
 )
 
 # Indexer core sources (shared between daemon and embedded)
@@ -113,20 +111,16 @@ set(INDEXER_CORE_SOURCES
     src/indexer/indexer.c
     src/indexer/utils.c
     src/indexer/artwork.c
-    src/indexer/folder_album.c
 )
 
-# MusicBrainz enrichment sources (optional)
+# MusicBrainz/AcoustID sources (optional)
 if(BUILD_MUSICBRAINZ)
     set(MUSICBRAINZ_SOURCES
         src/musicbrainz/mb_tags.c
-        src/musicbrainz/mb_client.c
         src/musicbrainz/mb_fingerprint.c
         src/musicbrainz/mb_acoustid.c
-        src/musicbrainz/mb_parser.c
-        src/musicbrainz/mb_tagger.c
-        src/musicbrainz/mb_artwork.c
-        src/musicbrainz/mb_enrichment.c
+        src/musicbrainz/mb_postgres.c
+        src/musicbrainz/mb_resolver.c
     )
 endif()
 
@@ -147,7 +141,7 @@ target_link_directories(quadrature_engine PUBLIC ${GLIB_LIBRARY_DIRS} ${FFMPEG_L
 # Note: Spectrum uses cavacore/FFTW which may conflict with Criterion signal handlers.
 # If tests crash, disable spectrum in individual test targets rather than engine-wide.
 
-# MusicBrainz enrichment library (optional)
+# MusicBrainz/AcoustID library (optional)
 if(BUILD_MUSICBRAINZ)
     add_library(quadrature_musicbrainz STATIC ${MUSICBRAINZ_SOURCES})
     target_include_directories(quadrature_musicbrainz PRIVATE
@@ -156,16 +150,14 @@ if(BUILD_MUSICBRAINZ)
     )
     target_link_libraries(quadrature_musicbrainz
         quadrature_engine
-        ${SOUP_LIBRARIES}
         ${CHROMAPRINT_LIBRARIES}
         ${TAGLIB_LIBRARIES}
-        ${JSON_GLIB_LIBRARIES}
+        ${LIBPQ_LIBRARIES}
     )
     target_link_directories(quadrature_musicbrainz PUBLIC
-        ${SOUP_LIBRARY_DIRS}
         ${CHROMAPRINT_LIBRARY_DIRS}
         ${TAGLIB_LIBRARY_DIRS}
-        ${JSON_GLIB_LIBRARY_DIRS}
+        ${LIBPQ_LIBRARY_DIRS}
     )
 endif()
 
@@ -186,7 +178,7 @@ if(BUILD_INDEXER)
     target_include_directories(quadrature-indexer PRIVATE ${CMAKE_SOURCE_DIR}/src/indexer)
     target_link_libraries(quadrature-indexer quadrature_indexer_core)
 
-    # Link MusicBrainz enrichment if enabled
+    # Link MusicBrainz/AcoustID if enabled
     if(BUILD_MUSICBRAINZ)
         target_link_libraries(quadrature-indexer quadrature_musicbrainz)
         target_compile_definitions(quadrature-indexer PRIVATE HAVE_MUSICBRAINZ=1)
@@ -200,29 +192,56 @@ if(BUILD_UI)
     # Find glib-compile-resources for GResource compilation
     find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
 
+    # CSS concatenation - combine modular CSS into single file
+    set(CSS_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/ui/css)
+    set(CSS_SOURCES
+        ${CSS_SOURCE_DIR}/quadrature.css
+        ${CSS_SOURCE_DIR}/ui.css
+        ${CSS_SOURCE_DIR}/library.css
+        ${CSS_SOURCE_DIR}/detail_view.css
+        ${CSS_SOURCE_DIR}/channel-strip.css
+    )
+    set(CSS_COMBINED ${CMAKE_BINARY_DIR}/quadrature.css)
+
+    add_custom_command(
+        OUTPUT ${CSS_COMBINED}
+        COMMAND ${CMAKE_COMMAND} -E cat ${CSS_SOURCES} > ${CSS_COMBINED}
+        DEPENDS ${CSS_SOURCES}
+        COMMENT "Combining CSS files"
+    )
+
     # GResource compilation
     set(GRESOURCE_XML ${CMAKE_SOURCE_DIR}/src/ui/templates/quadrature.gresource.xml)
     set(GRESOURCE_C ${CMAKE_BINARY_DIR}/quadrature-resources.c)
     set(GRESOURCE_DEPS
-        ${CMAKE_SOURCE_DIR}/src/ui/templates/quadrature.css
+        ${CSS_COMBINED}
         ${CMAKE_SOURCE_DIR}/src/ui/templates/quadrature_window.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/channel_strip.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/nav_bar.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/search_view.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/library_list_view.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/libraries_view.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/settings_view.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/help_view.ui
-        ${CMAKE_SOURCE_DIR}/src/ui/templates/detail_view.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/metadata_dialog.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/library_artist_row.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/library_album_row.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/library_track_row.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_track_item.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_track_row_wrapper.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_disc_header.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/album_card.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/artist_menu_button.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/artist_popover.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/artist_popover_row.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/album_button.ui
     )
 
     add_custom_command(
         OUTPUT ${GRESOURCE_C}
         COMMAND ${GLIB_COMPILE_RESOURCES}
             --target=${GRESOURCE_C}
+            --sourcedir=${CMAKE_BINARY_DIR}
             --sourcedir=${CMAKE_SOURCE_DIR}/src/ui/templates
             --generate-source
             ${GRESOURCE_XML}
@@ -239,9 +258,9 @@ if(BUILD_UI)
         src/ui/indexer_controller.c
         src/ui/app_settings.c
         src/ui/row_helpers.c
-        src/ui/library/cache.c
-        src/ui/library/model.c
         src/ui/library/views.c
+        src/ui/library/lazy_list.c
+        src/ui/library/detail_view.c
         src/ui/library/errors_view.c
         src/ui/library/artwork_manager.c
         src/ui/perf/perf_chart.c
@@ -254,6 +273,11 @@ if(BUILD_UI)
     target_include_directories(quadrature PRIVATE ${GTK4_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/src/ui ${CMAKE_SOURCE_DIR}/src/ui/library ${CMAKE_SOURCE_DIR}/src/ui/perf ${CMAKE_SOURCE_DIR}/src/indexer)
     target_link_libraries(quadrature quadrature_indexer_core ${GTK4_LIBRARIES})
     target_link_directories(quadrature PRIVATE ${GTK4_LIBRARY_DIRS})
+
+    if(BUILD_MUSICBRAINZ)
+        target_link_libraries(quadrature quadrature_musicbrainz)
+        target_compile_definitions(quadrature PRIVATE HAVE_MUSICBRAINZ=1)
+    endif()
 endif()
 
 # Tests (optional)
@@ -337,7 +361,7 @@ endif()
 
 if(BUILD_UI)
     install(TARGETS quadrature RUNTIME DESTINATION bin)
-    install(FILES src/ui/templates/quadrature.css DESTINATION share/quadrature)
+    install(FILES ${CMAKE_BINARY_DIR}/quadrature.css DESTINATION share/quadrature)
 
     if(BUILD_PRODUCTION)
         # Install desktop file

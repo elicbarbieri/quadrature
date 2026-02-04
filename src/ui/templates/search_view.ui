@@ -7,52 +7,134 @@
       <class name="view-container"/>
     </style>
 
-    <!-- Search entry -->
+    <!-- Top row: Search entry + filter toggles -->
     <child>
-      <object class="GtkSearchEntry" id="search_entry">
-        <property name="placeholder-text">Search tracks, artists, albums...</property>
-        <style>
-          <class name="search-entry"/>
-        </style>
+      <object class="GtkBox" id="search_top_row">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">8</property>
+        <child>
+          <object class="GtkSearchEntry" id="search_entry">
+            <property name="placeholder-text">Search tracks, artists, albums...</property>
+            <property name="hexpand">true</property>
+            <style>
+              <class name="search-entry"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="search_filters">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">4</property>
+            <property name="valign">center</property>
+            <child>
+              <object class="GtkButton" id="filter_all">
+                <property name="label">All</property>
+                <property name="focusable">false</property>
+                <style>
+                  <class name="search-filter"/>
+                  <class name="search-filter-active"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="filter_artists">
+                <property name="label">Artists</property>
+                <property name="focusable">false</property>
+                <style>
+                  <class name="search-filter"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="filter_albums">
+                <property name="label">Albums</property>
+                <property name="focusable">false</property>
+                <style>
+                  <class name="search-filter"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="filter_songs">
+                <property name="label">Songs</property>
+                <property name="focusable">false</property>
+                <style>
+                  <class name="search-filter"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
       </object>
     </child>
 
-    <!-- Filter buttons -->
+    <!-- Filter panel: Genre, Year, Clear -->
     <child>
-      <object class="GtkBox" id="search_filters">
+      <object class="GtkBox" id="search_filter_panel">
         <property name="orientation">horizontal</property>
-        <property name="spacing">4</property>
-        <property name="margin-top">8</property>
+        <property name="spacing">8</property>
+        <style>
+          <class name="filter-container"/>
+        </style>
+
+        <!-- Genre filter -->
         <child>
-          <object class="GtkButton" id="filter_all">
-            <property name="label">All</property>
+          <object class="GtkBox">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">0</property>
+            <property name="valign">center</property>
             <style>
-              <class name="search-filter"/>
-              <class name="search-filter-active"/>
+              <class name="filter-button"/>
             </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Genre</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="filter_genre">
+                <property name="label">All</property>
+              </object>
+            </child>
           </object>
         </child>
+
+        <!-- Year filter -->
         <child>
-          <object class="GtkButton" id="filter_artists">
-            <property name="label">Artists</property>
+          <object class="GtkBox">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">0</property>
+            <property name="valign">center</property>
             <style>
-              <class name="search-filter"/>
+              <class name="filter-button"/>
             </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Year</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="filter_year">
+                <property name="label">All</property>
+              </object>
+            </child>
           </object>
         </child>
+
+        <!-- Spacer -->
         <child>
-          <object class="GtkButton" id="filter_albums">
-            <property name="label">Albums</property>
-            <style>
-              <class name="search-filter"/>
-            </style>
+          <object class="GtkBox">
+            <property name="hexpand">true</property>
           </object>
         </child>
+
+        <!-- Clear button -->
         <child>
-          <object class="GtkButton" id="filter_songs">
-            <property name="label">Songs</property>
+          <object class="GtkButton" id="filter_clear">
+            <property name="label">Clear</property>
+            <property name="valign">center</property>
             <style>
-              <class name="search-filter"/>
+              <class name="filter-button-clear"/>
             </style>
           </object>
         </child>
@@ -79,48 +161,16 @@
               </object>
             </child>
 
-            <!-- Results container (initially hidden) -->
+            <!-- Results container (initially hidden) - unified GtkListBox for keyboard nav -->
             <child>
-              <object class="GtkBox" id="search_results_box">
-                <property name="orientation">vertical</property>
-                <property name="spacing">16</property>
+              <object class="GtkListBox" id="search_results_list">
+                <property name="selection-mode">single</property>
+                <property name="activate-on-single-click">false</property>
                 <property name="visible">false</property>
                 <style>
-                  <class name="content-padded"/>
+                  <class name="search-results-container"/>
+                  <class name="search-results-list"/>
                 </style>
-
-                <!-- Artists section -->
-                <child>
-                  <object class="GtkBox" id="search_artists_section">
-                    <property name="orientation">vertical</property>
-                    <property name="spacing">4</property>
-                    <style>
-                      <class name="search-results-section"/>
-                    </style>
-                  </object>
-                </child>
-
-                <!-- Albums section -->
-                <child>
-                  <object class="GtkBox" id="search_albums_section">
-                    <property name="orientation">vertical</property>
-                    <property name="spacing">4</property>
-                    <style>
-                      <class name="search-results-section"/>
-                    </style>
-                  </object>
-                </child>
-
-                <!-- Tracks section -->
-                <child>
-                  <object class="GtkBox" id="search_tracks_section">
-                    <property name="orientation">vertical</property>
-                    <property name="spacing">4</property>
-                    <style>
-                      <class name="search-results-section"/>
-                    </style>
-                  </object>
-                </child>
               </object>
             </child>
           </object>

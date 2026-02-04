@@ -55,6 +55,9 @@
                             <property name="spacing">0</property>
                             <property name="hexpand">true</property>
                             <property name="vexpand">true</property>
+                            <style>
+                              <class name="info-box"/>
+                            </style>
 
                             <!-- Top group: Title, Artist, Album -->
                             <child>
@@ -68,49 +71,61 @@
                                   <object class="GtkScrolledWindow" id="title_scroll">
                                     <property name="hscrollbar-policy">external</property>
                                     <property name="vscrollbar-policy">never</property>
+                                    <property name="hexpand">true</property>
+                                    <style>
+                                      <class name="marquee-scroll"/>
+                                    </style>
                                     <child>
                                       <object class="GtkLabel" id="title_label">
                                         <property name="label">No file loaded</property>
                                         <property name="xalign">0</property>
                                         <property name="single-line-mode">true</property>
                                         <style>
-                                          <class name="song-title"/>
+                                          <class name="display-panel-large"/>
                                         </style>
                                       </object>
                                     </child>
                                   </object>
                                 </child>
 
-                                <!-- Artist name -->
+                                <!-- Artist name (marquee scroll) -->
                                 <child>
-                                  <object class="GtkBox" id="artist_row">
-                                    <property name="orientation">horizontal</property>
+                                  <object class="GtkScrolledWindow" id="artist_scroll">
+                                    <property name="hscrollbar-policy">external</property>
+                                    <property name="vscrollbar-policy">never</property>
+                                    <property name="hexpand">true</property>
+                                    <style>
+                                      <class name="marquee-scroll"/>
+                                    </style>
                                     <child>
                                       <object class="GtkLabel" id="artist_label">
                                         <property name="label"></property>
                                         <property name="xalign">0</property>
-                                        <property name="ellipsize">end</property>
-                                        <property name="hexpand">true</property>
+                                        <property name="single-line-mode">true</property>
                                         <style>
-                                          <class name="artist-link"/>
+                                          <class name="display-panel-medium"/>
                                         </style>
                                       </object>
                                     </child>
                                   </object>
                                 </child>
 
-                                <!-- Album name -->
+                                <!-- Album name (marquee scroll) -->
                                 <child>
-                                  <object class="GtkBox" id="album_row">
-                                    <property name="orientation">horizontal</property>
+                                  <object class="GtkScrolledWindow" id="album_scroll">
+                                    <property name="hscrollbar-policy">external</property>
+                                    <property name="vscrollbar-policy">never</property>
+                                    <property name="hexpand">true</property>
+                                    <style>
+                                      <class name="marquee-scroll"/>
+                                    </style>
                                     <child>
                                       <object class="GtkLabel" id="album_label">
                                         <property name="label"></property>
                                         <property name="xalign">0</property>
-                                        <property name="ellipsize">end</property>
-                                        <property name="hexpand">true</property>
+                                        <property name="single-line-mode">true</property>
                                         <style>
-                                          <class name="album-link"/>
+                                          <class name="display-panel-medium"/>
                                         </style>
                                       </object>
                                     </child>
@@ -126,16 +141,33 @@
                               </object>
                             </child>
 
-                            <!-- Bottom: Next track preview -->
+                            <!-- Bottom group: Next track preview -->
                             <child>
-                              <object class="GtkLabel" id="next_track_label">
-                                <property name="label"></property>
-                                <property name="xalign">0</property>
-                                <property name="ellipsize">end</property>
+                              <object class="GtkBox" id="info_bottom">
+                                <property name="orientation">vertical</property>
+                                <property name="spacing">2</property>
                                 <property name="valign">end</property>
-                                <style>
-                                  <class name="next-track"/>
-                                </style>
+
+                                <child>
+                                  <object class="GtkScrolledWindow" id="next_track_scroll">
+                                    <property name="hscrollbar-policy">external</property>
+                                    <property name="vscrollbar-policy">never</property>
+                                    <property name="hexpand">true</property>
+                                    <style>
+                                      <class name="marquee-scroll"/>
+                                    </style>
+                                    <child>
+                                      <object class="GtkLabel" id="next_track_label">
+                                        <property name="label"></property>
+                                        <property name="xalign">0</property>
+                                        <property name="single-line-mode">true</property>
+                                        <style>
+                                          <class name="display-panel-small"/>
+                                        </style>
+                                      </object>
+                                    </child>
+                                  </object>
+                                </child>
                               </object>
                             </child>
                           </object>

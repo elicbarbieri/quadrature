@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Album Button Template
+  
+  Simple flat button with ellipsized label for album navigation.
+-->
+<interface>
+  <object class="GtkButton" id="album_btn">
+    <property name="has-frame">false</property>
+    <style>
+      <class name="album-btn"/>
+    </style>
+    
+    <child>
+      <object class="GtkLabel" id="album_label">
+        <property name="ellipsize">end</property>
+      </object>
+    </child>
+  </object>
+</interface>

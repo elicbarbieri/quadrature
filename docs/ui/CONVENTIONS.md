@@ -1,333 +1,147 @@
-# UI Design Conventions
+# UI Conventions
 
-Minimal style guide for consistent UI implementation across Quadrature.
+Style reference for Quadrature UI.
 
-## Typography
+## Colors
 
-### Font Sizes
+| Name               | Hex         | Usage                              |
+| ------------------ | ----------- | ---------------------------------- |
+| Primary Accent     | `#00d4ff`   | Focus, active nav, artist links    |
+| Album Accent       | `#e5a640`   | Album links, album buttons         |
+| Background         | `#1e1e1e`   | Window background                  |
+| Surface            | `#2a2a2a`   | Row hover, card backgrounds        |
+| Surface Selected   | `#00d4ff20` | Selected row (20% opacity accent)  |
+| Text Primary       | `#e0e0e0`   | Titles, main text                  |
+| Text Secondary     | `#888888`   | Metadata, subtitles                |
+| Text Dim           | `#555555`   | Disabled state                     |
 
-| Context | Size | Weight | Usage |
-| ------- | ---- | ------ | ----- |
-| View title | 24px | Bold | "ABBEY ROAD", artist name in detail |
-| Section header | 14px | Bold | "ALBUMS", "DISC 1" |
-| Row title | 14px | Medium | Album title, track title, artist name |
-| Row meta | 12px | Regular | "Artist · Year", track count, duration |
-| Track number | 12px | Regular | Right-aligned, muted |
-| Time display | 18px+ | Bold | Time remaining in channel strip |
-| Button labels | 12px | Medium | Transport controls, buttons |
+### Entity Color Coding
 
-### Text Transforms
+Interactive entity links are color-coded by type for instant visual differentiation:
 
-| Element | Transform | Example |
-| ------- | --------- | ------- |
-| Album title (detail header) | UPPERCASE | "ABBEY ROAD" |
-| Artist name (detail header) | UPPERCASE | "THE BEATLES" |
-| Section headers | UPPERCASE | "ALBUMS", "DISC 1" |
-| Column headers | UPPERCASE | "TITLE", "ARTIST", "YEAR" |
-| Everything else | Normal case | "Come Together" |
+| Entity  | Base      | Hover     | CSS Class             |
+| ------- | --------- | --------- | --------------------- |
+| Artist  | `#00d4ff` | `#33ddff` | `.artist-btn`         |
+| Album   | `#e5a640` | `#edb85c` | `.album-btn`          |
 
-### Font Styles
-
-- **Body text:** Sans-serif system font
-- **Duration/time:** Monospace for alignment
-- **Links:** Regular weight, cyan color (`#00d4ff`)
-
-## Color Palette
-
-### Semantic Colors
-
-| Name | Hex | Usage |
-| ---- | --- | ----- |
-| **Primary Accent** | `#00d4ff` | Focus indicator, active nav, links, highlights |
-| **Background** | `#1e1e1e` | Main window background |
-| **Surface** | `#2a2a2a` | Row hover, card backgrounds |
-| **Surface Selected** | `#00d4ff20` | Selected row (20% opacity accent) |
-| **Text Primary** | `#e0e0e0` | Album titles, track titles, main text |
-| **Text Secondary** | `#888888` | Metadata, "Artist · Year", track counts |
-| **Text Dim** | `#555555` | Very subtle text, disabled state |
+These colors are consistent everywhere the entity appears — library rows, detail views, and search results. Both meet WCAG AAA contrast on `#1e1e1e`.
 
 ### State Colors
 
-| State | Color | Hex | Usage |
-| ----- | ----- | --- | ----- |
-| Online/Ready | Green | `#4ade80` | Library online, device ready |
-| Indexing/Loading | Blue | `#60a5fa` | Progress, checking state |
-| Error/Warning | Red | `#f87171` | Errors, time warning (≤30s) |
-| Offline/Disabled | Gray | `#6b7280` | Unavailable libraries, disabled controls |
-| Preview | Orange | `#ff9500` | Preview/PFL mode |
-| Queued | Green | `#00cc66` | Queued for broadcast |
-| On-Air | Green | `#00cc66` | Live on air |
+| State    | Hex       | Usage                      |
+| -------- | --------- | -------------------------- |
+| Online   | `#4ade80` | Library online, ready      |
+| Indexing | `#60a5fa` | Progress, checking         |
+| Error    | `#f87171` | Errors, time warning       |
+| Offline  | `#6b7280` | Unavailable, disabled      |
+| Preview  | `#ff9500` | PFL mode                   |
+| On-Air   | `#00cc66` | Live, queued               |
 
-### Channel States
+## Sizing
 
-| State | Border Color | Hex |
-| ----- | ------------ | --- |
-| IDLE | Gray | `#555555` |
-| FOCUSED | Cyan | `#00d4ff` |
-| PREVIEW | Orange | `#ff9500` |
-| QUEUED | Green | `#00cc66` |
-| ON_AIR | Green | `#00cc66` |
-| UNCONFIGURED | Light Red | `#ff6666` |
-| INVALID | Dark Red | `#993333` |
+### Album Art
 
-## Spacing & Sizing
+| Context       | Size      | Notes |
+| ------------- | --------- | ----- |
+| Thumbnails    | 96x96px   | Managed by `artwork_manager_get_thumb_size()` |
+| Detail header | 120x120px | Album detail view |
+| Artist detail | 250x250px | Large artwork in album cards |
+
+**Note:** Thumbnail size is set programmatically via `artwork_manager_get_thumb_size()`, not hardcoded in templates. CSS fallback minimum is 48px. Current deployment uses 96px thumbnails.
+
+Missing art shows gray placeholder with music note icon.
 
 ### Row Heights
 
-| Row Type | Height | Usage |
-| -------- | ------ | ----- |
-| Album row | 64px | List view with 48px art + padding |
-| Artist row | 68px | List view with art strip |
-| Track row (compact) | 36px | Album detail view, artist detail track previews |
-| Track row (standard) | 52px | Artist detail Tracks view, search results |
-| Search result | 48-60px | Varies by result type |
+| Type               | Height |
+| ------------------ | ------ |
+| Album row          | 64px   |
+| Artist row         | 68px   |
+| Track row compact  | 36px   |
+| Track row standard | 52px   |
 
-### Padding & Margins
+### Typography
 
-| Element | Padding/Margin |
-| ------- | -------------- |
-| Row internal | 8px vertical, 12px horizontal |
-| View margins | 16px all sides |
-| Section spacing | 24px between sections |
-| Button padding | 6px vertical, 12px horizontal |
-| Input padding | 8px all sides |
+| Context              | Size  | Weight   |
+| -------------------- | ----- | -------- |
+| View title           | 24px  | Bold     |
+| Detail view title    | 40px  | Bold     |
+| Detail view metadata | 16px  | Regular  |
+| Section header       | 11px  | Bold     |
+| Library row title    | 20px  | Bold     |
+| Library row meta     | 17px  | Medium   |
+| Album button         | 16px  | Medium   |
+| Artist button        | 16px  | Medium   |
+| Row subtitle         | 12px  | Regular  |
+| Duration             | 14px  | Regular  |
+| Time display         | 18px+ | Bold     |
 
-### Border Radius
+**Transforms:** Section headers and column headers use UPPERCASE. Album/artist names in detail views use natural case (no forced transformation).
 
-| Element | Radius | Usage |
-| ------- | ------ | ----- |
-| Buttons | 4px | Standard buttons |
-| Cards | 8px | Library cards, panels |
-| Album art | 4px | Thumbnails, detail art |
-| Inputs | 4px | Search box, text inputs |
-| Channel strip | 8px | Entire strip container |
+### Row Vertical Alignment
 
-## Album Art Sizes
+All 2-row library rows (artist, album, track) use a **center-hugging** vertical alignment pattern:
 
-Standard sizes for album artwork across the UI:
+| Row | Alignment | Effect |
+|-----|-----------|--------|
+| Top row (titles, album name, year) | `valign=end` | Content sits at bottom of cell |
+| Bottom row (artists, genres, duration) | `valign=start` | Content sits at top of cell |
+| Art thumbnail (spans both rows) | `valign=center` | Centered across full row height |
 
-| Context | Size | Usage |
-| ------- | ---- | ----- |
-| **Thumbnails** | 48×48px | All thumbnails: albums list, search results, track rows, artist rows, artist detail albums |
-| **Album detail header** | 120×120px | Album detail view header |
-| **Artist detail album art** | 250×250px | Full-resolution album art in artist detail view |
+This creates visual cohesion where primary content (top row) and secondary content (bottom row) both gravitate toward the center dividing line, with no wasted vertical whitespace between them.
 
-**Placeholder:** Missing art shows gray box with music note icon, matching size.
-
-**Design principle:** All thumbnails in the UI are 48×48px for visual consistency. Only detail views show larger artwork loaded from full-resolution sources.
+For track rows (horizontal GtkBox layout), the column boxes use `valign=center` which achieves the same effect — the two stacked children within each column box naturally hug each other in the center of the row.
 
 ## Interactive States
 
-### Hover Behavior
+**Hover:** Background to surface color, 100ms ease. Buttons brighten +10%, scale 1.02.
 
-| Element | Hover Effect | Transition |
-| ------- | ------------ | ---------- |
-| Row | Background → Surface (`#2a2a2a`) | 100ms ease |
-| Button | Brightness +10%, scale 1.02 | 100ms ease |
-| Link | Opacity 80% → 100%, scale 1.02 | 150ms ease-out |
-| Slider thumb | Scale 1.2 | 200ms ease-out |
-| Channel badge | Glow effect | 150ms ease |
+**Focus:** Cyan border (2px) or left accent (4px for rows).
 
-**Cursor:** All interactive elements show `cursor: pointer` on hover.
+**Active:** Scale 0.98, brightness -10%.
 
-### Active/Pressed State
+**Cursor:** All interactive elements show `pointer` on hover.
 
-| Element | Effect |
-| ------- | ------ |
-| Button | Scale 0.98, brightness -10% |
-| Row | Background → darker surface |
-| Toggle (on) | Accent background, white icon |
+## CSS Variables
 
-### Focus State
-
-| Element | Effect |
-| ------- | ------ |
-| Input | Cyan border, subtle glow |
-| Button | Cyan outline (2px) |
-| Row (keyboard nav) | Cyan left accent (4px) |
-
-## Widget Patterns
-
-### Standard Row
+GTK4 doesn't support CSS custom properties, so these are reference values only (hardcoded in the stylesheets):
 
 ```
-┌────────────────────────────────────────────────────────┐
-│ [icon] Title Text                         Meta Text    │
-│        Subtitle Text                                   │
-└────────────────────────────────────────────────────────┘
+--accent-color: #00d4ff
+--album-accent:  #e5a640
+--bg-color:      #1e1e1e
+--surface-color: #2a2a2a
+--text-primary:  #e0e0e0
+--text-secondary:#888888
 ```
 
-- **Icon:** Left-aligned (art, symbol)
-- **Title:** Primary text, medium weight
-- **Subtitle:** Secondary text below title
-- **Meta:** Right-aligned, secondary color
+## Text Overflow Handling
 
-### Header Pattern
+Different UI contexts use different overflow strategies based on content type and user interaction needs:
 
-```
-┌────────────────────────────────────────────────────────┐
-│ TITLE TEXT                                  [Button]   │
-│ Subtitle · Metadata                                    │
-└────────────────────────────────────────────────────────┘
-```
+| Context | Method | Visual Effect |
+|---------|--------|---------------|
+| Track title | GTK ellipsize | Standard "…" truncation |
+| Album button label | GTK ellipsize | Standard "…" truncation |
+| Artist buttons | Overflow "…" button | Remaining artists shown in alphabetical popover |
+| Regular labels | GTK ellipsize | Standard "…" truncation |
 
-- **Title:** UPPERCASE, bold, 24px
-- **Subtitle:** Regular weight, secondary color
-- **Action button:** Right-aligned (Shuffle, etc.)
+### Width-Aware Overflow
 
-### List View Pattern
+Artist columns use intelligent overflow calculation:
+- Reads available width directly from the artist box's allocated size (`gtk_widget_get_width()`)
+- Adds artist buttons dynamically while space available
+- When space exhausted, shows "…" button with popover containing remaining artists
+- Recalculates on resize via tick callback monitoring box width
 
-```
-┌────────────────────────────────────────────────────────┐
-│ View Name · Count                    [Sort Controls]   │
-├────────────────────────────────────────────────────────┤
-│ [Row 1]                                                │
-│ [Row 2]                                                │
-│ [Row 3]                                                │
-└────────────────────────────────────────────────────────┘
-```
-
-- **Header:** View title + item count + controls
-- **Separator:** Subtle border below header
-- **Rows:** Scrollable list
-
-## Animations
-
-### Duration Guidelines
-
-| Animation Type | Duration | Easing |
-| -------------- | -------- | ------ |
-| Hover feedback | 100-150ms | ease-out |
-| Button press | 100ms | ease-in-out |
-| View transition | 200ms | ease-out |
-| Slider movement | 200ms | ease-out |
-| Pulse animation | 2s loop | ease-in-out |
-| Toast appear | 300ms | ease-out |
-| Toast dismiss | 200ms | ease-in |
-
-### Special Animations
-
-**Pulse (QUEUED state):**
-- Opacity: 100% → 60% → 100%
-- Duration: 2s loop
-- Easing: ease-in-out
-
-**Glow (hover on channel badge):**
-- Box-shadow: 0 0 0 → 0 0 8px
-- Color: Matches state color
-- Duration: 150ms ease
-
-**Marquee (long text):**
-- Horizontal scroll when text overflows
-- Pause 2s, scroll at 30px/s, pause 2s, reset
-- Only active on hover
-
-## Responsive Behavior
-
-### Minimum Widths
-
-| Panel | Min Width | Behavior Below Min |
-| ----- | --------- | ------------------ |
-| Library content | 400px | Horizontal scroll |
-| Channel strip | 280px | Compact layout |
-| Navigation bar | 56px | Icons only (always) |
-| Album art (detail) | 120px | Never scales down |
-
-### Text Overflow
-
-| Element | Overflow Behavior |
-| ------- | ----------------- |
-| Row titles | Ellipsis (...) |
-| Row metadata | Ellipsis (...) |
-| Long track titles | Marquee scroll on hover |
-| Time display | Never truncate |
-
-## Accessibility
-
-### Contrast Ratios
-
-- **Primary text on background:** 4.5:1 minimum
-- **Secondary text on background:** 3:1 minimum
-- **Accent color on background:** 4.5:1 minimum
-
-### Focus Indicators
-
-- All interactive elements must show visible focus state
-- Minimum 2px outline or border
-- Cyan accent color for consistency
-
-### Keyboard Navigation
-
-- Tab order follows visual hierarchy
-- All actions accessible via keyboard
-- See [KEYBINDS.md](KEYBINDS.md) for shortcuts
+See **Artist Buttons** section in `COMPONENTS.md` for detailed algorithm.
 
 ## Icons
 
-### Icon Set
+Symbolic icons from system theme (Adwaita). Common: `media-playback-start`, `media-playback-pause`, `go-next`, `go-previous`, `edit-find`, `audio-x-generic` (missing art).
 
-Use symbolic icons from system icon theme (typically Adwaita).
-
-**Common Icons:**
-- `media-playback-start` - Play
-- `media-playback-pause` - Pause
-- `media-playback-stop` - Stop
-- `media-skip-backward` - Previous
-- `media-skip-forward` - Next
-- `go-next` - Chevron right (drill-down)
-- `go-previous` - Back arrow
-- `edit-find` - Search
-- `audio-x-generic` - Music note (missing art)
-
-### Icon Sizes
-
-| Context | Size |
-| ------- | ---- |
+| Context        | Size |
+| -------------- | ---- |
 | Navigation bar | 24px |
-| Buttons | 16px |
-| Row indicators | 16px |
-| Missing album art | 32px |
-
-## CSS Class Naming
-
-### Conventions
-
-- Use kebab-case: `.album-row`, `.song-title`
-- Component prefix: `.channel-strip-focused`
-- State suffix: `-active`, `-hover`, `-disabled`
-- Modifier suffix: `-compact`, `-large`
-
-### Common Patterns
-
-| Pattern | Example | Usage |
-| ------- | ------- | ----- |
-| Component | `.channel-strip` | Top-level widget |
-| Element | `.album-art-thumb` | Child element |
-| State | `.nav-item-active` | Interactive state |
-| Modifier | `.song-row-compact` | Size/style variant |
-
-## Implementation Notes
-
-### GTK4 Specifics
-
-- Use GtkBox with CSS for flexible layouts
-- Apply CSS classes via `gtk_widget_add_css_class()`
-- Custom drawing for spectrum display only
-- Prefer CSS over custom drawing where possible
-
-### CSS Variables
-
-Define common values as CSS variables:
-
-```css
-:root {
-  --accent-color: #00d4ff;
-  --bg-color: #1e1e1e;
-  --surface-color: #2a2a2a;
-  --text-primary: #e0e0e0;
-  --text-secondary: #888888;
-  --spacing-unit: 8px;
-}
-```
-
-Use in styles: `background: var(--bg-color);`
+| Buttons/rows   | 16px |
+| Missing art    | 32px |

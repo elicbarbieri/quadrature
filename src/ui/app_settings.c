@@ -25,6 +25,12 @@
 #define KEY_AUTO_SCAN "auto_scan_on_startup"
 #define KEY_PROCESS_ARTWORK "process_artwork"
 #define KEY_INDEXER_THREADS "indexer_threads"
+#define KEY_ART_THUMB_SIZE "art_thumb_size"
+
+#define GROUP_MUSICBRAINZ "MusicBrainz"
+#define KEY_FINGERPRINT_TRACKS "fingerprint_tracks"
+#define KEY_MB_RESOLVE "musicbrainz_resolve"
+#define KEY_MB_PG_CONNINFO "pg_conninfo"
 
 #define DEFAULT_TIME_WARNING_MS 30000
 
@@ -61,6 +67,12 @@ static void init_defaults(app_settings_t *settings) {
     settings->auto_scan_on_startup = TRUE;
     settings->process_artwork = TRUE;
     settings->indexer_thread_count = 0;  // Auto
+    settings->art_thumb_size = 48;
+
+    // AcoustID / MusicBrainz defaults
+    settings->fingerprint_tracks = FALSE;
+    settings->musicbrainz_resolve = FALSE;
+    settings->musicbrainz_pg_conninfo = g_strdup("host=localhost dbname=musicbrainz_db user=musicbrainz");
 }
 
 app_settings_t *app_settings_load(void) {
@@ -151,6 +163,33 @@ app_settings_t *app_settings_load(void) {
     }
     g_clear_error(&error);
 
+    int art_thumb_size = g_key_file_get_integer(keyfile, GROUP_LIBRARY, KEY_ART_THUMB_SIZE, &error);
+    if (!error && art_thumb_size >= 16 && art_thumb_size <= 300) {
+        settings->art_thumb_size = art_thumb_size;
+    }
+    g_clear_error(&error);
+
+    // Load MusicBrainz settings
+    gboolean fingerprint = g_key_file_get_boolean(keyfile, GROUP_MUSICBRAINZ, KEY_FINGERPRINT_TRACKS, &error);
+    if (!error) {
+        settings->fingerprint_tracks = fingerprint;
+    }
+    g_clear_error(&error);
+
+    gboolean mb_resolve = g_key_file_get_boolean(keyfile, GROUP_MUSICBRAINZ, KEY_MB_RESOLVE, &error);
+    if (!error) {
+        settings->musicbrainz_resolve = mb_resolve;
+    }
+    g_clear_error(&error);
+
+    char *pg_conninfo = g_key_file_get_string(keyfile, GROUP_MUSICBRAINZ, KEY_MB_PG_CONNINFO, NULL);
+    if (pg_conninfo && pg_conninfo[0] != '\0') {
+        g_free(settings->musicbrainz_pg_conninfo);
+        settings->musicbrainz_pg_conninfo = pg_conninfo;
+    } else {
+        g_free(pg_conninfo);
+    }
+
     g_key_file_free(keyfile);
     g_free(path);
 
@@ -159,7 +198,7 @@ app_settings_t *app_settings_load(void) {
 }
 
 gboolean app_settings_save(const app_settings_t *settings) {
-    if (!settings) return FALSE;
+    g_assert(settings != NULL);  /* Caller must provide valid settings */
 
     // Ensure config directory exists
     char *config_dir = get_config_dir();
@@ -193,6 +232,13 @@ gboolean app_settings_save(const app_settings_t *settings) {
     g_key_file_set_boolean(keyfile, GROUP_LIBRARY, KEY_AUTO_SCAN, settings->auto_scan_on_startup);
     g_key_file_set_boolean(keyfile, GROUP_LIBRARY, KEY_PROCESS_ARTWORK, settings->process_artwork);
     g_key_file_set_integer(keyfile, GROUP_LIBRARY, KEY_INDEXER_THREADS, settings->indexer_thread_count);
+    g_key_file_set_integer(keyfile, GROUP_LIBRARY, KEY_ART_THUMB_SIZE, settings->art_thumb_size);
+
+    // Save MusicBrainz settings
+    g_key_file_set_boolean(keyfile, GROUP_MUSICBRAINZ, KEY_FINGERPRINT_TRACKS, settings->fingerprint_tracks);
+    g_key_file_set_boolean(keyfile, GROUP_MUSICBRAINZ, KEY_MB_RESOLVE, settings->musicbrainz_resolve);
+    g_key_file_set_string(keyfile, GROUP_MUSICBRAINZ, KEY_MB_PG_CONNINFO,
+                          settings->musicbrainz_pg_conninfo ? settings->musicbrainz_pg_conninfo : "");
 
     // Write to file
     char *path = app_settings_get_path();
@@ -219,6 +265,7 @@ void app_settings_free(app_settings_t *settings) {
         g_free(settings->channels[i].device_name);
         g_free(settings->channels[i].livewire_gpio_address);
     }
+    g_free(settings->musicbrainz_pg_conninfo);
     g_free(settings);
 }
 

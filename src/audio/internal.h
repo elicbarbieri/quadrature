@@ -8,8 +8,8 @@
 #ifndef QUADRATURE_AUDIO_INTERNAL_H
 #define QUADRATURE_AUDIO_INTERNAL_H
 
-#include "quadrature/core/types.h"
-#include "quadrature/core/perf_dashboard.h"
+#include "quadrature/quadrature.h"
+#include "../core/internal.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -46,6 +46,7 @@ extern "C" {
 #define SCRUB_SPEED_MULTIPLIER    3
 #define DECAY_FACTOR              0.85f
 #define MAX_AUDIO_PLAYERS         4
+#define MAX_FILENAME_LENGTH       512
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Forward Declarations
@@ -53,11 +54,12 @@ extern "C" {
 
 typedef struct audio_player audio_player_t;
 typedef struct audio_pipeline audio_pipeline_t;
-typedef struct audio_buffer_store audio_buffer_store_t;
+typedef struct audio_cache audio_cache_t;
 typedef struct audio_buffer audio_buffer_t;
 typedef struct spectrum_channel spectrum_channel_t;
 typedef struct spectrum_analyzer spectrum_analyzer_t;
 typedef struct audio_scrubber audio_scrubber_t;
+typedef struct library_cache library_cache_t;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Spectrum Analyzer (Full Definition)
@@ -95,7 +97,7 @@ struct spectrum_analyzer {
 /* ═══════════════════════════════════════════════════════════════════════════
  * FFmpeg Decoder Helper
  *
- * Low-level FFmpeg decode logic used exclusively by audio_buffer_store.
+ * Low-level FFmpeg decode logic used by audio_cache.
  * All audio is fully decoded to PCM buffers before playback - no streaming.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -194,16 +196,26 @@ static inline void meter_accum_process(meter_accum_t* m, float left, float right
 void meter_accum_store(meter_accum_t* m, audio_player_t* player);
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Time Utility (UI thread only - NOT for RT callback)
+ * Time Utilities
  *
- * Note: time_ms() uses clock_gettime() which is a system call. Do NOT call
- * from the real-time audio callback. Use sample-based timing instead.
+ * clock_gettime(CLOCK_MONOTONIC) is VDSO-mapped on Linux — executes entirely
+ * in userspace with no kernel transition (~20ns). Same mechanism used by
+ * PipeWire, JACK, and Ardour in their RT paths.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static inline uint64_t time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/**
+ * Nanosecond-precision monotonic timer for RT callback profiling.
+ */
+static inline uint64_t time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -271,6 +283,9 @@ float audio_scrubber_get_speed(const audio_scrubber_t* s);
 int64_t audio_scrubber_get_position(const audio_scrubber_t* s);
 shuttle_mode_t audio_scrubber_get_shuttle_mode(const audio_scrubber_t* s);
 
+/* Stats query (thread-safe) */
+uint64_t audio_scrubber_get_underflows(const audio_scrubber_t* s);
+
 /* Audio thread - unified playback at variable speed */
 uint32_t audio_scrubber_process(audio_scrubber_t* s,
                                  const float* samples, uint64_t num_frames,
@@ -310,10 +325,19 @@ struct audio_player {
     audio_pipeline_t* pipeline;  /* Back-reference for perf access */
 
     /* Playback state (atomic for real-time safety) */
-    atomic_int state;  /* CHANNEL_STOPPED, CHANNEL_LOADING, CHANNEL_PLAYING, CHANNEL_PAUSED, CHANNEL_ERROR */
+    atomic_int state;  /* CHANNEL_STOPPED, CHANNEL_PLAYING, CHANNEL_PAUSED, CHANNEL_ERROR */
     atomic_uint_fast64_t position_samples;
     atomic_uint_fast64_t length_samples;
     atomic_bool repeat;
+    atomic_bool autoplay;  /* Continue playing on track advance (default: true) */
+
+    /* Track ID-based playback (replaces filepath) */
+    atomic_int_fast64_t current_track_id;   /* Currently playing track */
+    atomic_int_fast64_t next_track_id;      /* Preloaded for instant advance */
+    _Atomic(audio_buffer_t*) next_buffer;   /* Preloaded buffer */
+    atomic_bool advance_pending;             /* Signal for deferred cleanup */
+    atomic_int_fast64_t advance_old_track_id;
+    atomic_int_fast64_t pending_buffer_track_id;  /* Track awaiting decode completion */
 
     /* Buffer playback (ALWAYS present when ready to play) */
     /* Atomic for thread-safe access from audio callback */
@@ -330,7 +354,7 @@ struct audio_player {
     /* Sample counter for RT-safe timestamps (incremented by callback) */
     atomic_uint_fast64_t callback_sample_count;
 
-    /* Track info */
+    /* Track info (kept for backward compatibility during transition) */
     char filepath[MAX_FILENAME_LENGTH];
 
     /* Metering (atomic, updated per callback) */
@@ -342,8 +366,17 @@ struct audio_player {
     _Atomic float peak_hold_right;
     atomic_uint_fast64_t peak_hold_age_frames;  /* Frames since last peak (sample-based timing) */
 
-    /* Spectrum analyzer data */
-    _Atomic float spectrum_bars[SPECTRUM_BARS];
+    /* Per-player RT stats (atomic — written in callback, read from UI thread) */
+    atomic_uint_fast64_t stats_cb_count;            /* Internal: for computing averages */
+    atomic_uint_fast64_t stats_cb_time_sum_ns;      /* Cumulative processing time */
+    atomic_uint_fast64_t stats_cb_time_max_ns;      /* Peak processing time */
+    atomic_uint_fast64_t stats_budget_overruns;      /* Callbacks exceeding 50% of period budget */
+    atomic_uint_fast64_t stats_dequeue_failures;     /* pw_stream_dequeue_buffer returned NULL */
+    atomic_uint_fast64_t stats_deferred_advances;    /* Silence gap — no preloaded buffer */
+    atomic_uint_fast64_t stats_instant_advances;     /* Gapless buffer swap in RT callback */
+
+    /* Spectrum analyzer data (stereo: 0..SPECTRUM_BARS-1 = left, SPECTRUM_BARS..2*SPECTRUM_BARS-1 = right) */
+    _Atomic float spectrum_bars[SPECTRUM_BARS * 2];
     struct spa_ringbuffer spectrum_rb;
     float* spectrum_buffer;
 
@@ -368,14 +401,231 @@ struct audio_pipeline {
     /* Spectrum analyzer (shared, processes all players) */
     spectrum_analyzer_t* spectrum;
 
-    /* Buffer store (shared by all players) */
-    audio_buffer_store_t* store;
+    /* Audio cache (shared by all players) - track_id based */
+    audio_cache_t* cache;
 
-    /* Performance dashboard (optional) */
+    /* Library cache (for track_id -> path resolution, next/prev navigation) */
+    library_cache_t* library;
+
+    /* Track changed callback */
+    void (*track_changed_callback)(int player_id, int64_t track_id, void* user_data);
+    void* track_changed_user_data;
+
+    /* Auto-advance timeout (runs on main thread) */
+    guint advance_timeout_id;
+
+    /* Performance dashboard (optional, for detailed timing) */
     perf_dashboard_t* perf;
+
+    /* Pipeline statistics (atomic for thread-safe reads) */
+    atomic_uint_fast64_t stats_callback_count;
+    atomic_uint_fast64_t stats_underrun_count;
+    atomic_uint_fast64_t stats_callback_time_sum_us;
+    atomic_uint_fast64_t stats_callback_time_max_us;
+    atomic_uint_fast64_t stats_track_changes;
+    atomic_uint_fast64_t stats_instant_advances;
 
     atomic_bool system_active;
 };
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Spectrum Analyzer API
+ *
+ * Runs a background thread that reads samples from each player's ring buffer,
+ * processes through cavacore FFT, and writes spectrum bars to player structs.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Create and start a spectrum analyzer.
+ *
+ * @param num_bars Number of frequency bars (1-64, typically 24)
+ * @param sample_rate Audio sample rate (e.g., 48000)
+ * @param num_channels Number of players to analyze (1-4)
+ * @param players Pointer to audio_player_t array (must outlive analyzer)
+ * @return New spectrum analyzer, or NULL on failure
+ */
+spectrum_analyzer_t* spectrum_create(int num_bars, int sample_rate, int num_channels,
+                                     void* players);
+
+/**
+ * Stop and destroy a spectrum analyzer.
+ */
+void spectrum_destroy(spectrum_analyzer_t* s);
+
+/**
+ * Check if the spectrum analyzer is running.
+ */
+bool spectrum_is_running(spectrum_analyzer_t* s);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Audio Device Enumeration API
+ *
+ * Enumerate available PipeWire audio sinks for device routing.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Audio output device information */
+typedef struct {
+    char node_name[256];      /* For PW_KEY_TARGET_OBJECT */
+    char description[256];    /* Human-readable name for UI */
+    char serial[64];          /* object.serial for stable identification */
+    uint32_t id;              /* PipeWire node ID */
+} audio_device_t;
+
+/* List of available audio devices */
+typedef struct {
+    audio_device_t *devices;
+    int count;
+    int capacity;
+} audio_device_list_t;
+
+/**
+ * Enumerate available PipeWire audio sinks.
+ * The pipeline must be started before calling this function.
+ * Caller must free the list with audio_devices_free().
+ */
+quadrature_result_t audio_devices_enumerate(audio_pipeline_t *pipeline, audio_device_list_t *list);
+
+/**
+ * Free device list resources.
+ */
+void audio_devices_free(audio_device_list_t *list);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Audio Cache API (Internal)
+ *
+ * Thread-safe LRU cache for fully decoded audio buffers.
+ * Uses track_id as key with LibraryCache for path resolution.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Cache memory limit: 1GB for DEBUG/BROADCAST modes (configurable via env) */
+#define AUDIO_CACHE_DEFAULT_MEMORY_LIMIT (1024 * 1024 * 1024)
+
+/* Maximum concurrent decode tasks */
+#define AUDIO_CACHE_MAX_DECODE_WORKERS 4
+
+/* Delayed unlock timeout in milliseconds */
+#define AUDIO_CACHE_UNLOCK_DELAY_MS 200
+
+/* Cache Status */
+typedef enum {
+    AUDIO_CACHE_NOT_FOUND,  /* Track ID not in cache */
+    AUDIO_CACHE_LOADING,    /* Decode in progress */
+    AUDIO_CACHE_READY,      /* Decode complete, buffer available */
+    AUDIO_CACHE_FAILED      /* Decode failed */
+} audio_cache_status_t;
+
+/* Decode event ring buffer settings */
+#define AUDIO_CACHE_MAX_DECODE_EVENTS 100
+
+/* Raw decode event stored in ring buffer */
+typedef struct {
+    int64_t track_id;
+    uint64_t file_size;           /* File size in bytes */
+    uint32_t audio_duration_ms;   /* Track length in milliseconds */
+    char filetype[8];             /* File extension (e.g., "mp3", "flac") */
+    uint32_t decode_duration_ms;  /* How long decode took */
+    uint64_t timestamp_ms;        /* When load() was called (monotonic) */
+} audio_cache_decode_event_t;
+
+/* Cache Statistics (simple metrics, histogram computed externally from events) */
+typedef struct {
+    float memory_usage_pct;           /* (used / limit) * 100 */
+    uint32_t cached_buffer_seconds;   /* Total seconds of audio in decoded buffers */
+    uint32_t prefetch_tracks;         /* Total tracks passed to audio_cache_prefetch() */
+    uint32_t event_count;             /* Number of events in ring buffer */
+} audio_cache_stats_t;
+
+/* Cache Lifecycle */
+quadrature_result_t audio_cache_create(library_cache_t* library,
+                                        uint32_t sample_rate,
+                                        audio_cache_t** out);
+void audio_cache_destroy(audio_cache_t* cache);
+
+/* Loading API (Background Decoding) */
+quadrature_result_t audio_cache_load(audio_cache_t* cache, int64_t track_id);
+void audio_cache_cancel_load(audio_cache_t* cache, int64_t track_id);
+void audio_cache_cancel_all_loads(audio_cache_t* cache);
+
+/* Lock result for audio_cache_lock() */
+typedef enum {
+    AUDIO_CACHE_LOCK_READY,    /* Buffer available now */
+    AUDIO_CACHE_LOCK_LOADING,  /* Decode in progress, call wait_ready() */
+    AUDIO_CACHE_LOCK_FAILED    /* Decode failed or track not found */
+} audio_cache_lock_result_t;
+
+/* Lock/Unlock API (Eviction Protection) */
+audio_cache_lock_result_t audio_cache_lock(audio_cache_t* cache, int64_t track_id);
+void audio_cache_unlock(audio_cache_t* cache, int64_t track_id);
+void audio_cache_unlock_delayed(audio_cache_t* cache, int64_t track_id);
+
+/* Wait for decode completion (blocks until ready or timeout) */
+bool audio_cache_wait_ready(audio_cache_t* cache, int64_t track_id, int64_t timeout_ms);
+
+/* Buffer Access (For Locked Tracks) */
+audio_buffer_t* audio_cache_get_locked(audio_cache_t* cache, int64_t track_id);
+
+/* Prefetch API */
+void audio_cache_prefetch(audio_cache_t* cache,
+                          const int64_t* track_ids,
+                          size_t count);
+
+/* Status Query */
+audio_cache_status_t audio_cache_get_status(audio_cache_t* cache, int64_t track_id);
+
+/* Buffer Accessors */
+int64_t audio_buffer_get_track_id(const audio_buffer_t* buf);
+const float* audio_buffer_get_samples(const audio_buffer_t* buf);
+uint64_t audio_buffer_get_num_frames(const audio_buffer_t* buf);
+uint32_t audio_buffer_get_sample_rate(const audio_buffer_t* buf);
+
+/* Cache Management */
+void audio_cache_evict(audio_cache_t* cache, int64_t track_id);
+void audio_cache_clear(audio_cache_t* cache);
+void audio_cache_set_memory_limit(audio_cache_t* cache, size_t memory_limit);
+size_t audio_cache_get_memory_used(audio_cache_t* cache);
+size_t audio_cache_get_count(audio_cache_t* cache);
+
+/* Statistics */
+void audio_cache_get_stats(audio_cache_t* cache, audio_cache_stats_t* stats);
+uint32_t audio_cache_get_decode_events(audio_cache_t* cache,
+                                        audio_cache_decode_event_t* out_events,
+                                        uint32_t max_events);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Audio Pipeline Internal Functions
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Get the performance dashboard for the pipeline (internal API).
+ * Used by perf view for detailed timing histograms.
+ *
+ * @param pipeline  Pipeline instance
+ * @return Performance dashboard (may be NULL if not enabled)
+ */
+perf_dashboard_t* audio_pipeline_get_perf_dashboard(audio_pipeline_t* pipeline);
+
+/**
+ * Get the audio cache for the pipeline (internal API).
+ * Used by perf view for decode metrics.
+ *
+ * @param pipeline  Pipeline instance
+ * @return Audio cache (may be NULL)
+ */
+audio_cache_t* audio_pipeline_get_audio_cache(audio_pipeline_t* pipeline);
+
+/**
+ * Load an audio file for playback by path (legacy internal API).
+ *
+ * @deprecated Use audio_pipeline_set_player_track() with track ID instead.
+ *
+ * @param pipeline   Pipeline instance
+ * @param player_id  Player index (0-3)
+ * @param path       Path to audio file
+ * @return QUADRATURE_OK on success (load started or cache hit)
+ */
+quadrature_result_t audio_pipeline_player_load(audio_pipeline_t* pipeline,
+                                                int player_id,
+                                                const char* path);
 
 #ifdef __cplusplus
 }

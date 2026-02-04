@@ -9,7 +9,7 @@
 #define QUADRATURE_PERF_CHART_H
 
 #include <gtk/gtk.h>
-#include "quadrature/core/perf_dashboard.h"
+#include "../../core/internal.h"
 
 G_BEGIN_DECLS
 

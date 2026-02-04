@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Unified Detail View Template
+
+  Container for album/artist detail pages with back navigation.
+  Structure: back button header + content stack (album/artist pages).
+-->
+<interface>
+  <object class="GtkBox" id="unified_detail_container">
+    <property name="orientation">vertical</property>
+    <property name="spacing">0</property>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         BACK HEADER
+         ═══════════════════════════════════════════════════════════════════ -->
+    <child>
+      <object class="GtkBox" id="back_header">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">0</property>
+        <property name="margin-start">16</property>
+        <property name="margin-end">16</property>
+        <property name="margin-top">12</property>
+        <property name="margin-bottom">8</property>
+        <property name="visible">false</property>
+        <style>
+          <class name="detail-back-header"/>
+        </style>
+
+        <!-- Back Button -->
+        <child>
+          <object class="GtkButton" id="back_button">
+            <property name="halign">start</property>
+            <style>
+              <class name="flat"/>
+              <class name="detail-back"/>
+            </style>
+
+            <child>
+              <object class="GtkBox" id="back_button_content">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">0</property>
+                <style>
+                  <class name="detail-back-content"/>
+                </style>
+
+                <!-- Back Icon -->
+                <child>
+                  <object class="GtkImage">
+                    <property name="icon-name">go-previous-symbolic</property>
+                  </object>
+                </child>
+
+                <!-- Back Label -->
+                <child>
+                  <object class="GtkLabel" id="back_label">
+                    <property name="label">Back</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         CONTENT STACK: Album / Artist Pages
+         ═══════════════════════════════════════════════════════════════════ -->
+    <child>
+      <object class="GtkStack" id="content_stack">
+        <property name="vexpand">true</property>
+        <property name="transition-type">crossfade</property>
+        <property name="transition-duration">150</property>
+        <!-- Album and artist pages added programmatically -->
+      </object>
+    </child>
+  </object>
+</interface>

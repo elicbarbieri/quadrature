@@ -1,6 +1,6 @@
 # Audio Cache
 
-Thread-safe LRU cache for fully-decoded audio buffers. Track-ID keyed storage with background decode, reference counting, lock-free acquisition for real-time playback, and two-tier caching for instant track changes.
+Thread-safe LRU cache for fully-decoded audio buffers. Track-ID keyed storage with background decode, lock-based eviction protection, and two-tier caching for instant track changes.
 
 **Dependency:** AudioCache depends on [LibraryCache](LIBRARY_CACHE.md) for audio file prefetch (track_id → path resolution).
 
@@ -33,8 +33,7 @@ Thread-safe LRU cache for fully-decoded audio buffers. Track-ID keyed storage wi
                    │   │  │  num_frames: 8,467,200                       │   │  │
                    │   │  │  sample_rate: 48000                          │   │  │
                    │   │  │  memory_bytes: 64.6 MB                       │   │  │
-                   │   │  │  ref_count: 1 (atomic)                       │   │  │
-                   │   │  │  lock_count: 0 (atomic)                      │   │  │
+                   │   │  │  lock_count: 1 (atomic)                      │   │  │
                    │   │  │  decode_complete: true (atomic)              │   │  │
                    │   │  └──────────────────────────────────────────────┘   │  │
                    │   └─────────────────────────────────────────────────────┘  │
@@ -45,7 +44,7 @@ Thread-safe LRU cache for fully-decoded audio buffers. Track-ID keyed storage wi
                    │   └─────────────────────────────────────────────────────┘  │
                    └─────────────────────────────────────────────────────────────┘
                                               │
-  Audio Thread                                │ try_acquire() / release()
+  Audio Thread                                │ get_locked() / lock() / unlock()
   ────────────────────────────────────────────┴──────────────────────────────────
 ```
 
@@ -54,37 +53,31 @@ Thread-safe LRU cache for fully-decoded audio buffers. Track-ID keyed storage wi
 When a user loads a track, the UI handler has the track ID from the row data.
 
 ```
-  UI THREAD                                 DECODE WORKERS            AUDIO THREAD
- ───────────                               ────────────────          ──────────────
-
-  on_track_queued(track_id)
-        │
-        v
-  audio_cache_load(track_id) ─────────> ┌────────────────────┐
-        │                               │    AUDIO CACHE     │ ──────> FFmpeg decode
-        v                               └────────────────────┘ <────── buffer ready
-  audio_pipeline_set_player_track()                │
-        │                                          │ try_acquire(track_id)
-        │                               ┌────────────────────┐
-        │                               │   AUDIO ENGINE     │ ──────> PipeWire callback
-        └──────────────────────────────>│                    │         reads samples
-        │  sets pending_track_id        │  player.buffer ────┼───┐
-        v                               └────────────────────┘   │
-  ui_channel_strip_set_track()                                   v
-        │                                                 samples ready
-        v
-      done
+on_track_queued(track_id)
+      │
+      v
+audio_cache_load(track_id) ─────────> ┌────────────────────┐
+      │                               │    AUDIO CACHE     │ ──────> FFmpeg decode
+      v                               └────────────────────┘ <────── buffer ready
+audio_pipeline_set_player_track()                │
+      │                                          │ lock() + get_locked()
+      │                               ┌────────────────────┐
+      │                               │   AUDIO ENGINE     │ ──────> PipeWire callback
+      └──────────────────────────────>│                    │         reads samples
+      │  sets pending_track_id        │  player.buffer ────┼───┐
+      v                               └────────────────────┘   │
+ui_channel_strip_set_track()                                   v
+      │                                                 samples ready
+      v
+    done
 ```
 
 ## Design Principles
 
 **Track ID as key.** The track_id from the database is the canonical identifier. The cache resolves track_id to file path internally via database lookup.
-
 **Buffer-first architecture.** All playback happens from decoded PCM buffers. No streaming fallback, no decode-on-play. This guarantees deterministic audio callback performance.
-
-**Locks prevent eviction.** Locked buffers (lock_count > 0) cannot be evicted. The engine locks current and next tracks to keep them in cache. Ref counting is separate—it ensures memory safety via deferred destruction when evicting buffers that are still being read.
-
-**Async decode, sync acquire.** Loading returns immediately, decode happens in thread pool. Acquisition is non-blocking (returns NULL if not ready) to avoid blocking the audio callback.
+**Locks prevent eviction.** Locked buffers (lock_count > 0) cannot be evicted. The engine locks current and next tracks to keep them in cache. Delayed unlock (200ms) ensures safe buffer transitions when audio callback may still be reading.
+**Async decode, sync access.** Loading returns immediately, decode happens in thread pool. Buffer access via `get_locked()` is non-blocking (returns NULL if not ready or not locked).
 
 ## Two-Tier Caching
 
@@ -101,17 +94,17 @@ For instantaneous track changes, the cache supports two tiers of protection:
 │   LOCKED (lock_count > 0)     ──── Cannot evict, pinned in cache            │
 │   UNLOCKED (lock_count == 0)  ──── Can evict via LRU                        │
 │                                                                             │
-│   Note: ref_count is orthogonal to eviction. If an unlocked buffer is       │
-│   evicted while ref_count > 0, destruction is deferred until released.      │
+│   IMPORTANT: Use delayed unlock (200ms) when transitioning tracks to        │
+│   ensure the audio callback has finished reading from the old buffer.       │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Use case:** Audio Engine locks the current and next tracks. When user skips or track ends, next track starts instantly from preloaded buffer. Previously played tracks (unlocked) can be evicted via LRU.
+**Use case:** Audio Engine locks the current and next tracks. When user skips or track ends, the engine swaps to the new buffer pointer, then schedules a delayed unlock (200ms) for the old track. This ensures the audio callback completes any in-flight reads before the buffer becomes evictable.
 
 ### Tier 2: File Prefetch (Kernel Page Cache)
 
-Hints to kernel to read file data into page cache. No decoding, just makes future decode faster.
+Hints to kernel to read file data into page cache. No decoding, just makes audio file-loading faster.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -150,8 +143,6 @@ LRU eviction triggers when `memory_used > memory_limit`. Eviction skips:
 - Buffers with `lock_count > 0` (locked for quick access)
 - Buffers with `decode_complete == false` (still loading)
 
-Note: `ref_count` does not affect eviction. If an unlocked buffer with `ref_count > 0` is evicted, it's moved to the `deferred_destroy` queue and freed when `ref_count` reaches 0.
-
 The eviction loop rotates skipped buffers to the head, preventing infinite loops when all buffers are in use.
 
 ## Thread Safety
@@ -163,32 +154,35 @@ The eviction loop rotates skipped buffers to the head, preventing infinite loops
 │ load()              │ UI          │ cache->lock   │ May start decode task  │
 │ cancel_load()       │ UI          │ cache->lock   │ Sets atomic cancel flag│
 │ get_status()        │ UI          │ cache->lock   │ Quick lookup           │
-│ get_progress()      │ UI          │ cache->lock   │ Reads atomic counters  │
-│ try_acquire()       │ UI/Audio    │ cache->lock   │ Increments ref_count   │
-│ release()           │ UI/Audio    │ None          │ Atomic decrement only  │
 │ lock()              │ UI/Engine   │ cache->lock   │ Increments lock_count  │
+│ wait_ready()        │ UI/Engine   │ buffer->mutex │ Blocks on GCond        │
 │ unlock()            │ UI/Engine   │ cache->lock   │ Decrements lock_count  │
+│ unlock_delayed()    │ UI/Engine   │ cache->lock   │ Schedules unlock+200ms │
+│ get_locked()        │ UI/Engine   │ cache->lock   │ Returns buffer if ready│
+│ get_stats()         │ Any         │ cache->lock   │ Iterates buffer list   │
+│ get_decode_events() │ Any         │ event_lock    │ Copies event buffer    │
 │ evict()             │ UI          │ cache->lock   │ Respects lock_count    │
-│ decode_worker()     │ Thread Pool │ (internal)    │ Updates atomics        │
+│ decode_worker()     │ Thread Pool │ (internal)    │ Signals GCond on done  │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Critical invariant:** The audio callback must never block. `try_acquire()` takes a mutex, but this is acceptable because:
+**Critical invariant:** The audio callback must never block. All cache operations happen on the UI/Engine thread:
 
 1. Audio callback holds buffer pointer directly (`audio_player_t.buffer`)
-2. Acquisition happens on UI thread before playback starts
-3. Audio callback reads `buffer` via atomic load, never calls cache functions
+1. Lock/unlock and buffer access happen on UI thread before playback starts
+1. Audio callback reads `buffer` via atomic load, never calls cache functions
+1. Delayed unlock (200ms) ensures audio callback finishes reading before eviction
 
 ## Buffer Lifecycle
 
 ```
                   load()                   decode complete
-    NOT_FOUND ──────────> LOADING ─────────────────────────> READY
-                              │                                │
-                              │ cancel_load()                  │ evict()
-                              │ decode error                   │ (ref_count == 0)
-                              v                                v
-                           FAILED                          NOT_FOUND
+NOT_FOUND ──────────> LOADING ─────────────────────────> READY
+                          │                                │
+                          │ cancel_load()                  │ evict()
+                          │ decode error                   │ (lock_count == 0)
+                          v                                v
+                        FAILED                          NOT_FOUND
 ```
 
 **State transitions are atomic.** `decode_complete`, `decode_failed`, and `decode_cancelled` are `atomic_bool`. The decode worker checks `decode_cancelled` between chunk reads for responsive cancellation.
@@ -204,11 +198,8 @@ typedef struct audio_buffer {
     size_t memory_bytes;                 // Actual allocation size
 
     // Thread-safe state
-    atomic_int ref_count;                // Memory safety (deferred destruction if evicted while > 0)
     atomic_int lock_count;               // Eviction protection (pinned in cache while > 0)
     atomic_bool decode_complete;         // Ready for playback
-    atomic_uint_fast64_t decoded_frames; // Progress tracking
-    atomic_uint_fast64_t total_frames;   // For progress calculation
     atomic_bool decode_cancelled;        // Cancellation flag
     atomic_bool decode_failed;           // Error state
 
@@ -229,12 +220,16 @@ typedef struct audio_cache {
     GHashTable* pending_decodes;         // In-flight decode tasks
     GMutex decode_lock;                  // Protects pending_decodes
 
-    GQueue deferred_destroy;             // Buffers awaiting ref_count == 0
+    GHashTable* pending_unlocks;         // track_id → timeout source for delayed unlocks
 
-    // Statistics (atomic)
-    atomic_uint_fast64_t hits;
-    atomic_uint_fast64_t misses;
-    atomic_uint_fast64_t evictions;
+    // Decode events ring buffer (for statistics)
+    audio_cache_decode_event_t decode_events[100];
+    atomic_uint_fast32_t event_head;     // Next write position
+    atomic_uint_fast32_t event_count;    // Total events (capped at 100)
+    GMutex event_lock;                   // Protects event writes
+
+    // Prefetch counter
+    atomic_uint_fast32_t prefetch_tracks;
 } audio_cache_t;
 ```
 
@@ -248,12 +243,6 @@ FFmpeg                          SwrContext                     audio_buffer_t
 └──────────────────┘    └─────────────────────────┘    └───────────────────────┘
 ```
 
-Decode happens in 4096-frame chunks. Progress is updated atomically after each chunk, enabling UI feedback:
-
-```c
-float progress = audio_cache_get_progress(cache, track_id);  // 0.0-1.0
-```
-
 Buffer allocation includes 10% headroom for resampler flush frames.
 
 ## API Reference
@@ -264,7 +253,6 @@ Buffer allocation includes 10% headroom for resampler flush frames.
 quadrature_result_t audio_cache_create(
     library_cache_t* library,    // For file prefetch (track_id → path resolution)
     uint32_t sample_rate,
-    size_t memory_limit,
     audio_cache_t** out
 );
 void audio_cache_destroy(audio_cache_t* cache);
@@ -278,8 +266,6 @@ void audio_cache_destroy(audio_cache_t* cache);
 quadrature_result_t audio_cache_load(
     audio_cache_t* cache,
     int64_t track_id,
-    audio_cache_callback_t callback,  // optional
-    void* user_data
 );
 
 // Cancel pending decode
@@ -287,53 +273,73 @@ void audio_cache_cancel_load(audio_cache_t* cache, int64_t track_id);
 void audio_cache_cancel_all_loads(audio_cache_t* cache);
 ```
 
-### Acquisition (For Playback)
+### Lock/Unlock (For Playback and Preloading)
 
 ```c
-// Try to acquire buffer (non-blocking, may return NULL)
-// On success, increments ref_count - must call release()
-audio_buffer_t* audio_cache_try_acquire(audio_cache_t* cache, int64_t track_id);
+// Lock result indicates decode status
+typedef enum {
+    AUDIO_CACHE_LOCK_READY,    // Buffer available now
+    AUDIO_CACHE_LOCK_LOADING,  // Decode in progress, call wait_ready()
+    AUDIO_CACHE_LOCK_FAILED    // Decode failed or track not found
+} audio_cache_lock_result_t;
 
-// Release buffer (decrements ref_count)
-void audio_cache_release(audio_cache_t* cache, audio_buffer_t* buffer);
-```
-
-### Lock/Unlock (For Preloading)
-
-```c
-// Lock track to prevent LRU eviction. Starts load if not in cache.
+// Lock track to prevent LRU eviction. Returns decode status.
 // Can be called multiple times (lock_count increments).
-// Use for next-track preloading - keeps buffer ready for instant playback.
-void audio_cache_lock(audio_cache_t* cache, int64_t track_id);
+// Use for current track and next-track preloading.
+// PRECONDITION: Track must be in cache (via audio_cache_load()).
+audio_cache_lock_result_t audio_cache_lock(audio_cache_t* cache, int64_t track_id);
 
-// Unlock track, allowing LRU eviction when lock_count reaches 0.
+// Wait for decode completion on a locked track (blocks until ready or timeout).
+// Uses GCond for instant wakeup when decode finishes - no polling overhead.
+// Returns true if decode completed successfully, false if failed or timeout.
+// PRECONDITION: Track must be in cache and locked.
+bool audio_cache_wait_ready(audio_cache_t* cache, int64_t track_id, int64_t timeout_ms);
+
+// Unlock track immediately. Only use when certain no audio callback is reading.
 // Must be called once for each corresponding lock() call.
 void audio_cache_unlock(audio_cache_t* cache, int64_t track_id);
+
+// Unlock track after 200ms delay. Use when transitioning away from a playing track.
+// The delay ensures any in-flight audio callback completes before eviction is allowed.
+// Cancels any pending delayed unlock for this track before scheduling new one.
+void audio_cache_unlock_delayed(audio_cache_t* cache, int64_t track_id);
+
+// Get buffer for a locked track. Returns NULL if not locked or not ready.
+// Does not modify lock_count - caller must have already called lock().
+audio_buffer_t* audio_cache_get_locked(audio_cache_t* cache, int64_t track_id);
+```
+
+**Usage pattern for waiting on decode:**
+
+```c
+audio_cache_load(cache, track_id);  // Start async decode
+
+audio_cache_lock_result_t result = audio_cache_lock(cache, track_id);
+if (result == AUDIO_CACHE_LOCK_FAILED) {
+    return QUADRATURE_ERROR_DECODE;
+}
+if (result == AUDIO_CACHE_LOCK_LOADING) {
+    // Wait for decode (blocks, instant wake when done)
+    if (!audio_cache_wait_ready(cache, track_id, 30000)) {
+        audio_cache_unlock(cache, track_id);
+        return QUADRATURE_ERROR_TIMEOUT;
+    }
+}
+
+// Buffer is now ready
+audio_buffer_t* buf = audio_cache_get_locked(cache, track_id);
 ```
 
 ### File Prefetch (Kernel Page Cache)
 
 ```c
-// Prefetch audio files for visible tracks into kernel page cache.
+// Prefetch audio files into kernel page cache.  Called by UI for top search results, or tracks in an album-detail view.
 // Calls LibraryCache to resolve track_ids → paths and do posix_fadvise.
-// Makes future decode faster (file data already in memory).
-void audio_cache_prefetch_visible(
+void audio_cache_prefetch(
     audio_cache_t* cache,
     const int64_t* track_ids,
     size_t count
 );
-```
-
-**Implementation:**
-
-```c
-void audio_cache_prefetch_visible(audio_cache_t* cache,
-                                   const int64_t* track_ids, size_t count) {
-    // Delegate to LibraryCache which handles:
-    // 1. Resolve track_ids → file paths
-    // 2. Call posix_fadvise(WILLNEED) for each file
-    library_cache_prefetch_audio_files(cache->library, track_ids, count);
-}
 ```
 
 ### Status
@@ -348,8 +354,6 @@ typedef enum {
 
 audio_cache_status_t audio_cache_get_status(audio_cache_t* cache, int64_t track_id);
 
-// Progress during decode (0.0-1.0, -1.0 on error/not found)
-float audio_cache_get_progress(audio_cache_t* cache, int64_t track_id);
 ```
 
 ### Buffer Accessors
@@ -367,60 +371,73 @@ int64_t audio_buffer_get_track_id(const audio_buffer_t* buf);
 void audio_cache_evict(audio_cache_t* cache, int64_t track_id);
 void audio_cache_clear(audio_cache_t* cache);
 void audio_cache_set_memory_limit(audio_cache_t* cache, size_t limit);
-
-// Statistics
 size_t audio_cache_get_memory_used(audio_cache_t* cache);
-size_t audio_cache_get_memory_limit(audio_cache_t* cache);
 size_t audio_cache_get_count(audio_cache_t* cache);
 ```
 
-## Usage Patterns
+### Statistics
 
-### Basic Playback
+The cache maintains a ring buffer of recent decode events for performance monitoring. Simple metrics are available via `get_stats()`, while raw events can be retrieved for detailed analysis (histogram computation, latency analysis, etc.).
 
 ```c
-// 1. Start decode (async)
-audio_cache_load(cache, track_id, on_decode_complete, ctx);
+#define AUDIO_CACHE_MAX_DECODE_EVENTS 100
 
-// 2. Poll status in UI tick
-audio_cache_status_t status = audio_cache_get_status(cache, track_id);
-if (status == AUDIO_CACHE_LOADING) {
-    float progress = audio_cache_get_progress(cache, track_id);
-    update_loading_indicator(progress);
-}
+// Raw decode event stored in ring buffer
+typedef struct {
+    int64_t track_id;
+    uint64_t file_size;           // File size in bytes
+    uint32_t audio_duration_ms;   // Track length in milliseconds
+    char filetype[8];             // File extension (e.g., "mp3", "flac")
+    uint32_t decode_duration_ms;  // How long decode took
+    uint64_t timestamp_ms;        // When load() was called (monotonic)
+} audio_cache_decode_event_t;
 
-// 3. Acquire for playback
-if (status == AUDIO_CACHE_READY) {
-    audio_buffer_t* buf = audio_cache_try_acquire(cache, track_id);
-    if (buf) {
-        atomic_store(&player->buffer, buf);
-    }
-}
+// Simple cache metrics
+typedef struct {
+    float memory_usage_pct;           // (used / limit) * 100
+    uint32_t cached_buffer_seconds;   // Total seconds of audio in decoded buffers
+    uint32_t prefetch_tracks;         // Total tracks passed to audio_cache_prefetch()
+    uint32_t event_count;             // Number of events in ring buffer
+} audio_cache_stats_t;
 
-// 4. Release on track change
-audio_buffer_t* old = atomic_exchange(&player->buffer, NULL);
-if (old) {
-    audio_cache_release(cache, old);
-}
+void audio_cache_get_stats(audio_cache_t* cache, audio_cache_stats_t* stats);
+
+// Access raw events for detailed analysis (histogram, latency distribution, etc.)
+uint32_t audio_cache_get_decode_events(
+    audio_cache_t* cache,
+    audio_cache_decode_event_t* out_events,
+    uint32_t max_events
+);
 ```
+
+**Key metrics:**
+
+- **memory_usage_pct**: Cache pressure indicator
+- **cached_buffer_seconds**: Total audio duration currently cached
+- **prefetch_tracks**: UI activity indicator (kernel page cache hints)
+- **Raw events**: For detailed analysis (latency histogram, filetype distribution, correlation with file size, etc.)
 
 ### Next-Track Preloading (Audio Engine)
 
 ```c
 // When track changes, preload next track for instant advance
 void on_track_set(int64_t old_id, int64_t old_next_id, int64_t new_id, int64_t new_next_id) {
-    // Release old locks
-    if (old_id > 0)      audio_cache_unlock(cache, old_id);
-    if (old_next_id > 0) audio_cache_unlock(cache, old_next_id);
-
-    // Lock and load new tracks
+    // Lock and load new tracks FIRST (before unlocking old)
     audio_cache_lock(cache, new_id);
-    audio_cache_load(cache, new_id, NULL, NULL);
+    audio_cache_load(cache, new_id);
 
     if (new_next_id > 0) {
         audio_cache_lock(cache, new_next_id);
-        audio_cache_load(cache, new_next_id, NULL, NULL);
+        audio_cache_load(cache, new_next_id);
     }
+
+    // Swap buffer pointer atomically (audio callback will read from new buffer)
+    audio_buffer_t* new_buf = audio_cache_get_locked(cache, new_id);
+    atomic_store(&player->buffer, new_buf);
+
+    // Release old locks with 200ms delay (ensures audio callback finishes reading)
+    if (old_id > 0)      audio_cache_unlock_delayed(cache, old_id);
+    if (old_next_id > 0) audio_cache_unlock_delayed(cache, old_next_id);
 }
 ```
 
@@ -454,105 +471,48 @@ struct audio_pipeline {
 };
 ```
 
-Pipeline API sets the track, audio thread handles acquisition:
+Pipeline API sets the track, engine handles lock management:
 
 ```c
-// Set track for player (audio thread will query cache for buffer)
+// Set track for player (locks track, gets buffer when ready)
 quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline, int player_id, int64_t track_id);
 
-// Check if buffer is acquired and ready
+// Check if buffer is locked and ready
 bool audio_pipeline_player_is_ready(audio_pipeline_t* pipeline, int player_id);
 ```
 
-If buffer is already cached, acquisition happens immediately and player transitions to STOPPED state. Otherwise, player stays in LOADING until the audio thread acquires the buffer.
+If buffer is already cached, `get_locked()` returns immediately and player transitions to STOPPED state. Otherwise, player stays in LOADING until decode completes and buffer becomes available.
 
 ## Performance Characteristics
 
-| Operation          | Complexity | Lock     | Notes                     |
-| ------------------ | ---------- | -------- | ------------------------- |
-| load()             | O(1)       | GMutex   | Hash insert + queue push  |
-| try_acquire()      | O(1)       | GMutex   | Hash lookup + atomic incr |
-| release()          | O(1)       | None     | Atomic decrement only     |
-| get_status()       | O(1)       | GMutex   | Hash lookup               |
-| evict_lru()        | O(n)       | GMutex   | Scans queue until freed   |
-| decode (3min song) | ~1-3s      | Internal | Depends on codec/disk     |
+| Operation          | Complexity | Lock     | Notes                           |
+| ------------------ | ---------- | -------- | ------------------------------- |
+| load()             | O(1)       | GMutex   | Hash insert + queue push        |
+| lock()             | O(1)       | GMutex   | Hash lookup + atomic incr       |
+| wait_ready()       | Blocking   | GCond    | Blocks until decode complete    |
+| unlock()           | O(1)       | GMutex   | Atomic decrement                |
+| unlock_delayed()   | O(1)       | GMutex   | Schedules g_timeout             |
+| get_locked()       | O(1)       | GMutex   | Hash lookup                     |
+| get_status()       | O(1)       | GMutex   | Hash lookup                     |
+| get_stats()        | O(n)       | GMutex   | Iterates buffers for duration   |
+| get_decode_events()| O(n)       | GMutex   | Copies event ring buffer        |
+| evict_lru()        | O(n)       | GMutex   | Scans queue until freed         |
+| decode (3min song) | ~1-3s      | Internal | Recorded in decode events       |
 
-The cache adds ~100-300 microseconds of latency to track start (cache hit) due to mutex acquisition. Cache misses add decode time (typically 1-3 seconds for a full track).
+The cache adds ~100-300 microseconds of latency to track start (cache hit) due to mutex acquisition. Cache misses add decode time (typically 1-3 seconds for a full track). The 200ms delayed unlock adds negligible overhead—buffers remain locked slightly longer but this doesn't impact cache pressure in practice.
 
 ## Eviction Policy
 
 LRU with lock-count protection:
 
 1. Eviction triggers when `memory_used > memory_limit`
-2. Walk LRU queue from tail (oldest)
-3. Skip if `lock_count > 0` (locked) or `decode_complete == false` (loading)
-4. Skipped buffers move to head (prevents starvation)
-5. Continue until under limit or full rotation
-
-```c
-// Eviction loop pseudocode
-while (cache->memory_used > cache->memory_limit) {
-    audio_buffer_t* buf = lru_get_tail(cache);
-    if (!buf) break;
-
-    if (buf->lock_count > 0 ||     // locked - cannot evict
-        !buf->decode_complete) {   // still loading
-        lru_move_to_head(cache, buf);  // prevent starvation
-        if (rotated_full_queue) break;
-        continue;
-    }
-
-    // Safe to evict - but may need deferred destruction
-    if (buf->ref_count > 0) {
-        // Buffer still being read - defer destruction
-        g_queue_push_tail(&cache->deferred_destroy, buf);
-        g_hash_table_remove(cache->buffers, &buf->track_id);
-        cache->memory_used -= buf->memory_bytes;
-    } else {
-        // Safe to free immediately
-        evict_buffer(cache, buf);
-    }
-}
-```
-
-### Deferred Destruction
-
-When `release()` is called on an evicted buffer (one in `deferred_destroy` queue):
-
-```c
-void audio_cache_release(audio_cache_t* cache, audio_buffer_t* buffer) {
-    if (atomic_fetch_sub(&buffer->ref_count, 1) == 1) {
-        // ref_count reached 0 - check if deferred
-        g_mutex_lock(&cache->lock);
-        if (g_queue_remove(&cache->deferred_destroy, buffer)) {
-            // Was deferred - now safe to free
-            audio_buffer_free(buffer);
-        }
-        g_mutex_unlock(&cache->lock);
-    }
-}
-```
-
-This ensures the audio thread never reads from freed memory, while allowing the cache to reclaim space from unlocked buffers.
-
-### Memory Budget with Locking
-
-With 4 players, worst case locked memory:
-- 4 current tracks × ~55MB = ~220MB
-- 4 next tracks × ~55MB = ~220MB
-- **Total locked: ~440MB**
-
-With default 512MB limit, leaves ~72MB for LRU. Consider increasing to 768MB or 1GB for more LRU headroom.
+1. Walk LRU queue from tail (oldest)
+1. Skip if `lock_count > 0` (locked) or `decode_complete == false` (loading)
+1. Skipped buffers move to head (prevents starvation)
+1. Continue until under limit or full rotation
 
 ## Error Handling
 
 Decode failures set `decode_failed = true` and remove the buffer from the cache. The player transitions to NO_AUDIO state (buffer unavailable).
-
-Common failure modes:
-
-- File not found / permission denied
-- Unsupported codec
-- Corrupt audio data
-- Out of memory (allocation failure)
 
 All failures are logged via `g_critical()` and propagate through the status API.

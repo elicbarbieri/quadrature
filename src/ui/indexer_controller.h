@@ -2,7 +2,7 @@
 #define INDEXER_CONTROLLER_H
 
 #include <gtk/gtk.h>
-#include "quadrature/indexer/indexer.h"
+#include "quadrature/quadrature_indexer.h"
 
 G_BEGIN_DECLS
 
@@ -131,6 +131,40 @@ void indexer_controller_get_progress_info(IndexerController* self,
  * @return Status string (e.g., "Scanning", "Idle", "Complete")
  */
 const char* indexer_controller_get_status(IndexerController* self);
+
+/**
+ * Enable/disable AcoustID fingerprint generation during indexing.
+ *
+ * @param self Controller instance
+ * @param enable True to generate chromaprint fingerprints in metadata phase
+ */
+void indexer_controller_set_fingerprint_tracks(IndexerController* self, gboolean enable);
+
+/**
+ * Enable/disable MusicBrainz resolver after indexing.
+ * Requires pg_conninfo to be set.
+ *
+ * @param self Controller instance
+ * @param enable True to run MusicBrainz resolution
+ */
+void indexer_controller_set_musicbrainz_resolve(IndexerController* self, gboolean enable);
+
+/**
+ * Set PostgreSQL connection info for MusicBrainz/AcoustID database.
+ *
+ * @param self Controller instance
+ * @param conninfo libpq connection string (copied)
+ */
+void indexer_controller_set_pg_conninfo(IndexerController* self, const char* conninfo);
+
+/**
+ * Invalidate the cached indexer so the next operation recreates it.
+ * Call after changing art_size or other config that requires re-creation.
+ * No-op if indexer is currently running.
+ *
+ * @param self Controller instance
+ */
+void indexer_controller_invalidate(IndexerController* self);
 
 G_END_DECLS
 

@@ -39,9 +39,8 @@
           rubberband
           libmusicbrainz
           chromaprint      # AcoustID fingerprinting
-          libsoup_3        # HTTP client for MusicBrainz API
-          taglib           # Write metadata to audio files
-          json-glib        # JSON parsing for .quadrature markers
+          taglib           # Read metadata tags from audio files
+          postgresql       # libpq for MusicBrainz PG queries
         ];
 
         buildDeps = with pkgs; [

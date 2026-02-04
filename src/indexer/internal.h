@@ -6,8 +6,8 @@
  * Contains all private types and shared constants.
  */
 
-#include "quadrature/core/types.h"
-#include "quadrature/database/database.h"
+#include "quadrature/quadrature.h"
+#include "quadrature/quadrature_database.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -29,94 +29,16 @@ typedef struct {
     char* path;         // Full path (owned, must free)
     char* title;        // Track title (owned, may be NULL)
     char* artist;       // Artist name (owned, may be NULL)
+    char* album_artist; // Album artist (owned, may be NULL — from ALBUMARTIST tag)
     char* album;        // Album title (owned, may be NULL)
+    char* genre;        // Genre (owned, may be NULL)
     uint32_t duration_ms;
     uint16_t track_num;
+    uint16_t disc_num;  // From disc/discnumber tag (0 = unset)
     uint16_t year;
     int64_t mtime;      // File modification time (filled by caller)
     int64_t size;       // File size in bytes (filled by caller)
 } index_item_t;
-
-// =============================================================================
-// Extended Metadata (for folder album context and metadata popup)
-// =============================================================================
-
-typedef struct {
-    // Basic metadata (same as index_item_t)
-    char* path;
-    char* title;
-    char* artist;
-    char* album;
-    uint32_t duration_ms;
-    uint16_t track_num;
-    uint16_t disc_num;
-    uint16_t year;
-    int64_t mtime;
-    int64_t size;
-
-    // Extended metadata
-    char* album_artist;      // ALBUMARTIST tag
-    char* genre;
-    char* comment;
-    char* encoder;
-    bool compilation;        // COMPILATION or TCMP tag
-    uint16_t disc_total;     // Total disc count (from "N/M" format)
-    uint16_t track_total;    // Total track count (from "N/M" format)
-
-    // Audio format info
-    int32_t bitrate;         // kbps
-    int32_t sample_rate;     // Hz
-    int32_t channels;
-    char* codec;             // e.g., "FLAC", "MP3", "AAC"
-
-    // Flags
-    bool has_embedded_art;
-
-    // Raw metadata as JSON (for Copy JSON feature)
-    char* raw_json;
-} extended_metadata_t;
-
-// Free extended_metadata_t and its members
-void extended_metadata_free(extended_metadata_t* meta);
-
-// Extract extended metadata from audio file
-quadrature_result_t extract_extended_metadata(const char* path, extended_metadata_t* out);
-
-// =============================================================================
-// Folder Album Context (for directory-first album grouping)
-// =============================================================================
-
-// Opaque handle - defined in folder_album.c
-typedef struct folder_album_context folder_album_context_t;
-
-// Create a new folder album context for the given directory
-folder_album_context_t* folder_album_context_new(const char* dir_path);
-
-// Add track metadata to the context (call for each track in directory)
-void folder_album_context_add_track(folder_album_context_t* ctx,
-                                     const extended_metadata_t* meta);
-
-// Finalize the context - determines album title, artist, compilation status
-void folder_album_finalize(folder_album_context_t* ctx);
-
-// Free the context
-void folder_album_context_free(folder_album_context_t* ctx);
-
-// Accessors (call after folder_album_finalize)
-const char* folder_album_get_directory_path(const folder_album_context_t* ctx);
-const char* folder_album_get_folder_name(const folder_album_context_t* ctx);
-const char* folder_album_get_title(const folder_album_context_t* ctx);
-const char* folder_album_get_artist(const folder_album_context_t* ctx);
-bool folder_album_is_compilation(const folder_album_context_t* ctx);
-uint16_t folder_album_get_year(const folder_album_context_t* ctx);
-size_t folder_album_get_track_count(const folder_album_context_t* ctx);
-size_t folder_album_get_unique_artist_count(const folder_album_context_t* ctx);
-
-// Validation helpers - check if track metadata differs from folder album
-bool folder_album_track_has_album_mismatch(const folder_album_context_t* ctx,
-                                            const extended_metadata_t* meta);
-bool folder_album_track_has_artist_inconsistency(const folder_album_context_t* ctx,
-                                                  const extended_metadata_t* meta);
 
 // =============================================================================
 // Directory Scan Result (single-pass enumeration)
@@ -199,6 +121,49 @@ quadrature_result_t artwork_generate_thumbnail(const char* input_path,
 quadrature_result_t artwork_find_and_process(const char* album_dir, int64_t album_id,
                                               const char* cache_dir, int thumb_size,
                                               char* result_path, size_t result_size);
+
+// =============================================================================
+// Artwork Atlas Format
+//
+// Binary format for packed album artwork thumbnails.
+// Provides O(log n) lookup via binary search on sorted album_id index.
+// =============================================================================
+
+/* Magic bytes identifying atlas file */
+#define ARTWORK_ATLAS_MAGIC "QDRA"
+#define ARTWORK_ATLAS_MAGIC_SIZE 4
+
+/* Current format version */
+#define ARTWORK_ATLAS_VERSION 1
+
+/* Default thumbnail size */
+#define ARTWORK_ATLAS_THUMB_SIZE 48
+
+/**
+ * Atlas file header (32 bytes, fixed size)
+ */
+typedef struct __attribute__((packed)) {
+    char magic[4];          /* "QDRA" */
+    uint32_t version;       /* Format version (currently 1) */
+    uint32_t count;         /* Number of entries in index */
+    uint32_t flags;         /* Reserved for future use */
+    uint32_t thumb_size;    /* Thumbnail size in pixels (48) */
+    uint8_t reserved[12];   /* Reserved for future use */
+} artwork_atlas_header_t;
+
+/**
+ * Index entry (16 bytes, fixed size)
+ * Sorted by album_id for binary search
+ */
+typedef struct __attribute__((packed)) {
+    int64_t album_id;       /* Album identifier (database primary key) */
+    uint32_t offset;        /* Byte offset from start of DATA section */
+    uint32_t size;          /* Size of PNG blob in bytes */
+} artwork_atlas_entry_t;
+
+/* Verify struct sizes at compile time */
+_Static_assert(sizeof(artwork_atlas_header_t) == 32, "Header must be 32 bytes");
+_Static_assert(sizeof(artwork_atlas_entry_t) == 16, "Entry must be 16 bytes");
 
 // =============================================================================
 // Artwork Atlas Builder

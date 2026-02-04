@@ -66,6 +66,95 @@
                 <property name="active">true</property>
               </object>
             </child>
+
+            <!-- Library Section Header -->
+            <child>
+              <object class="GtkLabel">
+                <property name="label">LIBRARY</property>
+                <property name="xalign">0</property>
+                <property name="margin-top">16</property>
+                <style>
+                  <class name="library-section-header"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Thumbnail size dropdown -->
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Thumbnail size</property>
+                    <property name="xalign">0</property>
+                    <property name="hexpand">true</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkDropDown" id="art_size_dropdown">
+                    <property name="model">
+                      <object class="GtkStringList">
+                        <items>
+                          <item>48px</item>
+                          <item>64px</item>
+                          <item>96px</item>
+                          <item>128px</item>
+                        </items>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <!-- MusicBrainz Section Header -->
+            <child>
+              <object class="GtkLabel">
+                <property name="label">MUSICBRAINZ</property>
+                <property name="xalign">0</property>
+                <property name="margin-top">16</property>
+                <style>
+                  <class name="library-section-header"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Fingerprint tracks toggle -->
+            <child>
+              <object class="GtkCheckButton" id="fingerprint_checkbox">
+                <property name="label">Generate AcoustID fingerprints during indexing</property>
+                <property name="active">false</property>
+              </object>
+            </child>
+
+            <!-- MusicBrainz resolve toggle -->
+            <child>
+              <object class="GtkCheckButton" id="mb_resolve_checkbox">
+                <property name="label">Resolve metadata from MusicBrainz after indexing</property>
+                <property name="active">false</property>
+              </object>
+            </child>
+
+            <!-- PostgreSQL connection string -->
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">PostgreSQL connection</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">center</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="pg_conninfo_entry">
+                    <property name="hexpand">true</property>
+                    <property name="placeholder-text">host=localhost dbname=musicbrainz_db user=musicbrainz</property>
+                  </object>
+                </child>
+              </object>
+            </child>
           </object>
         </child>
       </object>

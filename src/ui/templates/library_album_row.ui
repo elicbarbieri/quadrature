@@ -1,60 +1,122 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Album row template for library list views -->
+<!--
+  Library Album Row Template
+
+  Album row for library list views.
+  Uses 2-row, 4-column GtkGrid layout for better visual hierarchy.
+  Vertical alignment: Row 0 items bottom-aligned (valign=end),
+  Row 1 items top-aligned (valign=start), so content hugs the center.
+
+  Row 0: Album Title (20px) | Track Count | Year (far right)
+  Row 1: [Artist A, Artist B… (14px) | Genre · Genre (right-aligned)] spanning cols 1-3
+-->
 <interface>
-  <object class="GtkBox" id="row">
-    <property name="orientation">horizontal</property>
-    <property name="spacing">12</property>
+  <object class="GtkGrid" id="row">
+    <property name="column-spacing">12</property>
+    <property name="row-spacing">4</property>
+    <property name="hexpand">true</property>
     <style>
-      <class name="library-row"/>
       <class name="library-album-row"/>
     </style>
 
-    <!-- Album art -->
+    <!-- Column 0: Album art (48px thumbnail, rowspan=2) -->
     <child>
       <object class="GtkImage" id="art">
         <property name="icon-name">media-optical-symbolic</property>
-        <property name="pixel-size">48</property>
+        <!-- pixel-size set dynamically via artwork_manager_get_thumb_size() -->
         <property name="valign">center</property>
+        <property name="hexpand">false</property>
+        <layout>
+          <property name="column">0</property>
+          <property name="row">0</property>
+          <property name="row-span">2</property>
+        </layout>
         <style>
           <class name="library-album-art"/>
         </style>
       </object>
     </child>
 
-    <!-- Text box -->
+    <!-- Column 1, Row 0: Album Title (20px, bold) — bottom-aligned -->
     <child>
-      <object class="GtkBox" id="text_box">
-        <property name="orientation">vertical</property>
-        <property name="spacing">4</property>
-        <property name="valign">center</property>
+      <object class="GtkLabel" id="title">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <property name="valign">end</property>
+        <property name="hexpand">true</property>
+        <layout>
+          <property name="column">1</property>
+          <property name="row">0</property>
+        </layout>
+        <style>
+          <class name="library-row-title"/>
+          <class name="album-title-column"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Column 2, Row 0: Track count (right-aligned, bottom-aligned) -->
+    <child>
+      <object class="GtkLabel" id="count">
+        <property name="xalign">1</property>
+        <property name="halign">end</property>
+        <property name="valign">end</property>
+        <property name="width-chars">9</property>
+        <layout>
+          <property name="column">2</property>
+          <property name="row">0</property>
+        </layout>
+        <style>
+          <class name="library-row-meta"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Column 3, Row 0: Year (far right, bottom-aligned, white) -->
+    <child>
+      <object class="GtkLabel" id="year">
+        <property name="xalign">1</property>
+        <property name="halign">end</property>
+        <property name="valign">end</property>
+        <property name="width-chars">4</property>
+        <layout>
+          <property name="column">3</property>
+          <property name="row">0</property>
+        </layout>
+        <style>
+          <class name="library-row-year"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Column 1-3, Row 1: Artists (left) + Genre pills (right) — single spanning cell
+         so genres can't widen columns 2-3 and push track count left -->
+    <child>
+      <object class="GtkBox" id="bottom_bar">
+        <property name="orientation">horizontal</property>
+        <property name="valign">start</property>
+        <property name="hexpand">true</property>
+        <layout>
+          <property name="column">1</property>
+          <property name="row">1</property>
+          <property name="column-span">3</property>
+        </layout>
         <child>
-          <object class="GtkLabel" id="title">
-            <property name="xalign">0</property>
-            <property name="ellipsize">end</property>
-            <style>
-              <class name="library-row-title"/>
-            </style>
-          </object>
-        </child>
-        <child>
-          <object class="GtkLabel" id="subtitle">
-            <property name="xalign">0</property>
-            <property name="ellipsize">end</property>
+          <object class="GtkBox" id="primary_artists_box">
+            <property name="orientation">horizontal</property>
+            <property name="hexpand">true</property>
             <style>
               <class name="library-row-subtitle"/>
             </style>
           </object>
         </child>
-      </object>
-    </child>
-
-    <!-- Track count -->
-    <child>
-      <object class="GtkLabel" id="count">
-        <property name="valign">center</property>
-        <style>
-          <class name="library-row-count"/>
-        </style>
+        <child>
+          <object class="GtkBox" id="genres_box">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">4</property>
+            <property name="halign">end</property>
+          </object>
+        </child>
       </object>
     </child>
   </object>

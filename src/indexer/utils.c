@@ -13,7 +13,6 @@
 #include <sys/stat.h>
 
 #include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
 
 // =============================================================================
 // Audio File Detection
@@ -109,11 +108,15 @@ void index_item_free(index_item_t* item) {
     free(item->path);
     free(item->title);
     free(item->artist);
+    free(item->album_artist);
     free(item->album);
+    free(item->genre);
     item->path = NULL;
     item->title = NULL;
     item->artist = NULL;
+    item->album_artist = NULL;
     item->album = NULL;
+    item->genre = NULL;
 }
 
 // =============================================================================
@@ -128,9 +131,12 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     out->path = strdup(path);
     out->title = NULL;
     out->artist = NULL;
+    out->album_artist = NULL;
     out->album = NULL;
+    out->genre = NULL;
     out->duration_ms = 0;
     out->track_num = 0;
+    out->disc_num = 0;
     out->year = 0;
 
     AVFormatContext* fmt = NULL;
@@ -138,6 +144,10 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
         g_debug("Failed to open audio file: %s", path);
         return QUADRATURE_ERROR_FILE_NOT_FOUND;
     }
+
+    // Reduce probe limits — sufficient for tags + basic stream info
+    fmt->max_analyze_duration = 500000;  // 0.5s (default: 5s)
+    fmt->probesize = 512 * 1024;         // 512KB (default: 5MB)
 
     if (avformat_find_stream_info(fmt, NULL) < 0) {
         g_debug("Failed to read stream info: %s", path);
@@ -159,196 +169,18 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
             out->album = strdup(tag->value);
         } else if (strcasecmp(tag->key, "track") == 0) {
             out->track_num = (uint16_t)atoi(tag->value);
-        } else if (strcasecmp(tag->key, "date") == 0 || strcasecmp(tag->key, "year") == 0) {
-            out->year = (uint16_t)atoi(tag->value);
-        }
-    }
-
-    avformat_close_input(&fmt);
-
-    // Fallback: use filename as title if no title tag
-    if (!out->title) {
-        const char* fname = strrchr(path, '/');
-        fname = fname ? fname + 1 : path;
-        char* copy = strdup(fname);
-        char* dot = strrchr(copy, '.');
-        if (dot) *dot = '\0';
-        out->title = copy;
-    }
-
-    return QUADRATURE_OK;
-}
-
-// =============================================================================
-// Extended Metadata Extraction
-// =============================================================================
-
-void extended_metadata_free(extended_metadata_t* meta) {
-    if (!meta) return;
-    free(meta->path);
-    free(meta->title);
-    free(meta->artist);
-    free(meta->album);
-    free(meta->album_artist);
-    free(meta->genre);
-    free(meta->comment);
-    free(meta->encoder);
-    free(meta->codec);
-    free(meta->raw_json);
-    memset(meta, 0, sizeof(*meta));
-}
-
-// Parse "N/M" format to get N and M
-static void parse_track_disc_format(const char* value, uint16_t* num, uint16_t* total) {
-    if (!value) return;
-
-    *num = (uint16_t)atoi(value);
-
-    const char* slash = strchr(value, '/');
-    if (slash && total) {
-        *total = (uint16_t)atoi(slash + 1);
-    }
-}
-
-// Build JSON string from all metadata tags
-static char* build_raw_json(AVFormatContext* fmt) {
-    GString* json = g_string_new("{");
-    bool first = true;
-
-    AVDictionaryEntry* tag = NULL;
-    while ((tag = av_dict_get(fmt->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
-        if (!first) g_string_append(json, ",");
-        first = false;
-
-        // Escape key and value for JSON
-        char* escaped_key = g_strescape(tag->key, NULL);
-        char* escaped_value = g_strescape(tag->value, NULL);
-
-        g_string_append_printf(json, "\"%s\":\"%s\"", escaped_key, escaped_value);
-
-        g_free(escaped_key);
-        g_free(escaped_value);
-    }
-
-    g_string_append(json, "}");
-    return g_string_free(json, FALSE);
-}
-
-// Get codec name from stream
-static char* get_codec_name(AVFormatContext* fmt) {
-    for (unsigned int i = 0; i < fmt->nb_streams; i++) {
-        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            const AVCodec* codec = avcodec_find_decoder(fmt->streams[i]->codecpar->codec_id);
-            if (codec && codec->name) {
-                // Convert to uppercase for display
-                char* name = g_ascii_strup(codec->name, -1);
-                return name;
-            }
-        }
-    }
-    return NULL;
-}
-
-// Check if file has embedded artwork
-static bool has_embedded_artwork(AVFormatContext* fmt) {
-    for (unsigned int i = 0; i < fmt->nb_streams; i++) {
-        if (fmt->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC) {
-            return true;
-        }
-    }
-    return false;
-}
-
-quadrature_result_t extract_extended_metadata(const char* path, extended_metadata_t* out) {
-    if (!path || !out) {
-        return QUADRATURE_ERROR_INVALID_PARAM;
-    }
-
-    memset(out, 0, sizeof(*out));
-    out->path = strdup(path);
-    out->disc_num = 1;  // Default to disc 1
-
-    AVFormatContext* fmt = NULL;
-    if (avformat_open_input(&fmt, path, NULL, NULL) != 0) {
-        g_debug("Failed to open audio file: %s", path);
-        return QUADRATURE_ERROR_FILE_NOT_FOUND;
-    }
-
-    if (avformat_find_stream_info(fmt, NULL) < 0) {
-        g_debug("Failed to read stream info: %s", path);
-        avformat_close_input(&fmt);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
-    // Duration
-    if (fmt->duration != AV_NOPTS_VALUE) {
-        out->duration_ms = (uint32_t)(fmt->duration / 1000);
-    }
-
-    // Get audio stream info
-    for (unsigned int i = 0; i < fmt->nb_streams; i++) {
-        AVCodecParameters* codecpar = fmt->streams[i]->codecpar;
-        if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            out->sample_rate = codecpar->sample_rate;
-            out->channels = codecpar->ch_layout.nb_channels;
-            out->bitrate = (int32_t)(codecpar->bit_rate / 1000);  // Convert to kbps
-            if (out->bitrate == 0 && fmt->bit_rate > 0) {
-                out->bitrate = (int32_t)(fmt->bit_rate / 1000);
-            }
-            break;
-        }
-    }
-
-    // Codec name
-    out->codec = get_codec_name(fmt);
-
-    // Check for embedded art
-    out->has_embedded_art = has_embedded_artwork(fmt);
-
-    // Build raw JSON before processing tags
-    out->raw_json = build_raw_json(fmt);
-
-    // Extract metadata tags
-    AVDictionaryEntry* tag = NULL;
-    while ((tag = av_dict_get(fmt->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
-        if (strcasecmp(tag->key, "title") == 0) {
-            free(out->title);
-            out->title = strdup(tag->value);
-        } else if (strcasecmp(tag->key, "artist") == 0) {
-            free(out->artist);
-            out->artist = strdup(tag->value);
-        } else if (strcasecmp(tag->key, "album") == 0) {
-            free(out->album);
-            out->album = strdup(tag->value);
-        } else if (strcasecmp(tag->key, "albumartist") == 0 ||
-                   strcasecmp(tag->key, "album_artist") == 0 ||
-                   strcasecmp(tag->key, "album artist") == 0) {
-            free(out->album_artist);
-            out->album_artist = strdup(tag->value);
-        } else if (strcasecmp(tag->key, "track") == 0) {
-            parse_track_disc_format(tag->value, &out->track_num, &out->track_total);
         } else if (strcasecmp(tag->key, "disc") == 0 ||
                    strcasecmp(tag->key, "discnumber") == 0) {
-            parse_track_disc_format(tag->value, &out->disc_num, &out->disc_total);
-        } else if (strcasecmp(tag->key, "date") == 0 ||
-                   strcasecmp(tag->key, "year") == 0) {
+            out->disc_num = (uint16_t)atoi(tag->value);
+        } else if (strcasecmp(tag->key, "date") == 0 || strcasecmp(tag->key, "year") == 0) {
             out->year = (uint16_t)atoi(tag->value);
+        } else if (strcasecmp(tag->key, "album_artist") == 0 ||
+                   strcasecmp(tag->key, "albumartist") == 0) {
+            free(out->album_artist);
+            out->album_artist = strdup(tag->value);
         } else if (strcasecmp(tag->key, "genre") == 0) {
             free(out->genre);
             out->genre = strdup(tag->value);
-        } else if (strcasecmp(tag->key, "comment") == 0) {
-            free(out->comment);
-            out->comment = strdup(tag->value);
-        } else if (strcasecmp(tag->key, "encoder") == 0 ||
-                   strcasecmp(tag->key, "encoded_by") == 0) {
-            free(out->encoder);
-            out->encoder = strdup(tag->value);
-        } else if (strcasecmp(tag->key, "compilation") == 0 ||
-                   strcasecmp(tag->key, "tcmp") == 0) {
-            // iTunes compilation flag
-            out->compilation = (strcmp(tag->value, "1") == 0 ||
-                               strcasecmp(tag->value, "true") == 0 ||
-                               strcasecmp(tag->value, "yes") == 0);
         }
     }
 
@@ -363,9 +195,6 @@ quadrature_result_t extract_extended_metadata(const char* path, extended_metadat
         if (dot) *dot = '\0';
         out->title = copy;
     }
-
-    // Ensure disc_num is at least 1
-    if (out->disc_num == 0) out->disc_num = 1;
 
     return QUADRATURE_OK;
 }

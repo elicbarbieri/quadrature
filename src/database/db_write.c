@@ -1,6 +1,5 @@
 #include <glib.h>
 #include "db_internal.h"
-#include "quadrature/database/database.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -8,81 +7,13 @@
 #include <time.h>
 
 // =============================================================================
-// LRU Cache Implementation
-// =============================================================================
-
-// Simple hash function for strings
-static uint32_t hash_string(const char* str) {
-    uint32_t hash = 5381;
-    int c;
-    while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + c;
-    }
-    return hash;
-}
-
-void db_cache_init(db_cache_t* cache) {
-    memset(cache->entries, 0, sizeof(cache->entries));
-    pthread_mutex_init(&cache->lock, NULL);
-}
-
-void db_cache_destroy(db_cache_t* cache) {
-    for (int i = 0; i < DB_CACHE_SIZE; i++) {
-        free(cache->entries[i].key);
-    }
-    pthread_mutex_destroy(&cache->lock);
-}
-
-int64_t db_cache_get(db_cache_t* cache, const char* key) {
-    uint32_t idx = hash_string(key) % DB_CACHE_SIZE;
-
-    pthread_mutex_lock(&cache->lock);
-    db_cache_entry_t* entry = &cache->entries[idx];
-    int64_t result = -1;
-
-    if (entry->key && strcmp(entry->key, key) == 0) {
-        entry->access_count++;
-        result = entry->id;
-    }
-    pthread_mutex_unlock(&cache->lock);
-
-    return result;
-}
-
-void db_cache_put(db_cache_t* cache, const char* key, int64_t id) {
-    uint32_t idx = hash_string(key) % DB_CACHE_SIZE;
-
-    pthread_mutex_lock(&cache->lock);
-    db_cache_entry_t* entry = &cache->entries[idx];
-
-    free(entry->key);
-    entry->key = strdup(key);
-    entry->id = id;
-    entry->access_count = 1;
-    pthread_mutex_unlock(&cache->lock);
-}
-
-void db_cache_clear(db_cache_t* cache) {
-    pthread_mutex_lock(&cache->lock);
-    for (int i = 0; i < DB_CACHE_SIZE; i++) {
-        free(cache->entries[i].key);
-        cache->entries[i].key = NULL;
-        cache->entries[i].id = 0;
-        cache->entries[i].access_count = 0;
-    }
-    pthread_mutex_unlock(&cache->lock);
-}
-
-// =============================================================================
-// Get or Create Artist/Album (with caching)
+// Get or Create Artist
 // =============================================================================
 
 int64_t db_get_or_create_artist(quadrature_db_t* db, const char* name) {
     if (!name || !*name) name = "Unknown Artist";
 
-    // Check cache first (cache has its own lock)
-    int64_t id = db_cache_get(&db->artist_cache, name);
-    if (id >= 0) return id;
+    int64_t id = -1;
 
     // Acquire lock for DB operations
     bool need_unlock = false;
@@ -115,68 +46,6 @@ int64_t db_get_or_create_artist(quadrature_db_t* db, const char* name) {
 
     if (need_unlock) db_unlock(db);
 
-    if (id >= 0) {
-        db_cache_put(&db->artist_cache, name, id);
-    }
-
-    return id;
-}
-
-int64_t db_get_or_create_album(quadrature_db_t* db, const char* title, int64_t artist_id,
-                               const char* path, int year) {
-    if (!title || !*title) title = "Unknown Album";
-
-    // Build cache key: "title:artist_id"
-    char cache_key[512];
-    snprintf(cache_key, sizeof(cache_key), "%s:%lld", title, (long long)artist_id);
-
-    int64_t id = db_cache_get(&db->album_cache, cache_key);
-    if (id >= 0) return id;
-
-    // Acquire lock for DB operations
-    bool need_unlock = false;
-    if (!db->in_transaction) {
-        db_lock(db);
-        db_prepare_stmts(db);
-        need_unlock = true;
-    }
-
-    // Try to select existing
-    sqlite3_bind_text(db->select_album, 1, title, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(db->select_album, 2, artist_id);
-    if (sqlite3_step(db->select_album) == SQLITE_ROW) {
-        id = sqlite3_column_int64(db->select_album, 0);
-    }
-    sqlite3_reset(db->select_album);
-
-    if (id < 0) {
-        // Insert new
-        sqlite3_bind_text(db->insert_album, 1, title, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(db->insert_album, 2, artist_id);
-        sqlite3_bind_text(db->insert_album, 3, path ? path : "", -1, SQLITE_STATIC);
-        if (year > 0) {
-            sqlite3_bind_int(db->insert_album, 4, year);
-        } else {
-            sqlite3_bind_null(db->insert_album, 4);
-        }
-        sqlite3_step(db->insert_album);
-        sqlite3_reset(db->insert_album);
-
-        // Get the ID
-        sqlite3_bind_text(db->select_album, 1, title, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(db->select_album, 2, artist_id);
-        if (sqlite3_step(db->select_album) == SQLITE_ROW) {
-            id = sqlite3_column_int64(db->select_album, 0);
-        }
-        sqlite3_reset(db->select_album);
-    }
-
-    if (need_unlock) db_unlock(db);
-
-    if (id >= 0) {
-        db_cache_put(&db->album_cache, cache_key, id);
-    }
-
     return id;
 }
 
@@ -184,98 +53,35 @@ int64_t db_get_or_create_album(quadrature_db_t* db, const char* title, int64_t a
 // Track Write Operations
 // =============================================================================
 
-quadrature_result_t db_upsert_track(quadrature_db_t* db, const db_index_item_t* item, int64_t scan_time) {
-    if (!db || !item || !item->path) return QUADRATURE_ERROR_INVALID_PARAM;
-    if (!db->in_transaction) return QUADRATURE_ERROR_INTERNAL;
-
-    // Get or create artist and album
-    int64_t artist_id = db_get_or_create_artist(db, item->artist);
-
-    // Extract album path from track path (directory containing the track)
-    char album_path[4096] = "";
-    const char* last_slash = strrchr(item->path, '/');
-    if (last_slash) {
-        size_t len = last_slash - item->path;
-        if (len < sizeof(album_path)) {
-            memcpy(album_path, item->path, len);
-            album_path[len] = '\0';
-        }
-    }
-
-    int64_t album_id = db_get_or_create_album(db, item->album, artist_id, album_path, item->year);
-
-    // Check if track already exists (for FTS update)
-    int64_t existing_track_id = 0;
-    sqlite3_stmt* sel_stmt;
-    sqlite3_prepare_v2(db->db, "SELECT id FROM tracks WHERE path = ?", -1, &sel_stmt, NULL);
-    sqlite3_bind_text(sel_stmt, 1, item->path, -1, SQLITE_STATIC);
-    if (sqlite3_step(sel_stmt) == SQLITE_ROW) {
-        existing_track_id = sqlite3_column_int64(sel_stmt, 0);
-    }
-    sqlite3_finalize(sel_stmt);
-
-    // Upsert track
-    sqlite3_bind_text(db->upsert_track, 1, item->title ? item->title : "Unknown", -1, SQLITE_STATIC);
-    sqlite3_bind_int64(db->upsert_track, 2, artist_id);
-    sqlite3_bind_int64(db->upsert_track, 3, album_id);
-    sqlite3_bind_text(db->upsert_track, 4, item->path, -1, SQLITE_STATIC);
-    sqlite3_bind_int(db->upsert_track, 5, item->duration_ms);
-    sqlite3_bind_int(db->upsert_track, 6, item->track_num);
-    sqlite3_bind_int(db->upsert_track, 7, item->disc_num > 0 ? item->disc_num : 1);
-    sqlite3_bind_int64(db->upsert_track, 8, item->mtime);
-    sqlite3_bind_int64(db->upsert_track, 9, item->size);
-    sqlite3_bind_int64(db->upsert_track, 10, scan_time);
-
-    int rc = sqlite3_step(db->upsert_track);
-    sqlite3_reset(db->upsert_track);
-
-    if (rc != SQLITE_DONE) {
-        g_critical("Failed to upsert track: %s", sqlite3_errmsg(db->db));
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
-    // Get track_id (use existing if it was an update, otherwise get new row id)
-    int64_t track_id = existing_track_id > 0 ? existing_track_id : sqlite3_last_insert_rowid(db->db);
-
-    // Update FTS (INSERT OR REPLACE handles both insert and update)
-    sqlite3_bind_int64(db->insert_fts, 1, track_id);
-    sqlite3_bind_text(db->insert_fts, 2, item->title ? item->title : "Unknown", -1, SQLITE_STATIC);
-    sqlite3_step(db->insert_fts);
-    sqlite3_reset(db->insert_fts);
-
-    return QUADRATURE_OK;
-}
-
 quadrature_result_t db_upsert_track_with_album(quadrature_db_t* db, const db_index_item_t* item,
-                                                int64_t album_id, int64_t scan_time) {
+                                                int64_t album_id, int64_t* track_id_out) {
     if (!db || !item || !item->path) return QUADRATURE_ERROR_INVALID_PARAM;
     if (!db->in_transaction) return QUADRATURE_ERROR_INTERNAL;
     if (album_id <= 0) return QUADRATURE_ERROR_INVALID_PARAM;
 
-    // Get or create artist (but use provided album_id)
-    int64_t artist_id = db_get_or_create_artist(db, item->artist);
-
     // Check if track already exists (for FTS update)
     int64_t existing_track_id = 0;
-    sqlite3_stmt* sel_stmt;
-    sqlite3_prepare_v2(db->db, "SELECT id FROM tracks WHERE path = ?", -1, &sel_stmt, NULL);
-    sqlite3_bind_text(sel_stmt, 1, item->path, -1, SQLITE_STATIC);
-    if (sqlite3_step(sel_stmt) == SQLITE_ROW) {
-        existing_track_id = sqlite3_column_int64(sel_stmt, 0);
+    sqlite3_bind_text(db->select_track_by_path, 1, item->path, -1, SQLITE_STATIC);
+    if (sqlite3_step(db->select_track_by_path) == SQLITE_ROW) {
+        existing_track_id = sqlite3_column_int64(db->select_track_by_path, 0);
     }
-    sqlite3_finalize(sel_stmt);
+    sqlite3_reset(db->select_track_by_path);
 
     // Upsert track using provided album_id
     sqlite3_bind_text(db->upsert_track, 1, item->title ? item->title : "Unknown", -1, SQLITE_STATIC);
-    sqlite3_bind_int64(db->upsert_track, 2, artist_id);
-    sqlite3_bind_int64(db->upsert_track, 3, album_id);
-    sqlite3_bind_text(db->upsert_track, 4, item->path, -1, SQLITE_STATIC);
-    sqlite3_bind_int(db->upsert_track, 5, item->duration_ms);
-    sqlite3_bind_int(db->upsert_track, 6, item->track_num);
-    sqlite3_bind_int(db->upsert_track, 7, item->disc_num > 0 ? item->disc_num : 1);
-    sqlite3_bind_int64(db->upsert_track, 8, item->mtime);
-    sqlite3_bind_int64(db->upsert_track, 9, item->size);
-    sqlite3_bind_int64(db->upsert_track, 10, scan_time);
+    sqlite3_bind_int64(db->upsert_track, 2, album_id);
+    sqlite3_bind_text(db->upsert_track, 3, item->path, -1, SQLITE_STATIC);
+    sqlite3_bind_int(db->upsert_track, 4, item->duration_ms);
+    sqlite3_bind_int(db->upsert_track, 5, item->track_num);
+    sqlite3_bind_int(db->upsert_track, 6, item->disc_num > 0 ? item->disc_num : 1);
+    sqlite3_bind_int64(db->upsert_track, 7, item->mtime);
+    sqlite3_bind_int(db->upsert_track, 8, item->year);
+    if (item->genre) {
+        sqlite3_bind_text(db->upsert_track, 9, item->genre, -1, SQLITE_STATIC);
+    } else {
+        sqlite3_bind_null(db->upsert_track, 9);
+    }
+    sqlite3_bind_text(db->upsert_track, 10, item->metadata_json ? item->metadata_json : "{}", -1, SQLITE_STATIC);
 
     int rc = sqlite3_step(db->upsert_track);
     sqlite3_reset(db->upsert_track);
@@ -287,6 +93,8 @@ quadrature_result_t db_upsert_track_with_album(quadrature_db_t* db, const db_ind
 
     // Get track_id (use existing if it was an update, otherwise get new row id)
     int64_t track_id = existing_track_id > 0 ? existing_track_id : sqlite3_last_insert_rowid(db->db);
+
+    if (track_id_out) *track_id_out = track_id;
 
     // Update FTS (INSERT OR REPLACE handles both insert and update)
     sqlite3_bind_int64(db->insert_fts, 1, track_id);
@@ -461,83 +269,57 @@ quadrature_result_t db_upsert_folder_album(quadrature_db_t* db,
     bool need_unlock = false;
     if (!db->in_transaction) {
         db_lock(db);
+        db_prepare_stmts(db);
         need_unlock = true;
     }
 
     // Try to find existing album by folder path first
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db,
-        "SELECT id FROM albums WHERE path = ?",
-        -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        if (need_unlock) db_unlock(db);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
-    sqlite3_bind_text(stmt, 1, folder_path, -1, SQLITE_STATIC);
+    sqlite3_bind_text(db->select_album_by_path, 1, folder_path, -1, SQLITE_STATIC);
 
     int64_t album_id = -1;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        album_id = sqlite3_column_int64(stmt, 0);
+    if (sqlite3_step(db->select_album_by_path) == SQLITE_ROW) {
+        album_id = sqlite3_column_int64(db->select_album_by_path, 0);
     }
-    sqlite3_finalize(stmt);
+    sqlite3_reset(db->select_album_by_path);
 
     if (album_id >= 0) {
         // Update existing album
-        rc = sqlite3_prepare_v2(db->db,
-            "UPDATE albums SET title = ?, artist_id = ?, album_artist_id = ?, "
-            "is_compilation = ?, year = ? WHERE id = ?",
-            -1, &stmt, NULL);
-        if (rc != SQLITE_OK) {
-            if (need_unlock) db_unlock(db);
-            return QUADRATURE_ERROR_INTERNAL;
-        }
-
-        sqlite3_bind_text(stmt, 1, title, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(stmt, 2, artist_id);
+        sqlite3_bind_text(db->update_album_by_id, 1, title, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(db->update_album_by_id, 2, artist_id);
         if (album_artist_id > 0) {
-            sqlite3_bind_int64(stmt, 3, album_artist_id);
+            sqlite3_bind_int64(db->update_album_by_id, 3, album_artist_id);
         } else {
-            sqlite3_bind_null(stmt, 3);
+            sqlite3_bind_null(db->update_album_by_id, 3);
         }
-        sqlite3_bind_int(stmt, 4, is_compilation ? 1 : 0);
+        sqlite3_bind_int(db->update_album_by_id, 4, is_compilation ? 1 : 0);
         if (year > 0) {
-            sqlite3_bind_int(stmt, 5, year);
+            sqlite3_bind_int(db->update_album_by_id, 5, year);
         } else {
-            sqlite3_bind_null(stmt, 5);
+            sqlite3_bind_null(db->update_album_by_id, 5);
         }
-        sqlite3_bind_int64(stmt, 6, album_id);
+        sqlite3_bind_int64(db->update_album_by_id, 6, album_id);
 
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+        sqlite3_step(db->update_album_by_id);
+        sqlite3_reset(db->update_album_by_id);
     } else {
         // Insert new album
-        rc = sqlite3_prepare_v2(db->db,
-            "INSERT INTO albums(title, artist_id, path, year, is_compilation, album_artist_id) "
-            "VALUES(?, ?, ?, ?, ?, ?)",
-            -1, &stmt, NULL);
-        if (rc != SQLITE_OK) {
-            if (need_unlock) db_unlock(db);
-            return QUADRATURE_ERROR_INTERNAL;
-        }
-
-        sqlite3_bind_text(stmt, 1, title, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(stmt, 2, artist_id);
-        sqlite3_bind_text(stmt, 3, folder_path, -1, SQLITE_STATIC);
+        sqlite3_bind_text(db->insert_folder_album, 1, title, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(db->insert_folder_album, 2, artist_id);
+        sqlite3_bind_text(db->insert_folder_album, 3, folder_path, -1, SQLITE_STATIC);
         if (year > 0) {
-            sqlite3_bind_int(stmt, 4, year);
+            sqlite3_bind_int(db->insert_folder_album, 4, year);
         } else {
-            sqlite3_bind_null(stmt, 4);
+            sqlite3_bind_null(db->insert_folder_album, 4);
         }
-        sqlite3_bind_int(stmt, 5, is_compilation ? 1 : 0);
+        sqlite3_bind_int(db->insert_folder_album, 5, is_compilation ? 1 : 0);
         if (album_artist_id > 0) {
-            sqlite3_bind_int64(stmt, 6, album_artist_id);
+            sqlite3_bind_int64(db->insert_folder_album, 6, album_artist_id);
         } else {
-            sqlite3_bind_null(stmt, 6);
+            sqlite3_bind_null(db->insert_folder_album, 6);
         }
 
-        rc = sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+        int rc = sqlite3_step(db->insert_folder_album);
+        sqlite3_reset(db->insert_folder_album);
 
         if (rc == SQLITE_DONE) {
             album_id = sqlite3_last_insert_rowid(db->db);
@@ -576,13 +358,12 @@ int64_t db_get_track_id_by_path(quadrature_db_t* db, const char* path) {
 
 
 // =============================================================================
-// Track Metadata Operations
+// Fingerprint Cache Operations
 // =============================================================================
 
-quadrature_result_t db_insert_track_metadata(quadrature_db_t* db,
-                                              int64_t track_id,
-                                              const db_track_metadata_t* meta) {
-    if (!db || track_id < 0 || !meta) return QUADRATURE_ERROR_INVALID_PARAM;
+quadrature_result_t db_set_track_fingerprint(quadrature_db_t* db, int64_t track_id,
+                                              const char* chromaprint, int duration) {
+    if (!db || track_id <= 0 || !chromaprint) return QUADRATURE_ERROR_INVALID_PARAM;
 
     bool need_unlock = false;
     if (!db->in_transaction) {
@@ -591,36 +372,376 @@ quadrature_result_t db_insert_track_metadata(quadrature_db_t* db,
     }
 
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db,
-        "INSERT OR REPLACE INTO track_metadata("
-        "track_id, raw_json, bitrate, sample_rate, channels, codec, "
-        "album_artist, genre, comment, compilation, disc_total, track_total, has_embedded_art"
-        ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    sqlite3_prepare_v2(db->db,
+        "UPDATE tracks SET chromaprint = ?, chromaprint_duration = ? WHERE id = ?",
         -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        if (need_unlock) db_unlock(db);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
+    sqlite3_bind_text(stmt, 1, chromaprint, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, duration);
+    sqlite3_bind_int64(stmt, 3, track_id);
 
-    sqlite3_bind_int64(stmt, 1, track_id);
-    sqlite3_bind_text(stmt, 2, meta->raw_json ? meta->raw_json : "{}", -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 3, meta->bitrate);
-    sqlite3_bind_int(stmt, 4, meta->sample_rate);
-    sqlite3_bind_int(stmt, 5, meta->channels);
-    sqlite3_bind_text(stmt, 6, meta->codec ? meta->codec : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 7, meta->album_artist ? meta->album_artist : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 8, meta->genre ? meta->genre : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 9, meta->comment ? meta->comment : "", -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 10, meta->compilation ? 1 : 0);
-    sqlite3_bind_int(stmt, 11, meta->disc_total);
-    sqlite3_bind_int(stmt, 12, meta->track_total);
-    sqlite3_bind_int(stmt, 13, meta->has_embedded_art ? 1 : 0);
-
-    rc = sqlite3_step(stmt);
+    int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
     if (need_unlock) db_unlock(db);
     return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+quadrature_result_t db_get_track_fingerprint(quadrature_db_t* db, int64_t track_id,
+                                              char** chromaprint_out, int* duration_out) {
+    if (!db || track_id <= 0 || !chromaprint_out || !duration_out) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    *chromaprint_out = NULL;
+    *duration_out = 0;
+
+    bool need_unlock = false;
+    if (!db->in_transaction) {
+        db_lock(db);
+        need_unlock = true;
+    }
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db->db,
+        "SELECT chromaprint, chromaprint_duration FROM tracks WHERE id = ?",
+        -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, track_id);
+
+    quadrature_result_t res = QUADRATURE_ERROR_FILE_NOT_FOUND;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* fp = (const char*)sqlite3_column_text(stmt, 0);
+        if (fp && fp[0]) {
+            *chromaprint_out = g_strdup(fp);
+            *duration_out = sqlite3_column_int(stmt, 1);
+            res = QUADRATURE_OK;
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    if (need_unlock) db_unlock(db);
+    return res;
+}
+
+// =============================================================================
+// MusicBrainz Resolution Operations
+// =============================================================================
+
+int64_t db_get_or_create_artist_mb(quadrature_db_t* db,
+                                    const char* name,
+                                    const char* sort_name,
+                                    const char* musicbrainz_id) {
+    if (!name || !*name) name = "Unknown Artist";
+
+    bool need_unlock = false;
+    if (!db->in_transaction) {
+        db_lock(db);
+        db_prepare_stmts(db);
+        need_unlock = true;
+    }
+
+    int64_t id = -1;
+
+    // 1. Look up by musicbrainz_id first (if provided)
+    if (musicbrainz_id && *musicbrainz_id) {
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db->db,
+            "SELECT id FROM artists WHERE musicbrainz_id = ?",
+            -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, musicbrainz_id, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            id = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+
+        if (id >= 0) {
+            // Update sort_name if provided
+            if (sort_name && *sort_name) {
+                sqlite3_stmt* upd;
+                sqlite3_prepare_v2(db->db,
+                    "UPDATE artists SET sort_name = ? WHERE id = ? AND (sort_name IS NULL OR sort_name = '')",
+                    -1, &upd, NULL);
+                sqlite3_bind_text(upd, 1, sort_name, -1, SQLITE_STATIC);
+                sqlite3_bind_int64(upd, 2, id);
+                sqlite3_step(upd);
+                sqlite3_finalize(upd);
+            }
+            if (need_unlock) db_unlock(db);
+            return id;
+        }
+    }
+
+    // 2. Look up by name (case-insensitive)
+    sqlite3_stmt* sel;
+    sqlite3_prepare_v2(db->db,
+        "SELECT id FROM artists WHERE name = ? COLLATE NOCASE",
+        -1, &sel, NULL);
+    sqlite3_bind_text(sel, 1, name, -1, SQLITE_STATIC);
+    if (sqlite3_step(sel) == SQLITE_ROW) {
+        id = sqlite3_column_int64(sel, 0);
+    }
+    sqlite3_finalize(sel);
+
+    if (id >= 0) {
+        // Found by name — update with MB data
+        sqlite3_stmt* upd;
+        sqlite3_prepare_v2(db->db,
+            "UPDATE artists SET musicbrainz_id = ?, sort_name = ? WHERE id = ?",
+            -1, &upd, NULL);
+        if (musicbrainz_id && *musicbrainz_id)
+            sqlite3_bind_text(upd, 1, musicbrainz_id, -1, SQLITE_STATIC);
+        else
+            sqlite3_bind_null(upd, 1);
+        if (sort_name && *sort_name)
+            sqlite3_bind_text(upd, 2, sort_name, -1, SQLITE_STATIC);
+        else
+            sqlite3_bind_null(upd, 2);
+        sqlite3_bind_int64(upd, 3, id);
+        sqlite3_step(upd);
+        sqlite3_finalize(upd);
+
+        if (need_unlock) db_unlock(db);
+        return id;
+    }
+
+    // 3. Not found — insert new
+    sqlite3_stmt* ins;
+    sqlite3_prepare_v2(db->db,
+        "INSERT INTO artists(name, musicbrainz_id, sort_name) VALUES(?, ?, ?)",
+        -1, &ins, NULL);
+    sqlite3_bind_text(ins, 1, name, -1, SQLITE_STATIC);
+    if (musicbrainz_id && *musicbrainz_id)
+        sqlite3_bind_text(ins, 2, musicbrainz_id, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(ins, 2);
+    if (sort_name && *sort_name)
+        sqlite3_bind_text(ins, 3, sort_name, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(ins, 3);
+
+    int rc = sqlite3_step(ins);
+    sqlite3_finalize(ins);
+
+    if (rc == SQLITE_DONE) {
+        id = sqlite3_last_insert_rowid(db->db);
+    }
+
+    if (need_unlock) db_unlock(db);
+
+    return id;
+}
+
+quadrature_result_t db_update_album_mb(quadrature_db_t* db, int64_t album_id,
+    const char* musicbrainz_release_id,
+    const char* musicbrainz_release_group_id,
+    const char* release_type,
+    const char* label,
+    const char* barcode,
+    uint16_t year,
+    int mb_status) {
+    if (!db || album_id <= 0) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    bool need_unlock = false;
+    if (!db->in_transaction) {
+        db_lock(db);
+        need_unlock = true;
+    }
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db->db,
+        "UPDATE albums SET "
+        "musicbrainz_release_id = ?, "
+        "musicbrainz_release_group_id = ?, "
+        "release_type = ?, "
+        "label = ?, "
+        "barcode = ?, "
+        "year = CASE WHEN ? > 0 THEN ? ELSE year END, "
+        "mb_status = ?, "
+        "mb_resolved_at = ? "
+        "WHERE id = ?",
+        -1, &stmt, NULL);
+
+    int p = 1;
+    sqlite3_bind_text(stmt, p++, musicbrainz_release_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, p++, musicbrainz_release_group_id, -1, SQLITE_STATIC);
+    if (release_type) sqlite3_bind_text(stmt, p++, release_type, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, p++);
+    if (label) sqlite3_bind_text(stmt, p++, label, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, p++);
+    if (barcode) sqlite3_bind_text(stmt, p++, barcode, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, p++);
+    sqlite3_bind_int(stmt, p++, year);
+    sqlite3_bind_int(stmt, p++, year);
+    sqlite3_bind_int(stmt, p++, mb_status);
+    sqlite3_bind_int64(stmt, p++, (int64_t)time(NULL));
+    sqlite3_bind_int64(stmt, p++, album_id);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (need_unlock) db_unlock(db);
+    return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+quadrature_result_t db_update_track_mb(quadrature_db_t* db, int64_t track_id,
+    const char* musicbrainz_recording_id,
+    const char* title) {
+    if (!db || track_id <= 0) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    bool need_unlock = false;
+    if (!db->in_transaction) {
+        db_lock(db);
+        need_unlock = true;
+    }
+
+    sqlite3_stmt* stmt;
+    if (title && *title) {
+        sqlite3_prepare_v2(db->db,
+            "UPDATE tracks SET musicbrainz_recording_id = ?, title = ? WHERE id = ?",
+            -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, musicbrainz_recording_id, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, title, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 3, track_id);
+    } else {
+        sqlite3_prepare_v2(db->db,
+            "UPDATE tracks SET musicbrainz_recording_id = ? WHERE id = ?",
+            -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, musicbrainz_recording_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 2, track_id);
+    }
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    // Update FTS if title changed
+    if (title && *title && rc == SQLITE_DONE) {
+        sqlite3_stmt* fts;
+        sqlite3_prepare_v2(db->db,
+            "INSERT OR REPLACE INTO tracks_fts(rowid, title) VALUES(?, ?)",
+            -1, &fts, NULL);
+        sqlite3_bind_int64(fts, 1, track_id);
+        sqlite3_bind_text(fts, 2, title, -1, SQLITE_STATIC);
+        sqlite3_step(fts);
+        sqlite3_finalize(fts);
+    }
+
+    if (need_unlock) db_unlock(db);
+    return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+quadrature_result_t db_get_unresolved_albums(quadrature_db_t* db,
+    int64_t** album_ids, size_t* count) {
+    if (!db || !album_ids || !count) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    *album_ids = NULL;
+    *count = 0;
+
+    db_lock(db);
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db->db,
+        "SELECT id FROM albums WHERE mb_status = 0 AND path != '' ORDER BY id",
+        -1, &stmt, NULL);
+
+    size_t cap = 256;
+    int64_t* ids = g_new(int64_t, cap);
+    size_t n = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (n >= cap) {
+            cap *= 2;
+            ids = g_renew(int64_t, ids, cap);
+        }
+        ids[n++] = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    db_unlock(db);
+
+    *album_ids = ids;
+    *count = n;
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_set_album_mb_status(quadrature_db_t* db,
+    int64_t album_id, int status, int64_t resolved_at) {
+    if (!db || album_id <= 0) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    bool need_unlock = false;
+    if (!db->in_transaction) {
+        db_lock(db);
+        need_unlock = true;
+    }
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db->db,
+        "UPDATE albums SET mb_status = ?, mb_resolved_at = ? WHERE id = ?",
+        -1, &stmt, NULL);
+    sqlite3_bind_int(stmt, 1, status);
+    sqlite3_bind_int64(stmt, 2, resolved_at);
+    sqlite3_bind_int64(stmt, 3, album_id);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (need_unlock) db_unlock(db);
+    return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+quadrature_result_t db_update_album_artist(quadrature_db_t* db, int64_t album_id,
+    int64_t artist_id, int64_t album_artist_id, bool is_compilation) {
+    if (!db || album_id <= 0) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    bool need_unlock = false;
+    if (!db->in_transaction) {
+        db_lock(db);
+        need_unlock = true;
+    }
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db->db,
+        "UPDATE albums SET artist_id = ?, album_artist_id = ?, is_compilation = ? WHERE id = ?",
+        -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, artist_id);
+    sqlite3_bind_int64(stmt, 2, album_artist_id);
+    sqlite3_bind_int(stmt, 3, is_compilation ? 1 : 0);
+    sqlite3_bind_int64(stmt, 4, album_id);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (need_unlock) db_unlock(db);
+    return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+// =============================================================================
+// Track Artist Operations (multi-artist via junction table)
+// =============================================================================
+
+quadrature_result_t db_set_track_artists(quadrature_db_t* db, int64_t track_id,
+                                          const db_track_artist_t* artists, size_t count) {
+    if (!db || track_id <= 0 || (!artists && count > 0)) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    bool need_unlock = false;
+    if (!db->in_transaction) {
+        db_lock(db);
+        db_prepare_stmts(db);
+        need_unlock = true;
+    }
+
+    // Delete existing associations
+    sqlite3_bind_int64(db->delete_track_artists, 1, track_id);
+    sqlite3_step(db->delete_track_artists);
+    sqlite3_reset(db->delete_track_artists);
+
+    // Insert new associations
+    for (size_t i = 0; i < count; i++) {
+        sqlite3_bind_int64(db->insert_track_artist, 1, track_id);
+        sqlite3_bind_int64(db->insert_track_artist, 2, artists[i].artist_id);
+        sqlite3_bind_int(db->insert_track_artist, 3, artists[i].role);
+        sqlite3_bind_int(db->insert_track_artist, 4, artists[i].position);
+        sqlite3_step(db->insert_track_artist);
+        sqlite3_reset(db->insert_track_artist);
+    }
+
+    if (need_unlock) db_unlock(db);
+    return QUADRATURE_OK;
 }
 
 // =============================================================================
@@ -689,16 +810,6 @@ quadrature_result_t db_clear_errors_for_path(quadrature_db_t* db, const char* pa
 // =============================================================================
 // Free Functions for New Types
 // =============================================================================
-
-void db_track_metadata_free(db_track_metadata_t* meta) {
-    if (!meta) return;
-    free(meta->raw_json);
-    free(meta->codec);
-    free(meta->album_artist);
-    free(meta->genre);
-    free(meta->comment);
-    free(meta);
-}
 
 void db_indexer_error_free(db_indexer_error_t* err) {
     if (!err) return;

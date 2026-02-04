@@ -1,5 +1,4 @@
 #include "internal.h"
-#include "quadrature/audio/audio_devices.h"
 
 #include <glib.h>
 #include <spa/utils/dict.h>

@@ -4,79 +4,81 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <time.h>
 #include <unistd.h>
 
 // =============================================================================
-// Schema SQL (v3 - folder-based album indexing with error tracking)
+// Schema SQL
 // =============================================================================
 
 static const char* SCHEMA_SQL =
-    // Core music data
+    // Artists
     "CREATE TABLE IF NOT EXISTS artists ("
     "  id INTEGER PRIMARY KEY,"
-    "  name TEXT NOT NULL UNIQUE"
+    "  name TEXT NOT NULL UNIQUE COLLATE NOCASE,"
+    "  musicbrainz_id TEXT,"
+    "  sort_name TEXT"
     ");"
+
+    // Albums
     "CREATE TABLE IF NOT EXISTS albums ("
     "  id INTEGER PRIMARY KEY,"
     "  title TEXT NOT NULL,"
     "  artist_id INTEGER REFERENCES artists(id),"
+    "  album_artist_id INTEGER REFERENCES artists(id),"
     "  path TEXT NOT NULL DEFAULT '',"
     "  year INTEGER,"
-    "  last_updated_at INTEGER,"
+    "  genres TEXT,"
     "  is_compilation INTEGER DEFAULT 0,"
-    "  album_artist_id INTEGER REFERENCES artists(id),"
-    "  UNIQUE(title, artist_id)"
+    "  last_updated_at INTEGER,"
+    "  musicbrainz_release_id TEXT,"
+    "  musicbrainz_release_group_id TEXT,"
+    "  release_type TEXT,"
+    "  label TEXT,"
+    "  barcode TEXT,"
+    "  mb_status INTEGER DEFAULT 0,"
+    "  mb_resolved_at INTEGER"
     ");"
-    "CREATE INDEX IF NOT EXISTS idx_albums_path ON albums(path);"
 
+    // Tracks
     "CREATE TABLE IF NOT EXISTS tracks ("
     "  id INTEGER PRIMARY KEY,"
     "  title TEXT NOT NULL,"
-    "  artist_id INTEGER REFERENCES artists(id),"
     "  album_id INTEGER REFERENCES albums(id),"
     "  path TEXT NOT NULL UNIQUE,"
     "  duration_ms INTEGER NOT NULL,"
     "  track_num INTEGER,"
     "  disc_num INTEGER NOT NULL DEFAULT 1,"
     "  mtime INTEGER NOT NULL DEFAULT 0,"
-    "  size INTEGER NOT NULL DEFAULT 0,"
-    "  last_seen INTEGER NOT NULL DEFAULT 0"
+    "  year INTEGER DEFAULT 0,"
+    "  genre TEXT,"
+    "  metadata TEXT NOT NULL DEFAULT '{}',"
+    "  artist_display TEXT,"
+    "  musicbrainz_recording_id TEXT,"
+    "  chromaprint TEXT,"
+    "  chromaprint_duration INTEGER DEFAULT 0"
     ");"
-    "CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id, track_num);"
-    "CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);"
-    "CREATE INDEX IF NOT EXISTS idx_tracks_last_seen ON tracks(last_seen);"
+
+    // Multi-artist junction table
+    "CREATE TABLE IF NOT EXISTS track_artists ("
+    "  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,"
+    "  artist_id INTEGER NOT NULL REFERENCES artists(id),"
+    "  role INTEGER NOT NULL DEFAULT 0,"      // 0=primary, 1=featuring
+    "  position INTEGER NOT NULL DEFAULT 0,"  // display order
+    "  PRIMARY KEY (track_id, artist_id)"
+    ");"
 
     // Full-text search
     "CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5("
     "  title, content='tracks', content_rowid='id'"
     ");"
 
-    // Track extended metadata (for metadata popup)
-    "CREATE TABLE IF NOT EXISTS track_metadata ("
-    "  track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,"
-    "  raw_json TEXT NOT NULL,"
-    "  bitrate INTEGER,"
-    "  sample_rate INTEGER,"
-    "  channels INTEGER,"
-    "  codec TEXT,"
-    "  album_artist TEXT,"
-    "  genre TEXT,"
-    "  comment TEXT,"
-    "  compilation INTEGER DEFAULT 0,"
-    "  disc_total INTEGER,"
-    "  track_total INTEGER,"
-    "  has_embedded_art INTEGER DEFAULT 0"
-    ");"
-
-    // Indexer errors for user review (path-based, no FK constraints)
+    // Indexer errors
     "CREATE TABLE IF NOT EXISTS indexer_errors ("
     "  id INTEGER PRIMARY KEY,"
     "  path TEXT NOT NULL,"
     "  message TEXT NOT NULL,"
     "  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");"
-    "CREATE INDEX IF NOT EXISTS idx_errors_path ON indexer_errors(path);"
 
     // Watch paths
     "CREATE TABLE IF NOT EXISTS watch_paths ("
@@ -86,11 +88,21 @@ static const char* SCHEMA_SQL =
     "  last_scanned INTEGER"
     ");"
 
-    // Directory mtime cache (fast change detection)
-    "CREATE TABLE IF NOT EXISTS dir_mtime ("
-    "  path TEXT PRIMARY KEY,"
-    "  mtime INTEGER NOT NULL"
-    ");";
+    // Indexes
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_path ON albums(path) WHERE path != '';"
+    "CREATE INDEX IF NOT EXISTS idx_albums_artist_year_title ON albums(artist_id, year, title);"
+    "CREATE INDEX IF NOT EXISTS idx_albums_mb_release ON albums(musicbrainz_release_id) WHERE musicbrainz_release_id IS NOT NULL;"
+    "CREATE INDEX IF NOT EXISTS idx_albums_mb_status ON albums(mb_status);"
+    "CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id, track_num);"
+    "CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);"
+    "CREATE INDEX IF NOT EXISTS idx_tracks_year ON tracks(year);"
+    "CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre);"
+    "CREATE INDEX IF NOT EXISTS idx_tracks_album_genre ON tracks(album_id, genre);"
+    "CREATE INDEX IF NOT EXISTS idx_tracks_mb_recording ON tracks(musicbrainz_recording_id) WHERE musicbrainz_recording_id IS NOT NULL;"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_artists_mbid ON artists(musicbrainz_id) WHERE musicbrainz_id IS NOT NULL;"
+    "CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);"
+    "CREATE INDEX IF NOT EXISTS idx_track_artists_track ON track_artists(track_id, artist_id, role, position);"
+    "CREATE INDEX IF NOT EXISTS idx_errors_path ON indexer_errors(path);";
 
 // =============================================================================
 // Helper Functions
@@ -109,83 +121,13 @@ static quadrature_result_t apply_schema(sqlite3* db) {
     return QUADRATURE_OK;
 }
 
-// Helper to check if a column exists in a table
-static bool column_exists(sqlite3* db, const char* table, const char* column) {
-    char sql[256];
-    snprintf(sql, sizeof(sql),
-        "SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name='%s'",
-        table, column);
-
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) return false;
-
-    bool exists = false;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        exists = sqlite3_column_int(stmt, 0) > 0;
-    }
-    sqlite3_finalize(stmt);
-    return exists;
-}
-
-// Helper to add a column if it doesn't exist
-static void add_column_if_missing(sqlite3* db, const char* table,
-                                   const char* column, const char* type_and_default) {
-    if (column_exists(db, table, column)) return;
-
-    char sql[512];
-    snprintf(sql, sizeof(sql), "ALTER TABLE %s ADD COLUMN %s %s",
-             table, column, type_and_default);
-
-    char* err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        g_debug("Migration note: %s", err ? err : "unknown");
-        sqlite3_free(err);
-    }
-}
-
-// Apply migrations for existing databases
-static quadrature_result_t apply_migrations(sqlite3* db) {
-    // v2 migration: last_updated_at column
-    add_column_if_missing(db, "albums", "last_updated_at", "INTEGER");
-
-    // v3 migrations: folder-based album indexing
-    add_column_if_missing(db, "albums", "is_compilation", "INTEGER DEFAULT 0");
-    add_column_if_missing(db, "albums", "album_artist_id", "INTEGER REFERENCES artists(id)");
-
-    // Create indexes if they don't exist (idempotent)
-    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_albums_path ON albums(path)",
-                 NULL, NULL, NULL);
-    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_errors_path ON indexer_errors(path)",
-                 NULL, NULL, NULL);
-
-    // v4 migration: Migrate old FK-based indexer_errors table to path-based
-    // Check if old schema exists (has track_id column)
-    if (column_exists(db, "indexer_errors", "track_id")) {
-        // Drop old table and recreate with new schema
-        sqlite3_exec(db, "DROP TABLE IF EXISTS indexer_errors", NULL, NULL, NULL);
-        sqlite3_exec(db,
-            "CREATE TABLE IF NOT EXISTS indexer_errors ("
-            "  id INTEGER PRIMARY KEY,"
-            "  path TEXT NOT NULL,"
-            "  message TEXT NOT NULL,"
-            "  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
-            ")",
-            NULL, NULL, NULL);
-        sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_errors_path ON indexer_errors(path)",
-                     NULL, NULL, NULL);
-    }
-
-    return QUADRATURE_OK;
-}
-
 static quadrature_result_t apply_pragmas(sqlite3* db) {
     sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA temp_store=MEMORY", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA cache_size=-64000", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
+    sqlite3_exec(db, "PRAGMA mmap_size=268435456", NULL, NULL, NULL);  // 256MB mmap for reads
     sqlite3_busy_timeout(db, 5000);
     return QUADRATURE_OK;
 }
@@ -213,21 +155,16 @@ void db_prepare_stmts(quadrature_db_t* db) {
         "INSERT OR IGNORE INTO artists(name) VALUES(?)",
         -1, &db->insert_artist, NULL);
     sqlite3_prepare_v2(db->db,
-        "SELECT id FROM artists WHERE name=?",
+        "SELECT id FROM artists WHERE name=? COLLATE NOCASE",
         -1, &db->select_artist, NULL);
     sqlite3_prepare_v2(db->db,
-        "INSERT OR IGNORE INTO albums(title,artist_id,path,year) VALUES(?,?,?,?)",
-        -1, &db->insert_album, NULL);
-    sqlite3_prepare_v2(db->db,
-        "SELECT id FROM albums WHERE title=? AND artist_id=?",
-        -1, &db->select_album, NULL);
-    sqlite3_prepare_v2(db->db,
-        "INSERT INTO tracks(title,artist_id,album_id,path,duration_ms,track_num,disc_num,mtime,size,last_seen) "
+        "INSERT INTO tracks(title,album_id,path,duration_ms,track_num,disc_num,mtime,year,genre,metadata) "
         "VALUES(?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(path) DO UPDATE SET "
-        "title=excluded.title, artist_id=excluded.artist_id, album_id=excluded.album_id, "
-        "duration_ms=excluded.duration_ms, track_num=excluded.track_num, disc_num=excluded.disc_num, "
-        "mtime=excluded.mtime, size=excluded.size, last_seen=excluded.last_seen",
+        "title=excluded.title, album_id=excluded.album_id, "
+        "duration_ms=excluded.duration_ms, track_num=excluded.track_num, "
+        "disc_num=excluded.disc_num, mtime=excluded.mtime, "
+        "year=excluded.year, genre=excluded.genre, metadata=excluded.metadata",
         -1, &db->upsert_track, NULL);
     sqlite3_prepare_v2(db->db,
         "INSERT OR REPLACE INTO tracks_fts(rowid, title) VALUES(?, ?)",
@@ -238,17 +175,44 @@ void db_prepare_stmts(quadrature_db_t* db) {
     sqlite3_prepare_v2(db->db,
         "DELETE FROM tracks_fts WHERE rowid = ?",
         -1, &db->delete_fts, NULL);
+    sqlite3_prepare_v2(db->db,
+        "INSERT OR REPLACE INTO track_artists(track_id,artist_id,role,position) "
+        "VALUES(?,?,?,?)",
+        -1, &db->insert_track_artist, NULL);
+    sqlite3_prepare_v2(db->db,
+        "DELETE FROM track_artists WHERE track_id = ?",
+        -1, &db->delete_track_artists, NULL);
+
+    // Cached statements for indexer hot paths
+    sqlite3_prepare_v2(db->db,
+        "SELECT id FROM tracks WHERE path = ?",
+        -1, &db->select_track_by_path, NULL);
+    sqlite3_prepare_v2(db->db,
+        "SELECT id FROM albums WHERE path = ?",
+        -1, &db->select_album_by_path, NULL);
+    sqlite3_prepare_v2(db->db,
+        "UPDATE albums SET title = ?, artist_id = ?, album_artist_id = ?, "
+        "is_compilation = ?, year = ? WHERE id = ?",
+        -1, &db->update_album_by_id, NULL);
+    sqlite3_prepare_v2(db->db,
+        "INSERT INTO albums(title, artist_id, path, year, is_compilation, album_artist_id) "
+        "VALUES(?, ?, ?, ?, ?, ?)",
+        -1, &db->insert_folder_album, NULL);
 }
 
 void db_finalize_stmts(quadrature_db_t* db) {
     if (db->insert_artist) { sqlite3_finalize(db->insert_artist); db->insert_artist = NULL; }
     if (db->select_artist) { sqlite3_finalize(db->select_artist); db->select_artist = NULL; }
-    if (db->insert_album) { sqlite3_finalize(db->insert_album); db->insert_album = NULL; }
-    if (db->select_album) { sqlite3_finalize(db->select_album); db->select_album = NULL; }
     if (db->upsert_track) { sqlite3_finalize(db->upsert_track); db->upsert_track = NULL; }
     if (db->insert_fts) { sqlite3_finalize(db->insert_fts); db->insert_fts = NULL; }
     if (db->delete_track) { sqlite3_finalize(db->delete_track); db->delete_track = NULL; }
     if (db->delete_fts) { sqlite3_finalize(db->delete_fts); db->delete_fts = NULL; }
+    if (db->insert_track_artist) { sqlite3_finalize(db->insert_track_artist); db->insert_track_artist = NULL; }
+    if (db->delete_track_artists) { sqlite3_finalize(db->delete_track_artists); db->delete_track_artists = NULL; }
+    if (db->select_track_by_path) { sqlite3_finalize(db->select_track_by_path); db->select_track_by_path = NULL; }
+    if (db->select_album_by_path) { sqlite3_finalize(db->select_album_by_path); db->select_album_by_path = NULL; }
+    if (db->update_album_by_id) { sqlite3_finalize(db->update_album_by_id); db->update_album_by_id = NULL; }
+    if (db->insert_folder_album) { sqlite3_finalize(db->insert_folder_album); db->insert_folder_album = NULL; }
 }
 
 // =============================================================================
@@ -263,8 +227,6 @@ quadrature_result_t db_open(const char* path, quadrature_db_t** out) {
 
     pthread_mutex_init(&db->lock, NULL);
     atomic_init(&db->cancel_flag, 0);
-    db_cache_init(&db->artist_cache);
-    db_cache_init(&db->album_cache);
 
     int rc = sqlite3_open(path ? path : ":memory:", &db->db);
     if (rc != SQLITE_OK) {
@@ -296,16 +258,6 @@ quadrature_result_t db_open(const char* path, quadrature_db_t** out) {
         return res;
     }
 
-    // Apply migrations for existing databases
-    res = apply_migrations(db->db);
-    if (res != QUADRATURE_OK) {
-        sqlite3_close(db->db);
-        pthread_mutex_destroy(&db->lock);
-        free(db->db_path);
-        free(db);
-        return res;
-    }
-
     *out = db;
     return QUADRATURE_OK;
 }
@@ -314,12 +266,45 @@ quadrature_result_t db_open_memory(quadrature_db_t** out) {
     return db_open(NULL, out);
 }
 
+quadrature_result_t db_open_readonly(const char* path, quadrature_db_t** out) {
+    if (!out || !path) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    quadrature_db_t* db = calloc(1, sizeof(quadrature_db_t));
+    if (!db) return QUADRATURE_ERROR_OUT_OF_MEMORY;
+
+    pthread_mutex_init(&db->lock, NULL);
+    atomic_init(&db->cancel_flag, 0);
+
+    /* Open read-write + create so we can fully participate in WAL mode
+     * (access -shm file) and succeed even if the DB doesn't exist yet.
+     * SQLITE_OPEN_READONLY cannot reliably read WAL pages because it may
+     * fail to open/create the shared-memory file.
+     * SQLITE_OPEN_CREATE ensures library_cache is never NULL at startup.
+     * We use PRAGMA query_only = ON below to prevent any actual writes. */
+    int rc = sqlite3_open_v2(path, &db->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+    if (rc != SQLITE_OK) {
+        g_critical("Failed to open database read-only: %s", sqlite3_errmsg(db->db));
+        pthread_mutex_destroy(&db->lock);
+        free(db);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    db->db_path = strdup(path);
+
+    /* Prevent writes while allowing full WAL read visibility.
+     * journal_mode is inherited from the database file (already WAL from writer),
+     * so no need to set it here. READWRITE + query_only gives us WAL read
+     * access without the ability to modify data. */
+    sqlite3_exec(db->db, "PRAGMA query_only = ON;", NULL, NULL, NULL);
+
+    *out = db;
+    return QUADRATURE_OK;
+}
+
 void db_close(quadrature_db_t* db) {
     if (!db) return;
 
     db_finalize_stmts(db);
-    db_cache_destroy(&db->artist_cache);
-    db_cache_destroy(&db->album_cache);
     sqlite3_close(db->db);
     pthread_mutex_destroy(&db->lock);
     free(db->db_path);
@@ -388,8 +373,8 @@ quadrature_result_t db_rollback(quadrature_db_t* db) {
 // Track State Operations
 // =============================================================================
 
-quadrature_result_t db_get_track_state(quadrature_db_t* db, const char* path,
-                                       int64_t* mtime, int64_t* size) {
+quadrature_result_t db_get_track_mtime(quadrature_db_t* db, const char* path,
+                                        int64_t* mtime) {
     if (!db || !path) return QUADRATURE_ERROR_INVALID_PARAM;
 
     bool need_unlock = false;
@@ -400,68 +385,19 @@ quadrature_result_t db_get_track_state(quadrature_db_t* db, const char* path,
 
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(db->db,
-        "SELECT mtime, size FROM tracks WHERE path = ?",
+        "SELECT mtime FROM tracks WHERE path = ?",
         -1, &stmt, NULL);
     sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
 
     quadrature_result_t res = QUADRATURE_ERROR_FILE_NOT_FOUND;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         if (mtime) *mtime = sqlite3_column_int64(stmt, 0);
-        if (size) *size = sqlite3_column_int64(stmt, 1);
         res = QUADRATURE_OK;
     }
     sqlite3_finalize(stmt);
 
     if (need_unlock) db_unlock(db);
     return res;
-}
-
-quadrature_result_t db_mark_tracks_seen(quadrature_db_t* db, const char* dir_path, int64_t timestamp) {
-    if (!db || !dir_path) return QUADRATURE_ERROR_INVALID_PARAM;
-
-    bool need_unlock = false;
-    if (!db->in_transaction) {
-        db_lock(db);
-        need_unlock = true;
-    }
-
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db->db,
-        "UPDATE tracks SET last_seen = ? WHERE path LIKE ? || '%'",
-        -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, timestamp);
-    sqlite3_bind_text(stmt, 2, dir_path, -1, SQLITE_STATIC);
-
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    if (need_unlock) db_unlock(db);
-    return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
-}
-
-quadrature_result_t db_delete_unseen_tracks(quadrature_db_t* db, int64_t older_than) {
-    if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
-
-    db_lock(db);
-
-    // First delete from FTS
-    sqlite3_exec(db->db,
-        "DELETE FROM tracks_fts WHERE rowid IN "
-        "(SELECT id FROM tracks WHERE last_seen > 0 AND last_seen < ?)",
-        NULL, NULL, NULL);
-
-    // Then delete from tracks
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db->db,
-        "DELETE FROM tracks WHERE last_seen > 0 AND last_seen < ?",
-        -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, older_than);
-
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    db_unlock(db);
-    return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
 }
 
 // =============================================================================

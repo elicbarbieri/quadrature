@@ -7,7 +7,7 @@
 
 #include "internal.h"
 #include "../internal.h"
-#include "quadrature/database/database.h"
+#include "quadrature/quadrature_database.h"
 
 #include <glib.h>
 #include <string.h>
@@ -242,7 +242,7 @@ static void errors_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer da
     GtkWidget *expander = gtk_tree_expander_new();
     gtk_tree_expander_set_indent_for_icon(GTK_TREE_EXPANDER(expander), TRUE);
 
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(box, "errors-tree-row");
 
     GtkWidget *icon = gtk_image_new();
@@ -268,10 +268,10 @@ static void errors_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer dat
     (void)data;
 
     GtkTreeListRow *row = gtk_list_item_get_item(li);
-    if (!row) return;
+    g_assert(row != NULL);  /* GTK row binding must provide a row */
 
     ErrorItem *item = gtk_tree_list_row_get_item(row);
-    if (!item) return;
+    g_assert(item != NULL);  /* Tree list row must have an item */
 
     GtkWidget *expander = gtk_list_item_get_child(li);
     gtk_tree_expander_set_list_row(GTK_TREE_EXPANDER(expander), row);
@@ -449,11 +449,12 @@ static void build_root_model(ErrorsViewData *vd) {
 // =============================================================================
 
 GtkWidget *errors_view_new(quadrature_db_t *db) {
-    GtkWidget *container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    GtkWidget *container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_margin_start(container, 16);
     gtk_widget_set_margin_end(container, 16);
     gtk_widget_set_margin_top(container, 8);
     gtk_widget_set_margin_bottom(container, 16);
+    gtk_widget_add_css_class(container, "errors-view-container");
 
     ErrorsViewData *vd = g_new0(ErrorsViewData, 1);
     vd->db = db;
@@ -507,7 +508,8 @@ GtkWidget *errors_view_new(quadrature_db_t *db) {
 
 void errors_view_refresh(GtkWidget *view) {
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
-    if (!vd || !vd->db) return;
+    g_assert(vd != NULL);       /* View must have been created via errors_view_new */
+    g_assert(vd->db != NULL);   /* Database must be valid */
 
     // Get total error count
     size_t total_count = 0;
@@ -531,7 +533,7 @@ void errors_view_set_callbacks(GtkWidget *view,
                                 void (*on_path)(const char *path, gpointer data),
                                 gpointer user_data) {
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
-    if (!vd) return;
+    g_assert(vd != NULL);  /* View must have been created via errors_view_new */
 
     vd->on_navigate_to_path = on_path;
     vd->user_data = user_data;
@@ -539,7 +541,8 @@ void errors_view_set_callbacks(GtkWidget *view,
 
 size_t errors_view_get_count(GtkWidget *view) {
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
-    if (!vd || !vd->db) return 0;
+    g_assert(vd != NULL);       /* View must have been created via errors_view_new */
+    g_assert(vd->db != NULL);   /* Database must be valid */
 
     size_t count = 0;
     db_get_error_count(vd->db, vd->path_filter, &count);
@@ -548,7 +551,7 @@ size_t errors_view_get_count(GtkWidget *view) {
 
 void errors_view_set_path_filter(GtkWidget *view, const char *path_filter) {
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
-    if (!vd) return;
+    g_assert(vd != NULL);  /* View must have been created via errors_view_new */
 
     g_free(vd->path_filter);
     vd->path_filter = path_filter ? g_strdup(path_filter) : NULL;

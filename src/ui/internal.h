@@ -8,7 +8,8 @@
 #define QUADRATURE_UI_INTERNAL_H
 
 #include <gtk/gtk.h>
-#include "quadrature/audio/audio_pipeline.h"
+#include "quadrature/quadrature_audio.h"
+#include "quadrature/quadrature_library.h"
 #include "quadrature/ui/app_settings.h"
 
 G_BEGIN_DECLS
@@ -35,6 +36,49 @@ static inline void ui_toggle_css(GtkWidget *w, const char *cls, gboolean on) {
     else    gtk_widget_remove_css_class(w, cls);
 }
 
+/* "Various Artists" is a synthetic placeholder for compilations, not a real artist.
+ * UI elements referencing it should be inactive (dimmed, non-clickable). */
+static inline gboolean ui_is_various_artists(const char *name) {
+    return name && g_ascii_strcasecmp(name, "Various Artists") == 0;
+}
+
+/* Clear all children from a GtkBox */
+static inline void ui_box_clear(GtkBox *box) {
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(box))))
+        gtk_box_remove(box, child);
+}
+
+/* Populate a GtkBox with genre pill labels. Splits on semicolon,
+ * shows at most max_show pills. Hides the box if no genres. */
+static inline void ui_populate_genre_pills(GtkBox *box, const char *genres, guint max_show) {
+    ui_box_clear(box);
+
+    if (!genres || !genres[0]) {
+        gtk_widget_set_visible(GTK_WIDGET(box), FALSE);
+        return;
+    }
+
+    gchar **parts = g_strsplit(genres, ";", 0);
+    guint n = g_strv_length(parts);
+    guint shown = 0;
+
+    for (guint i = 0; i < n && shown < max_show; i++) {
+        g_strstrip(parts[i]);
+        if (!parts[i][0]) continue;
+
+        GtkWidget *pill = gtk_label_new(parts[i]);
+        gtk_label_set_ellipsize(GTK_LABEL(pill), PANGO_ELLIPSIZE_END);
+        gtk_label_set_max_width_chars(GTK_LABEL(pill), 18);
+        gtk_widget_add_css_class(pill, "genre-pill");
+        gtk_box_append(box, pill);
+        shown++;
+    }
+
+    g_strfreev(parts);
+    gtk_widget_set_visible(GTK_WIDGET(box), shown > 0);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * SpectrumDisplay Widget
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -43,7 +87,7 @@ static inline void ui_toggle_css(GtkWidget *w, const char *cls, gboolean on) {
 G_DECLARE_FINAL_TYPE(UiSpectrum, ui_spectrum, UI, SPECTRUM, GtkWidget)
 
 GtkWidget *ui_spectrum_new(int num_bars);
-void ui_spectrum_set_bars(UiSpectrum *s, const float *bars, int count);
+void ui_spectrum_set_bars(UiSpectrum *s, const float *left, const float *right, int count);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * ChannelStrip Widget
@@ -67,16 +111,23 @@ typedef enum {
     CHANNEL_MODE_ON_AIR          /* Live broadcast */
 } ChannelMode;
 
-GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline);
+GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, library_cache_t *library);
 void ui_channel_strip_update(UiChannelStrip *strip, audio_pipeline_t *pipeline);
 void ui_channel_strip_set_spectrum_visible(UiChannelStrip *strip, gboolean visible);
 void ui_channel_strip_set_device_name(UiChannelStrip *strip, const char *device_name);
 int ui_channel_strip_get_channel_id(UiChannelStrip *strip);
 quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *strip,
+                                                 int64_t track_id,
                                                  const char *path,
                                                  const char *title,
                                                  const char *artist,
                                                  const char *album);
+void ui_channel_strip_update_track_display(UiChannelStrip *strip,
+                                            int64_t track_id,
+                                            const char *path,
+                                            const char *title,
+                                            const char *artist,
+                                            const char *album);
 
 void ui_channel_strip_set_device_state(UiChannelStrip *strip, DeviceState state);
 DeviceState ui_channel_strip_get_device_state(UiChannelStrip *strip);
@@ -86,29 +137,14 @@ void ui_channel_strip_set_focused(UiChannelStrip *strip, gboolean focused);
 gboolean ui_channel_strip_get_focused(UiChannelStrip *strip);
 gboolean ui_channel_strip_is_active(UiChannelStrip *strip);
 
-/* Album context API */
-#include "quadrature/database/database.h"
-void ui_channel_strip_set_album_context(UiChannelStrip *strip,
-                                         int64_t album_id,
-                                         const char *album_name,
-                                         const db_track_t *tracks,
-                                         int track_count,
-                                         int current_index);
-void ui_channel_strip_clear_album_context(UiChannelStrip *strip);
-int64_t ui_channel_strip_get_album_id(UiChannelStrip *strip);
-int ui_channel_strip_get_track_index(UiChannelStrip *strip);
-int ui_channel_strip_get_track_count(UiChannelStrip *strip);
-gboolean ui_channel_strip_has_album_context(UiChannelStrip *strip);
+/* Track context query - uses LibraryCache for album context */
+int64_t ui_channel_strip_get_current_track_id(UiChannelStrip *strip);
 
 /* Track navigation */
 gboolean ui_channel_strip_previous_track(UiChannelStrip *strip);
 gboolean ui_channel_strip_next_track(UiChannelStrip *strip);
 gboolean ui_channel_strip_can_go_previous(UiChannelStrip *strip);
 gboolean ui_channel_strip_can_go_next(UiChannelStrip *strip);
-
-/* Autoplay control */
-void ui_channel_strip_set_autoplay(UiChannelStrip *strip, gboolean autoplay);
-gboolean ui_channel_strip_get_autoplay(UiChannelStrip *strip);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * TransportBar Widget
@@ -135,6 +171,7 @@ G_DECLARE_FINAL_TYPE(UiWindow, ui_window, UI, WINDOW, GtkApplicationWindow)
 
 GtkWidget *ui_window_new(GtkApplication *app,
                          audio_pipeline_t *pipeline,
+                         library_cache_t *library_cache,
                          app_settings_t *settings);
 
 void ui_window_navigate_to(UiWindow *win, const char *view);
@@ -155,10 +192,7 @@ void ui_window_show_toast(UiWindow *win, const char *message);
 #define UI_TYPE_METADATA_DIALOG (ui_metadata_dialog_get_type())
 G_DECLARE_FINAL_TYPE(UiMetadataDialog, ui_metadata_dialog, UI, METADATA_DIALOG, GtkWindow)
 
-GtkWidget *ui_metadata_dialog_new(GtkWindow *parent);
-void ui_metadata_dialog_set_track(UiMetadataDialog *dialog,
-                                   const db_track_t *track,
-                                   const db_track_metadata_t *metadata);
+GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t *track);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Library Module (see library/internal.h for full API)
@@ -167,39 +201,109 @@ void ui_metadata_dialog_set_track(UiMetadataDialog *dialog,
 #include "library/internal.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Row Helpers (row_helpers.c)
+ *
+ * Functions for creating consistent list rows from LibraryCache data.
+ * All row creation functions store entity IDs for handler access.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Size groups for column alignment across multiple rows in a list.
+ * Pass NULL for any group to skip alignment for that column. */
+typedef struct {
+    GtkSizeGroup *col1;  /* Left content column (title/name) */
+    GtkSizeGroup *col2;  /* Right content column (metadata/art strip) */
+} UiRowSizeGroups;
+
+/* Attach click handlers to a row. Handlers receive entity ID from row data. */
+void ui_row_attach_handlers(GtkWidget *row, RowCallbacks *callbacks);
+
+/* GtkListBox row-activated handler. Connect to "row-activated" signal for Enter key support.
+ * Reads callbacks from child's "row-handler-data" (set by ui_row_attach_handlers). */
+void ui_list_box_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_data);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Row Creation Helpers
  *
- * Create fully-populated, interactive row widgets from database types.
- * Each row is wrapped in a clickable button with handlers attached.
- * Entity IDs stored via g_object_set_data() for handler access.
+ * Create rows from LibraryCache data. Rows are stateless widgets.
+ * Click handlers attached separately via ui_row_attach_handlers().
  *
- * Click behaviors:
- *   - Artist row: left-click navigates to artist detail
- *   - Album row: left-click navigates to album detail, right-click queues track 1
- *   - Track row: right-click queues track to focused channel
+ * Each row stores entity data via g_object_set_data():
+ *   - Artist rows: "artist-id"
+ *   - Album rows: "album-id"
+ *   - Track rows: "track-id", "track-path", "album-id"
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Format duration in milliseconds to "M:SS" string */
 void ui_format_duration(uint32_t ms, char *buf, size_t len);
 
-/* Create clickable artist row. Left-click calls on_navigate(ARTIST, id). */
-GtkWidget *ui_create_artist_row(const db_artist_t *artist,
+/* Create artist row with name and album/track counts.
+ * Optionally shows album art strip (up to 6 thumbnails).
+ * size_groups: optional size groups for column alignment (NULL to skip) */
+GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
+                                 library_cache_t *cache,
+                                 ArtworkManager *art_mgr,
                                  gboolean show_art_strip,
-                                 const LibraryCallbacks *cbs);
+                                 UiRowSizeGroups *size_groups);
 
-/* Create clickable album row. Left-click calls on_navigate(ALBUM, id).
- * Right-click calls on_play() with track 1 of the album. */
-GtkWidget *ui_create_album_row(const db_album_t *album,
+/* Create album row with art, title, artist, year, track count.
+ * cache: library cache for resolving first track (NULL to skip first-track-id)
+ * artist_cbs: optional callbacks for artist name click (navigate to artist)
+ * size_groups: optional size groups for column alignment (NULL to skip)
+ * Stores: "album-id", "first-track-id" (if cache provided and album has tracks) */
+GtkWidget *ui_create_album_row(const library_album_info_t *album,
+                                library_cache_t *cache,
                                 ArtworkManager *art_mgr,
                                 gboolean show_count,
-                                quadrature_db_t *db,
-                                const LibraryCallbacks *cbs);
+                                RowCallbacks *artist_cbs,
+                                UiRowSizeGroups *size_groups);
 
-/* Create track row. Right-click calls on_play() with track info. */
-GtkWidget *ui_create_track_row(const db_track_t *track,
+/* Create track row with art, title, album, artist buttons, year, duration.
+ * show_album_info controls visibility of album column.
+ * artist_cbs: callbacks for artist button clicks (navigate to artist)
+ * album_cbs: callbacks for album button click (navigate to album)
+ * size_groups: optional size groups for column alignment (NULL to skip)
+ * Stores: "track-id", "track-path", "track-artists" */
+GtkWidget *ui_create_track_row(const library_track_info_t *track,
+                                library_cache_t *cache,
                                 ArtworkManager *art_mgr,
-                                gboolean show_track_disc,
-                                const LibraryCallbacks *cbs);
+                                gboolean show_album_info,
+                                RowCallbacks *artist_cbs,
+                                RowCallbacks *album_cbs,
+                                UiRowSizeGroups *size_groups);
+
+/* Create album detail track item (compact row for album detail view).
+ * Shows track number, title, featuring artists, info button, duration.
+ * artist_cbs: callbacks for featuring artist button clicks
+ * Stores: "track-id", "track-path" */
+GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
+                                               library_cache_t *cache,
+                                               RowCallbacks *artist_cbs);
+
+/* Create disc separator header for multi-disc albums.
+ * Shows "DISC N" label with subtle styling. */
+GtkWidget *ui_create_disc_header(uint16_t disc_num);
+
+/* Create album detail card for artist detail view.
+ * Contains: album art, metadata, preview track list with automatic disc headers.
+ * Stores: "album-id" on the card widget.
+ * max_preview_tracks: limit of tracks to show (0 for all)
+ * track_cbs: optional callbacks for track rows (NULL to skip handler attachment)
+ * artist_cbs: optional callbacks for artist buttons in track rows */
+GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
+                                        const GPtrArray *tracks,
+                                        library_cache_t *cache,
+                                        ArtworkManager *art_mgr,
+                                        guint max_preview_tracks,
+                                        RowCallbacks *track_cbs,
+                                        RowCallbacks *artist_cbs);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * List View Loading States
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+void ui_list_view_set_loading(GtkWidget *list, gboolean loading);
+void ui_list_view_set_empty(GtkWidget *list, const char *message);
+void ui_list_view_set_error(GtkWidget *list, const char *message, GCallback retry_cb);
 
 G_END_DECLS
 

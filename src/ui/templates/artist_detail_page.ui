@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Artist Detail Page Template
+
+  Complete artist detail page with scrollable content.
+  Contains: artist name, stats, albums list, and "Appears On" section with toggle.
+
+  C code populates metadata and dynamically adds album cards to containers.
+-->
+<interface>
+  <object class="GtkScrolledWindow" id="artist_page_scroll">
+    <property name="vexpand">true</property>
+    <property name="hscrollbar-policy">never</property>
+    <property name="vscrollbar-policy">automatic</property>
+
+    <child>
+      <object class="GtkBox" id="artist_page_content">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+        <property name="margin-start">24</property>
+        <property name="margin-end">24</property>
+        <property name="margin-top">16</property>
+        <property name="margin-bottom">24</property>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             ARTIST HEADER: Name + Stats
+             ═══════════════════════════════════════════════════════════════════ -->
+        <child>
+          <object class="GtkBox" id="artist_header">
+            <property name="orientation">vertical</property>
+            <property name="spacing">0</property>
+            <property name="margin-bottom">16</property>
+            <style>
+              <class name="artist-header"/>
+            </style>
+
+            <!-- Artist Name -->
+            <child>
+              <object class="GtkLabel" id="artist_name">
+                <property name="label">Artist Name</property>
+                <property name="xalign">0</property>
+                <property name="wrap">true</property>
+                <property name="wrap-mode">word-char</property>
+                <property name="selectable">true</property>
+                <style>
+                  <class name="detail-title"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Artist Stats -->
+            <child>
+              <object class="GtkLabel" id="artist_stats">
+                <property name="label">4 albums - 89 tracks - 5h 23m</property>
+                <property name="xalign">0</property>
+                <property name="selectable">true</property>
+                <property name="margin-top">6</property>
+                <style>
+                  <class name="detail-meta"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             ALBUMS SECTION
+             ═══════════════════════════════════════════════════════════════════ -->
+        <child>
+          <object class="GtkLabel" id="albums_section_header">
+            <property name="label">ALBUMS</property>
+            <property name="xalign">0</property>
+            <property name="margin-top">8</property>
+            <property name="margin-bottom">12</property>
+            <style>
+              <class name="detail-section-header"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Albums Container (album cards added by C code) -->
+        <child>
+          <object class="GtkBox" id="artist_albums_container">
+            <property name="orientation">vertical</property>
+            <property name="spacing">0</property>
+            <style>
+              <class name="artist-albums-container"/>
+            </style>
+            <!-- Album cards added dynamically by C code -->
+          </object>
+        </child>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             APPEARS ON SECTION
+             ═══════════════════════════════════════════════════════════════════ -->
+        <child>
+          <object class="GtkBox" id="appears_on_section">
+            <property name="orientation">vertical</property>
+            <property name="spacing">0</property>
+            <property name="margin-top">24</property>
+            <style>
+              <class name="appears-on-section"/>
+            </style>
+
+            <!-- Section Header with Toggle Buttons -->
+            <child>
+              <object class="GtkBox" id="appears_on_header">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                <property name="margin-bottom">12</property>
+
+                <!-- "APPEARS ON" Label -->
+                <child>
+                  <object class="GtkLabel" id="appears_on_label">
+                    <property name="label">APPEARS ON</property>
+                    <property name="xalign">0</property>
+                    <property name="hexpand">true</property>
+                    <style>
+                      <class name="detail-section-header"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Toggle Buttons (Albums/Tracks) -->
+                <child>
+                  <object class="GtkBox" id="appears_on_toggles">
+                    <property name="orientation">horizontal</property>
+                    <property name="spacing">0</property>
+                    <style>
+                      <class name="linked"/>
+                    </style>
+
+                    <child>
+                      <object class="GtkToggleButton" id="toggle_albums_btn">
+                        <property name="label">Albums</property>
+                        <property name="active">true</property>
+                        <style>
+                          <class name="toggle-btn"/>
+                        </style>
+                      </object>
+                    </child>
+
+                    <child>
+                      <object class="GtkToggleButton" id="toggle_tracks_btn">
+                        <property name="label">Tracks</property>
+                        <style>
+                          <class name="toggle-btn"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Stack for Albums/Tracks View -->
+            <child>
+              <object class="GtkStack" id="appears_on_stack">
+                <property name="transition-type">crossfade</property>
+                <property name="transition-duration">100</property>
+
+                <!-- Appears On: Albums View -->
+                <child>
+                  <object class="GtkStackPage">
+                    <property name="name">albums</property>
+                    <property name="child">
+                      <object class="GtkListBox" id="appears_on_albums">
+                        <property name="selection-mode">single</property>
+                        <property name="activate-on-single-click">false</property>
+                        <style>
+                          <class name="appears-on-list"/>
+                        </style>
+                        <!-- Album rows added dynamically -->
+                      </object>
+                    </property>
+                  </object>
+                </child>
+
+                <!-- Appears On: Tracks View -->
+                <child>
+                  <object class="GtkStackPage">
+                    <property name="name">tracks</property>
+                    <property name="child">
+                      <object class="GtkListBox" id="appears_on_tracks">
+                        <property name="selection-mode">single</property>
+                        <property name="activate-on-single-click">false</property>
+                        <style>
+                          <class name="appears-on-list"/>
+                        </style>
+                        <!-- Track rows added dynamically -->
+                      </object>
+                    </property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

@@ -4,16 +4,26 @@
  * GtkApplicationWindow subclass: nav bar + content stack + channel panel.
  */
 
+#define G_LOG_DOMAIN "quadrature"
+
 #include "internal.h"
 #include "indexer_controller.h"
 #include "perf/perf_view.h"
-#include "quadrature/audio/audio_devices.h"
-#include "quadrature/database/database.h"
+#include "quadrature/quadrature_audio.h"
+#include "quadrature/quadrature_database.h"
+#include "quadrature/quadrature_library.h"
+#include "../audio/internal.h"  /* For audio_devices and perf access */
 #include <string.h>
 
 /* View names for content stack pages */
 static const char *VIEW_SEARCH = "search";
-static const char *VIEW_ARTISTS = "artists";
+
+/* Map view name to display label for back button */
+static const char *view_display_name(const char *view) {
+    if (strcmp(view, "search") == 0) return "Search";
+    if (strcmp(view, "artists") == 0) return "Artists";
+    return "Albums";
+}
 
 /* Library entry */
 typedef struct {
@@ -42,7 +52,7 @@ struct _UiWindow {
     app_settings_t *settings;
     quadrature_db_t *db;
     IndexerController *indexer;
-    LibraryCache *library_cache;
+    library_cache_t *library_cache;
     ArtworkManager *artwork_mgr;
 
     /* Template-bound layout widgets */
@@ -84,11 +94,19 @@ struct _UiWindow {
     int filter_active;
     guint search_debounce_timer;
     char *last_search_query;
-    GtkWidget *search_results_box;
-    GtkWidget *search_artists_section;
-    GtkWidget *search_albums_section;
-    GtkWidget *search_tracks_section;
+    GtkWidget *search_results_list;  /* Unified GtkListBox for keyboard nav */
     GtkWidget *search_empty_label;
+    GtkWidget *filter_panel;
+    GtkWidget *filter_genre;         /* GtkMenuButton */
+    GtkWidget *filter_year;          /* GtkMenuButton */
+    GtkWidget *filter_clear;
+
+    /* Multi-select filter state */
+    GHashTable *selected_genres;     /* Set of selected genre strings */
+    uint16_t selected_years_mask;    /* Bitmask: bit 0=2020s .. bit 7=Pre-1960 */
+
+    /* Shared library callbacks */
+    LibraryCallbacks lib_cbs;
 
     /* Settings - devices */
     GtkWidget *device_drops[MAX_CHANNELS];
@@ -111,6 +129,7 @@ struct _UiWindow {
     ProgressPhaseWidgets scan_phase;
     ProgressPhaseWidgets metadata_phase;
     ProgressPhaseWidgets artwork_phase;
+    ProgressPhaseWidgets resolve_phase;
     guint progress_pulse_timer;
 
     guint update_timer;
@@ -157,6 +176,41 @@ static gboolean on_update(gpointer data) {
     return G_SOURCE_CONTINUE;
 }
 
+/**
+ * Track changed callback - called when audio pipeline auto-advances to next track.
+ * Updates the channel strip display with the new track's metadata.
+ */
+static void on_track_changed(int player_id, int64_t track_id, void* user_data) {
+    UiWindow *w = UI_WINDOW(user_data);
+    if (!w || player_id < 0 || player_id >= MAX_CHANNELS) return;
+    if (!w->channels[player_id]) return;
+
+    if (track_id <= 0) {
+        /* Playback ended (no next track) */
+        g_message("Channel %d: playback ended", player_id + 1);
+        return;
+    }
+
+    /* Look up track info from library cache */
+    if (w->library_cache) {
+        const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
+        if (track) {
+            g_message("Channel %d: auto-advanced to \"%s\" by %s",
+                      player_id + 1, track->title, track->artist_name);
+
+            /* Update channel strip display with new track metadata.
+             * Use update_track_display, not load_track - track is already
+             * loaded in engine, we just need to refresh the UI. */
+            ui_channel_strip_update_track_display(w->channels[player_id],
+                                                   track_id,
+                                                   track->path,
+                                                   track->title,
+                                                   track->artist_name,
+                                                   track->album_title);
+        }
+    }
+}
+
 /* Navigate action handler - triggered by nav bar buttons */
 static void on_navigate_action(GSimpleAction *action, GVariant *param, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
@@ -165,22 +219,36 @@ static void on_navigate_action(GSimpleAction *action, GVariant *param, gpointer 
     /* Update action state (auto-updates toggle button :checked states) */
     g_simple_action_set_state(action, param);
 
+    /* Toplevel nav bar click clears any detail view nav history */
+    if (w->detail_view)
+        library_unified_detail_clear_nav(w->detail_view);
+
     /* Switch stack page */
     w->current_view = view;
     gtk_stack_set_visible_child_name(GTK_STACK(w->stack), view);
 }
 
-static void do_search(UiWindow *w);  /* Forward declaration */
+static void do_search(UiWindow *w);               /* Forward declaration */
+static void clear_search_view_filters(UiWindow *w); /* Forward declaration */
+static void update_search_genre_label(UiWindow *w);
+static void update_search_year_label(UiWindow *w);
+static void uncheck_search_popover(GtkWidget *menu_button);
+
+static void set_search_filter(UiWindow *w, int idx) {
+    for (int i = 0; i < 4; i++)
+        ui_toggle_css(w->filter_btns[i], "search-filter-active", i == idx);
+    w->filter_active = idx;
+    do_search(w);
+}
 
 static void on_filter_clicked(GtkButton *btn, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
     for (int i = 0; i < 4; i++) {
-        gboolean active = (GTK_WIDGET(btn) == w->filter_btns[i]);
-        ui_toggle_css(w->filter_btns[i], "search-filter-active", active);
-        if (active) w->filter_active = i;
+        if (GTK_WIDGET(btn) == w->filter_btns[i]) {
+            set_search_filter(w, i);
+            return;
+        }
     }
-    /* Re-run search with new filter */
-    do_search(w);
 }
 
 static void on_spectrum_toggled(GtkCheckButton *btn, gpointer data) {
@@ -216,9 +284,13 @@ static void on_channel_album_clicked(UiChannelStrip *strip, int channel_id, int6
     UiWindow *w = UI_WINDOW(data);
 
     if (album_id > 0) {
-        /* Navigate to album detail view */
-        w->previous_view = w->current_view;
-        library_unified_detail_navigate_to_album(w->detail_view, album_id, w->current_view);
+        gboolean from_detail = (strcmp(w->current_view, "detail") == 0);
+        /* Channel strip clicks preserve existing nav stack (no clear_nav).
+         * Pass source view name so back button shows where to return to. */
+        const char *source = from_detail ? NULL : view_display_name(w->current_view);
+        if (!from_detail)
+            w->previous_view = w->current_view;
+        library_unified_detail_navigate_to_album(w->detail_view, album_id, source, 0);
         gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "detail");
         w->current_view = "detail";
     }
@@ -229,76 +301,295 @@ static void on_channel_artist_clicked(UiChannelStrip *strip, int channel_id, int
     UiWindow *w = UI_WINDOW(data);
 
     if (artist_id > 0) {
-        /* Navigate to artist detail view */
-        w->previous_view = w->current_view;
-        library_unified_detail_navigate_to_artist(w->detail_view, artist_id, w->current_view);
+        gboolean from_detail = (strcmp(w->current_view, "detail") == 0);
+        /* Channel strip clicks preserve existing nav stack (no clear_nav).
+         * Pass source view name so back button shows where to return to. */
+        const char *source = from_detail ? NULL : view_display_name(w->current_view);
+        if (!from_detail)
+            w->previous_view = w->current_view;
+        library_unified_detail_navigate_to_artist(w->detail_view, artist_id, source);
         gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "detail");
         w->current_view = "detail";
     }
 }
 
-static void on_channel_track_changed(UiChannelStrip *strip, int channel_id, int new_index, gpointer data) {
-    (void)strip; (void)channel_id; (void)new_index; (void)data;
+static void on_channel_track_changed(UiChannelStrip *strip, int channel_id, int64_t track_id, gpointer data) {
+    (void)strip; (void)channel_id; (void)track_id; (void)data;
     /* Log for debugging, could be used for future features like play history */
-    g_debug("Track changed on channel %d to index %d", channel_id, new_index);
+    g_debug("Track changed on channel %d to track %" G_GINT64_FORMAT, channel_id, track_id);
 }
 
-static void on_channel_track_ended(UiChannelStrip *strip, int channel_id, gpointer data) {
-    (void)strip; (void)channel_id; (void)data;
-    /* Log for debugging, could be used for future features like play history */
-    g_debug("Track ended on channel %d", channel_id);
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Keyboard Shortcut Actions
+ *
+ * All keyboard shortcuts are implemented as GActions with accelerators.
+ * This provides proper GTK4 integration and works regardless of focus.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Forward declaration */
+static void on_load_to_channel(int channel, int64_t track_id, gpointer data);
+
+/* Helper: Get track ID from selected row in a list box */
+static int64_t get_selected_track_id(GtkWidget *list_box) {
+    if (!list_box) return 0;
+
+    GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list_box));
+    if (!row) return 0;
+
+    GtkWidget *child = gtk_list_box_row_get_child(row);
+    if (!child) return 0;
+
+    /* Check for track-id (track rows) or first-track-id (album rows) */
+    gpointer p = g_object_get_data(G_OBJECT(child), "track-id");
+    if (!p)
+        p = g_object_get_data(G_OBJECT(child), "first-track-id");
+    if (!p) return 0;
+
+    return (int64_t)GPOINTER_TO_SIZE(p);
 }
 
-static gboolean on_key(GtkEventControllerKey *ctl, guint key, guint code,
-                       GdkModifierType state, gpointer data) {
-    (void)ctl; (void)code;
+/* Helper: Get selected track from the current view */
+static int64_t get_current_view_selected_track(UiWindow *w) {
+    if (w->current_view == VIEW_SEARCH) {
+        return get_selected_track_id(w->search_results_list);
+    } else if (strcmp(w->current_view, "detail") == 0) {
+        return get_selected_track_id(library_unified_detail_get_track_list(w->detail_view));
+    }
+    return 0;
+}
+
+/* Action: Load selected track to channel N (1-4 keys) */
+static void on_action_load_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
-    gboolean ctrl = (state & GDK_CONTROL_MASK) != 0;
-    gboolean shift = (state & GDK_SHIFT_MASK) != 0;
 
-    /* Escape: close errors overlay if open */
-    if (key == GDK_KEY_Escape && w->errors_overlay &&
-        gtk_widget_get_visible(w->errors_overlay)) {
-        gtk_widget_set_visible(w->errors_overlay, FALSE);
-        return TRUE;
-    }
+    /* Extract channel number from action name (load-channel-1 → 0) */
+    const char *name = g_action_get_name(G_ACTION(action));
+    int ch = name[strlen(name) - 1] - '1';
 
-    if (ctrl) {
-        if (key == GDK_KEY_f) { ui_window_navigate_to(w, VIEW_SEARCH); return TRUE; }
-    }
+    if (ch < 0 || ch >= MAX_CHANNELS || !w->channels[ch])
+        return;
 
-    /* 1-4: Set focus to channel (if channel is active) */
-    if (key >= GDK_KEY_1 && key <= GDK_KEY_4) {
-        int ch = key - GDK_KEY_1;
-        if (ch < MAX_CHANNELS && w->channels[ch]) {
-            /* Check if channel can be focused */
-            if (!ui_channel_strip_is_active(w->channels[ch])) {
-                /* Show toast explaining why */
-                DeviceState ds = ui_channel_strip_get_device_state(w->channels[ch]);
-                ChannelMode mode = ui_channel_strip_get_mode(w->channels[ch]);
+    /* Check if channel can receive tracks */
+    if (!ui_channel_strip_is_active(w->channels[ch])) {
+        DeviceState ds = ui_channel_strip_get_device_state(w->channels[ch]);
+        ChannelMode mode = ui_channel_strip_get_mode(w->channels[ch]);
 
-                if (ds == DEVICE_STATE_UNCONFIGURED || ds == DEVICE_STATE_INVALID) {
-                    ui_window_show_toast(w, "Channel has no Audio Output Configured");
-                } else if (mode == CHANNEL_MODE_QUEUED) {
-                    ui_window_show_toast(w, "Channel is Queued");
-                } else if (mode == CHANNEL_MODE_ON_AIR) {
-                    ui_window_show_toast(w, "Channel is On-Air");
-                }
-                return TRUE;
-            }
+        if (ds == DEVICE_STATE_UNCONFIGURED || ds == DEVICE_STATE_INVALID) {
+            ui_window_show_toast(w, "Channel has no Audio Output Configured");
+        } else if (mode == CHANNEL_MODE_QUEUED) {
+            ui_window_show_toast(w, "Channel is Queued");
+        } else if (mode == CHANNEL_MODE_ON_AIR) {
+            ui_window_show_toast(w, "Channel is On-Air");
         }
-        ui_window_set_focused_channel(w, ch);
-        return TRUE;
+        return;
     }
 
-    if (key >= GDK_KEY_F1 && key <= GDK_KEY_F4 && w->pipeline) {
-        int ch = key - GDK_KEY_F1;
-        if (shift) audio_pipeline_player_stop(w->pipeline, ch);
-        else       audio_pipeline_player_play(w->pipeline, ch);
-        return TRUE;
+    /* Get selected track from current view */
+    int64_t track_id = get_current_view_selected_track(w);
+    if (track_id <= 0) {
+        ui_window_show_toast(w, "Select a track first");
+        return;
     }
 
-    return FALSE;
+    /* Load track to channel */
+    on_load_to_channel(ch, track_id, w);
+}
+
+/* Action: Focus channel N (Ctrl+1-4 keys) */
+static void on_action_focus_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)param;
+    UiWindow *w = UI_WINDOW(data);
+
+    const char *name = g_action_get_name(G_ACTION(action));
+    int ch = name[strlen(name) - 1] - '1';
+
+    if (ch < 0 || ch >= MAX_CHANNELS || !w->channels[ch])
+        return;
+
+    if (!ui_channel_strip_is_active(w->channels[ch])) {
+        DeviceState ds = ui_channel_strip_get_device_state(w->channels[ch]);
+        ChannelMode mode = ui_channel_strip_get_mode(w->channels[ch]);
+
+        if (ds == DEVICE_STATE_UNCONFIGURED || ds == DEVICE_STATE_INVALID) {
+            ui_window_show_toast(w, "Channel has no Audio Output Configured");
+        } else if (mode == CHANNEL_MODE_QUEUED) {
+            ui_window_show_toast(w, "Channel is Queued");
+        } else if (mode == CHANNEL_MODE_ON_AIR) {
+            ui_window_show_toast(w, "Channel is On-Air");
+        }
+        return;
+    }
+
+    ui_window_set_focused_channel(w, ch);
+}
+
+/* Action: Play channel N (F1-F4 keys) */
+static void on_action_play_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    if (!w->pipeline) return;
+
+    const char *name = g_action_get_name(G_ACTION(action));
+    int ch = name[strlen(name) - 1] - '1';
+
+    if (ch >= 0 && ch < MAX_CHANNELS)
+        audio_pipeline_player_play(w->pipeline, ch);
+}
+
+/* Action: Stop channel N (Shift+F1-F4 keys) */
+static void on_action_stop_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    if (!w->pipeline) return;
+
+    const char *name = g_action_get_name(G_ACTION(action));
+    int ch = name[strlen(name) - 1] - '1';
+
+    if (ch >= 0 && ch < MAX_CHANNELS)
+        audio_pipeline_player_stop(w->pipeline, ch);
+}
+
+/* Helper: Focus search entry and select all text */
+static void focus_search_entry(UiWindow *w) {
+    gtk_widget_grab_focus(w->search_entry);
+    gtk_editable_select_region(GTK_EDITABLE(w->search_entry), 0, -1);
+}
+
+/* Action: Navigate to search (Ctrl+F) */
+static void on_action_search(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)action; (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    ui_window_navigate_to(w, VIEW_SEARCH);
+    set_search_filter(w, 0);
+    focus_search_entry(w);
+}
+
+/* Action: Navigate to search with Artists filter (Ctrl+A) */
+static void on_action_filter_artists(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)action; (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    ui_window_navigate_to(w, VIEW_SEARCH);
+    set_search_filter(w, 1);
+    focus_search_entry(w);
+}
+
+/* Action: Navigate to search with Albums filter (Ctrl+B) */
+static void on_action_filter_albums(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)action; (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    ui_window_navigate_to(w, VIEW_SEARCH);
+    set_search_filter(w, 2);
+    focus_search_entry(w);
+}
+
+/* Action: Navigate to search with Tracks filter (Ctrl+T) */
+static void on_action_filter_tracks(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)action; (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    ui_window_navigate_to(w, VIEW_SEARCH);
+    set_search_filter(w, 3);
+    focus_search_entry(w);
+}
+
+/* Action: Clear filters in current view (Ctrl+R) */
+static void on_action_clear_filters(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)action; (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    if (w->current_view == VIEW_SEARCH)
+        clear_search_view_filters(w);
+    else if (w->artists_view && strcmp(w->current_view, "artists") == 0)
+        library_view_clear_filters(w->artists_view);
+    else if (w->albums_view && strcmp(w->current_view, "albums") == 0)
+        library_view_clear_filters(w->albums_view);
+}
+
+/* Action: Escape key - context-dependent behavior */
+static void on_action_close_errors(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)action; (void)param;
+    UiWindow *w = UI_WINDOW(data);
+
+    /* Priority 1: Close errors overlay if visible */
+    if (w->errors_overlay && gtk_widget_get_visible(w->errors_overlay)) {
+        gtk_widget_set_visible(w->errors_overlay, FALSE);
+        return;
+    }
+
+    /* Priority 2: In detail view, navigate back */
+    if (strcmp(w->current_view, "detail") == 0) {
+        if (!library_unified_detail_go_back(w->detail_view)) {
+            if (w->previous_view)
+                ui_window_navigate_to(w, w->previous_view);
+        }
+        return;
+    }
+
+    /* Priority 3: In search view, return focus to search entry */
+    if (w->current_view == VIEW_SEARCH) {
+        focus_search_entry(w);
+    }
+}
+
+/* Setup all keyboard shortcut actions */
+static void setup_keyboard_actions(UiWindow *w) {
+    GtkApplication *app = gtk_window_get_application(GTK_WINDOW(w));
+    g_assert(app != NULL);
+
+    /* Action entries for window */
+    static const GActionEntry entries[] = {
+        { "load-channel-1", on_action_load_channel, NULL, NULL, NULL, {0} },
+        { "load-channel-2", on_action_load_channel, NULL, NULL, NULL, {0} },
+        { "load-channel-3", on_action_load_channel, NULL, NULL, NULL, {0} },
+        { "load-channel-4", on_action_load_channel, NULL, NULL, NULL, {0} },
+        { "focus-channel-1", on_action_focus_channel, NULL, NULL, NULL, {0} },
+        { "focus-channel-2", on_action_focus_channel, NULL, NULL, NULL, {0} },
+        { "focus-channel-3", on_action_focus_channel, NULL, NULL, NULL, {0} },
+        { "focus-channel-4", on_action_focus_channel, NULL, NULL, NULL, {0} },
+        { "play-channel-1", on_action_play_channel, NULL, NULL, NULL, {0} },
+        { "play-channel-2", on_action_play_channel, NULL, NULL, NULL, {0} },
+        { "play-channel-3", on_action_play_channel, NULL, NULL, NULL, {0} },
+        { "play-channel-4", on_action_play_channel, NULL, NULL, NULL, {0} },
+        { "stop-channel-1", on_action_stop_channel, NULL, NULL, NULL, {0} },
+        { "stop-channel-2", on_action_stop_channel, NULL, NULL, NULL, {0} },
+        { "stop-channel-3", on_action_stop_channel, NULL, NULL, NULL, {0} },
+        { "stop-channel-4", on_action_stop_channel, NULL, NULL, NULL, {0} },
+        { "search", on_action_search, NULL, NULL, NULL, {0} },
+        { "filter-artists", on_action_filter_artists, NULL, NULL, NULL, {0} },
+        { "filter-albums", on_action_filter_albums, NULL, NULL, NULL, {0} },
+        { "filter-tracks", on_action_filter_tracks, NULL, NULL, NULL, {0} },
+        { "clear-filters", on_action_clear_filters, NULL, NULL, NULL, {0} },
+        { "close-errors", on_action_close_errors, NULL, NULL, NULL, {0} },
+    };
+
+    g_action_map_add_action_entries(G_ACTION_MAP(w), entries, G_N_ELEMENTS(entries), w);
+
+    /* Set accelerators */
+    gtk_application_set_accels_for_action(app, "win.load-channel-1", (const char*[]){"1", NULL});
+    gtk_application_set_accels_for_action(app, "win.load-channel-2", (const char*[]){"2", NULL});
+    gtk_application_set_accels_for_action(app, "win.load-channel-3", (const char*[]){"3", NULL});
+    gtk_application_set_accels_for_action(app, "win.load-channel-4", (const char*[]){"4", NULL});
+
+    gtk_application_set_accels_for_action(app, "win.focus-channel-1", (const char*[]){"<Control>1", NULL});
+    gtk_application_set_accels_for_action(app, "win.focus-channel-2", (const char*[]){"<Control>2", NULL});
+    gtk_application_set_accels_for_action(app, "win.focus-channel-3", (const char*[]){"<Control>3", NULL});
+    gtk_application_set_accels_for_action(app, "win.focus-channel-4", (const char*[]){"<Control>4", NULL});
+
+    gtk_application_set_accels_for_action(app, "win.play-channel-1", (const char*[]){"F1", NULL});
+    gtk_application_set_accels_for_action(app, "win.play-channel-2", (const char*[]){"F2", NULL});
+    gtk_application_set_accels_for_action(app, "win.play-channel-3", (const char*[]){"F3", NULL});
+    gtk_application_set_accels_for_action(app, "win.play-channel-4", (const char*[]){"F4", NULL});
+
+    gtk_application_set_accels_for_action(app, "win.stop-channel-1", (const char*[]){"<Shift>F1", NULL});
+    gtk_application_set_accels_for_action(app, "win.stop-channel-2", (const char*[]){"<Shift>F2", NULL});
+    gtk_application_set_accels_for_action(app, "win.stop-channel-3", (const char*[]){"<Shift>F3", NULL});
+    gtk_application_set_accels_for_action(app, "win.stop-channel-4", (const char*[]){"<Shift>F4", NULL});
+
+    gtk_application_set_accels_for_action(app, "win.search", (const char*[]){"<Control>f", NULL});
+    gtk_application_set_accels_for_action(app, "win.filter-artists", (const char*[]){"<Control>a", NULL});
+    gtk_application_set_accels_for_action(app, "win.filter-albums", (const char*[]){"<Control>b", NULL});
+    gtk_application_set_accels_for_action(app, "win.filter-tracks", (const char*[]){"<Control>t", NULL});
+    gtk_application_set_accels_for_action(app, "win.clear-filters", (const char*[]){"<Control>r", NULL});
+    gtk_application_set_accels_for_action(app, "win.close-errors", (const char*[]){"Escape", NULL});
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -625,7 +916,7 @@ static void on_errors_close(GtkButton *btn, gpointer data) {
 }
 
 static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
-    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(card, "library-card");
     e->card = card;
 
@@ -647,8 +938,9 @@ static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
     gtk_label_set_xalign(GTK_LABEL(det), 0.0);
     gtk_box_append(GTK_BOX(card), det);
 
-    GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_halign(btns, GTK_ALIGN_END);
+    gtk_widget_add_css_class(btns, "library-card-buttons");
 
     /* Errors button - show count if > 0 */
     GtkWidget *errors_btn;
@@ -759,6 +1051,10 @@ static void on_indexer_started(IndexerController *idx, gpointer data) {
     gtk_label_set_text(GTK_LABEL(w->artwork_phase.label), "0/0 albums");
     gtk_label_set_text(GTK_LABEL(w->artwork_phase.rate_label), "");
 
+    /* Hide resolve phase by default (shown only if MB is active) */
+    if (w->resolve_phase.container)
+        gtk_widget_set_visible(w->resolve_phase.container, FALSE);
+
     /* Start pulse animation for scan phase */
     if (w->progress_pulse_timer == 0)
         w->progress_pulse_timer = g_timeout_add(100, on_scan_pulse, w);
@@ -837,11 +1133,32 @@ static void on_indexer_progress(IndexerController *idx, indexer_progress_t *p, g
         }
         break;
 
-    case INDEXER_PHASE_FINALIZE:
-        /* Artwork complete, finalizing DB */
+    case INDEXER_PHASE_RESOLVE:
+        /* Artwork complete, MusicBrainz resolution in progress */
         set_phase_state(&w->artwork_phase, "progress-phase-complete");
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w->artwork_phase.bar), 1.0);
         gtk_label_set_text(GTK_LABEL(w->artwork_phase.rate_label), "Complete");
+
+        /* Show and activate resolve phase */
+        if (w->resolve_phase.container) {
+            gtk_widget_set_visible(w->resolve_phase.container, TRUE);
+            set_phase_state(&w->resolve_phase, "progress-phase-active");
+            gtk_label_set_text(GTK_LABEL(w->resolve_phase.label), "Resolving albums...");
+            gtk_progress_bar_pulse(GTK_PROGRESS_BAR(w->resolve_phase.bar));
+        }
+        break;
+
+    case INDEXER_PHASE_FINALIZE:
+        /* Mark artwork and resolve as complete */
+        set_phase_state(&w->artwork_phase, "progress-phase-complete");
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w->artwork_phase.bar), 1.0);
+        gtk_label_set_text(GTK_LABEL(w->artwork_phase.rate_label), "Complete");
+
+        if (w->resolve_phase.container && gtk_widget_get_visible(w->resolve_phase.container)) {
+            set_phase_state(&w->resolve_phase, "progress-phase-complete");
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w->resolve_phase.bar), 1.0);
+            gtk_label_set_text(GTK_LABEL(w->resolve_phase.rate_label), "Complete");
+        }
         break;
 
     case INDEXER_PHASE_COMPLETE:
@@ -849,8 +1166,20 @@ static void on_indexer_progress(IndexerController *idx, indexer_progress_t *p, g
         set_phase_state(&w->artwork_phase, "progress-phase-complete");
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w->artwork_phase.bar), 1.0);
         gtk_label_set_text(GTK_LABEL(w->artwork_phase.rate_label), "Complete");
+
+        if (w->resolve_phase.container && gtk_widget_get_visible(w->resolve_phase.container)) {
+            set_phase_state(&w->resolve_phase, "progress-phase-complete");
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(w->resolve_phase.bar), 1.0);
+            gtk_label_set_text(GTK_LABEL(w->resolve_phase.rate_label), "Complete");
+        }
         break;
     }
+}
+
+static void on_cache_ready(void *data) {
+    UiWindow *w = UI_WINDOW(data);
+    library_view_refresh(w->artists_view);
+    library_view_refresh(w->albums_view);
 }
 
 static void on_indexer_done(IndexerController *idx, gboolean ok, indexer_progress_t *p, gpointer data) {
@@ -867,21 +1196,22 @@ static void on_indexer_done(IndexerController *idx, gboolean ok, indexer_progres
     /* For now, just hide immediately */
     gtk_widget_set_visible(w->progress_container, FALSE);
 
+    /* Reload atlas so new artwork is picked up */
+    if (w->artwork_mgr)
+        artwork_manager_reload_atlas(w->artwork_mgr);
+
     /* Reload library data */
     libs_load(w);
     libs_rebuild(w);
 
-    /* Reload artwork atlas (new thumbnails may have been generated) */
-    if (w->artwork_mgr) {
-        artwork_manager_clear(w->artwork_mgr);
-        artwork_manager_reload_atlas(w->artwork_mgr);
+    /* Clear and re-warm library cache */
+    if (w->library_cache) {
+        library_cache_clear(w->library_cache);
+        library_cache_start_warming(w->library_cache);
     }
 
-    /* Invalidate library cache so views fetch fresh data */
-    if (w->library_cache)
-        library_cache_invalidate(w->library_cache);
-
-    /* Refresh library views */
+    /* Refresh library views (sync fallback will populate immediately,
+     * warming thread will trigger a second refresh when complete) */
     library_view_refresh(w->artists_view);
     library_view_refresh(w->albums_view);
 }
@@ -890,123 +1220,230 @@ static void on_indexer_done(IndexerController *idx, gboolean ok, indexer_progres
  * Search Functions
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void clear_search_section(GtkWidget *section) {
-    GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(section)))
-        gtk_box_remove(GTK_BOX(section), child);
+static void clear_search_results(GtkWidget *list_box) {
+    gtk_list_box_remove_all(GTK_LIST_BOX(list_box));
 }
 
+/* Create a non-selectable section header row for GtkListBox.
+ * Returns a GtkListBoxRow wrapper so we can set it non-activatable. */
+static GtkWidget *create_search_section_header(const char *title) {
+    GtkWidget *label = gtk_label_new(title);
+    gtk_widget_add_css_class(label, "search-results-section-header");
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+    gtk_widget_set_margin_top(label, 12);
+    gtk_widget_set_margin_bottom(label, 4);
+
+    /* Wrap in a GtkListBoxRow and make it non-activatable/non-selectable */
+    GtkWidget *row = gtk_list_box_row_new();
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
+    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
+    gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
+    return row;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Shared Row Handlers
+ *
+ * Used by all library views (search, detail, lists). Match RowCallbacks signature.
+ * Selection handled by GTK automatically. These handle activate and queue actions.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Track: activate navigates to album detail with track pre-selected */
+static void on_track_activate(int64_t track_id, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (!w->library_cache) return;
+
+    const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
+    if (!track) return;
+
+    /* Navigate to album detail with this track selected */
+    const char *source = NULL;
+    if (strcmp(w->current_view, "detail") != 0) {
+        source = view_display_name(w->current_view);
+        w->previous_view = w->current_view;
+        library_unified_detail_clear_nav(w->detail_view);
+    }
+    library_unified_detail_navigate_to_album(w->detail_view, track->album_id, source, track_id);
+    gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "detail");
+    w->current_view = "detail";
+}
+
+static void on_track_secondary(int64_t track_id, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (!w->library_cache) return;
+
+    const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
+    if (!track) return;
+
+    on_library_play(track->path, track->title, track->artist_name,
+                    track->album_title, track->track_id, w);
+}
+
+/* Album: activate navigates to album detail, right-click queues track_1 */
+static void on_album_activate(int64_t album_id, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    on_library_navigate(LIBRARY_ITEM_ALBUM, album_id, w);
+}
+
+static void on_album_secondary(int64_t album_id, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (!w->library_cache) return;
+
+    const GPtrArray *tracks = library_cache_get_tracks_by_album(w->library_cache, album_id);
+    if (!tracks || tracks->len == 0) return;
+
+    const library_track_info_t *track = g_ptr_array_index(tracks, 0);
+    on_library_play(track->path, track->title, track->artist_name,
+                    track->album_title, track->track_id, w);
+}
+
+/* Artist: activate navigates to artist detail, no right-click action */
+static void on_artist_activate(int64_t artist_id, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    on_library_navigate(LIBRARY_ITEM_ARTIST, artist_id, w);
+}
 
 static void do_search(UiWindow *w) {
-    if (!w->db) return;
+    if (!w->library_cache) return;
 
     const char *query = gtk_editable_get_text(GTK_EDITABLE(w->search_entry));
     if (!query || strlen(query) < 1) {
-        /* Clear results */
-        clear_search_section(w->search_artists_section);
-        clear_search_section(w->search_albums_section);
-        clear_search_section(w->search_tracks_section);
-        gtk_widget_set_visible(w->search_results_box, FALSE);
+        clear_search_results(w->search_results_list);
+        gtk_widget_set_visible(w->search_results_list, FALSE);
         gtk_widget_set_visible(w->search_empty_label, TRUE);
         gtk_label_set_text(GTK_LABEL(w->search_empty_label), "Type to search...");
         return;
     }
 
-    /* Determine search type from filter */
-    db_search_type_t type = DB_SEARCH_ALL;
-    size_t limit = 0; /* 0 = use defaults */
+    /* Determine search filter */
+    library_search_filter_t filter = LIBRARY_SEARCH_FILTER_ALL;
+    size_t limit = 0; /* 0 = unlimited */
     switch (w->filter_active) {
-        case 1: type = DB_SEARCH_ARTISTS; break;
-        case 2: type = DB_SEARCH_ALBUMS; break;
-        case 3: type = DB_SEARCH_TRACKS; break;
+        case 1: filter = LIBRARY_SEARCH_FILTER_ARTISTS; break;
+        case 2: filter = LIBRARY_SEARCH_FILTER_ALBUMS; break;
+        case 3: filter = LIBRARY_SEARCH_FILTER_TRACKS; break;
     }
 
-    db_search_results_t results = {0};
-    if (db_search_typed(w->db, query, type, limit, &results) != QUADRATURE_OK) {
-        gtk_widget_set_visible(w->search_results_box, FALSE);
+    /* Build filter opts from multi-select state */
+    const char **genre_arr = NULL;
+    size_t genre_count = 0;
+    if (w->selected_genres && g_hash_table_size(w->selected_genres) > 0) {
+        genre_count = g_hash_table_size(w->selected_genres);
+        genre_arr = g_new(const char *, genre_count);
+        GHashTableIter iter;
+        gpointer key;
+        size_t gi = 0;
+        g_hash_table_iter_init(&iter, w->selected_genres);
+        while (g_hash_table_iter_next(&iter, &key, NULL))
+            genre_arr[gi++] = (const char *)key;
+    }
+    db_search_opts_t search_opts = {
+        .genres = genre_arr,
+        .genre_count = genre_count,
+        .year_mask = w->selected_years_mask,
+    };
+    const db_search_opts_t *opts_ptr = (genre_count > 0 || w->selected_years_mask) ? &search_opts : NULL;
+
+    library_search_results_t *results = library_cache_search(w->library_cache, query, filter, limit, opts_ptr);
+    g_free(genre_arr);
+    if (!results) {
+        gtk_widget_set_visible(w->search_results_list, FALSE);
         gtk_widget_set_visible(w->search_empty_label, TRUE);
         gtk_label_set_text(GTK_LABEL(w->search_empty_label), "Search failed");
         return;
     }
 
     /* Check if any results */
-    if (results.artist_count == 0 && results.album_count == 0 && results.track_count == 0) {
-        clear_search_section(w->search_artists_section);
-        clear_search_section(w->search_albums_section);
-        clear_search_section(w->search_tracks_section);
-        gtk_widget_set_visible(w->search_results_box, FALSE);
+    gboolean has_artists = results->artists && results->artists->len > 0;
+    gboolean has_albums = results->albums && results->albums->len > 0;
+    gboolean has_tracks = results->tracks && results->tracks->len > 0;
+
+    if (!has_artists && !has_albums && !has_tracks) {
+        clear_search_results(w->search_results_list);
+        gtk_widget_set_visible(w->search_results_list, FALSE);
         gtk_widget_set_visible(w->search_empty_label, TRUE);
         gtk_label_set_text(GTK_LABEL(w->search_empty_label), "No results found");
-        db_search_results_free(&results);
         return;
     }
 
     gtk_widget_set_visible(w->search_empty_label, FALSE);
-    gtk_widget_set_visible(w->search_results_box, TRUE);
+    gtk_widget_set_visible(w->search_results_list, TRUE);
 
-    /* Set up callbacks for search results - uses same handlers as library views */
-    LibraryCallbacks search_cbs = {
-        .on_navigate = on_library_navigate,
-        .on_play = on_library_play,
-        .on_back = on_library_back,
-        .on_track_info = on_track_info,
-        .user_data = w
-    };
+    /* Clear existing results */
+    clear_search_results(w->search_results_list);
 
-    /* Populate artists section */
-    clear_search_section(w->search_artists_section);
-    if (results.artist_count > 0) {
-        GtkWidget *header = gtk_label_new("ARTISTS");
-        gtk_widget_add_css_class(header, "search-results-section-header");
-        gtk_label_set_xalign(GTK_LABEL(header), 0.0);
-        gtk_box_append(GTK_BOX(w->search_artists_section), header);
+    /* Populate artists with size groups for column alignment */
+    if (has_artists) {
+        GtkWidget *header = create_search_section_header("ARTISTS");
+        gtk_list_box_append(GTK_LIST_BOX(w->search_results_list), header);
 
-        for (size_t i = 0; i < results.artist_count; i++) {
-            GtkWidget *row = ui_create_artist_row(&results.artists[i], FALSE, &search_cbs);
-            gtk_box_append(GTK_BOX(w->search_artists_section), row);
+        /* Create size groups for artist rows */
+        UiRowSizeGroups artist_groups = {
+            .col1 = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL),
+            .col2 = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL)
+        };
+
+        for (guint i = 0; i < results->artists->len; i++) {
+            const library_artist_info_t *artist = g_ptr_array_index(results->artists, i);
+            GtkWidget *row = ui_create_artist_row(artist, w->library_cache, w->artwork_mgr, TRUE, &artist_groups);
+            ui_row_attach_handlers(row, &w->lib_cbs.artist_cbs);
+            gtk_list_box_append(GTK_LIST_BOX(w->search_results_list), row);
         }
-        gtk_widget_set_visible(w->search_artists_section, TRUE);
-    } else {
-        gtk_widget_set_visible(w->search_artists_section, FALSE);
+
+        /* Size groups auto-unref when widgets are destroyed */
+        g_object_unref(artist_groups.col1);
+        g_object_unref(artist_groups.col2);
     }
 
-    /* Populate albums section */
-    clear_search_section(w->search_albums_section);
-    if (results.album_count > 0) {
-        GtkWidget *header = gtk_label_new("ALBUMS");
-        gtk_widget_add_css_class(header, "search-results-section-header");
-        gtk_label_set_xalign(GTK_LABEL(header), 0.0);
-        gtk_box_append(GTK_BOX(w->search_albums_section), header);
+    /* Populate albums with size groups for column alignment */
+    if (has_albums) {
+        GtkWidget *header = create_search_section_header("ALBUMS");
+        gtk_list_box_append(GTK_LIST_BOX(w->search_results_list), header);
 
-        for (size_t i = 0; i < results.album_count; i++) {
-            GtkWidget *row = ui_create_album_row(&results.albums[i], w->artwork_mgr, FALSE,
-                                                  w->db, &search_cbs);
-            gtk_box_append(GTK_BOX(w->search_albums_section), row);
+        /* Create size groups for album rows */
+        UiRowSizeGroups album_groups = {
+            .col1 = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL),
+            .col2 = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL)
+        };
+
+        for (guint i = 0; i < results->albums->len; i++) {
+            const library_album_info_t *album = g_ptr_array_index(results->albums, i);
+            GtkWidget *row = ui_create_album_row(album, w->library_cache, w->artwork_mgr, TRUE,
+                                                   &w->lib_cbs.artist_cbs, &album_groups);
+            ui_row_attach_handlers(row, &w->lib_cbs.album_cbs);
+            gtk_list_box_append(GTK_LIST_BOX(w->search_results_list), row);
         }
-        gtk_widget_set_visible(w->search_albums_section, TRUE);
-    } else {
-        gtk_widget_set_visible(w->search_albums_section, FALSE);
+
+        /* Size groups auto-unref when widgets are destroyed */
+        g_object_unref(album_groups.col1);
+        g_object_unref(album_groups.col2);
     }
 
-    /* Populate tracks section */
-    clear_search_section(w->search_tracks_section);
-    if (results.track_count > 0) {
-        GtkWidget *header = gtk_label_new("SONGS");
-        gtk_widget_add_css_class(header, "search-results-section-header");
-        gtk_label_set_xalign(GTK_LABEL(header), 0.0);
-        gtk_box_append(GTK_BOX(w->search_tracks_section), header);
+    /* Populate tracks with size groups for column alignment */
+    if (has_tracks) {
+        GtkWidget *header = create_search_section_header("SONGS");
+        gtk_list_box_append(GTK_LIST_BOX(w->search_results_list), header);
 
-        for (size_t i = 0; i < results.track_count; i++) {
-            GtkWidget *row = ui_create_track_row(&results.tracks[i], w->artwork_mgr, FALSE,
-                                                  &search_cbs);
-            gtk_box_append(GTK_BOX(w->search_tracks_section), row);
+        /* Create size groups for track rows */
+        UiRowSizeGroups track_groups = {
+            .col1 = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL),
+            .col2 = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL)
+        };
+
+        for (guint i = 0; i < results->tracks->len; i++) {
+            const library_track_info_t *track = g_ptr_array_index(results->tracks, i);
+            GtkWidget *row = ui_create_track_row(track, w->library_cache, w->artwork_mgr, TRUE,
+                                                   &w->lib_cbs.artist_cbs, &w->lib_cbs.album_cbs, &track_groups);
+            ui_row_attach_handlers(row, &w->lib_cbs.track_cbs);
+            gtk_list_box_append(GTK_LIST_BOX(w->search_results_list), row);
         }
-        gtk_widget_set_visible(w->search_tracks_section, TRUE);
-    } else {
-        gtk_widget_set_visible(w->search_tracks_section, FALSE);
+
+        /* Size groups auto-unref when widgets are destroyed */
+        g_object_unref(track_groups.col1);
+        g_object_unref(track_groups.col2);
     }
 
-    db_search_results_free(&results);
+    library_search_results_free(results);
 }
 
 static gboolean on_search_debounce(gpointer data) {
@@ -1043,8 +1480,257 @@ static void on_search_activate(GtkSearchEntry *entry, gpointer data) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Search View Key Handlers
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Search entry: Down arrow moves focus to first selectable result */
+static gboolean on_search_entry_key_pressed(GtkEventControllerKey *ctl, guint keyval,
+                                             guint keycode, GdkModifierType state,
+                                             gpointer data) {
+    (void)ctl; (void)keycode; (void)state;
+    UiWindow *w = UI_WINDOW(data);
+
+    if (keyval == GDK_KEY_Down || keyval == GDK_KEY_KP_Down) {
+        if (gtk_widget_get_visible(w->search_results_list)) {
+            GtkWidget *child = gtk_widget_get_first_child(w->search_results_list);
+            while (child) {
+                if (GTK_IS_LIST_BOX_ROW(child) &&
+                    gtk_list_box_row_get_selectable(GTK_LIST_BOX_ROW(child))) {
+                    gtk_list_box_select_row(GTK_LIST_BOX(w->search_results_list),
+                                           GTK_LIST_BOX_ROW(child));
+                    gtk_widget_grab_focus(child);
+                    return TRUE;
+                }
+                child = gtk_widget_get_next_sibling(child);
+            }
+        }
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Search results: Escape returns to search entry, 1-4 loads selected track to channel */
+static gboolean on_search_results_key_pressed(GtkEventControllerKey *ctl, guint keyval,
+                                               guint keycode, GdkModifierType state,
+                                               gpointer data) {
+    (void)ctl; (void)keycode; (void)state;
+    UiWindow *w = UI_WINDOW(data);
+
+    if (keyval == GDK_KEY_Escape) {
+        focus_search_entry(w);
+        return TRUE;
+    }
+
+    if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_4) {
+        char action_name[32];
+        snprintf(action_name, sizeof(action_name), "load-channel-%d",
+                 (int)(keyval - GDK_KEY_1) + 1);
+        g_action_group_activate_action(G_ACTION_GROUP(w), action_name, NULL);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Filter panel: Down arrow snaps focus to first selectable search result */
+static gboolean on_filter_panel_key_pressed(GtkEventControllerKey *ctl, guint keyval,
+                                             guint keycode, GdkModifierType state,
+                                             gpointer data) {
+    (void)ctl; (void)keycode; (void)state;
+    UiWindow *w = UI_WINDOW(data);
+
+    if (keyval == GDK_KEY_Down || keyval == GDK_KEY_KP_Down) {
+        if (gtk_widget_get_visible(w->search_results_list)) {
+            GtkWidget *child = gtk_widget_get_first_child(w->search_results_list);
+            while (child) {
+                if (GTK_IS_LIST_BOX_ROW(child) &&
+                    gtk_list_box_row_get_selectable(GTK_LIST_BOX_ROW(child))) {
+                    gtk_list_box_select_row(GTK_LIST_BOX(w->search_results_list),
+                                           GTK_LIST_BOX_ROW(child));
+                    gtk_widget_grab_focus(child);
+                    return TRUE;
+                }
+                child = gtk_widget_get_next_sibling(child);
+            }
+        }
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Clear genre/year/text filters in the search view (preserves type toggle) */
+static void clear_search_view_filters(UiWindow *w) {
+    gtk_editable_set_text(GTK_EDITABLE(w->search_entry), "");
+    if (w->search_debounce_timer) {
+        g_source_remove(w->search_debounce_timer);
+        w->search_debounce_timer = 0;
+    }
+    /* Clear multi-select state */
+    if (w->selected_genres) g_hash_table_remove_all(w->selected_genres);
+    w->selected_years_mask = 0;
+    uncheck_search_popover(w->filter_genre);
+    uncheck_search_popover(w->filter_year);
+    update_search_genre_label(w);
+    update_search_year_label(w);
+    do_search(w);
+    focus_search_entry(w);
+}
+
+static void on_filter_clear_clicked(GtkButton *btn, gpointer data) {
+    (void)btn;
+    clear_search_view_filters(UI_WINDOW(data));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * View Builders
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Search filter multi-select helpers ── */
+
+static const char *SEARCH_DECADE_NAMES[] = {
+    "2020s", "2010s", "2000s", "1990s", "1980s", "1970s", "1960s", "Pre-1960",
+};
+#define SEARCH_NUM_DECADES 8
+
+static void update_search_genre_label(UiWindow *w) {
+    guint count = w->selected_genres ? g_hash_table_size(w->selected_genres) : 0;
+    if (count == 0) {
+        gtk_menu_button_set_label(GTK_MENU_BUTTON(w->filter_genre), "All");
+    } else if (count == 1) {
+        GHashTableIter iter;
+        gpointer key;
+        g_hash_table_iter_init(&iter, w->selected_genres);
+        g_hash_table_iter_next(&iter, &key, NULL);
+        gtk_menu_button_set_label(GTK_MENU_BUTTON(w->filter_genre), (const char *)key);
+    } else {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%u selected", count);
+        gtk_menu_button_set_label(GTK_MENU_BUTTON(w->filter_genre), buf);
+    }
+}
+
+static void update_search_year_label(UiWindow *w) {
+    int count = __builtin_popcount(w->selected_years_mask);
+    if (count == 0) {
+        gtk_menu_button_set_label(GTK_MENU_BUTTON(w->filter_year), "All");
+    } else if (count == 1) {
+        for (int i = 0; i < SEARCH_NUM_DECADES; i++) {
+            if (w->selected_years_mask & (1 << i)) {
+                gtk_menu_button_set_label(GTK_MENU_BUTTON(w->filter_year), SEARCH_DECADE_NAMES[i]);
+                break;
+            }
+        }
+    } else {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d selected", count);
+        gtk_menu_button_set_label(GTK_MENU_BUTTON(w->filter_year), buf);
+    }
+}
+
+static void on_search_genre_toggled(GtkCheckButton *check, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    const char *genre = gtk_check_button_get_label(check);
+    if (gtk_check_button_get_active(check))
+        g_hash_table_add(w->selected_genres, g_strdup(genre));
+    else
+        g_hash_table_remove(w->selected_genres, genre);
+    update_search_genre_label(w);
+    do_search(w);
+}
+
+static void on_search_year_toggled(GtkCheckButton *check, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    int bit = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(check), "bit-index"));
+    if (gtk_check_button_get_active(check))
+        w->selected_years_mask |= (uint16_t)(1 << bit);
+    else
+        w->selected_years_mask &= (uint16_t)~(1 << bit);
+    update_search_year_label(w);
+    do_search(w);
+}
+
+/* Uncheck all checkboxes in a menu button's popover */
+static void uncheck_search_popover(GtkWidget *menu_button) {
+    GtkPopover *popover = gtk_menu_button_get_popover(GTK_MENU_BUTTON(menu_button));
+    if (!popover) return;
+    GtkWidget *child = gtk_popover_get_child(GTK_POPOVER(popover));
+    if (!child) return;
+    /* Child is either a box directly or a scrolled window wrapping a box */
+    GtkWidget *box = GTK_IS_SCROLLED_WINDOW(child)
+        ? gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(child)) : child;
+    if (!box) return;
+    for (GtkWidget *c = gtk_widget_get_first_child(box);
+         c; c = gtk_widget_get_next_sibling(c)) {
+        if (GTK_IS_CHECK_BUTTON(c))
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(c), FALSE);
+    }
+}
+
+/* Build year multi-select popover for search view */
+static void build_search_year_popover(UiWindow *w) {
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    for (int i = 0; i < SEARCH_NUM_DECADES; i++) {
+        GtkWidget *check = gtk_check_button_new_with_label(SEARCH_DECADE_NAMES[i]);
+        g_object_set_data(G_OBJECT(check), "bit-index", GINT_TO_POINTER(i));
+        g_signal_connect(check, "toggled", G_CALLBACK(on_search_year_toggled), w);
+        gtk_box_append(GTK_BOX(box), check);
+    }
+    GtkWidget *popover = gtk_popover_new();
+    gtk_widget_add_css_class(popover, "filter-popover");
+    gtk_popover_set_child(GTK_POPOVER(popover), box);
+    gtk_menu_button_set_popover(GTK_MENU_BUTTON(w->filter_year), popover);
+}
+
+/* Build genre multi-select popover from library cache */
+static void build_search_genre_popover(UiWindow *w) {
+    if (!w->library_cache) return;
+
+    GPtrArray *albums = library_cache_get_albums_filtered(w->library_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+    if (!albums) return;
+
+    /* Collect unique genres */
+    GHashTable *genre_set = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < albums->len; i++) {
+        const library_album_info_t *album = g_ptr_array_index(albums, i);
+        if (!album->genres || !album->genres[0]) continue;
+        char **parts = g_strsplit(album->genres, ";", -1);
+        for (int j = 0; parts[j]; j++) {
+            char *trimmed = g_strstrip(g_strdup(parts[j]));
+            if (*trimmed && !g_hash_table_contains(genre_set, trimmed))
+                g_hash_table_add(genre_set, trimmed);
+            else
+                g_free(trimmed);
+        }
+        g_strfreev(parts);
+    }
+
+    /* Sort alphabetically */
+    GList *sorted = g_hash_table_get_keys(genre_set);
+    sorted = g_list_sort(sorted, (GCompareFunc)g_ascii_strcasecmp);
+
+    /* Build popover with checkboxes */
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    for (GList *l = sorted; l; l = l->next) {
+        GtkWidget *check = gtk_check_button_new_with_label((const char *)l->data);
+        g_signal_connect(check, "toggled", G_CALLBACK(on_search_genre_toggled), w);
+        gtk_box_append(GTK_BOX(box), check);
+    }
+    g_list_free(sorted);
+    g_hash_table_unref(genre_set);
+    g_ptr_array_unref(albums);
+
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scroll), 300);
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroll), TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), box);
+
+    GtkWidget *popover = gtk_popover_new();
+    gtk_widget_add_css_class(popover, "filter-popover");
+    gtk_popover_set_child(GTK_POPOVER(popover), scroll);
+    gtk_menu_button_set_popover(GTK_MENU_BUTTON(w->filter_genre), popover);
+}
 
 static GtkWidget *make_search_view(UiWindow *w) {
     GtkBuilder *builder = gtk_builder_new_from_resource("/org/quadrature/ui/search_view.ui");
@@ -1059,18 +1745,43 @@ static GtkWidget *make_search_view(UiWindow *w) {
     w->filter_btns[2] = GTK_WIDGET(gtk_builder_get_object(builder, "filter_albums"));
     w->filter_btns[3] = GTK_WIDGET(gtk_builder_get_object(builder, "filter_songs"));
     w->search_empty_label = GTK_WIDGET(gtk_builder_get_object(builder, "search_empty_label"));
-    w->search_results_box = GTK_WIDGET(gtk_builder_get_object(builder, "search_results_box"));
-    w->search_artists_section = GTK_WIDGET(gtk_builder_get_object(builder, "search_artists_section"));
-    w->search_albums_section = GTK_WIDGET(gtk_builder_get_object(builder, "search_albums_section"));
-    w->search_tracks_section = GTK_WIDGET(gtk_builder_get_object(builder, "search_tracks_section"));
+    w->search_results_list = GTK_WIDGET(gtk_builder_get_object(builder, "search_results_list"));
+    w->filter_panel = GTK_WIDGET(gtk_builder_get_object(builder, "search_filter_panel"));
+    w->filter_genre = GTK_WIDGET(gtk_builder_get_object(builder, "filter_genre"));
+    w->filter_year = GTK_WIDGET(gtk_builder_get_object(builder, "filter_year"));
+    w->filter_clear = GTK_WIDGET(gtk_builder_get_object(builder, "filter_clear"));
+
+    /* Initialize multi-select state and build popovers */
+    w->selected_genres = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    w->selected_years_mask = 0;
+    build_search_genre_popover(w);
+    build_search_year_popover(w);
 
     /* Connect signals */
     g_signal_connect(w->search_entry, "search-changed", G_CALLBACK(on_search_changed), w);
     g_signal_connect(w->search_entry, "activate", G_CALLBACK(on_search_activate), w);
+    g_signal_connect(w->search_results_list, "row-activated", G_CALLBACK(ui_list_box_row_activated), NULL);
 
     for (int i = 0; i < 4; i++) {
         g_signal_connect(w->filter_btns[i], "clicked", G_CALLBACK(on_filter_clicked), w);
     }
+    g_signal_connect(w->filter_clear, "clicked", G_CALLBACK(on_filter_clear_clicked), w);
+
+    /* Key controller: Down arrow in search entry moves to results */
+    GtkEventController *entry_key_ctl = gtk_event_controller_key_new();
+    g_signal_connect(entry_key_ctl, "key-pressed", G_CALLBACK(on_search_entry_key_pressed), w);
+    gtk_widget_add_controller(w->search_entry, entry_key_ctl);
+
+    /* Key controller: Escape returns to search entry, 1-4 loads to channel */
+    GtkEventController *results_key_ctl = gtk_event_controller_key_new();
+    g_signal_connect(results_key_ctl, "key-pressed", G_CALLBACK(on_search_results_key_pressed), w);
+    gtk_widget_add_controller(w->search_results_list, results_key_ctl);
+
+    /* Key controller: Down arrow in filter panel snaps to first search result (capture phase) */
+    GtkEventController *filter_key_ctl = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(filter_key_ctl, GTK_PHASE_CAPTURE);
+    g_signal_connect(filter_key_ctl, "key-pressed", G_CALLBACK(on_filter_panel_key_pressed), w);
+    gtk_widget_add_controller(w->filter_panel, filter_key_ctl);
 
     g_object_unref(builder);
     return view;
@@ -1082,22 +1793,25 @@ static GtkWidget *make_search_view(UiWindow *w) {
 
 static void on_library_navigate(LibraryItemKind kind, int64_t id, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
+    gboolean from_detail = (strcmp(w->current_view, "detail") == 0);
+    const char *source = from_detail ? NULL : view_display_name(w->current_view);
+
+    /* Toplevel navigation clears stale detail history */
+    if (!from_detail) {
+        w->previous_view = w->current_view;
+        library_unified_detail_clear_nav(w->detail_view);
+    }
 
     if (kind == LIBRARY_ITEM_ARTIST) {
         g_message("Artist selected: id=%" G_GINT64_FORMAT, id);
-        w->previous_view = VIEW_ARTISTS;
-        library_unified_detail_navigate_to_artist(w->detail_view, id, "Artists");
-        gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "detail");
-        w->current_view = "detail";
+        library_unified_detail_navigate_to_artist(w->detail_view, id, source);
     } else if (kind == LIBRARY_ITEM_ALBUM) {
         g_message("Album selected: id=%" G_GINT64_FORMAT, id);
-        const char *source = (w->current_view == VIEW_ARTISTS) ? "Artists" : "Albums";
-        if (strcmp(w->current_view, "detail") != 0)
-            w->previous_view = w->current_view;
-        library_unified_detail_navigate_to_album(w->detail_view, id, source);
-        gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "detail");
-        w->current_view = "detail";
+        library_unified_detail_navigate_to_album(w->detail_view, id, source, 0);
     }
+
+    gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "detail");
+    w->current_view = "detail";
 }
 
 static void on_library_play(const char *path, const char *title,
@@ -1130,95 +1844,59 @@ static void on_library_play(const char *path, const char *title,
         }
     }
 
-    g_message("Track queued to channel %d: \"%s\" by %s (%s)", ch + 1, title, artist, album);
-    g_debug("Track path: %s", path);
+    g_info("Load Track → Channel %d: '%s' by %s from '%s' (track_id=%" G_GINT64_FORMAT ")",
+           ch + 1, title, artist, album, track_id);
 
     if (!w->channels[ch])
         return;
 
-    /* Load the track */
-    ui_channel_strip_load_track(w->channels[ch], path, title, artist, album);
-
-    /* Load album context for track navigation */
-    if (w->db && track_id > 0) {
-        db_track_t *track = NULL;
-        if (db_get_track(w->db, track_id, &track) == QUADRATURE_OK && track) {
-            if (track->album_id > 0) {
-                db_track_t *album_tracks = NULL;
-                size_t count = 0;
-                if (db_get_tracks_by_album(w->db, track->album_id, &album_tracks, &count) == QUADRATURE_OK
-                    && album_tracks && count > 0) {
-                    /* Find current track index in album */
-                    int idx = 0;
-                    for (size_t i = 0; i < count; i++) {
-                        if (album_tracks[i].id == track_id) {
-                            idx = (int)i;
-                            break;
-                        }
-                    }
-
-                    ui_channel_strip_set_album_context(w->channels[ch],
-                                                        track->album_id,
-                                                        track->album,
-                                                        album_tracks,
-                                                        (int)count,
-                                                        idx);
-                    db_tracks_free(album_tracks, count);
-                } else {
-                    /* No album tracks found - clear context */
-                    ui_channel_strip_clear_album_context(w->channels[ch]);
-                }
-            } else {
-                /* No album_id - clear context */
-                ui_channel_strip_clear_album_context(w->channels[ch]);
-            }
-            db_track_free(track);
-        } else {
-            /* Couldn't get track info - clear context */
-            ui_channel_strip_clear_album_context(w->channels[ch]);
-        }
-    } else {
-        /* No database or track_id - clear context */
-        ui_channel_strip_clear_album_context(w->channels[ch]);
-    }
+    /* Load the track - album context is resolved via LibraryCache in channel_strip */
+    ui_channel_strip_load_track(w->channels[ch], track_id, path, title, artist, album);
 }
 
 static void on_library_back(gpointer data) {
     UiWindow *w = UI_WINDOW(data);
 
-    /* If detail view handles back internally, we're done */
-    if (library_unified_detail_go_back(w->detail_view))
-        return;
-
-    /* Otherwise return to previous main view */
+    /* on_back is only called when detail view's internal nav is exhausted
+     * (back button handler already called library_unified_detail_go_back).
+     * Just navigate to previous main view. */
     if (w->previous_view) {
         ui_window_navigate_to(w, w->previous_view);
-        library_unified_detail_show_empty(w->detail_view);
     }
 }
 
 static void on_track_info(int64_t track_id, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
-    if (!w->db || track_id <= 0) return;
+    if (!w->library_cache || track_id <= 0) return;
 
-    /* Get track info */
-    db_track_t *track = NULL;
-    if (db_get_track(w->db, track_id, &track) != QUADRATURE_OK) {
-        return;
-    }
+    const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
+    if (!track) return;
 
-    /* Get extended metadata */
-    db_track_metadata_t *metadata = NULL;
-    db_get_track_metadata(w->db, track_id, &metadata);  /* May be NULL if not available */
-
-    /* Create and show metadata dialog */
-    GtkWidget *dialog = ui_metadata_dialog_new(GTK_WINDOW(w));
-    ui_metadata_dialog_set_track(UI_METADATA_DIALOG(dialog), track, metadata);
+    GtkWidget *dialog = ui_metadata_dialog_new(GTK_WINDOW(w), track);
     gtk_window_present(GTK_WINDOW(dialog));
+}
 
-    /* Cleanup */
-    db_track_free(track);
-    if (metadata) db_track_metadata_free(metadata);
+static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (!w->library_cache || track_id <= 0) return;
+
+    /* Validate channel */
+    if (channel < 0 || channel >= MAX_CHANNELS || !w->channels[channel])
+        return;  /* Fail silently */
+
+    /* Check if target channel can receive tracks - fail silently if not */
+    if (!ui_channel_strip_is_active(w->channels[channel]))
+        return;
+
+    /* Look up track info */
+    const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
+    if (!track) return;
+
+    g_info("Keyboard Shortcut → Load Track to Channel %d: '%s' by %s from '%s' (track_id=%" G_GINT64_FORMAT ")",
+           channel + 1, track->title, track->artist_name, track->album_title, track_id);
+
+    ui_channel_strip_load_track(w->channels[channel], track_id, track->path,
+                                 track->title, track->artist_name, track->album_title);
 }
 
 static GtkWidget *make_libraries_view(UiWindow *w) {
@@ -1237,6 +1915,7 @@ static GtkWidget *make_libraries_view(UiWindow *w) {
     load_phase_widgets(builder, &w->scan_phase, "scan");
     load_phase_widgets(builder, &w->metadata_phase, "metadata");
     load_phase_widgets(builder, &w->artwork_phase, "artwork");
+    load_phase_widgets(builder, &w->resolve_phase, "resolve");
 
     /* Connect signals */
     g_signal_connect(add_btn, "clicked", G_CALLBACK(on_add_library), w);
@@ -1257,12 +1936,13 @@ static GtkWidget *make_channel_settings_frame(UiWindow *w, int channel) {
     gtk_widget_add_css_class(frame, "settings-channel-frame");
 
     GtkWidget *grid = gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
-    gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 0);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 0);
     gtk_widget_set_margin_start(grid, 12);
     gtk_widget_set_margin_end(grid, 12);
     gtk_widget_set_margin_top(grid, 8);
     gtk_widget_set_margin_bottom(grid, 12);
+    gtk_widget_add_css_class(grid, "settings-channel-grid");
 
     /* Row 0: Audio Device */
     GtkWidget *device_label = gtk_label_new("Audio Device");
@@ -1316,6 +1996,83 @@ static GtkWidget *make_channel_settings_frame(UiWindow *w, int channel) {
     return frame;
 }
 
+static const int art_size_values[] = { 48, 64, 96, 128 };
+static const int art_size_count = G_N_ELEMENTS(art_size_values);
+
+static int art_size_to_index(int size) {
+    for (int i = 0; i < art_size_count; i++)
+        if (art_size_values[i] == size) return i;
+    return 0;
+}
+
+static void on_art_size_changed(GtkDropDown *dropdown, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
+    UiWindow *w = UI_WINDOW(data);
+    if (w->settings_initializing) return;
+
+    guint idx = gtk_drop_down_get_selected(dropdown);
+    if (idx >= (guint)art_size_count) return;
+    int new_size = art_size_values[idx];
+
+    if (w->settings && w->settings->art_thumb_size != new_size) {
+        w->settings->art_thumb_size = new_size;
+        app_settings_save(w->settings);
+
+        if (w->indexer)
+            indexer_controller_invalidate(w->indexer);
+
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Thumbnail size set to %dpx — re-index to apply", new_size);
+        ui_window_show_toast(w, msg);
+    }
+}
+
+static void on_fingerprint_toggled(GtkCheckButton *btn, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (w->settings_initializing) return;
+
+    gboolean active = gtk_check_button_get_active(btn);
+    if (w->settings) {
+        w->settings->fingerprint_tracks = active;
+        app_settings_save(w->settings);
+    }
+    if (w->indexer) {
+        indexer_controller_set_fingerprint_tracks(w->indexer, active);
+        indexer_controller_invalidate(w->indexer);
+    }
+}
+
+static void on_mb_resolve_toggled(GtkCheckButton *btn, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (w->settings_initializing) return;
+
+    gboolean active = gtk_check_button_get_active(btn);
+    if (w->settings) {
+        w->settings->musicbrainz_resolve = active;
+        app_settings_save(w->settings);
+    }
+    if (w->indexer) {
+        indexer_controller_set_musicbrainz_resolve(w->indexer, active);
+        indexer_controller_invalidate(w->indexer);
+    }
+}
+
+static void on_pg_conninfo_changed(GtkEditable *editable, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (w->settings_initializing) return;
+
+    const char *text = gtk_editable_get_text(editable);
+    if (w->settings) {
+        g_free(w->settings->musicbrainz_pg_conninfo);
+        w->settings->musicbrainz_pg_conninfo = g_strdup(text);
+        app_settings_save(w->settings);
+    }
+    if (w->indexer) {
+        indexer_controller_set_pg_conninfo(w->indexer, text);
+        indexer_controller_invalidate(w->indexer);
+    }
+}
+
 static GtkWidget *make_settings_view(UiWindow *w) {
     GtkBuilder *builder = gtk_builder_new_from_resource("/org/quadrature/ui/settings_view.ui");
 
@@ -1325,6 +2082,10 @@ static GtkWidget *make_settings_view(UiWindow *w) {
     /* Get widget references */
     GtkWidget *channel_frames_box = GTK_WIDGET(gtk_builder_get_object(builder, "channel_frames_box"));
     GtkWidget *spectrum_checkbox = GTK_WIDGET(gtk_builder_get_object(builder, "spectrum_checkbox"));
+    GtkWidget *art_size_dropdown = GTK_WIDGET(gtk_builder_get_object(builder, "art_size_dropdown"));
+    GtkWidget *fingerprint_checkbox = GTK_WIDGET(gtk_builder_get_object(builder, "fingerprint_checkbox"));
+    GtkWidget *mb_resolve_checkbox = GTK_WIDGET(gtk_builder_get_object(builder, "mb_resolve_checkbox"));
+    GtkWidget *pg_conninfo_entry = GTK_WIDGET(gtk_builder_get_object(builder, "pg_conninfo_entry"));
 
     /* Create a frame for each channel */
     for (int i = 0; i < MAX_CHANNELS; i++) {
@@ -1335,6 +2096,31 @@ static GtkWidget *make_settings_view(UiWindow *w) {
     /* Connect spectrum toggle */
     gtk_check_button_set_active(GTK_CHECK_BUTTON(spectrum_checkbox), w->show_spectrum);
     g_signal_connect(spectrum_checkbox, "toggled", G_CALLBACK(on_spectrum_toggled), w);
+
+    /* Connect art size dropdown */
+    if (art_size_dropdown) {
+        int current = w->settings ? w->settings->art_thumb_size : 48;
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(art_size_dropdown), art_size_to_index(current));
+        g_signal_connect(art_size_dropdown, "notify::selected", G_CALLBACK(on_art_size_changed), w);
+    }
+
+    /* Connect MusicBrainz settings */
+    if (fingerprint_checkbox) {
+        gboolean active = w->settings ? w->settings->fingerprint_tracks : FALSE;
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(fingerprint_checkbox), active);
+        g_signal_connect(fingerprint_checkbox, "toggled", G_CALLBACK(on_fingerprint_toggled), w);
+    }
+    if (mb_resolve_checkbox) {
+        gboolean active = w->settings ? w->settings->musicbrainz_resolve : FALSE;
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(mb_resolve_checkbox), active);
+        g_signal_connect(mb_resolve_checkbox, "toggled", G_CALLBACK(on_mb_resolve_toggled), w);
+    }
+    if (pg_conninfo_entry) {
+        const char *conninfo = w->settings ? w->settings->musicbrainz_pg_conninfo : NULL;
+        if (conninfo)
+            gtk_editable_set_text(GTK_EDITABLE(pg_conninfo_entry), conninfo);
+        g_signal_connect(pg_conninfo_entry, "changed", G_CALLBACK(on_pg_conninfo_changed), w);
+    }
 
     g_object_unref(builder);
     return view;
@@ -1401,35 +2187,59 @@ static void build_ui(UiWindow *w) {
     /* Add views to content stack */
     gtk_stack_add_named(GTK_STACK(w->stack), make_search_view(w), "search");
 
-    LibraryCallbacks lib_cbs = {
+    w->lib_cbs = (LibraryCallbacks){
         .on_navigate = on_library_navigate,
         .on_play = on_library_play,
         .on_back = on_library_back,
         .on_track_info = on_track_info,
+        .on_load_to_channel = on_load_to_channel,
+        /* Track rows in search/lists: activate navigates to album */
+        .track_cbs = {
+            .on_activate = on_track_activate,
+            .on_secondary = on_track_secondary,
+            .user_data = w
+        },
+        /* Track rows in album detail: no on_activate (already viewing album) */
+        .album_track_cbs = {
+            .on_secondary = on_track_secondary,
+            .user_data = w
+        },
+        .album_cbs = {
+            .on_activate = on_album_activate,
+            .on_secondary = on_album_secondary,
+            .user_data = w
+        },
+        .artist_cbs = {
+            .on_activate = on_artist_activate,
+            .user_data = w
+        },
         .user_data = w
     };
 
-    w->artists_view = library_view_new(LIBRARY_ITEM_ARTIST, w->db, w->library_cache,
-                                        w->artwork_mgr, &lib_cbs);
+    w->artists_view = library_view_new(LIBRARY_ITEM_ARTIST, w->library_cache,
+                                        w->artwork_mgr, &w->lib_cbs);
     gtk_stack_add_named(GTK_STACK(w->stack), w->artists_view, "artists");
 
-    w->albums_view = library_view_new(LIBRARY_ITEM_ALBUM, w->db, w->library_cache,
-                                       w->artwork_mgr, &lib_cbs);
+    w->albums_view = library_view_new(LIBRARY_ITEM_ALBUM, w->library_cache,
+                                       w->artwork_mgr, &w->lib_cbs);
     gtk_stack_add_named(GTK_STACK(w->stack), w->albums_view, "albums");
 
     gtk_stack_add_named(GTK_STACK(w->stack), make_libraries_view(w), "libraries");
     gtk_stack_add_named(GTK_STACK(w->stack), make_settings_view(w), "settings");
-    gtk_stack_add_named(GTK_STACK(w->stack), perf_view_new(audio_pipeline_get_perf(w->pipeline)), "perf");
+    gtk_stack_add_named(GTK_STACK(w->stack), 
+                        perf_view_new(audio_pipeline_get_perf_dashboard(w->pipeline),
+                                      audio_pipeline_get_audio_cache(w->pipeline)), 
+                        "perf");
     gtk_stack_add_named(GTK_STACK(w->stack), make_help_view(), "help");
 
     /* Unified detail view */
-    w->detail_view = library_unified_detail_view_new(w->db, w->library_cache,
-                                                      w->artwork_mgr, &lib_cbs);
+    w->detail_view = library_unified_detail_view_new(w->library_cache,
+                                                      w->artwork_mgr, &w->lib_cbs);
     gtk_stack_add_named(GTK_STACK(w->stack), w->detail_view, "detail");
 
     /* Create channel strips and add to template container */
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        GtkWidget *strip = ui_channel_strip_new(i, w->pipeline);
+        GtkWidget *strip = ui_channel_strip_new(i, w->pipeline, w->library_cache);
         w->channels[i] = UI_CHANNEL_STRIP(strip);
         gtk_widget_set_vexpand(strip, TRUE);
         g_signal_connect(strip, "clicked", G_CALLBACK(on_channel_strip_clicked), w);
@@ -1437,7 +2247,6 @@ static void build_ui(UiWindow *w) {
         g_signal_connect(strip, "album-clicked", G_CALLBACK(on_channel_album_clicked), w);
         g_signal_connect(strip, "artist-clicked", G_CALLBACK(on_channel_artist_clicked), w);
         g_signal_connect(strip, "track-changed", G_CALLBACK(on_channel_track_changed), w);
-        g_signal_connect(strip, "track-ended", G_CALLBACK(on_channel_track_ended), w);
         gtk_box_append(GTK_BOX(w->channel_strips_box), strip);
     }
 
@@ -1448,10 +2257,8 @@ static void build_ui(UiWindow *w) {
         gtk_widget_set_hexpand(channels_panel, FALSE);
     }
 
-    /* Key controller */
-    GtkEventController *key = gtk_event_controller_key_new();
-    g_signal_connect(key, "key-pressed", G_CALLBACK(on_key), w);
-    gtk_widget_add_controller(GTK_WIDGET(w), key);
+    /* Setup keyboard shortcut actions */
+    setup_keyboard_actions(w);
 
     /* Update timer */
     w->update_timer = g_timeout_add(16, on_update, w);
@@ -1488,9 +2295,11 @@ static void ui_window_dispose(GObject *obj) {
 
     g_free(w->errors_library_path);
     w->errors_library_path = NULL;
+    g_clear_pointer(&w->selected_genres, g_hash_table_unref);
 
     if (w->artwork_mgr) { artwork_manager_free(w->artwork_mgr); w->artwork_mgr = NULL; }
-    if (w->library_cache) { library_cache_free(w->library_cache); w->library_cache = NULL; }
+    /* library_cache is owned by main.c, just clear our reference */
+    w->library_cache = NULL;
     if (w->db) { db_close(w->db); w->db = NULL; }
 
     G_OBJECT_CLASS(ui_window_parent_class)->dispose(obj);
@@ -1556,11 +2365,12 @@ static void ui_window_init(UiWindow *w) {
     /* Search */
     w->search_debounce_timer = 0;
     w->last_search_query = NULL;
-    w->search_results_box = NULL;
-    w->search_artists_section = NULL;
-    w->search_albums_section = NULL;
-    w->search_tracks_section = NULL;
+    w->search_results_list = NULL;
     w->search_empty_label = NULL;
+    w->filter_panel = NULL;
+    w->filter_genre = NULL;
+    w->filter_year = NULL;
+    w->filter_clear = NULL;
 
     /* Library views */
     w->artists_view = NULL;
@@ -1591,14 +2401,16 @@ static gboolean auto_scan_idle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline, app_settings_t *settings) {
+GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
+                         library_cache_t *library_cache, app_settings_t *settings) {
     UiWindow *w = g_object_new(UI_TYPE_WINDOW, "application", app, NULL);
     w->pipeline = pipeline;
+    w->library_cache = library_cache;  /* Owned by main.c, not us */
     w->settings = settings;
 
     if (settings) w->show_spectrum = settings->show_spectrum;
 
-    /* Open database */
+    /* Open database for indexer (separate from library_cache) */
     char *dir = g_build_filename(g_get_user_data_dir(), "quadrature", NULL);
     g_mkdir_with_parents(dir, 0755);
     char *dbpath = g_build_filename(dir, "library.db", NULL);
@@ -1613,16 +2425,31 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline, app_se
         if (w->indexer && settings) {
             indexer_controller_set_thread_count(w->indexer, settings->indexer_thread_count);
             indexer_controller_set_process_artwork(w->indexer, settings->process_artwork);
+            indexer_controller_set_art_size(w->indexer, settings->art_thumb_size);
+            indexer_controller_set_fingerprint_tracks(w->indexer, settings->fingerprint_tracks);
+            indexer_controller_set_musicbrainz_resolve(w->indexer, settings->musicbrainz_resolve);
+            indexer_controller_set_pg_conninfo(w->indexer, settings->musicbrainz_pg_conninfo);
         }
     }
 
-    /* Create library cache for lazy loading */
-    w->library_cache = library_cache_new();
-
     /* Create artwork manager for async image loading */
-    w->artwork_mgr = artwork_manager_new(w->db, 0);
+    int thumb_size = settings ? settings->art_thumb_size : 48;
+    w->artwork_mgr = artwork_manager_new(w->library_cache, thumb_size, 0);
 
     build_ui(w);
+
+    /* Start background cache warming (after build_ui so views exist for the
+     * ready callback, and the sync fallback in populate_artists/albums has
+     * already completed before the warming thread can replace all_artists) */
+    if (w->library_cache) {
+        library_cache_set_ready_callback(w->library_cache, on_cache_ready, w);
+        library_cache_start_warming(w->library_cache);
+    }
+
+    /* Register track changed callback for auto-advance notification */
+    if (pipeline) {
+        audio_pipeline_set_track_changed_callback(pipeline, on_track_changed, w);
+    }
 
     if (w->indexer) {
         g_signal_connect(w->indexer, "started", G_CALLBACK(on_indexer_started), w);
@@ -1730,7 +2557,9 @@ void ui_window_show_toast(UiWindow *w, const char *message) {
     g_return_if_fail(UI_IS_WINDOW(w));
     g_return_if_fail(message != NULL);
 
-    if (!w->toast_overlay || !w->toast_label) return;
+    /* Template children must be bound during init */
+    g_assert(w->toast_overlay != NULL);
+    g_assert(w->toast_label != NULL);
 
     gtk_label_set_text(GTK_LABEL(w->toast_label), message);
     gtk_widget_set_visible(w->toast_overlay, TRUE);

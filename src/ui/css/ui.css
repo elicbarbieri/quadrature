@@ -1,0 +1,406 @@
+/* General UI Styles */
+
+/* Navigation Bar */
+.nav-bar {
+    background-color: #151515;
+    min-width: 56px;
+}
+
+.nav-item {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 8px 4px;
+    min-width: 56px;
+    min-height: 56px;
+    color: #888888;
+    border-left: 3px solid transparent;
+}
+
+.nav-item:hover {
+    color: #aaaaaa;
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.nav-item:checked {
+    color: #00d4ff;
+    border-left: 3px solid #00d4ff;
+    background-color: rgba(0, 212, 255, 0.1);
+}
+
+.nav-icon { color: inherit; }
+
+.nav-label {
+    font-size: 10px;
+    font-weight: 500;
+    color: inherit;
+}
+
+.nav-separator {
+    background-color: #333333;
+    min-height: 1px;
+    margin: 8px;
+}
+
+.nav-badge {
+    background-color: #ff3333;
+    color: white;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 4px;
+    border-radius: 8px;
+    min-width: 14px;
+}
+
+/* Settings */
+.settings-section {
+    padding: 16px;
+    background-color: rgba(255, 255, 255, 0.02);
+    border-radius: 8px;
+    margin-bottom: 16px;
+}
+
+.settings-channel-frame {
+    background-color: #282828;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+
+.settings-channel-frame > label {
+    font-size: 14px;
+    font-weight: 600;
+    color: #00d4ff;
+    padding: 0 8px;
+    margin-left: 8px;
+}
+
+.settings-label {
+    font-size: 13px;
+    color: #aaaaaa;
+    min-width: 120px;
+}
+
+.settings-entry {
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.settings-entry:disabled { opacity: 0.5; }
+
+/* Help View */
+.help-shortcuts {
+    font-family: monospace;
+    font-size: 12px;
+    color: #cccccc;
+    line-height: 1.6;
+}
+
+/* Indexing Progress */
+.progress-section {
+    padding: 16px;
+    background-color: #282828;
+    border-radius: 8px;
+    border: 1px solid #3a3a3a;
+    margin-bottom: 16px;
+}
+
+.progress-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-bottom: 12px;
+}
+
+.progress-phase { margin-bottom: 16px; }
+.progress-phase:last-child { margin-bottom: 0; }
+
+.progress-phase-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: #e0e0e0;
+    margin-bottom: 4px;
+}
+
+.progress-phase-bar {
+    min-height: 8px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+}
+
+.progress-phase-bar trough {
+    min-height: 8px;
+    background-color: #3a3a3a;
+    border-radius: 4px;
+}
+
+.progress-phase-bar progress {
+    min-height: 8px;
+    background-color: #00d4ff;
+    border-radius: 4px;
+}
+
+.progress-phase-label {
+    font-size: 12px;
+    color: #aaaaaa;
+}
+
+.progress-phase-rate {
+    font-size: 11px;
+    color: #666666;
+}
+
+.progress-phase-dim .progress-phase-title { color: #666666; }
+.progress-phase-dim .progress-phase-bar trough { background-color: #2a2a2a; }
+.progress-phase-dim .progress-phase-bar progress { background-color: #555555; }
+.progress-phase-dim .progress-phase-label { color: #555555; }
+.progress-phase-dim .progress-phase-rate { color: #444444; }
+
+.progress-phase-active .progress-phase-title { color: #00d4ff; }
+.progress-phase-complete .progress-phase-bar progress { background-color: #4ade80; }
+
+/* Toast Notifications */
+.toast-notification {
+    background-color: rgba(40, 40, 40, 0.95);
+    border: 1px solid #555555;
+    border-radius: 8px;
+    padding: 12px 20px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.toast-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+/* Metadata Dialog */
+.metadata-section-header {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: #666666;
+}
+
+.metadata-section {
+    background-color: #282828;
+    border-radius: 6px;
+    padding: 12px;
+}
+
+.metadata-label {
+    font-size: 12px;
+    color: #888888;
+    font-weight: 500;
+}
+
+.metadata-value {
+    font-size: 12px;
+    color: #e0e0e0;
+}
+
+.metadata-value.dim-label {
+    color: #666666;
+    font-style: italic;
+}
+
+/* Errors View */
+.errors-tree-row {
+    padding: 6px 8px;
+    min-height: 32px;
+}
+
+.errors-tree-row:hover { background-color: rgba(255, 255, 255, 0.05); }
+
+.error-artist-row {
+    font-weight: 600;
+    color: #e0e0e0;
+}
+
+.error-album-row {
+    color: #aaaaaa;
+    padding-left: 24px;
+}
+
+.error-track-row {
+    color: #888888;
+    padding-left: 48px;
+    font-size: 12px;
+}
+
+.error-badge {
+    background-color: rgba(255, 107, 107, 0.2);
+    color: #ff6b6b;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    min-width: 20px;
+}
+
+.error-badge-warning { background-color: #ff9500; }
+.error-badge-info { background-color: #666666; }
+
+.error-type-label {
+    font-size: 11px;
+    color: #888888;
+}
+
+.error-expected { color: #33cc33; }
+.error-actual { color: #ff3333; }
+
+.error-folder-row {
+    color: #e0e0e0;
+    font-weight: 500;
+    font-size: 14px;
+}
+
+.error-folder-row image {
+    opacity: 0;
+    min-width: 0;
+    min-height: 0;
+}
+
+.error-item-row {
+    color: #aaaaaa;
+    font-size: 13px;
+}
+
+.error-item-row image {
+    color: #ff6b6b;
+    min-width: 16px;
+}
+
+.error-item-row label { color: #aaaaaa; }
+
+/* Errors Overlay */
+.errors-overlay-backdrop { background-color: #1e1e1e; }
+
+.errors-overlay-panel {
+    background-color: #1e1e1e;
+    margin: 16px;
+}
+
+.errors-overlay-header {
+    padding: 0 0 12px 0;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #333333;
+}
+
+.errors-overlay-title {
+    font-size: 24px;
+    font-weight: bold;
+    color: #e0e0e0;
+}
+
+.errors-overlay-close {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+    border-radius: 6px;
+    background: #3a3a3a;
+    border: 1px solid #555555;
+    color: #aaaaaa;
+}
+
+.errors-overlay-close:hover {
+    background-color: #4a4a4a;
+    color: #ffffff;
+}
+
+/* Performance Dashboard */
+
+/* Section Headers */
+.perf-section-title {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: #00d4ff;
+    margin-top: 16px;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 2px solid #333333;
+}
+
+/* Chart Containers */
+.perf-chart {
+    background-color: #1a1a1a;
+    border: 1px solid #282828;
+    border-radius: 8px;
+    padding: 8px;
+    min-height: 150px;
+    transition: border-color 0.2s;
+}
+
+.perf-chart:hover {
+    border-color: #3a3a3a;
+}
+
+.perf-chart-title {
+    font-size: 12px;
+    font-weight: bold;
+    color: #888888;
+    margin-bottom: 4px;
+}
+
+/* Histogram Stats */
+.perf-percentile {
+    font-family: monospace;
+    font-size: 11px;
+    color: #00d4ff;
+    font-weight: 500;
+}
+
+/* Health Status Colors */
+.perf-health-ok { 
+    color: #4ade80;
+    font-weight: 600;
+}
+
+.perf-health-warn { 
+    color: #fbbf24;
+    font-weight: 600;
+}
+
+.perf-health-error { 
+    color: #f87171;
+    font-weight: 600;
+}
+
+/* Health Summary Panel */
+.perf-chart frame > label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #00d4ff;
+}
+
+/* Log Viewer */
+.perf-log {
+    font-family: monospace;
+    font-size: 11px;
+    background-color: #0d0d0d;
+    color: #cccccc;
+    padding: 8px;
+    line-height: 1.4;
+}
+
+.perf-log-debug { color: #6b7280; }
+.perf-log-info { color: #d1d5db; }
+.perf-log-warn { color: #fbbf24; }
+.perf-log-error { color: #f87171; }
+
+/* Tooltips */
+.perf-tooltip {
+    font-family: monospace;
+    font-size: 11px;
+    padding: 8px;
+    background-color: #282828;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+}
+
+/* Grid Spacing */
+grid.perf-charts {
+    margin-top: 8px;
+    margin-bottom: 16px;
+}

@@ -1,69 +1,109 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Track row template for album detail views -->
+<!--
+  Library Track Row Template
+
+  Horizontal GtkBox with proportional column sizing (60/40) enforced
+  programmatically via tick callback in row_helpers.c.
+
+  [Art] [Title / Primary Artists  60%] [Album / Feat. Artists  40%] [Year/Dur]
+-->
 <interface>
   <object class="GtkBox" id="row">
     <property name="orientation">horizontal</property>
     <property name="spacing">12</property>
+    <property name="hexpand">true</property>
     <style>
-      <class name="library-row"/>
       <class name="library-track-row"/>
     </style>
 
-    <!-- Track number -->
+    <!-- Album art thumbnail (pixel-size set dynamically via artwork_manager) -->
     <child>
-      <object class="GtkLabel" id="track_num">
+      <object class="GtkImage" id="art">
+        <property name="icon-name">media-optical-symbolic</property>
         <property name="valign">center</property>
-        <property name="width-chars">3</property>
         <style>
-          <class name="library-row-track-num"/>
+          <class name="library-album-art"/>
         </style>
       </object>
     </child>
 
-    <!-- Text box (title only for detail view) -->
+    <!-- Left content: title + primary artists (60% of flexible space) -->
     <child>
-      <object class="GtkBox" id="text_box">
+      <object class="GtkBox" id="col_left">
         <property name="orientation">vertical</property>
-        <property name="spacing">2</property>
+        <property name="spacing">4</property>
         <property name="valign">center</property>
         <child>
           <object class="GtkLabel" id="title">
             <property name="xalign">0</property>
             <property name="ellipsize">end</property>
+            <property name="hexpand">true</property>
             <style>
               <class name="library-row-title"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="primary_artists_box">
+            <property name="orientation">horizontal</property>
+            <property name="hexpand">true</property>
+            <style>
+              <class name="library-row-subtitle"/>
             </style>
           </object>
         </child>
       </object>
     </child>
 
-    <!-- Duration -->
+    <!-- Right content: album + featuring artists (40% of flexible space) -->
     <child>
-      <object class="GtkLabel" id="duration">
+      <object class="GtkBox" id="col_right">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
         <property name="valign">center</property>
-        <style>
-          <class name="library-row-duration"/>
-        </style>
+        <child>
+          <object class="GtkBox" id="album_box">
+            <property name="orientation">horizontal</property>
+            <property name="hexpand">true</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="secondary_artists_box">
+            <property name="orientation">horizontal</property>
+            <property name="hexpand">true</property>
+            <style>
+              <class name="library-row-subtitle"/>
+            </style>
+          </object>
+        </child>
       </object>
     </child>
 
-    <!-- Info button (metadata popup) -->
+    <!-- Meta column: year + duration (fixed width, right-aligned) -->
     <child>
-      <object class="GtkButton" id="info_btn">
+      <object class="GtkBox" id="col_meta">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+        <property name="halign">end</property>
         <property name="valign">center</property>
-        <property name="tooltip-text">Show track metadata</property>
-        <property name="has-frame">false</property>
         <child>
-          <object class="GtkImage">
-            <property name="icon-name">help-about-symbolic</property>
-            <property name="pixel-size">14</property>
+          <object class="GtkLabel" id="year">
+            <property name="width-chars">4</property>
+            <property name="xalign">1</property>
+            <style>
+              <class name="library-row-year"/>
+            </style>
           </object>
         </child>
-        <style>
-          <class name="flat"/>
-          <class name="track-info-btn"/>
-        </style>
+        <child>
+          <object class="GtkLabel" id="duration">
+            <property name="width-chars">5</property>
+            <property name="xalign">1</property>
+            <style>
+              <class name="library-row-duration"/>
+            </style>
+          </object>
+        </child>
       </object>
     </child>
   </object>

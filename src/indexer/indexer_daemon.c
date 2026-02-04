@@ -5,6 +5,6 @@
  * Currently a stub - daemon functionality not yet implemented.
  */
 
-#include "quadrature/core/types.h"
+#include "quadrature/quadrature.h"
 
 // Daemon functions will be implemented when needed

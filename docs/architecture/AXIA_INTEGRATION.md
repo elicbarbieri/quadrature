@@ -4,14 +4,14 @@ Decouples Audio (AES67/RTP) from Logic (LWRP). PipeWire handles audio transport;
 
 ## Network Addressing
 
-| Source Name | Livewire Ch | Multicast IP | Studio |
-| --- | --- | --- | --- |
-| Quadrature_Studio_A_0 | 101 | `239.192.0.101` | A |
-| Quadrature_Studio_A_1 | 102 | `239.192.0.102` | A |
-| Quadrature_Studio_A_2 | 103 | `239.192.0.103` | A |
-| Quadrature_Studio_A_3 | 104 | `239.192.0.104` | A |
-| Quadrature_Studio_B_0 | 201 | `239.192.0.201` | B |
-| Quadrature_Studio_B_1 | 202 | `239.192.0.202` | B |
+| Source Name           | Livewire Ch | Multicast IP    | Studio |
+| --------------------- | ----------- | --------------- | ------ |
+| Quadrature_Studio_A_0 | 101         | `239.192.0.101` | A      |
+| Quadrature_Studio_A_1 | 102         | `239.192.0.102` | A      |
+| Quadrature_Studio_A_2 | 103         | `239.192.0.103` | A      |
+| Quadrature_Studio_A_3 | 104         | `239.192.0.104` | A      |
+| Quadrature_Studio_B_0 | 201         | `239.192.0.201` | B      |
+| Quadrature_Studio_B_1 | 202         | `239.192.0.202` | B      |
 
 **Format:** 48kHz, Stereo, 24-bit (L24) | **Port:** UDP 5004
 
@@ -36,9 +36,9 @@ pactl load-module module-rtp-send \
 
 TCP port 93, ASCII `\r\n` terminated.
 
-| Command | Dir | Description |
-| --- | --- | --- |
-| `ADD GPO <ch>` | TX | Subscribe to channel GPIO |
+| Command                  | Dir   | Description                                     |
+| ------------------------ | ----- | ----------------------------------------------- |
+| `ADD GPO <ch>`           | TX    | Subscribe to channel GPIO                       |
 | `GPO <ch> <pin> <state>` | RX/TX | GPIO state (pin 1=ON, pin 2=PREVIEW, state 0/1) |
 
 ## API
@@ -76,12 +76,12 @@ quadrature_result_t axia_gpio_set(axia_gpio_t *gpio, axia_pin_t pin, axia_state_
 
 ## Operations
 
-| Operation | Direction | Trigger |
-| --- | --- | --- |
-| Fader ON | Console → App | Console fader raised → `engine_play()` |
-| Fader OFF | Console → App | Console fader lowered → `engine_stop()` |
+| Operation  | Direction     | Trigger                                             |
+| ---------- | ------------- | --------------------------------------------------- |
+| Fader ON   | Console → App | Console fader raised → `engine_play()`              |
+| Fader OFF  | Console → App | Console fader lowered → `engine_stop()`             |
 | Queue Play | App → Console | Play pressed in queue mode → set `AXIA_PIN_ON` high |
-| Preview On | Bidirectional | Toggle preview/cue monitoring |
+| Preview On | Bidirectional | Toggle preview/cue monitoring                       |
 
 ## Multi-Studio
 

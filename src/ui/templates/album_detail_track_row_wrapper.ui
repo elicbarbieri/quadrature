@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Album Track Row Wrapper Template
+  
+  GtkListBoxRow wrapper for album detail track items.
+  Prevents vertical expansion and eliminates extra padding.
+-->
+<interface>
+  <object class="GtkListBoxRow" id="track_row">
+    <property name="vexpand">false</property>
+    <property name="valign">fill</property>
+    <style>
+      <class name="album-track-row"/>
+    </style>
+    <!-- Child content (GtkGrid) is set dynamically via gtk_list_box_row_set_child() -->
+  </object>
+</interface>

@@ -1,60 +1,74 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Artist row template for library list views -->
+<!--
+  Library Artist Row Template
+
+  Artist row for library list views.
+  Uses 2-row GtkGrid layout with album art strip on the right.
+  Vertical alignment: Row 0 bottom-aligned (valign=end),
+  Row 1 top-aligned (valign=start), so content hugs the center.
+
+  Row 0: Artist Name (18px, bold)                | [art][art][art][art]
+  Row 1: N albums · Appears on N tracks (12px)   | (48×48 thumbnails)
+         col 0 (60%)                              | col 1 (40%, rowspan=2)
+-->
 <interface>
-  <object class="GtkBox" id="row">
-    <property name="orientation">horizontal</property>
-    <property name="spacing">12</property>
+  <object class="GtkGrid" id="row">
+    <property name="column-spacing">12</property>
+    <property name="row-spacing">4</property>
+    <property name="hexpand">true</property>
     <style>
-      <class name="library-row"/>
       <class name="library-artist-row"/>
     </style>
 
-    <!-- Text box -->
+    <!-- Column 0, Row 0: Artist Name (18px, bold) — bottom-aligned -->
     <child>
-      <object class="GtkBox" id="text_box">
-        <property name="orientation">vertical</property>
-        <property name="spacing">4</property>
-        <property name="valign">center</property>
-        <child>
-          <object class="GtkLabel" id="title">
-            <property name="xalign">0</property>
-            <property name="ellipsize">end</property>
-            <style>
-              <class name="library-row-title"/>
-            </style>
-          </object>
-        </child>
-        <child>
-          <object class="GtkLabel" id="subtitle">
-            <property name="xalign">0</property>
-            <property name="ellipsize">end</property>
-            <style>
-              <class name="library-row-subtitle"/>
-            </style>
-          </object>
-        </child>
+      <object class="GtkLabel" id="title">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <property name="valign">end</property>
+        <property name="hexpand">true</property>
+        <layout>
+          <property name="column">0</property>
+          <property name="row">0</property>
+        </layout>
+        <style>
+          <class name="library-row-title"/>
+          <class name="artist-name-column"/>
+        </style>
       </object>
     </child>
 
-    <!-- Album art strip (dynamically populated) -->
+    <!-- Column 0, Row 1: Metadata (N albums · Appears on N tracks) — top-aligned -->
+    <child>
+      <object class="GtkLabel" id="subtitle">
+        <property name="xalign">0</property>
+        <property name="ellipsize">end</property>
+        <property name="valign">start</property>
+        <property name="hexpand">true</property>
+        <layout>
+          <property name="column">0</property>
+          <property name="row">1</property>
+        </layout>
+        <style>
+          <class name="library-row-subtitle"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Column 1: Album art strip (dynamically populated, rowspan=2) -->
     <child>
       <object class="GtkBox" id="art_strip">
         <property name="orientation">horizontal</property>
         <property name="spacing">4</property>
         <property name="valign">center</property>
+        <property name="halign">end</property>
+        <layout>
+          <property name="column">1</property>
+          <property name="row">0</property>
+          <property name="row-span">2</property>
+        </layout>
         <style>
           <class name="album-art-strip"/>
-        </style>
-      </object>
-    </child>
-
-    <!-- Navigation arrow -->
-    <child>
-      <object class="GtkImage" id="arrow">
-        <property name="icon-name">go-next-symbolic</property>
-        <property name="valign">center</property>
-        <style>
-          <class name="library-row-arrow"/>
         </style>
       </object>
     </child>

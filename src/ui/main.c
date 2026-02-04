@@ -5,12 +5,14 @@
  */
 
 #include "internal.h"
+#include "quadrature/quadrature_library.h"
 
 #define SAMPLE_RATE 48000
 
 typedef struct {
     GtkApplication *app;
     audio_pipeline_t *pipeline;
+    library_cache_t *library_cache;
 } AppData;
 
 static void on_activate(GtkApplication *gtkapp, gpointer data) {
@@ -21,7 +23,7 @@ static void on_activate(GtkApplication *gtkapp, gpointer data) {
     g_type_ensure(UI_TYPE_CHANNEL_STRIP);
 
     app_settings_t *settings = app_settings_load();
-    GtkWidget *win = ui_window_new(gtkapp, d->pipeline, settings);
+    GtkWidget *win = ui_window_new(gtkapp, d->pipeline, d->library_cache, settings);
     gtk_window_present(GTK_WINDOW(win));
 }
 
@@ -34,19 +36,40 @@ static void on_shutdown(GtkApplication *gtkapp, gpointer data) {
         audio_pipeline_destroy(d->pipeline);
         d->pipeline = NULL;
     }
+
+    if (d->library_cache) {
+        library_cache_destroy(d->library_cache);
+        d->library_cache = NULL;
+    }
 }
 
 int main(int argc, char *argv[]) {
     AppData data = {0};
 
-    if (audio_pipeline_create(SAMPLE_RATE, &data.pipeline) != QUADRATURE_OK) {
+    /* Build database path */
+    char *dir = g_build_filename(g_get_user_data_dir(), "quadrature", NULL);
+    g_mkdir_with_parents(dir, 0755);
+    char *dbpath = g_build_filename(dir, "library.db", NULL);
+    g_free(dir);
+
+    /* Create library cache for track_id -> path resolution */
+    if (library_cache_create(dbpath, NULL, &data.library_cache) != QUADRATURE_OK) {
+        g_warning("Failed to create library cache - audio will not resolve track IDs");
+        data.library_cache = NULL;
+    }
+    g_free(dbpath);
+
+    /* Create audio pipeline with library cache */
+    if (audio_pipeline_create(data.library_cache, SAMPLE_RATE, &data.pipeline) != QUADRATURE_OK) {
         g_critical("Failed to create audio pipeline");
+        if (data.library_cache) library_cache_destroy(data.library_cache);
         return 1;
     }
 
     if (audio_pipeline_start(data.pipeline) != QUADRATURE_OK) {
         g_critical("Failed to start audio pipeline");
         audio_pipeline_destroy(data.pipeline);
+        if (data.library_cache) library_cache_destroy(data.library_cache);
         return 1;
     }
 

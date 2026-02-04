@@ -1,6 +1,6 @@
 #include "indexer_controller.h"
-#include "quadrature/indexer/indexer.h"
-#include "quadrature/database/database.h"
+#include "quadrature/quadrature_indexer.h"
+#include "quadrature/quadrature_database.h"
 
 #include <string.h>
 
@@ -15,6 +15,9 @@ struct _IndexerController {
     gboolean process_artwork;
     int art_size;
     char* art_cache_dir;
+    gboolean fingerprint_tracks;
+    gboolean musicbrainz_resolve;
+    char* pg_conninfo;
 
     // Current state (for property binding)
     double progress;
@@ -182,6 +185,8 @@ static void indexer_controller_dispose(GObject* object) {
 
     g_free(self->art_cache_dir);
     self->art_cache_dir = NULL;
+    g_free(self->pg_conninfo);
+    self->pg_conninfo = NULL;
 
     G_OBJECT_CLASS(indexer_controller_parent_class)->dispose(object);
 }
@@ -237,7 +242,7 @@ static void indexer_controller_class_init(IndexerControllerClass* klass) {
 static void indexer_controller_init(IndexerController* self) {
     self->thread_count = 0;  // Auto
     self->process_artwork = TRUE;
-    self->art_size = 300;
+    self->art_size = 48;
     self->progress = 0.0;
     self->running = FALSE;
     strncpy(self->status, "Idle", sizeof(self->status));
@@ -263,7 +268,7 @@ void indexer_controller_set_process_artwork(IndexerController* self, gboolean en
 
 void indexer_controller_set_art_size(IndexerController* self, int size) {
     g_return_if_fail(INDEXER_IS_CONTROLLER(self));
-    self->art_size = size > 0 ? size : 300;
+    self->art_size = size > 0 ? size : 48;
 }
 
 static gboolean ensure_indexer(IndexerController* self) {
@@ -275,7 +280,10 @@ static gboolean ensure_indexer(IndexerController* self) {
         .art_size = self->art_size,
         .art_dir = self->art_cache_dir,
         .callback = on_indexer_callback,
-        .user_data = self
+        .user_data = self,
+        .fingerprint_tracks = self->fingerprint_tracks,
+        .mb_resolve = self->musicbrainz_resolve,
+        .pg_conninfo = self->pg_conninfo,
     };
 
     if (indexer_create(&self->indexer, &config) != QUADRATURE_OK) {
@@ -404,4 +412,29 @@ void indexer_controller_get_progress_info(IndexerController* self,
 const char* indexer_controller_get_status(IndexerController* self) {
     g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), "Unknown");
     return self->status;
+}
+
+void indexer_controller_set_fingerprint_tracks(IndexerController* self, gboolean enable) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    self->fingerprint_tracks = enable;
+}
+
+void indexer_controller_set_musicbrainz_resolve(IndexerController* self, gboolean enable) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    self->musicbrainz_resolve = enable;
+}
+
+void indexer_controller_set_pg_conninfo(IndexerController* self, const char* conninfo) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    g_free(self->pg_conninfo);
+    self->pg_conninfo = conninfo ? g_strdup(conninfo) : NULL;
+}
+
+void indexer_controller_invalidate(IndexerController* self) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    if (self->running) return;
+    if (self->indexer) {
+        indexer_destroy(self->indexer);
+        self->indexer = NULL;
+    }
 }

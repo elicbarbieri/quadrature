@@ -9,7 +9,7 @@
 #define QUADRATURE_APP_SETTINGS_H
 
 #include <glib.h>
-#include "../core/types.h"
+#include "quadrature/quadrature.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +56,12 @@ typedef struct {
     gboolean auto_scan_on_startup;    // Auto-scan watch paths on startup (default: TRUE)
     gboolean process_artwork;         // Extract and process album artwork (default: TRUE)
     int indexer_thread_count;         // Number of indexer threads (0 = auto)
+    int art_thumb_size;               // Album art thumbnail size in pixels (default: 48)
+
+    // AcoustID / MusicBrainz settings
+    gboolean fingerprint_tracks;      // Generate AcoustID chromaprint fingerprints during indexing
+    gboolean musicbrainz_resolve;     // Run MusicBrainz resolver after indexing
+    char *musicbrainz_pg_conninfo;    // libpq conninfo for MB+AcoustID PG database
 } app_settings_t;
 
 /**

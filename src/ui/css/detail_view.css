@@ -1,0 +1,251 @@
+/* Detail View Styles */
+
+/* Detail View Back Button */
+.detail-back {
+    background: transparent;
+    border: none;
+    color: #00d4ff;
+    padding: 4px 8px;
+    transition: background-color 150ms ease-out, color 150ms ease-out;
+}
+
+.detail-back:hover {
+    background-color: rgba(0, 212, 255, 0.15);
+    color: #33ddff;
+}
+
+/* Detail View Title and Metadata */
+.detail-title {
+    font-size: 40px;
+    font-weight: 700;
+    color: #e0e0e0;
+    letter-spacing: -0.5px;
+    line-height: 1.1;
+}
+
+.detail-meta {
+    font-size: 16px;
+    color: #888888;
+    line-height: 1.5;
+}
+
+.detail-featuring-label {
+    font-size: 13px;
+    color: #666666;
+}
+
+/* Detail View Section Header */
+.detail-section-header {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #666666;
+    letter-spacing: 1.2px;
+    padding-bottom: 8px;
+}
+
+/* Detail View Album Art */
+.detail-album-art {
+    min-width: 250px;
+    min-height: 250px;
+    border-radius: 8px;
+    background-color: #333333;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Album Detail Artist Link */
+.album-detail-artist {
+    color: #00d4ff;
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: 16px;
+    font-weight: 500;
+    transition: color 150ms ease-out;
+}
+
+.album-detail-artist:hover {
+    color: #33ddff;
+    background: transparent;
+    text-decoration: underline;
+}
+
+/* Album Track Row Wrapper */
+row.album-track-row {
+    padding: 10px 16px;
+    margin: 0;
+    border: none;
+    border-radius: 6px;
+    transition: background-color 150ms ease-out;
+}
+
+row.album-track-row:hover {
+    background-color: rgba(255, 255, 255, 0.03);
+}
+
+/* Album Detail Track Grid */
+.album-detail-track {
+    padding: 0;
+    margin: 0;
+}
+
+/* Album Detail Track Number */
+.album-detail-track-num {
+    font-size: 15px;
+    color: #666666;
+    font-weight: 500;
+    font-feature-settings: "tnum";
+    min-width: 32px;
+}
+
+/* Album Detail Track Title */
+.album-detail-track-title {
+    font-size: 16px;
+    font-weight: 500;
+    color: #e0e0e0;
+    transition: color 150ms ease-out;
+}
+
+row.album-track-row:hover .album-detail-track-title {
+    color: #ffffff;
+}
+
+/* Album Detail Track Duration */
+.album-detail-track-duration {
+    font-size: 14px;
+    color: #888888;
+    font-family: monospace;
+    font-feature-settings: "tnum";
+    letter-spacing: 0.5px;
+}
+
+/* Album Detail Track Info Button */
+.album-detail-track-info-btn {
+    background: transparent;
+    border: none;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 6px;
+    opacity: 0;
+    transition: opacity 150ms ease-out, background-color 150ms ease-out;
+    border-radius: 4px;
+}
+
+.album-detail-track-info-btn:hover {
+    opacity: 1.0;
+    background-color: rgba(0, 212, 255, 0.15);
+}
+
+row.album-track-row:hover .album-detail-track-info-btn {
+    opacity: 0.6;
+}
+
+.album-detail-track-featuring:empty {
+    display: none;
+}
+
+/* Disc Headers */
+.disc-header-row {
+    padding: 16px 16px 8px 16px;
+    margin-top: 16px;
+    border-top: 1px solid #2a2a2a;
+}
+
+.disc-header-row:first-child {
+    margin-top: 0;
+    border-top: none;
+    padding-top: 8px;
+}
+
+.disc-header-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #666666;
+    letter-spacing: 1.2px;
+}
+
+.disc-header {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #666666;
+    letter-spacing: 1.2px;
+    border-top: 1px solid #2a2a2a;
+    padding: 12px 16px 6px 16px;
+    margin-top: 16px;
+    background-color: rgba(255, 255, 255, 0.02);
+}
+
+.disc-header:first-child {
+    margin-top: 0;
+    border-top: none;
+}
+
+/* Album tracks list container */
+.album-tracks-list {
+    padding: 0;
+    margin: 0;
+    margin-top: 24px;
+    background-color: transparent;
+}
+
+/* Remove default GTK ListBoxRow padding */
+list.album-tracks-list > row {
+    padding: 0;
+    margin: 0;
+    min-height: 0;
+    border: none;
+    background: transparent;
+}
+
+/* Detail View Back Header */
+.detail-back-header {
+    padding: 4px 0;
+}
+
+/* Artist Detail Page Spacing */
+.artist-header {
+    margin-bottom: 24px;
+}
+
+.appears-on-section {
+    margin-top: 32px;
+}
+
+/* Appears On list boxes */
+list.appears-on-list {
+    background: transparent;
+    padding: 0;
+}
+
+list.appears-on-list > row {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    transition: background-color 150ms ease-out;
+}
+
+list.appears-on-list > row:hover {
+    background-color: rgba(255, 255, 255, 0.03);
+}
+
+list.appears-on-list > row + row {
+    margin-top: 2px;
+}
+
+/* Album Card Wrapper - minimal and unobtrusive for both single and multi-card display */
+.album-card {
+    padding: 8px;
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+}
+
+/* Spacing between cards in multi-card contexts (artist detail view) */
+.artist-albums-container .album-card {
+    padding: 0;
+    margin-bottom: 32px;
+}
+

@@ -1,290 +1,277 @@
 # Library System
 
-Dual-mode architecture: NAS daemon + client-side portable drive indexing.
+Five-phase indexer with MusicBrainz resolution. SQLite for local state, PostgreSQL for MusicBrainz + AcoustID lookups.
 
-## Architecture
-
-```
-┌─────────────────────────────────┬───────────────────────────────────────┐
-│   PRIMARY NAS LIBRARY           │   PORTABLE DRIVE LIBRARIES            │
-│   (Server-side indexing)        │   (Client-side indexing)              │
-│                                 │                                       │
-│  quadrature-indexer daemon      │  Client UI (GTK4)                     │
-│  • fanotify watching            │  • GVolumeMonitor detection           │
-│  • Delta scanning               │  • Background thread indexing         │
-│  • Batched writes               │  • Progress callbacks                 │
-│           │                     │           │                           │
-│           ▼                     │           ▼                           │
-│  /mnt/nas/library.db            │  /media/USB/.quadrature/library.db    │
-│  (WAL mode, rw)                 │  (stored on drive itself)             │
-│           │                     │                                       │
-│           │ NFS (read-only)     │                                       │
-│           ▼                     │                                       │
-│  Studio clients                 │                                       │
-└─────────────────────────────────┴───────────────────────────────────────┘
-```
-
-## Filesystem Requirements
-
-**fanotify requires a local filesystem with proper kernel support.** Network filesystems don't work.
-
-| Filesystem | Supported | Notes                           |
-| ---------- | --------- | ------------------------------- |
-| ext4       | ✓         | Recommended for portable drives |
-| XFS        | ✓         | Good for large files            |
-| Btrfs      | ✓         | Snapshots, checksums            |
-| ZFS        | ✓         | Enterprise NAS                  |
-| NFS/CIFS   | ✗         | Read-only client access only    |
-| exFAT/NTFS | ✗         | Rejected at mount detection     |
-
-Portable drives **must** be ext4, XFS, Btrfs, or ZFS. The UI rejects other formats.
-
-______________________________________________________________________
-
-## Part 1: NAS Library
-
-Indexer daemon runs on NAS with local filesystem access. Clients read database via NFS.
-
-### fanotify Watcher
-
-```c
-// Watch entire mount point with single fd
-int fan_fd = fanotify_init(FAN_CLASS_NOTIF | FAN_NONBLOCK, O_RDONLY);
-fanotify_mark(fan_fd, FAN_MARK_ADD | FAN_MARK_MOUNT,
-              FAN_CREATE | FAN_DELETE | FAN_MODIFY | FAN_MOVED_FROM | FAN_MOVED_TO,
-              AT_FDCWD, "/mnt/broadcast/music");
-
-// Event loop
-struct fanotify_event_metadata buf[256];
-while ((len = read(fan_fd, buf, sizeof(buf))) > 0) {
-    // Process events, debounce, queue for indexing
-}
-```
-
-### Indexer Components
-
-- **Scanner**: Multi-threaded directory walker with delta detection
-- **Writer**: Single-threaded batched transactions
-- **Watcher**: fanotify with debounce (500ms)
-- **Database**: SQLite WAL mode
-
-### Configuration
-
-```ini
-# /etc/quadrature/indexer.conf
-[daemon]
-pid_file = /var/run/quadrature-indexer.pid
-log_file = /var/log/quadrature/indexer.log
-
-[database]
-path = /mnt/broadcast/library/library.db
-checkpoint_interval = 300
-
-[scanner]
-watch_paths = /mnt/broadcast/music
-batch_size = 500
-reconcile_interval = 24    # hours
-
-[watcher]
-debounce_ms = 500
-```
-
-### NFS Client Access
-
-```c
-// Client opens read-only
-sqlite3_open_v2("file:///mnt/nas/library.db?mode=ro", &db, SQLITE_OPEN_READONLY, NULL);
-```
-
-Clients refresh queries on user action or periodic timer. No sync daemon needed.
-
-______________________________________________________________________
-
-## Part 2: Portable Drives
-
-Indexed client-side when mounted. Database stored on drive for portability.
-
-### Detection Flow
+## Indexer Architecture
 
 ```
-Drive Mounted
-      │
-      ▼
-Check .quadrature/library.db exists?
-      │
-   ┌──┴──┐
-   │     │
-   ▼     ▼
-EXISTS   NOT FOUND
-   │        │
-   ▼        ▼
-Auto-index  Prompt user
-(if enabled)  "Index this drive?"
-   │        │
-   ▼        ▼
-Incremental  Full index
-scan         (or ignore)
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              INDEXER                                      │
+│                                                                          │
+│  Phase 1 ─ SCAN          stat() + hashmap → work queue of changed dirs  │
+│  Phase 2 ─ METADATA      GThreadPool: FFmpeg extract + fingerprint      │
+│  Phase 3 ─ ARTWORK       GThreadPool: image resize → atlas              │
+│  Phase 4 ─ RESOLVE       MusicBrainz: tags or fingerprint → PG lookup  │
+│  Phase 5 ─ FINALIZE      Batch mtime update, error flags, checkpoint    │
+│                                                                          │
+│              │                              │                            │
+│              v                              v                            │
+│  ┌────────────────────────┐    ┌────────────────────────────────────┐   │
+│  │  SQLite (WAL mode)     │    │  PostgreSQL (self-hosted)          │   │
+│  │  tracks, albums,       │    │  MusicBrainz + AcoustID data       │   │
+│  │  artists, fingerprints │    │  acoustid_compare2() + GIN index   │   │
+│  └────────────────────────┘    └────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Filesystem Validation
+### Phase 1 — SCAN
 
-```c
-static void on_mount_added(GVolumeMonitor* monitor, GMount* mount, gpointer data) {
-    const char* fs_type = get_mount_fstype(mount);
+Fast, single-threaded. Builds a work queue of changed album directories.
 
-    // Reject unsupported filesystems
-    if (!is_fanotify_compatible(fs_type)) {
-        show_toast(app, "Unsupported filesystem",
-                   "Drive uses %s. Please format as ext4.", fs_type);
-        return;
-    }
-    // ... proceed with indexing
-}
+1. `db_get_album_mtimes_page()` → build `GHashTable` of `path → (album_id, last_updated_at)`
+2. Walk watch paths recursively
+3. `stat(dir)` to get current mtime
+4. Lookup in hashmap: mtime matches → skip; differs or missing → queue for processing
 
-static bool is_fanotify_compatible(const char* fs) {
-    return strcmp(fs, "ext4") == 0 ||
-           strcmp(fs, "xfs") == 0 ||
-           strcmp(fs, "btrfs") == 0 ||
-           strcmp(fs, "zfs") == 0;
-}
-```
+Completes in <1 second for unchanged libraries.
 
-### Drive Layout
+### Phase 2 — METADATA
 
-```
-/media/DJ_USB/
-├── .quadrature/
-│   └── library.db
-├── Electronic/
-│   └── Artist/Album/track.flac
-└── Jazz/
-```
+Parallel via `GThreadPool`. For each queued directory:
 
-### Incremental Scanning
+1. Extract metadata from audio files (FFmpeg)
+2. Build folder album context (detect multi-disc, compilation, etc.)
+3. Parse artist credits from tags
+4. Write tracks/albums/artists to SQLite
+5. Generate Chromaprint fingerprint and cache in SQLite (`tracks.chromaprint`)
 
-Uses `file_state` table to detect changes efficiently.
+### Phase 3 — ARTWORK
+
+Parallel via `GThreadPool`. For each album in work queue:
+
+1. Find artwork file in album directory (priority: `cover.jpg` > `folder.jpg` > `front.jpg` > `albumart.jpg`, with `.png`/`.webp` variants)
+2. Fall back to embedded artwork from first audio file
+3. Resize to thumbnail (48x48 default)
+4. Write to atlas file (`~/.local/share/quadrature/art/`)
+
+### Phase 4 — RESOLVE
+
+MusicBrainz resolution via local PostgreSQL. Processes all albums with `mb_status = NOT_ATTEMPTED`.
+
+**Two-tier resolution:**
 
 ```
-For each audio file:
-  1. Lookup by path in file_state
-  2. Not found → NEW, extract metadata
-  3. Found but (mtime|size|inode) changed → MODIFIED, re-extract
-  4. Found and unchanged → SKIP
+Tier 1: File has MUSICBRAINZ_ALBUMID tag
+        → Use that release UUID directly
 
-After scan:
-  Mark files with last_seen < scan_start as DELETED
+Tier 2: No tags
+        → Read cached fingerprints from SQLite
+        → Local AcoustID PG query (acoustid_compare2 + GIN index)
+        → Consensus vote across album tracks → release UUID
+
+Then:   Fetch full release from MusicBrainz PG
+        → Match tracks by position
+        → Write canonical metadata to SQLite
 ```
 
-**Performance:**
+No heuristic metadata matching. No HTTP. No file writes. Binary: tags exist or they don't.
 
-- Full index 5k tracks: ~2-5 min
-- Incremental (no changes): ~5-10 sec
-- Incremental (50 new): ~15-30 sec
+**What MB resolution provides:**
 
-### Read-Only Fallback
+- Canonical artist names and sort names (with MusicBrainz IDs)
+- Canonical album title, release type, label, barcode
+- Canonical track titles and recording IDs
+- Proper album artist vs. track artist separation
+- Compilation detection
+- Release year correction
 
-If drive is write-protected:
+### Phase 5 — FINALIZE
 
-```
-~/.cache/quadrature/drives/{filesystem-uuid}.db
-```
+Single-threaded cleanup:
 
-### Client Indexer API
-
-```c
-typedef struct {
-    size_t files_scanned, files_total;
-    size_t files_new, files_updated, files_unchanged, files_deleted, errors;
-    const char* current_file;
-} index_progress_t;
-
-typedef void (*index_progress_cb)(const index_progress_t* progress, void* user_data);
-typedef void (*index_complete_cb)(quadrature_result_t result, void* user_data);
-
-quadrature_result_t library_index_drive(
-    const char* mount_path,
-    index_progress_cb progress_cb,
-    index_complete_cb complete_cb,
-    void* user_data,
-    atomic_bool* cancel_flag
-);
-```
-
-Threading: Background thread, progress via `g_idle_add()`, cooperative cancellation.
+- `db_set_album_mtimes_batch()` for all successfully processed albums
+- Update error flags for albums with issues
+- WAL checkpoint for durability
 
 ______________________________________________________________________
 
 ## Database Schema
 
-SQLite with WAL mode. Minimal fields for performance.
+SQLite with WAL mode. MusicBrainz columns populated by Phase 4 resolver.
 
 ```sql
 CREATE TABLE artists (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL
+    name TEXT NOT NULL UNIQUE,
+    -- MB resolution (Phase 4)
+    musicbrainz_id TEXT,
+    sort_name TEXT
 );
 
 CREATE TABLE albums (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
     artist_id INTEGER REFERENCES artists(id),
-    path TEXT NOT NULL,            -- relative to music base
+    album_artist_id INTEGER REFERENCES artists(id),
+    path TEXT NOT NULL DEFAULT '',
     year INTEGER,
+    last_updated_at INTEGER,          -- Delta detection (Phase 1)
+    is_compilation INTEGER DEFAULT 0,
+    genres TEXT,                       -- Comma-separated (set by MB resolver)
+    -- MB resolution (Phase 4)
+    musicbrainz_release_id TEXT,
+    musicbrainz_release_group_id TEXT,
+    release_type TEXT,
+    label TEXT,
+    barcode TEXT,
+    mb_status INTEGER DEFAULT 0,      -- 0=not_attempted, 1=resolved, 2=no_match, 3=failed
+    mb_resolved_at INTEGER,
     UNIQUE(title, artist_id)
 );
 
 CREATE TABLE tracks (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
-    artist_id INTEGER REFERENCES artists(id),
     album_id INTEGER REFERENCES albums(id),
     path TEXT NOT NULL UNIQUE,
     duration_ms INTEGER NOT NULL,
-    track_num INTEGER
+    track_num INTEGER,
+    disc_num INTEGER NOT NULL DEFAULT 1,
+    mtime INTEGER NOT NULL DEFAULT 0,
+    year INTEGER DEFAULT 0,
+    genre TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    artist_display TEXT,              -- "Artist A feat. Artist B"
+    -- Fingerprint cache (Phase 2)
+    chromaprint TEXT,
+    chromaprint_duration INTEGER DEFAULT 0,
+    -- MB resolution (Phase 4)
+    musicbrainz_recording_id TEXT
 );
 
+-- Multi-artist junction table
+CREATE TABLE track_artists (
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    artist_id INTEGER NOT NULL REFERENCES artists(id),
+    role INTEGER NOT NULL DEFAULT 0,      -- 0=primary, 1=featuring
+    position INTEGER NOT NULL DEFAULT 0,  -- display order
+    PRIMARY KEY (track_id, artist_id)
+);
+
+-- Full-text search
 CREATE VIRTUAL TABLE tracks_fts USING fts5(
     title, content='tracks', content_rowid='id'
 );
 
-CREATE INDEX idx_tracks_album ON tracks(album_id, track_num);
-
--- Delta detection
-CREATE TABLE file_state (
+-- Watch paths (user-configured scan roots)
+CREATE TABLE watch_paths (
     id INTEGER PRIMARY KEY,
-    path TEXT UNIQUE NOT NULL,
-    mtime INTEGER NOT NULL,
-    size INTEGER NOT NULL,
-    inode INTEGER NOT NULL,
-    track_id INTEGER,
-    last_seen INTEGER NOT NULL,
-    state INTEGER DEFAULT 0         -- 0=active, 1=deleted
+    path TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_scanned INTEGER
+);
+
+-- Indexer errors for user review
+CREATE TABLE indexer_errors (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 ```
 
-**Storage:** ~100 bytes/track, FTS5 adds ~50% overhead. 1M tracks ≈ 150MB.
+**Storage:** ~400 bytes/track with MB columns. 100k tracks ~ 40MB.
 
 ______________________________________________________________________
 
-## Album Art
+## Directory Format
 
-Thumbnails pre-generated by indexer, full-size loaded on demand.
-
-### Discovery Order
-
-1. `art.jpg`
-1. `cover.jpg`
-1. `folder.jpg`
-1. `album.jpg`
-1. `front.jpg`
-1. Embedded (FFmpeg extraction)
-
-### Storage
+### Single-Disc Album
 
 ```
-/mnt/broadcast/art/
-└── thumb/
-    └── {album_id}.jpg    # 48x48, JPEG 85%
+/Artist/Album/
+  cover.jpg
+  01-track.flac
+  02-track.flac
 ```
 
-Full-size art loaded from `{music_base}/{albums.path}/art.jpg` at runtime.
+### Multi-Disc Album
+
+```
+/Artist/Album/
+  cover.jpg          <- Artwork in parent folder
+  CD1/
+    01-track.flac
+  CD2/
+    01-track.flac
+```
+
+Disc folder patterns (case-insensitive): `CD1`, `CD 1`, `CD-1`, `Disc1`, `Disc 1`, `Disc-1`, `Disc One`, `D1`.
+
+The indexer creates one album record pointing to the parent directory, extracts tracks from all disc directories, and sets `disc_num` on each track.
+
+### Validation Rules
+
+The indexer logs errors for these conditions:
+
+| Error | Condition | Fix |
+|-------|-----------|-----|
+| Mixed content | Album has both loose tracks and disc folders | Move tracks into disc folders |
+| Orphan disc folder | Only one disc subdirectory exists | Remove folder level or add more discs |
+| Non-sequential discs | Disc numbers skip a value | Rename to be sequential |
+| Artwork in disc folder | Artwork found inside disc subdir | Move to album root |
+| Too deep nesting | Tracks >1 level below album dir | Flatten structure |
+| Empty disc folder | Disc subdirectory has no audio files | Add tracks or remove folder |
+
+### Artwork Discovery
+
+Priority order per album directory:
+
+1. `cover.{jpg,png,webp}`
+2. `folder.{jpg,png,webp}`
+3. `front.{jpg,png,webp}`
+4. `albumart.{jpg,png,webp}`
+5. Embedded artwork from first audio file (FFmpeg extraction)
+
+______________________________________________________________________
+
+## MusicBrainz Infrastructure
+
+### PostgreSQL Setup
+
+The resolver requires a self-hosted PostgreSQL instance with:
+
+- **MusicBrainz database** — full mirror of musicbrainz.org data (artists, releases, recordings, etc.)
+- **AcoustID data** — fingerprint-to-recording mappings with `acoustid_compare2()` function and GIN index
+
+Standard MusicBrainz replication keeps the data current. The AcoustID dataset is a separate import.
+
+### Resolution Flow
+
+```
+For each unresolved album (mb_status = 0):
+    │
+    ├── Read first track's tags
+    │   └── Has MUSICBRAINZ_ALBUMID? ──── YES ──→ Tier 1: use release UUID
+    │                                      NO
+    │                                      │
+    ├── Read cached fingerprints from SQLite
+    │   └── For each track:
+    │       └── Query local AcoustID PG (acoustid_compare2)
+    │           └── Returns candidate recording_ids with scores
+    │
+    ├── Consensus vote: group recordings by release, pick best match
+    │
+    ├── Fetch full release from MusicBrainz PG
+    │   └── Match tracks by position (disc_num, track_num)
+    │
+    └── Write to SQLite:
+        ├── albums: release_id, release_group_id, release_type, label, barcode, year
+        ├── tracks: recording_id, title (canonical)
+        ├── artists: musicbrainz_id, sort_name (deduplicated)
+        └── albums.mb_status = 1 (resolved)
+```
+
+### What Remains Without MusicBrainz
+
+If MB resolution is disabled or no match is found, the library still works — it just uses whatever metadata was in the file tags. The indexer's tag parsing (artist splitting on `feat.`/`;`, album artist detection, compilation heuristics) provides a reasonable baseline. MB resolution upgrades that baseline to canonical data.

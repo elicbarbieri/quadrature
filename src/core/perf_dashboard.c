@@ -5,7 +5,8 @@
  * Lock-free metrics collection with log-scale histograms and ring buffers.
  */
 
-#include "quadrature/core/perf_dashboard.h"
+#include "internal.h"
+#include "quadrature/quadrature_audio.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -122,11 +123,19 @@ quadrature_result_t perf_dashboard_create(uint32_t sample_rate, perf_dashboard_t
     histogram_reset(&d->audio_decode);
     histogram_reset(&d->audio_latency);
     histogram_reset(&d->artwork_load_time);
+    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
+        histogram_reset(&d->callback_time[i]);
+    }
 
     /* Initialize time series */
     timeseries_init(&d->artwork_hit_rate);
     timeseries_init(&d->cache_hit_rate);
     timeseries_init(&d->memory_usage);
+    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
+        timeseries_init(&d->budget_pct[i]);
+        d->budget_last_sum_ns[i] = 0;
+        d->budget_last_count[i] = 0;
+    }
 
     /* Initialize log buffer */
     atomic_store(&d->log_write, 0);
@@ -146,6 +155,9 @@ void perf_dashboard_destroy(perf_dashboard_t* d) {
     timeseries_clear(&d->artwork_hit_rate);
     timeseries_clear(&d->cache_hit_rate);
     timeseries_clear(&d->memory_usage);
+    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
+        timeseries_clear(&d->budget_pct[i]);
+    }
 
     g_free(d);
 }
@@ -164,6 +176,17 @@ void perf_dashboard_reset(perf_dashboard_t* d) {
         atomic_store(&d->audio_health[i].jitter_sum_samples, 0);
         atomic_store(&d->audio_health[i].jitter_max_samples, 0);
         atomic_store(&d->audio_health[i].last_callback_sample, 0);
+        atomic_store(&d->audio_health[i].callback_time_sum_ns, 0);
+        atomic_store(&d->audio_health[i].callback_count_for_budget, 0);
+        atomic_store(&d->audio_health[i].budget_overruns, 0);
+        atomic_store(&d->audio_health[i].dequeue_failures, 0);
+        atomic_store(&d->audio_health[i].scrubber_underflows, 0);
+        atomic_store(&d->audio_health[i].deferred_advances, 0);
+        atomic_store(&d->audio_health[i].instant_advances, 0);
+        atomic_store(&d->audio_health[i].total_advances, 0);
+        histogram_reset(&d->callback_time[i]);
+        d->budget_last_sum_ns[i] = 0;
+        d->budget_last_count[i] = 0;
     }
 
     atomic_store(&d->artwork_hits, 0);
@@ -214,8 +237,8 @@ void perf_record_callback(perf_dashboard_t* d, int player_id, uint64_t sample) {
     /* Calculate jitter from expected vs actual sample position */
     uint64_t last = atomic_load(&h->last_callback_sample);
     if (last > 0 && sample > last) {
-        /* Expected ~256 samples per callback at 48kHz (~5.3ms) */
-        uint64_t expected = 256;
+        /* Expected ~512 samples per callback (matches NODE_LATENCY "512/48000") */
+        uint64_t expected = 512;
         uint64_t actual = sample - last;
         uint64_t jitter = actual > expected ? actual - expected : expected - actual;
 
@@ -226,8 +249,68 @@ void perf_record_callback(perf_dashboard_t* d, int player_id, uint64_t sample) {
             if (atomic_compare_exchange_weak(&h->jitter_max_samples, &cur_max, jitter))
                 break;
         }
+
+        /* Late callback: jitter exceeds 25% of expected period */
+        if (jitter > expected / 4) {
+            atomic_fetch_add(&h->late_callbacks, 1);
+        }
     }
     atomic_store(&h->last_callback_sample, sample);
+}
+
+void perf_record_callback_time(perf_dashboard_t* d, int player_id,
+                                uint64_t elapsed_ns, uint32_t frame_count) {
+    if (!d || atomic_load(&d->paused)) return;
+    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
+
+    /* Per-player callback latency histogram (in microseconds) */
+    histogram_record(&d->callback_time[player_id], elapsed_ns / 1000);
+
+    /* Also feed the existing shared latency histogram */
+    histogram_record(&d->audio_latency, elapsed_ns / 1000);
+
+    /* Track sum/count for windowed budget computation */
+    perf_audio_health_t* h = &d->audio_health[player_id];
+    atomic_fetch_add_explicit(&h->callback_time_sum_ns, elapsed_ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&h->callback_count_for_budget, 1, memory_order_relaxed);
+
+    /* Track budget overruns (>50% of period) */
+    uint64_t budget_ns = (uint64_t)frame_count * 1000000000ULL / d->sample_rate;
+    if (elapsed_ns > budget_ns / 2) {
+        atomic_fetch_add(&h->budget_overruns, 1);
+    }
+
+    /* Log severe budget overruns (>80% of period) */
+    if (elapsed_ns > budget_ns * 80 / 100) {
+        perf_log(d, PERF_LOG_WARN, "audio",
+                 "Player %d: callback %.1fms (budget %.1fms, %.0f%%)",
+                 player_id, (double)elapsed_ns / 1e6,
+                 (double)budget_ns / 1e6,
+                 (double)elapsed_ns / (double)budget_ns * 100.0);
+    }
+}
+
+void perf_sample_budget_utilization(perf_dashboard_t* d) {
+    if (!d || atomic_load(&d->paused)) return;
+
+    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
+        perf_audio_health_t* h = &d->audio_health[i];
+        uint64_t cur_sum = atomic_load_explicit(&h->callback_time_sum_ns, memory_order_relaxed);
+        uint64_t cur_count = atomic_load_explicit(&h->callback_count_for_budget, memory_order_relaxed);
+
+        uint64_t delta_sum = cur_sum - d->budget_last_sum_ns[i];
+        uint64_t delta_count = cur_count - d->budget_last_count[i];
+
+        if (delta_count > 0) {
+            double avg_ns = (double)delta_sum / (double)delta_count;
+            double budget_ns = 512.0 * 1e9 / (double)d->sample_rate;
+            double pct = avg_ns / budget_ns * 100.0;
+            perf_timeseries_add(&d->budget_pct[i], pct);
+        }
+
+        d->budget_last_sum_ns[i] = cur_sum;
+        d->budget_last_count[i] = cur_count;
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -386,3 +469,42 @@ void perf_get_audio_health(const perf_dashboard_t* d, int player,
         }
     }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Fault Event Recording
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+void perf_record_dequeue_failure(perf_dashboard_t* d, int player_id) {
+    if (!d || atomic_load(&d->paused)) return;
+    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
+    atomic_fetch_add(&d->audio_health[player_id].dequeue_failures, 1);
+    perf_log(d, PERF_LOG_ERROR, "audio", 
+             "Player %d: dequeue failure (PipeWire buffer unavailable)", player_id);
+}
+
+void perf_record_scrubber_underflow(perf_dashboard_t* d, int player_id) {
+    if (!d || atomic_load(&d->paused)) return;
+    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
+    atomic_fetch_add(&d->audio_health[player_id].scrubber_underflows, 1);
+    perf_log(d, PERF_LOG_WARN, "audio",
+             "Player %d: scrubber underflow (Rubberband output shortage)", player_id);
+}
+
+void perf_record_track_advance(perf_dashboard_t* d, int player_id, bool instant) {
+    if (!d || atomic_load(&d->paused)) return;
+    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
+    
+    perf_audio_health_t* h = &d->audio_health[player_id];
+    atomic_fetch_add(&h->total_advances, 1);
+    
+    if (instant) {
+        atomic_fetch_add(&h->instant_advances, 1);
+    } else {
+        atomic_fetch_add(&h->deferred_advances, 1);
+        perf_log(d, PERF_LOG_INFO, "audio",
+                 "Player %d: deferred advance (next track not preloaded)", player_id);
+    }
+}
+
+/* Per-player statistics query is implemented in audio_pipeline.c as
+ * audio_pipeline_get_player_stats() - see quadrature_audio.h */

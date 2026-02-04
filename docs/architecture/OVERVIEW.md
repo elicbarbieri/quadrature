@@ -32,59 +32,73 @@
                                                     Broadcast Console
 ```
 
+## Indexer Pipeline
+
+Five-phase pipeline handles library scanning, metadata extraction, and MusicBrainz resolution:
+
+```
+Phase 1 — SCAN       Fast directory walk, stat() + hashmap delta detection
+Phase 2 — METADATA   Parallel FFmpeg metadata extraction + Chromaprint fingerprinting
+Phase 3 — ARTWORK    Parallel image processing → thumbnail atlas
+Phase 4 — RESOLVE    MusicBrainz resolution via local PostgreSQL (two-tier)
+Phase 5 — FINALIZE   Batch DB updates (mtimes, error flags, WAL checkpoint)
+```
+
+Phase 4 uses a self-hosted MusicBrainz + AcoustID PostgreSQL database. Two-tier resolution: if the file has MB tags (e.g. from Picard), use them directly; otherwise, match cached fingerprints against local AcoustID via `acoustid_compare2()` + consensus voting. All resolved metadata written to SQLite — never modifies library files.
+
+See [Library System](LIBRARY_SYSTEM.md) for details.
+
 ## Design Principles
 
 - **No volume control** - Console controls all levels
 - **No mixing** - Each channel outputs independently
 - **No effects** - Processing on console or outboard
 - **Read-only metering** - Display only, doesn't modify audio
+- **Read-only library** - Never modifies files in scanned paths
 
 ## Threading
 
-| Thread       | Purpose                                | Priority  |
-| ------------ | -------------------------------------- | --------- |
-| Main         | GTK4 UI, user input                    | Normal    |
-| Decode Pool  | FFmpeg decode, resample (Audio Cache)  | Normal    |
-| Audio        | PipeWire callbacks, sample output      | Real-time |
-| Spectrum     | FFT analysis (reads from ring buffer)  | Normal    |
+| Thread       | Purpose                                    | Priority  |
+| ------------ | ------------------------------------------ | --------- |
+| Main         | GTK4 UI, user input                        | Normal    |
+| Decode Pool  | FFmpeg decode, resample (Audio Cache)      | Normal    |
+| Audio        | PipeWire callbacks, sample output          | Real-time |
+| Spectrum     | FFT analysis (reads from ring buffer)      | Normal    |
+| Indexer Pool | Metadata extraction, fingerprinting        | Normal    |
+| MB Resolver  | PostgreSQL queries for MusicBrainz data    | Normal    |
 
-Communication via lock-free ring buffers and atomics. Audio thread reads pre-decoded buffers from cache—no decoding on real-time thread. See [Audio Cache](AUDIO_CACHE.md) and [Audio Engine](AUDIO_ENGINE.md) for details.
-
-## Library Sources
-
-| Source          | Indexed By                  | Database Location                  |
-| --------------- | --------------------------- | ---------------------------------- |
-| Primary NAS     | `quadrature-indexer` daemon | NFS share                          |
-| Portable drives | Client UI (in-process)      | On drive: `.quadrature/library.db` |
-
-See [Library System](LIBRARY_SYSTEM.md) for details.
+Communication via lock-free ring buffers and atomics. Audio thread reads pre-decoded buffers from cache — no decoding on real-time thread. See [Audio Cache](AUDIO_CACHE.md) and [Audio Engine](AUDIO_ENGINE.md) for details.
 
 ## Configuration
 
 ```ini
-[audio]
-sample_rate = 48000
-buffer_size = 1024
+# ~/.config/quadrature/settings.ini
 
-[channel.1]
-sink = console_input_1
+[Channel1]
+device = alsa_output.pci-0000_00_1f.3.analog-stereo
+enabled = true
+output_format = 1
 
-[channel.2]
-sink = console_input_2
+[Display]
+show_spectrum = true
+time_warning_threshold = 30000
 
-[channel.3]
-sink = console_input_3
+[Library]
+auto_scan_on_startup = true
+process_artwork = true
+indexer_threads = 0
+art_thumb_size = 48
 
-[channel.4]
-sink = console_input_4
-
-[library]
-db_path = /mnt/nas/music/library.db
-music_base = /mnt/nas/music
+[MusicBrainz]
+pg_conninfo = host=localhost dbname=musicbrainz_db user=musicbrainz
+auto_resolve = true
 ```
 
 ## Platform Requirements
 
 - Linux with PipeWire
-- GTK4, FFmpeg, SQLite3, FFTW3
-- Filesystems: ext4, XFS, Btrfs, or ZFS (fanotify support required)
+- GTK4, GLib, FFmpeg, SQLite3, FFTW3, libvips, Rubberband
+- Chromaprint (audio fingerprinting)
+- TagLib (tag reading)
+- libpq (PostgreSQL client for MusicBrainz + AcoustID)
+- Self-hosted PostgreSQL with MusicBrainz + AcoustID data

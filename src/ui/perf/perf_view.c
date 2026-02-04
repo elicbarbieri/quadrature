@@ -1,13 +1,17 @@
 /**
  * @file perf_view.c
- * @brief Performance dashboard view
+ * @brief Grafana-style performance dashboard with comprehensive audio metrics
  *
- * Grafana-style monitoring dashboard with charts and log viewer.
+ * Displays audio engine metrics (callback latency, budget utilization, underruns)
+ * and audio cache metrics (decode time distribution, memory usage, hit rates).
  */
 
 #include "perf_chart.h"
+#include "perf_view.h"
 #include "../internal.h"
+#include "../../audio/internal.h"
 #include <string.h>
+#include <math.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Private State
@@ -15,15 +19,21 @@
 
 typedef struct {
     perf_dashboard_t* dashboard;
+    audio_cache_t* audio_cache;
 
-    /* Charts */
-    PerfHistogramChart* decode_hist;
-    PerfHistogramChart* artwork_hist;
-    PerfLineChart* hit_rate_chart;
+    /* Audio Engine - Per-Player Metrics */
+    PerfHistogramChart* callback_latency_hist[PERF_MAX_PLAYERS];
+    PerfLineChart* budget_util_chart[PERF_MAX_PLAYERS];
+    GtkWidget* player_stats_grid;
+
+    /* Audio Cache Metrics */
+    PerfHistogramChart* decode_time_hist;
     PerfLineChart* memory_chart;
+    PerfLineChart* hit_rate_chart;
+    PerfHistogramChart* artwork_hist;
 
-    /* Health panel */
-    GtkWidget* health_labels[PERF_MAX_PLAYERS];
+    /* Audio Health Summary */
+    GtkWidget* health_summary;
 
     /* Log viewer */
     GtkTextView* log_view;
@@ -35,6 +45,9 @@ typedef struct {
 
     /* Update timer */
     guint timer_id;
+    
+    /* Current selected player for detail view */
+    int selected_player;
 } PerfViewPrivate;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -55,7 +68,8 @@ static void append_log_entry(PerfViewPrivate* priv, const perf_log_entry_t* entr
     uint64_t ms = (entry->timestamp_us / 1000) % 1000;
     char time_buf[32];
     snprintf(time_buf, sizeof(time_buf), "%02lu:%02lu:%02lu.%03lu ",
-             (sec / 3600) % 24, (sec / 60) % 60, sec % 60, ms);
+             (unsigned long)((sec / 3600) % 24), (unsigned long)((sec / 60) % 60), 
+             (unsigned long)(sec % 60), (unsigned long)ms);
 
     /* Insert timestamp */
     gtk_text_buffer_insert(priv->log_buffer, &end, time_buf, -1);
@@ -91,23 +105,57 @@ static void append_log_entry(PerfViewPrivate* priv, const perf_log_entry_t* entr
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Update Timer
+ * Update Timer - Refresh All Metrics
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static gboolean update_dashboard(gpointer data) {
     PerfViewPrivate* priv = data;
     if (!priv->dashboard) return G_SOURCE_CONTINUE;
 
-    /* Update histograms */
+    /* Update audio cache decode histogram */
+    if (priv->audio_cache && priv->decode_time_hist) {
+        audio_cache_decode_event_t events[100];
+        uint32_t event_count = audio_cache_get_decode_events(priv->audio_cache, events, 100);
+        
+        /* Build histogram from events */
+        perf_histogram_t hist;
+        memset(&hist, 0, sizeof(hist));
+        atomic_store(&hist.min, UINT64_MAX);
+        atomic_store(&hist.max, 0);
+        
+        for (uint32_t i = 0; i < event_count; i++) {
+            uint64_t time_us = (uint64_t)events[i].decode_duration_ms * 1000;
+            
+            /* Compute bucket (log scale) */
+            int bucket = 0;
+            if (time_us >= 1000) {
+                uint64_t ms = time_us / 1000;
+                bucket = (int)(log2((double)ms)) + 1;
+                if (bucket >= PERF_HIST_BUCKETS) bucket = PERF_HIST_BUCKETS - 1;
+            }
+            
+            atomic_fetch_add(&hist.buckets[bucket], 1);
+            atomic_fetch_add(&hist.count, 1);
+            atomic_fetch_add(&hist.sum, time_us);
+            
+            uint64_t cur_min = atomic_load(&hist.min);
+            if (time_us < cur_min) atomic_store(&hist.min, time_us);
+            
+            uint64_t cur_max = atomic_load(&hist.max);
+            if (time_us > cur_max) atomic_store(&hist.max, time_us);
+        }
+        
+        perf_hist_stats_t stats;
+        perf_get_histogram_stats(&hist, &stats);
+        perf_histogram_chart_set_data(priv->decode_time_hist, &stats);
+    }
+
+    /* Update artwork load time histogram */
     perf_hist_stats_t stats;
-
-    perf_get_histogram_stats(&priv->dashboard->audio_decode, &stats);
-    perf_histogram_chart_set_data(priv->decode_hist, &stats);
-
     perf_get_histogram_stats(&priv->dashboard->artwork_load_time, &stats);
     perf_histogram_chart_set_data(priv->artwork_hist, &stats);
 
-    /* Update time series */
+    /* Update cache hit rates */
     double values[PERF_TIMESERIES_SIZE];
     size_t count;
 
@@ -117,25 +165,65 @@ static gboolean update_dashboard(gpointer data) {
     perf_get_timeseries(&priv->dashboard->cache_hit_rate, values, &count);
     perf_line_chart_set_data(priv->hit_rate_chart, 1, values, count);
 
-    /* Update audio health */
+    /* Update per-player metrics */
     for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-        uint64_t underruns, callbacks;
-        double jitter_ms;
-        perf_get_audio_health(priv->dashboard, i, &underruns, &callbacks, &jitter_ms);
+        /* Callback latency histogram */
+        perf_get_histogram_stats(&priv->dashboard->callback_time[i], &stats);
+        perf_histogram_chart_set_data(priv->callback_latency_hist[i], &stats);
+        
+        /* Budget utilization line chart */
+        perf_get_timeseries(&priv->dashboard->budget_pct[i], values, &count);
+        perf_line_chart_set_data(priv->budget_util_chart[i], 0, values, count);
+    }
 
-        char buf[128];
-        const char* status = underruns > 0 ? "perf-health-warn" : "perf-health-ok";
-        if (underruns > 10) status = "perf-health-error";
+    /* Update health summary */
+    if (priv->health_summary) {
+        GString* text = g_string_new("");
+        
+        for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
+            uint64_t underruns, callbacks;
+            double jitter;
+            perf_get_audio_health(priv->dashboard, i, &underruns, &callbacks, &jitter);
+            
+            const char* status_icon = "✓";
+            const char* status_color = "#4ade80";  /* green */
+            
+            /* Simple health status based on underruns */
+            float underrun_pct = callbacks > 0 ? (float)underruns / (float)callbacks * 100.0f : 0.0f;
+            
+            if (underrun_pct > 0.1f || underruns > 0) {
+                status_icon = "⚠";
+                status_color = "#fbbf24";  /* yellow */
+            }
+            if (underrun_pct > 1.0f) {
+                status_icon = "✗";
+                status_color = "#f87171";  /* red */
+            }
+            
+            g_string_append_printf(text, 
+                "<span foreground='%s' weight='bold'>%s Ch%d</span>  "
+                "Callbacks: %lu  Underruns: %lu  Jitter: %.2fms\n",
+                status_color, status_icon, i + 1,
+                (unsigned long)callbacks,
+                (unsigned long)underruns,
+                jitter);
+        }
+        
+        gtk_label_set_markup(GTK_LABEL(priv->health_summary), text->str);
+        g_string_free(text, TRUE);
+    }
 
-        snprintf(buf, sizeof(buf), "Ch%d: %lu callbacks, %lu underruns, %.2fms jitter",
-                 i + 1, (unsigned long)callbacks, (unsigned long)underruns, jitter_ms);
-        gtk_label_set_text(GTK_LABEL(priv->health_labels[i]), buf);
-
-        /* Update CSS class */
-        gtk_widget_remove_css_class(priv->health_labels[i], "perf-health-ok");
-        gtk_widget_remove_css_class(priv->health_labels[i], "perf-health-warn");
-        gtk_widget_remove_css_class(priv->health_labels[i], "perf-health-error");
-        gtk_widget_add_css_class(priv->health_labels[i], status);
+    /* Memory usage */
+    if (priv->audio_cache && priv->memory_chart) {
+        audio_cache_stats_t cache_stats;
+        audio_cache_get_stats(priv->audio_cache, &cache_stats);
+        
+        /* Convert to MB */
+        double memory_mb = cache_stats.memory_usage_pct * 512.0 / 100.0;  /* Assume 512MB limit */
+        perf_timeseries_add(&priv->dashboard->memory_usage, memory_mb);
+        
+        perf_get_timeseries(&priv->dashboard->memory_usage, values, &count);
+        perf_line_chart_set_data(priv->memory_chart, 0, values, count);
     }
 
     /* Read and display new log entries */
@@ -188,38 +276,35 @@ static void on_view_destroy(GtkWidget* widget G_GNUC_UNUSED, gpointer data) {
  * Widget Construction
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static GtkWidget* make_audio_health_panel(PerfViewPrivate* priv) {
-    GtkWidget* frame = gtk_frame_new("Audio Health");
+static GtkWidget* make_health_summary(PerfViewPrivate* priv) {
+    GtkWidget* frame = gtk_frame_new("Audio Health Summary");
     gtk_widget_add_css_class(frame, "perf-chart");
 
-    GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    gtk_widget_set_margin_start(vbox, 8);
-    gtk_widget_set_margin_end(vbox, 8);
-    gtk_widget_set_margin_top(vbox, 8);
-    gtk_widget_set_margin_bottom(vbox, 8);
+    priv->health_summary = gtk_label_new("Initializing...");
+    gtk_label_set_use_markup(GTK_LABEL(priv->health_summary), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(priv->health_summary), 0);
+    gtk_widget_set_margin_start(priv->health_summary, 8);
+    gtk_widget_set_margin_end(priv->health_summary, 8);
+    gtk_widget_set_margin_top(priv->health_summary, 8);
+    gtk_widget_set_margin_bottom(priv->health_summary, 8);
 
-    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-        priv->health_labels[i] = gtk_label_new("Ch? -- callbacks, -- underruns");
-        gtk_widget_add_css_class(priv->health_labels[i], "perf-health-ok");
-        gtk_label_set_xalign(GTK_LABEL(priv->health_labels[i]), 0);
-        gtk_box_append(GTK_BOX(vbox), priv->health_labels[i]);
-    }
-
-    gtk_frame_set_child(GTK_FRAME(frame), vbox);
+    gtk_frame_set_child(GTK_FRAME(frame), priv->health_summary);
     return frame;
 }
 
 static GtkWidget* make_log_viewer(PerfViewPrivate* priv) {
-    GtkWidget* frame = gtk_frame_new("Log");
+    GtkWidget* frame = gtk_frame_new("Event Log");
     gtk_widget_add_css_class(frame, "perf-chart");
 
-    GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(vbox, "perf-view-container");
 
     /* Toolbar */
-    GtkWidget* toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget* toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_margin_start(toolbar, 8);
     gtk_widget_set_margin_end(toolbar, 8);
     gtk_widget_set_margin_top(toolbar, 4);
+    gtk_widget_add_css_class(toolbar, "perf-view-toolbar");
 
     /* Level filter */
     const char* const levels[] = {"All", "Info+", "Warn+", "Error", NULL};
@@ -246,8 +331,11 @@ static GtkWidget* make_log_viewer(PerfViewPrivate* priv) {
 
     /* Scrolled text view */
     GtkWidget* scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(scroll), 150);
-    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(scroll), 200);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scroll), 200);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                    GTK_POLICY_NEVER,
+                                    GTK_POLICY_AUTOMATIC);
 
     priv->log_view = GTK_TEXT_VIEW(gtk_text_view_new());
     gtk_text_view_set_editable(priv->log_view, FALSE);
@@ -270,15 +358,29 @@ static GtkWidget* make_log_viewer(PerfViewPrivate* priv) {
     return frame;
 }
 
-GtkWidget* perf_view_new(perf_dashboard_t* dashboard) {
+GtkWidget* perf_view_new(perf_dashboard_t* dashboard, audio_cache_t* cache) {
     PerfViewPrivate* priv = g_new0(PerfViewPrivate, 1);
     priv->dashboard = dashboard;
+    priv->audio_cache = cache;
     priv->min_level = PERF_LOG_DEBUG;
     priv->auto_scroll = TRUE;
+    priv->selected_player = 0;
 
-    /* Main container */
-    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    /* Scrolled window wrapper for all content */
+    GtkWidget* scrolled = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
+                                    GTK_POLICY_NEVER,
+                                    GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_vexpand(scrolled, TRUE);
+
+    /* Main container inside scrolled window */
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(box, "view-container");
+    gtk_widget_add_css_class(box, "perf-detail-container");
+    gtk_widget_set_margin_start(box, 16);
+    gtk_widget_set_margin_end(box, 16);
+    gtk_widget_set_margin_top(box, 16);
+    gtk_widget_set_margin_bottom(box, 16);
     g_signal_connect(box, "destroy", G_CALLBACK(on_view_destroy), priv);
 
     /* Title */
@@ -287,59 +389,113 @@ GtkWidget* perf_view_new(perf_dashboard_t* dashboard) {
     gtk_label_set_xalign(GTK_LABEL(title), 0);
     gtk_box_append(GTK_BOX(box), title);
 
-    /* Charts grid (2 cols × 3 rows) - fits in narrower content area */
-    GtkWidget* grid = gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(grid), 12);
-    gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
-    gtk_widget_set_hexpand(grid, TRUE);
-    gtk_grid_set_row_homogeneous(GTK_GRID(grid), TRUE);
-    gtk_grid_set_column_homogeneous(GTK_GRID(grid), TRUE);
+    /* Health summary bar */
+    GtkWidget* health = make_health_summary(priv);
+    gtk_box_append(GTK_BOX(box), health);
 
-    /* Row 0: Histograms */
-    priv->decode_hist = PERF_HISTOGRAM_CHART(perf_histogram_chart_new("Audio Decode Time", "ms"));
-    gtk_widget_set_size_request(GTK_WIDGET(priv->decode_hist), 200, 120);
-    gtk_widget_add_css_class(GTK_WIDGET(priv->decode_hist), "perf-chart");
-    gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(priv->decode_hist), 0, 0, 1, 1);
+    /* ═══════════════════════════════════════════════════════════════════════
+     * SECTION 1: Audio Engine Metrics (Per-Player)
+     * ═══════════════════════════════════════════════════════════════════════ */
+    
+    GtkWidget* section1 = gtk_label_new("Audio Engine (Per-Player Metrics)");
+    gtk_widget_add_css_class(section1, "perf-section-title");
+    gtk_label_set_xalign(GTK_LABEL(section1), 0);
+    gtk_box_append(GTK_BOX(box), section1);
 
-    priv->artwork_hist = PERF_HISTOGRAM_CHART(perf_histogram_chart_new("Artwork Load Time", "ms"));
-    gtk_widget_set_size_request(GTK_WIDGET(priv->artwork_hist), 200, 120);
-    gtk_widget_add_css_class(GTK_WIDGET(priv->artwork_hist), "perf-chart");
-    gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(priv->artwork_hist), 1, 0, 1, 1);
+    /* Grid: 2 rows × 4 columns (callback latency + budget util for each player) */
+    GtkWidget* engine_grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(engine_grid), 0);
+    gtk_grid_set_column_spacing(GTK_GRID(engine_grid), 0);
+    gtk_widget_set_hexpand(engine_grid, TRUE);
+    gtk_widget_add_css_class(engine_grid, "perf-stats-grid");
 
-    /* Row 1: Line charts */
-    priv->hit_rate_chart = PERF_LINE_CHART(perf_line_chart_new("Cache Hit Rates (%)", 2));
+    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
+        /* Row 0: Callback Latency Histograms */
+        char title_buf[64];
+        snprintf(title_buf, sizeof(title_buf), "Ch%d Callback Latency", i + 1);
+        priv->callback_latency_hist[i] = PERF_HISTOGRAM_CHART(
+            perf_histogram_chart_new(title_buf, "µs"));
+        gtk_widget_set_size_request(GTK_WIDGET(priv->callback_latency_hist[i]), 200, 120);
+        gtk_widget_add_css_class(GTK_WIDGET(priv->callback_latency_hist[i]), "perf-chart");
+        gtk_grid_attach(GTK_GRID(engine_grid), GTK_WIDGET(priv->callback_latency_hist[i]), 
+                       i, 0, 1, 1);
+
+        /* Row 1: Budget Utilization Line Charts */
+        snprintf(title_buf, sizeof(title_buf), "Ch%d Budget (%%)", i + 1);
+        priv->budget_util_chart[i] = PERF_LINE_CHART(
+            perf_line_chart_new(title_buf, 1));
+        perf_line_chart_set_series(priv->budget_util_chart[i], 0, "Utilization", NULL);
+        perf_line_chart_set_range(priv->budget_util_chart[i], 0, 100);
+        gtk_widget_set_size_request(GTK_WIDGET(priv->budget_util_chart[i]), 200, 120);
+        gtk_widget_add_css_class(GTK_WIDGET(priv->budget_util_chart[i]), "perf-chart");
+        gtk_grid_attach(GTK_GRID(engine_grid), GTK_WIDGET(priv->budget_util_chart[i]), 
+                       i, 1, 1, 1);
+    }
+
+    gtk_box_append(GTK_BOX(box), engine_grid);
+
+    /* ═══════════════════════════════════════════════════════════════════════
+     * SECTION 2: Audio Cache Metrics
+     * ═══════════════════════════════════════════════════════════════════════ */
+    
+    GtkWidget* section2 = gtk_label_new("Audio Cache");
+    gtk_widget_add_css_class(section2, "perf-section-title");
+    gtk_label_set_xalign(GTK_LABEL(section2), 0);
+    gtk_box_append(GTK_BOX(box), section2);
+
+    /* Grid: 2 columns × 2 rows */
+    GtkWidget* cache_grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(cache_grid), 0);
+    gtk_grid_set_column_spacing(GTK_GRID(cache_grid), 0);
+    gtk_widget_set_hexpand(cache_grid, TRUE);
+    gtk_widget_add_css_class(cache_grid, "perf-stats-grid");
+    gtk_grid_set_column_homogeneous(GTK_GRID(cache_grid), TRUE);
+
+    /* Decode Time Distribution */
+    priv->decode_time_hist = PERF_HISTOGRAM_CHART(
+        perf_histogram_chart_new("Decode Time Distribution", "ms"));
+    gtk_widget_set_size_request(GTK_WIDGET(priv->decode_time_hist), 200, 120);
+    gtk_widget_add_css_class(GTK_WIDGET(priv->decode_time_hist), "perf-chart");
+    gtk_grid_attach(GTK_GRID(cache_grid), GTK_WIDGET(priv->decode_time_hist), 0, 0, 1, 1);
+
+    /* Memory Usage */
+    priv->memory_chart = PERF_LINE_CHART(perf_line_chart_new("Memory Usage", 1));
+    perf_line_chart_set_series(priv->memory_chart, 0, "Cached Audio (MB)", NULL);
+    perf_line_chart_set_range(priv->memory_chart, 0, 512);
+    gtk_widget_set_size_request(GTK_WIDGET(priv->memory_chart), 200, 120);
+    gtk_widget_add_css_class(GTK_WIDGET(priv->memory_chart), "perf-chart");
+    gtk_grid_attach(GTK_GRID(cache_grid), GTK_WIDGET(priv->memory_chart), 1, 0, 1, 1);
+
+    /* Cache Hit Rates */
+    priv->hit_rate_chart = PERF_LINE_CHART(perf_line_chart_new("Cache Hit Rates", 2));
     perf_line_chart_set_series(priv->hit_rate_chart, 0, "Artwork", NULL);
     perf_line_chart_set_series(priv->hit_rate_chart, 1, "Library", NULL);
     perf_line_chart_set_range(priv->hit_rate_chart, 0, 100);
     gtk_widget_set_size_request(GTK_WIDGET(priv->hit_rate_chart), 200, 120);
     gtk_widget_add_css_class(GTK_WIDGET(priv->hit_rate_chart), "perf-chart");
-    gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(priv->hit_rate_chart), 0, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(cache_grid), GTK_WIDGET(priv->hit_rate_chart), 0, 1, 1, 1);
 
-    priv->memory_chart = PERF_LINE_CHART(perf_line_chart_new("Memory Usage (MB)", 1));
-    perf_line_chart_set_series(priv->memory_chart, 0, "Total", NULL);
-    perf_line_chart_set_range(priv->memory_chart, 0, 500);
-    gtk_widget_set_size_request(GTK_WIDGET(priv->memory_chart), 200, 120);
-    gtk_widget_add_css_class(GTK_WIDGET(priv->memory_chart), "perf-chart");
-    gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(priv->memory_chart), 1, 1, 1, 1);
+    /* Artwork Load Time */
+    priv->artwork_hist = PERF_HISTOGRAM_CHART(
+        perf_histogram_chart_new("Artwork Load Time", "ms"));
+    gtk_widget_set_size_request(GTK_WIDGET(priv->artwork_hist), 200, 120);
+    gtk_widget_add_css_class(GTK_WIDGET(priv->artwork_hist), "perf-chart");
+    gtk_grid_attach(GTK_GRID(cache_grid), GTK_WIDGET(priv->artwork_hist), 1, 1, 1, 1);
 
-    /* Row 2: Health + Placeholder */
-    GtkWidget* health_panel = make_audio_health_panel(priv);
-    gtk_grid_attach(GTK_GRID(grid), health_panel, 0, 2, 1, 1);
+    gtk_box_append(GTK_BOX(box), cache_grid);
 
-    GtkWidget* placeholder1 = gtk_frame_new("File Size Distribution");
-    gtk_widget_add_css_class(placeholder1, "perf-chart");
-    gtk_widget_set_size_request(placeholder1, 200, 120);
-    gtk_grid_attach(GTK_GRID(grid), placeholder1, 1, 2, 1, 1);
-
-    gtk_box_append(GTK_BOX(box), grid);
-
-    /* Log viewer */
+    /* ═══════════════════════════════════════════════════════════════════════
+     * SECTION 3: Event Log
+     * ═══════════════════════════════════════════════════════════════════════ */
+    
     GtkWidget* log_section = make_log_viewer(priv);
-    gtk_widget_set_vexpand(log_section, TRUE);
     gtk_box_append(GTK_BOX(box), log_section);
 
     /* Start 100ms update timer */
     priv->timer_id = g_timeout_add(100, update_dashboard, priv);
 
-    return box;
+    /* Add box to scrolled window */
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), box);
+
+    return scrolled;
 }
