@@ -6,7 +6,7 @@
  */
 
 #include "internal.h"
-#include "quadrature/quadrature_audio.h"
+#include "quadrature/audio.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -26,44 +26,7 @@ static uint64_t time_us(void) {
  * Bucket 0: 0-1ms, Bucket 1: 1-2ms, Bucket 2: 2-4ms, ... Bucket 19: 512ms+
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static int histogram_bucket(uint64_t us) {
-    if (us < 1000) return 0;  /* < 1ms */
-    uint64_t ms = us / 1000;
-    int bucket = (int)(log2((double)ms)) + 1;
-    return bucket >= PERF_HIST_BUCKETS ? PERF_HIST_BUCKETS - 1 : bucket;
-}
 
-static void histogram_record(perf_histogram_t* h, uint64_t value) {
-    int bucket = histogram_bucket(value);
-    atomic_fetch_add_explicit(&h->buckets[bucket], 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&h->count, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&h->sum, value, memory_order_relaxed);
-
-    /* Update min/max with CAS loops */
-    uint64_t cur_min = atomic_load_explicit(&h->min, memory_order_relaxed);
-    while (value < cur_min) {
-        if (atomic_compare_exchange_weak_explicit(&h->min, &cur_min, value,
-                memory_order_relaxed, memory_order_relaxed))
-            break;
-    }
-
-    uint64_t cur_max = atomic_load_explicit(&h->max, memory_order_relaxed);
-    while (value > cur_max) {
-        if (atomic_compare_exchange_weak_explicit(&h->max, &cur_max, value,
-                memory_order_relaxed, memory_order_relaxed))
-            break;
-    }
-}
-
-static void histogram_reset(perf_histogram_t* h) {
-    for (int i = 0; i < PERF_HIST_BUCKETS; i++) {
-        atomic_store_explicit(&h->buckets[i], 0, memory_order_relaxed);
-    }
-    atomic_store_explicit(&h->count, 0, memory_order_relaxed);
-    atomic_store_explicit(&h->sum, 0, memory_order_relaxed);
-    atomic_store_explicit(&h->min, UINT64_MAX, memory_order_relaxed);
-    atomic_store_explicit(&h->max, 0, memory_order_relaxed);
-}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Time Series
@@ -119,28 +82,20 @@ quadrature_result_t perf_dashboard_create(uint32_t sample_rate, perf_dashboard_t
 
     d->sample_rate = sample_rate;
 
-    /* Initialize histograms with UINT64_MAX min */
-    histogram_reset(&d->audio_decode);
-    histogram_reset(&d->audio_latency);
-    histogram_reset(&d->artwork_load_time);
-    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-        histogram_reset(&d->callback_time[i]);
-    }
-
     /* Initialize time series */
-    timeseries_init(&d->artwork_hit_rate);
-    timeseries_init(&d->cache_hit_rate);
-    timeseries_init(&d->memory_usage);
+    perf_memory_multi_init(&d->memory_multi);
+
+    /* Initialize PipeWire metrics */
     for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-        timeseries_init(&d->budget_pct[i]);
-        d->budget_last_sum_ns[i] = 0;
-        d->budget_last_count[i] = 0;
+        atomic_store(&d->pw_avail_buffers[i], 0);
+        atomic_store(&d->pw_queued_buffers[i], 0);
+        atomic_store(&d->pw_delay_samples[i], 0);
+        timeseries_init(&d->pw_queue_depth[i]);
     }
 
-    /* Initialize log buffer */
-    atomic_store(&d->log_write, 0);
-    atomic_store(&d->log_read, 0);
-
+    /* Initialize component pointers (set later via registration functions) */
+    d->audio_pipeline = NULL;
+    d->audio_cache = NULL;
     /* Enable by default */
     atomic_store(&d->enabled, true);
     atomic_store(&d->paused, false);
@@ -152,248 +107,32 @@ quadrature_result_t perf_dashboard_create(uint32_t sample_rate, perf_dashboard_t
 void perf_dashboard_destroy(perf_dashboard_t* d) {
     if (!d) return;
 
-    timeseries_clear(&d->artwork_hit_rate);
-    timeseries_clear(&d->cache_hit_rate);
-    timeseries_clear(&d->memory_usage);
+    g_mutex_clear(&d->memory_multi.lock);
     for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-        timeseries_clear(&d->budget_pct[i]);
+        timeseries_clear(&d->pw_queue_depth[i]);
     }
 
     g_free(d);
 }
 
-void perf_dashboard_reset(perf_dashboard_t* d) {
-    if (!d) return;
-
-    histogram_reset(&d->audio_decode);
-    histogram_reset(&d->audio_latency);
-    histogram_reset(&d->artwork_load_time);
-
-    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-        atomic_store(&d->audio_health[i].underruns, 0);
-        atomic_store(&d->audio_health[i].callbacks, 0);
-        atomic_store(&d->audio_health[i].late_callbacks, 0);
-        atomic_store(&d->audio_health[i].jitter_sum_samples, 0);
-        atomic_store(&d->audio_health[i].jitter_max_samples, 0);
-        atomic_store(&d->audio_health[i].last_callback_sample, 0);
-        atomic_store(&d->audio_health[i].callback_time_sum_ns, 0);
-        atomic_store(&d->audio_health[i].callback_count_for_budget, 0);
-        atomic_store(&d->audio_health[i].budget_overruns, 0);
-        atomic_store(&d->audio_health[i].dequeue_failures, 0);
-        atomic_store(&d->audio_health[i].scrubber_underflows, 0);
-        atomic_store(&d->audio_health[i].deferred_advances, 0);
-        atomic_store(&d->audio_health[i].instant_advances, 0);
-        atomic_store(&d->audio_health[i].total_advances, 0);
-        histogram_reset(&d->callback_time[i]);
-        d->budget_last_sum_ns[i] = 0;
-        d->budget_last_count[i] = 0;
-    }
-
-    atomic_store(&d->artwork_hits, 0);
-    atomic_store(&d->artwork_misses, 0);
-    atomic_store(&d->artwork_evictions, 0);
-    atomic_store(&d->artwork_failures, 0);
-    atomic_store(&d->artwork_timeouts, 0);
-
-    atomic_store(&d->cache_hits, 0);
-    atomic_store(&d->cache_misses, 0);
-    atomic_store(&d->cache_evictions, 0);
-
-    atomic_store(&d->log_write, 0);
-    atomic_store(&d->log_read, 0);
-}
-
-void perf_dashboard_pause(perf_dashboard_t* d, bool pause) {
-    if (d) atomic_store(&d->paused, pause);
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════
- * Recording - Audio (RT-Safe)
+ * Component Registration (for event polling)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void perf_record_decode(perf_dashboard_t* d, uint64_t us) {
-    if (!d || atomic_load(&d->paused)) return;
-    histogram_record(&d->audio_decode, us);
+void perf_dashboard_set_audio_pipeline(perf_dashboard_t* d, void* pipeline) {
+    if (d) d->audio_pipeline = pipeline;
 }
 
-void perf_record_latency(perf_dashboard_t* d, uint64_t us) {
-    if (!d || atomic_load(&d->paused)) return;
-    histogram_record(&d->audio_latency, us);
+void perf_dashboard_set_audio_cache(perf_dashboard_t* d, void* cache) {
+    if (d) d->audio_cache = cache;
 }
 
-void perf_record_underrun(perf_dashboard_t* d, int player_id) {
-    if (!d || atomic_load(&d->paused)) return;
-    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
-    atomic_fetch_add(&d->audio_health[player_id].underruns, 1);
+void perf_dashboard_set_library_cache(perf_dashboard_t* d, void* library_cache) {
+    if (d) d->library_cache = library_cache;
 }
 
-void perf_record_callback(perf_dashboard_t* d, int player_id, uint64_t sample) {
-    if (!d || atomic_load(&d->paused)) return;
-    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
-
-    perf_audio_health_t* h = &d->audio_health[player_id];
-    atomic_fetch_add(&h->callbacks, 1);
-
-    /* Calculate jitter from expected vs actual sample position */
-    uint64_t last = atomic_load(&h->last_callback_sample);
-    if (last > 0 && sample > last) {
-        /* Expected ~512 samples per callback (matches NODE_LATENCY "512/48000") */
-        uint64_t expected = 512;
-        uint64_t actual = sample - last;
-        uint64_t jitter = actual > expected ? actual - expected : expected - actual;
-
-        atomic_fetch_add(&h->jitter_sum_samples, jitter);
-
-        uint64_t cur_max = atomic_load(&h->jitter_max_samples);
-        while (jitter > cur_max) {
-            if (atomic_compare_exchange_weak(&h->jitter_max_samples, &cur_max, jitter))
-                break;
-        }
-
-        /* Late callback: jitter exceeds 25% of expected period */
-        if (jitter > expected / 4) {
-            atomic_fetch_add(&h->late_callbacks, 1);
-        }
-    }
-    atomic_store(&h->last_callback_sample, sample);
-}
-
-void perf_record_callback_time(perf_dashboard_t* d, int player_id,
-                                uint64_t elapsed_ns, uint32_t frame_count) {
-    if (!d || atomic_load(&d->paused)) return;
-    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
-
-    /* Per-player callback latency histogram (in microseconds) */
-    histogram_record(&d->callback_time[player_id], elapsed_ns / 1000);
-
-    /* Also feed the existing shared latency histogram */
-    histogram_record(&d->audio_latency, elapsed_ns / 1000);
-
-    /* Track sum/count for windowed budget computation */
-    perf_audio_health_t* h = &d->audio_health[player_id];
-    atomic_fetch_add_explicit(&h->callback_time_sum_ns, elapsed_ns, memory_order_relaxed);
-    atomic_fetch_add_explicit(&h->callback_count_for_budget, 1, memory_order_relaxed);
-
-    /* Track budget overruns (>50% of period) */
-    uint64_t budget_ns = (uint64_t)frame_count * 1000000000ULL / d->sample_rate;
-    if (elapsed_ns > budget_ns / 2) {
-        atomic_fetch_add(&h->budget_overruns, 1);
-    }
-
-    /* Log severe budget overruns (>80% of period) */
-    if (elapsed_ns > budget_ns * 80 / 100) {
-        perf_log(d, PERF_LOG_WARN, "audio",
-                 "Player %d: callback %.1fms (budget %.1fms, %.0f%%)",
-                 player_id, (double)elapsed_ns / 1e6,
-                 (double)budget_ns / 1e6,
-                 (double)elapsed_ns / (double)budget_ns * 100.0);
-    }
-}
-
-void perf_sample_budget_utilization(perf_dashboard_t* d) {
-    if (!d || atomic_load(&d->paused)) return;
-
-    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-        perf_audio_health_t* h = &d->audio_health[i];
-        uint64_t cur_sum = atomic_load_explicit(&h->callback_time_sum_ns, memory_order_relaxed);
-        uint64_t cur_count = atomic_load_explicit(&h->callback_count_for_budget, memory_order_relaxed);
-
-        uint64_t delta_sum = cur_sum - d->budget_last_sum_ns[i];
-        uint64_t delta_count = cur_count - d->budget_last_count[i];
-
-        if (delta_count > 0) {
-            double avg_ns = (double)delta_sum / (double)delta_count;
-            double budget_ns = 512.0 * 1e9 / (double)d->sample_rate;
-            double pct = avg_ns / budget_ns * 100.0;
-            perf_timeseries_add(&d->budget_pct[i], pct);
-        }
-
-        d->budget_last_sum_ns[i] = cur_sum;
-        d->budget_last_count[i] = cur_count;
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Recording - Artwork & Cache
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-void perf_record_artwork_stats(perf_dashboard_t* d,
-        uint64_t hits, uint64_t misses, uint64_t evictions,
-        uint64_t failures, uint64_t timeouts) {
-    if (!d || atomic_load(&d->paused)) return;
-
-    atomic_store(&d->artwork_hits, hits);
-    atomic_store(&d->artwork_misses, misses);
-    atomic_store(&d->artwork_evictions, evictions);
-    atomic_store(&d->artwork_failures, failures);
-    atomic_store(&d->artwork_timeouts, timeouts);
-
-    /* Update hit rate time series */
-    uint64_t total = hits + misses;
-    double rate = total > 0 ? (double)hits / (double)total * 100.0 : 0.0;
-    perf_timeseries_add(&d->artwork_hit_rate, rate);
-}
-
-void perf_record_artwork_load(perf_dashboard_t* d, uint64_t us) {
-    if (!d || atomic_load(&d->paused)) return;
-    histogram_record(&d->artwork_load_time, us);
-}
-
-void perf_record_cache_stats(perf_dashboard_t* d,
-        uint64_t hits, uint64_t misses, uint64_t evictions) {
-    if (!d || atomic_load(&d->paused)) return;
-
-    atomic_store(&d->cache_hits, hits);
-    atomic_store(&d->cache_misses, misses);
-    atomic_store(&d->cache_evictions, evictions);
-
-    /* Update hit rate time series */
-    uint64_t total = hits + misses;
-    double rate = total > 0 ? (double)hits / (double)total * 100.0 : 0.0;
-    perf_timeseries_add(&d->cache_hit_rate, rate);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Logging
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-void perf_log(perf_dashboard_t* d, perf_log_level_t level,
-              const char* source, const char* fmt, ...) {
-    if (!d || atomic_load(&d->paused)) return;
-
-    unsigned int write_idx = atomic_fetch_add(&d->log_write, 1) % PERF_LOG_SIZE;
-    perf_log_entry_t* entry = &d->logs[write_idx];
-
-    entry->timestamp_us = time_us();
-    entry->level = level;
-    g_strlcpy(entry->source, source, sizeof(entry->source));
-
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(entry->message, sizeof(entry->message), fmt, args);
-    va_end(args);
-}
-
-int perf_read_logs(perf_dashboard_t* d, perf_log_entry_t* out, int max) {
-    if (!d || !out || max <= 0) return 0;
-
-    unsigned int write_idx = atomic_load(&d->log_write);
-    unsigned int read_idx = atomic_load(&d->log_read);
-
-    /* Handle wraparound: limit to last PERF_LOG_SIZE entries */
-    if (write_idx - read_idx > PERF_LOG_SIZE) {
-        read_idx = write_idx - PERF_LOG_SIZE;
-    }
-
-    int count = 0;
-    while (read_idx < write_idx && count < max) {
-        unsigned int idx = read_idx % PERF_LOG_SIZE;
-        out[count++] = d->logs[idx];
-        read_idx++;
-    }
-
-    atomic_store(&d->log_read, read_idx);
-    return count;
+void perf_dashboard_set_artwork_mgr(perf_dashboard_t* d, void* artwork_mgr) {
+    if (d) d->artwork_mgr = artwork_mgr;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -449,62 +188,91 @@ void perf_get_histogram_stats(const perf_histogram_t* h, perf_hist_stats_t* out)
     }
 }
 
-void perf_get_audio_health(const perf_dashboard_t* d, int player,
-        uint64_t* underruns, uint64_t* callbacks, double* jitter_ms) {
-    if (!d || player < 0 || player >= PERF_MAX_PLAYERS) return;
+/* PipeWire queue depth sampling (called from ~1s timer) */
+void perf_sample_pw_queue_depth(perf_dashboard_t* d) {
+    if (!d || atomic_load(&d->paused)) return;
 
-    const perf_audio_health_t* h = &d->audio_health[player];
-
-    if (underruns) *underruns = atomic_load(&h->underruns);
-    if (callbacks) *callbacks = atomic_load(&h->callbacks);
-
-    if (jitter_ms) {
-        uint64_t cb = atomic_load(&h->callbacks);
-        if (cb > 1) {
-            uint64_t jitter_samples = atomic_load(&h->jitter_sum_samples);
-            double avg_jitter_samples = (double)jitter_samples / (double)(cb - 1);
-            *jitter_ms = (avg_jitter_samples / (double)d->sample_rate) * 1000.0;
-        } else {
-            *jitter_ms = 0.0;
-        }
+    for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
+        uint64_t avail = atomic_load(&d->pw_avail_buffers[i]);
+        perf_timeseries_add(&d->pw_queue_depth[i], (double)avail);
     }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Fault Event Recording
+ * Multi-Series Memory Time Series
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void perf_record_dequeue_failure(perf_dashboard_t* d, int player_id) {
-    if (!d || atomic_load(&d->paused)) return;
-    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
-    atomic_fetch_add(&d->audio_health[player_id].dequeue_failures, 1);
-    perf_log(d, PERF_LOG_ERROR, "audio", 
-             "Player %d: dequeue failure (PipeWire buffer unavailable)", player_id);
+void perf_memory_multi_init(perf_memory_multi_t* mm) {
+    memset(mm, 0, sizeof(*mm));
+    g_mutex_init(&mm->lock);
 }
 
-void perf_record_scrubber_underflow(perf_dashboard_t* d, int player_id) {
-    if (!d || atomic_load(&d->paused)) return;
-    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
-    atomic_fetch_add(&d->audio_health[player_id].scrubber_underflows, 1);
-    perf_log(d, PERF_LOG_WARN, "audio",
-             "Player %d: scrubber underflow (Rubberband output shortage)", player_id);
-}
+void perf_memory_multi_add(perf_memory_multi_t* mm,
+                           double audio_cache_mb,
+                           const double* lib_cache_mb,
+                           double artwork_texture_mb,
+                           const double* artwork_atlas_mb,
+                           int lib_count) {
+    g_mutex_lock(&mm->lock);
+    unsigned int idx = atomic_load(&mm->write_index) % PERF_TIMESERIES_SIZE;
 
-void perf_record_track_advance(perf_dashboard_t* d, int player_id, bool instant) {
-    if (!d || atomic_load(&d->paused)) return;
-    if (player_id < 0 || player_id >= PERF_MAX_PLAYERS) return;
-    
-    perf_audio_health_t* h = &d->audio_health[player_id];
-    atomic_fetch_add(&h->total_advances, 1);
-    
-    if (instant) {
-        atomic_fetch_add(&h->instant_advances, 1);
-    } else {
-        atomic_fetch_add(&h->deferred_advances, 1);
-        perf_log(d, PERF_LOG_INFO, "audio",
-                 "Player %d: deferred advance (next track not preloaded)", player_id);
+    mm->audio_cache_mb[idx]    = audio_cache_mb;
+    mm->artwork_texture_mb[idx] = artwork_texture_mb;
+
+    int n = lib_count < PERF_MAX_LIBRARIES ? lib_count : PERF_MAX_LIBRARIES;
+    mm->lib_count = n;
+    for (int i = 0; i < n; i++) {
+        mm->lib_cache_mb[i][idx]    = lib_cache_mb ? lib_cache_mb[i] : 0.0;
+        mm->artwork_atlas_mb[i][idx] = artwork_atlas_mb ? artwork_atlas_mb[i] : 0.0;
     }
+    /* Zero unused libraries at this index */
+    for (int i = n; i < PERF_MAX_LIBRARIES; i++) {
+        mm->lib_cache_mb[i][idx]    = 0.0;
+        mm->artwork_atlas_mb[i][idx] = 0.0;
+    }
+
+    atomic_fetch_add(&mm->write_index, 1);
+    g_mutex_unlock(&mm->lock);
 }
 
-/* Per-player statistics query is implemented in audio_pipeline.c as
- * audio_pipeline_get_player_stats() - see quadrature_audio.h */
+/**
+ * Get a single series from the multi-series memory ring buffer.
+ * Series index encoding:
+ *   0                  = audio cache MB
+ *   1 .. lib_count     = library cache MB [0..lib_count-1]
+ *   lib_count + 1      = artwork texture cache MB
+ *   lib_count + 2 .. + lib_count + 1 + lib_count = artwork atlas MB [0..lib_count-1]
+ */
+void perf_memory_multi_get(perf_memory_multi_t* mm, int series_idx,
+                           double* out, size_t* count) {
+    g_mutex_lock(&mm->lock);
+    unsigned int write_idx = atomic_load(&mm->write_index);
+    size_t n = write_idx < PERF_TIMESERIES_SIZE ? write_idx : PERF_TIMESERIES_SIZE;
+
+    /* Select source array */
+    const double *src = NULL;
+    int lc = mm->lib_count;
+    if (series_idx == 0) {
+        src = mm->audio_cache_mb;
+    } else if (series_idx >= 1 && series_idx <= lc) {
+        src = mm->lib_cache_mb[series_idx - 1];
+    } else if (series_idx == lc + 1) {
+        src = mm->artwork_texture_mb;
+    } else if (series_idx >= lc + 2 && series_idx < lc + 2 + lc) {
+        src = mm->artwork_atlas_mb[series_idx - lc - 2];
+    }
+
+    if (!src) { *count = 0; g_mutex_unlock(&mm->lock); return; }
+
+    /* Copy in chronological order */
+    if (write_idx < PERF_TIMESERIES_SIZE) {
+        memcpy(out, src, n * sizeof(double));
+    } else {
+        unsigned int start = write_idx % PERF_TIMESERIES_SIZE;
+        size_t tail = PERF_TIMESERIES_SIZE - start;
+        memcpy(out, &src[start], tail * sizeof(double));
+        memcpy(&out[tail], src, start * sizeof(double));
+    }
+    *count = n;
+    g_mutex_unlock(&mm->lock);
+}

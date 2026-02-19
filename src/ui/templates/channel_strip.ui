@@ -71,6 +71,7 @@
                                   <object class="GtkScrolledWindow" id="title_scroll">
                                     <property name="hscrollbar-policy">external</property>
                                     <property name="vscrollbar-policy">never</property>
+                                    <property name="kinetic-scrolling">false</property>
                                     <property name="hexpand">true</property>
                                     <style>
                                       <class name="marquee-scroll"/>
@@ -93,6 +94,7 @@
                                   <object class="GtkScrolledWindow" id="artist_scroll">
                                     <property name="hscrollbar-policy">external</property>
                                     <property name="vscrollbar-policy">never</property>
+                                    <property name="kinetic-scrolling">false</property>
                                     <property name="hexpand">true</property>
                                     <style>
                                       <class name="marquee-scroll"/>
@@ -115,6 +117,7 @@
                                   <object class="GtkScrolledWindow" id="album_scroll">
                                     <property name="hscrollbar-policy">external</property>
                                     <property name="vscrollbar-policy">never</property>
+                                    <property name="kinetic-scrolling">false</property>
                                     <property name="hexpand">true</property>
                                     <style>
                                       <class name="marquee-scroll"/>
@@ -152,6 +155,7 @@
                                   <object class="GtkScrolledWindow" id="next_track_scroll">
                                     <property name="hscrollbar-policy">external</property>
                                     <property name="vscrollbar-policy">never</property>
+                                    <property name="kinetic-scrolling">false</property>
                                     <property name="hexpand">true</property>
                                     <style>
                                       <class name="marquee-scroll"/>
@@ -521,67 +525,20 @@
               </object>
             </child>
 
-            <!-- Seek row: vertical container with seek bar on top, time labels below -->
+            <!-- Seek row: self-contained waveform seek bar -->
             <child>
               <object class="GtkBox" id="seek_row">
                 <property name="orientation">vertical</property>
-                <property name="spacing">2</property>
+                <property name="spacing">0</property>
                 <property name="hexpand">true</property>
                 <property name="valign">end</property>
                 <style>
                   <class name="seek-row"/>
                 </style>
 
-                <!-- Seek bar (full width) -->
                 <child>
-                  <object class="GtkScale" id="seek_bar">
-                    <property name="orientation">horizontal</property>
+                  <object class="UiWaveformSeekBar" id="waveform">
                     <property name="hexpand">true</property>
-                    <property name="draw-value">false</property>
-                    <property name="adjustment">
-                      <object class="GtkAdjustment">
-                        <property name="lower">0</property>
-                        <property name="upper">1</property>
-                        <property name="step-increment">0.001</property>
-                      </object>
-                    </property>
-                    <style>
-                      <class name="seek-bar"/>
-                    </style>
-                  </object>
-                </child>
-
-                <!-- Time labels row below -->
-                <child>
-                  <object class="GtkBox" id="seek_times_row">
-                    <property name="orientation">horizontal</property>
-                    <property name="hexpand">true</property>
-                    <style>
-                      <class name="seek-times-row"/>
-                    </style>
-
-                    <!-- Start time label (0:00) -->
-                    <child>
-                      <object class="GtkLabel" id="seek_time_start">
-                        <property name="label">0:00</property>
-                        <property name="halign">start</property>
-                        <style>
-                          <class name="seek-time"/>
-                        </style>
-                      </object>
-                    </child>
-
-                    <!-- End time label (total duration) -->
-                    <child>
-                      <object class="GtkLabel" id="seek_time_end">
-                        <property name="label">--:--</property>
-                        <property name="hexpand">true</property>
-                        <property name="halign">end</property>
-                        <style>
-                          <class name="seek-time"/>
-                        </style>
-                      </object>
-                    </child>
                   </object>
                 </child>
               </object>

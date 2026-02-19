@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Errors Popover
+
+  Displays library indexing errors. Anchored to the content_stack at runtime.
+  autohide=TRUE: dismissed by clicking outside or Escape key (GTK default).
+  Follows the track_metadata_popover pattern: scrolled window, no custom header.
+-->
+<interface>
+  <object class="GtkPopover" id="errors_popover">
+    <property name="autohide">true</property>
+    <property name="has-arrow">false</property>
+    <style><class name="errors-popover"/></style>
+    <child>
+      <object class="GtkBox" id="errors_content">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+        <style><class name="errors-content"/></style>
+      </object>
+    </child>
+  </object>
+</interface>

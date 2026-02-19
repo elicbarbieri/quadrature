@@ -31,9 +31,11 @@
               <class name="detail-album-art"/>
             </style>
             <child>
-              <object class="GtkImage" id="card_art">
-                <property name="icon-name">media-optical-symbolic</property>
-                <property name="pixel-size">250</property>
+              <object class="GtkPicture" id="card_art">
+                <property name="content-fit">contain</property>
+                <property name="can-shrink">true</property>
+                <property name="width-request">300</property>
+                <property name="height-request">300</property>
               </object>
             </child>
           </object>
@@ -52,8 +54,8 @@
               <object class="GtkLabel" id="card_title">
                 <property name="label">Album Title</property>
                 <property name="xalign">0</property>
-                <property name="ellipsize">end</property>
-                <property name="selectable">true</property>
+                <property name="wrap">true</property>
+                <property name="wrap-mode">word-char</property>
                 <property name="hexpand">true</property>
                 <style>
                   <class name="detail-title"/>
@@ -83,7 +85,6 @@
                 <child>
                   <object class="GtkLabel" id="card_year">
                     <property name="label"></property>
-                    <property name="selectable">true</property>
                     <style>
                       <class name="detail-meta"/>
                     </style>
@@ -92,14 +93,46 @@
               </object>
             </child>
 
+            <!-- Label (record label) -->
+            <child>
+              <object class="GtkLabel" id="card_label">
+                <property name="label"></property>
+                <property name="xalign">0</property>
+                <property name="visible">false</property>
+                <style>
+                  <class name="detail-meta"/>
+                </style>
+              </object>
+            </child>
+
             <!-- Stats (track count, duration) -->
             <child>
               <object class="GtkLabel" id="card_stats">
                 <property name="label">12 tracks - 45:32</property>
                 <property name="xalign">0</property>
-                <property name="selectable">true</property>
                 <style>
                   <class name="detail-meta"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Genre Pills -->
+            <child>
+              <object class="GtkBox" id="card_genres">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">6</property>
+                <property name="visible">false</property>
+              </object>
+            </child>
+
+            <!-- Album Path Button -->
+            <child>
+              <object class="GtkButton" id="card_path_btn">
+                <property name="halign">start</property>
+                <property name="visible">false</property>
+                <style>
+                  <class name="flat"/>
+                  <class name="album-path-btn"/>
                 </style>
               </object>
             </child>
@@ -115,8 +148,10 @@
       <object class="GtkListBox" id="track_list">
         <property name="selection-mode">single</property>
         <property name="activate-on-single-click">false</property>
+        <property name="overflow">visible</property>
         <style>
           <class name="album-tracks-list"/>
+          <class name="library-list"/>
         </style>
         <!-- Track rows added here by C code -->
       </object>

@@ -2,6 +2,16 @@
 
 Guidance for Claude Code when working with this codebase.
 
+## ⚠ Minimal Storage Principle — CRITICAL
+
+**Store the minimum data in SQLite. Derive everything else on demand.**
+
+- Every new DB column must justify itself: what query requires it that cannot be answered from existing data?
+- No redundant identifiers: `tracks` has no `musicbrainz_recording_id` — tracks are addressed by `(disc_num, track_num)` within `albums.musicbrainz_release_id`.
+- No convenience caches: if a value can be computed at query time in < 1ms, do not persist it.
+- No "just in case" columns. Schema debt compounds on every re-index and migration.
+- Full rules: `docs/architecture/LIBRARY_SYSTEM.md` → "Minimal Storage Principle"
+
 ## Build
 
 ```bash
@@ -14,24 +24,33 @@ make clean      # Clean build
 ## Directory Structure
 
 ```
-include/quadrature/
-  audio/     # audio_pipeline.h, audio_ringbuf.h, audio_spectrum.h
-  core/      # engine.h, config.h, logging.h, types.h
-  library/   # library.h, library_index.h, library_sync.h
-  indexer/   # indexer.h, indexer_core.h, indexer_pipeline.h
+include/quadrature/       # Flat public headers (no subdirectories)
+  quadrature.h            # Core types (quadrature_result_t, etc.)
+  audio.h                 # Audio pipeline, ring buffer, spectrum
+  database.h              # SQLite database API
+  indexer.h               # Indexer + MusicBrainz resolver API
+  library.h               # Library cache + global ID macros
+  metadata.h              # Metadata types
+  perf.h                  # Performance system monitor
+  settings.h              # App settings (settings.ini)
 
 src/
-  audio/     # Pipeline, ring buffer, spectrum analyzer
-  core/      # Engine, config, logging
-  library/   # SQLite music library (v4 schema with album hashing)
-  indexer/   # Four-phase queue-based indexer
-  ui/        # GTK4 widgets (.c/.h source files)
-    templates/  # .ui templates, .css stylesheets, gresource.xml
+  audio/                  # Pipeline, ring buffer, spectrum analyzer
+  core/                   # Engine, config, logging
+  database/               # SQLite music library (v4 schema with album hashing)
+  indexer/                # Four-phase queue-based indexer
+    musicbrainz/          # MusicBrainz/AcoustID resolution (phases 4-5)
+  ui/                     # GTK4 widgets (.c/.h source files)
+    library/              # Library browser widgets
+    perf/                 # Performance dashboard widgets
+    templates/            # .ui templates, .css stylesheets, gresource.xml
 
-bin/             # Entry points (quadrature_indexer.c)
-tests/unit/      # Criterion tests
-third_party/     # cavacore (spectrum FFT)
+bin/                      # Entry points (quadrature_indexer.c)
+tests/unit/               # Criterion tests
+third_party/              # cavacore (spectrum FFT)
 ```
+
+**Internal header rule:** Each `src/` subdirectory has at most one `internal.h` for private declarations. No other `.h` files in `src/`.
 
 ## Code Conventions
 
@@ -104,6 +123,26 @@ void audio_cache_lock(audio_cache_t* cache, int64_t track_id) {
 - Document preconditions in comments
 - Enforce preconditions with asserts
 - Caller is responsible for meeting preconditions
+
+### Library Cache Pointer Safety
+
+`library_cache_get_*` functions return **interior pointers** into the cache's slot arrays. These are valid only while the cache is warm. `library_cache_clear()` frees all slot arrays — any stored raw pointer becomes dangling.
+
+**Rule: never store a raw cache pointer in widget data that outlives the row-creation call.**
+
+```c
+// BAD — dangling after library_cache_clear()
+abd->track_artists = library_cache_get_track_artists(cache, track_id);
+
+// GOOD — re-fetch on every access; returns NULL gracefully after clear
+abd->cache    = cache;
+abd->track_id = track_id;
+// then: library_cache_get_track_artists(abd->cache, abd->track_id)
+```
+
+Within a single row-creation function, cache interior pointers are safe to use for immediate widget setup (setting labels, requesting artwork). They must not be stored in tick-callback structs, GObject data keys, or any other structure that persists across frames.
+
+See `docs/architecture/LIBRARY_CACHE.md` → "Pointer Lifetimes & UI Safety" for the full picture.
 
 ### Indexer Architecture
 

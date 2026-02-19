@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Track Metadata Popover
+
+  Displays per-track file info, credits, and MusicBrainz data.
+  All rows defined declaratively; C code does data binding and show/hide.
+-->
+<interface>
+  <object class="GtkPopover" id="track_info_popover">
+    <property name="autohide">true</property>
+    <property name="has-arrow">false</property>
+    <style><class name="track-info-popover"/></style>
+    <child>
+      <object class="GtkScrolledWindow" id="track_info_scroll">
+        <property name="hscrollbar-policy">never</property>
+        <property name="vscrollbar-policy">automatic</property>
+        <property name="propagate-natural-height">true</property>
+        <child>
+          <object class="GtkBox" id="track_info_content">
+            <property name="orientation">vertical</property>
+            <property name="spacing">8</property>
+            <style><class name="track-info-box"/></style>
+
+            <!-- Track title -->
+            <child>
+              <object class="GtkLabel" id="track_title_label">
+                <property name="xalign">0</property>
+                <property name="wrap">true</property>
+                <property name="wrap-mode">word-char</property>
+                <style><class name="track-info-title"/></style>
+              </object>
+            </child>
+
+            <!-- Album row -->
+            <child>
+              <object class="GtkBox" id="album_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Album</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="album_value">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="hexpand">true</property>
+                    <style><class name="track-info-value"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Artist row -->
+            <child>
+              <object class="GtkBox" id="artist_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Artist</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkFlowBox" id="artist_flow_box">
+                    <property name="selection-mode">none</property>
+                    <property name="max-children-per-line">10</property>
+                    <property name="row-spacing">0</property>
+                    <property name="column-spacing">4</property>
+                    <property name="hexpand">true</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Featuring row -->
+            <child>
+              <object class="GtkBox" id="featuring_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Featuring</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkFlowBox" id="featuring_flow_box">
+                    <property name="selection-mode">none</property>
+                    <property name="max-children-per-line">10</property>
+                    <property name="row-spacing">0</property>
+                    <property name="column-spacing">4</property>
+                    <property name="hexpand">true</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Release Date row -->
+            <child>
+              <object class="GtkBox" id="release_date_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Release Date</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="release_date_value">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="hexpand">true</property>
+                    <style><class name="track-info-value"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Position row -->
+            <child>
+              <object class="GtkBox" id="position_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Position</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="position_value">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="hexpand">true</property>
+                    <style><class name="track-info-value"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Credits container (dynamic subsection headers + credit rows appended here) -->
+            <child>
+              <object class="GtkBox" id="credits_box">
+                <property name="orientation">vertical</property>
+                <property name="overflow">visible</property>
+                <property name="visible">false</property>
+              </object>
+            </child>
+
+            <!-- TRACK INFO section header -->
+            <child>
+              <object class="GtkLabel" id="track_info_header">
+                <property name="label">TRACK INFO</property>
+                <property name="xalign">0</property>
+                <style><class name="track-info-section-header"/></style>
+              </object>
+            </child>
+
+            <!-- Path row -->
+            <child>
+              <object class="GtkBox" id="path_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Path</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="path_value">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="hexpand">true</property>
+                    <style><class name="track-info-value"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Duration row -->
+            <child>
+              <object class="GtkBox" id="duration_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Duration</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="duration_value">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="hexpand">true</property>
+                    <style><class name="track-info-value"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Recording row -->
+            <child>
+              <object class="GtkBox" id="recording_row">
+                <property name="orientation">horizontal</property>
+
+                <property name="visible">false</property>
+                <style><class name="track-info-row"/></style>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">Recording</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">start</property>
+                    <style><class name="track-info-label"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="recording_value">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="hexpand">true</property>
+                    <style><class name="track-info-value"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

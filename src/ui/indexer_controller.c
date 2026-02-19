@@ -1,51 +1,75 @@
-#include "indexer_controller.h"
-#include "quadrature/quadrature_indexer.h"
-#include "quadrature/quadrature_database.h"
+#include "internal.h"
 
 #include <string.h>
+
+/* =============================================================================
+ * Per-scan state
+ * ============================================================================= */
+
+/* User data passed to each individual indexer's callback */
+typedef struct {
+    IndexerController* controller;
+    char* library_path;   /* heap-owned copy of the library root path */
+} ScanCallbackData;
+
+/* One active library scan slot */
+typedef struct {
+    indexer_t* indexer;
+    char* library_path;          /* heap-owned */
+    ScanCallbackData* cb_data;   /* heap-owned; freed when slot is released */
+} ActiveScan;
+
+/* =============================================================================
+ * Controller struct
+ * ============================================================================= */
 
 struct _IndexerController {
     GObject parent_instance;
 
-    quadrature_db_t* db;
-    indexer_t* indexer;
-
-    // Configuration
+    /* Configuration */
     int thread_count;
     gboolean process_artwork;
     int art_size;
-    char* art_cache_dir;
-    gboolean fingerprint_tracks;
     gboolean musicbrainz_resolve;
     char* pg_conninfo;
+    char* fanart_api_key;
+    int max_concurrent;   /* default: 2 */
 
-    // Current state (for property binding)
-    double progress;
+    /* All library roots for the current batch (for cross-library art reuse) */
+    GPtrArray* all_roots; /* char*, owned — set at start(), kept until next start() */
+
+    /* Active scans (array of ActiveScan*, owned) */
+    GPtrArray* active;    /* ActiveScan* while running */
+
+    /* Pending paths waiting for a free slot */
+    GPtrArray* pending;   /* char* library_paths, owned */
+
+    /* Data root overrides: library_path → data_path (NULL entry = same as library) */
+    GHashTable* data_root_map;  /* char* → char*, owned keys + values */
+
+    /* Global state */
     gboolean running;
-    char current_item[256];
-    char status[64];
-
-    // Latest progress snapshot
-    indexer_progress_t last_progress;
 };
 
-// Properties
+/* =============================================================================
+ * Properties & Signals
+ * ============================================================================= */
+
 enum {
     PROP_0,
-    PROP_PROGRESS,
     PROP_RUNNING,
-    PROP_CURRENT_ITEM,
-    PROP_STATUS,
     N_PROPS
 };
 
 static GParamSpec* props[N_PROPS];
 
-// Signals
 enum {
     SIGNAL_STARTED,
     SIGNAL_PROGRESS,
+    SIGNAL_LIBRARY_UPDATED,
+    SIGNAL_ARTWORK_UPDATED,
     SIGNAL_COMPLETED,
+    SIGNAL_ALL_COMPLETED,
     N_SIGNALS
 };
 
@@ -53,94 +77,100 @@ static guint signals[N_SIGNALS];
 
 G_DEFINE_TYPE(IndexerController, indexer_controller, G_TYPE_OBJECT)
 
-// --- Idle callback for thread-safe UI updates ---
+/* =============================================================================
+ * Idle callback — marshals worker-thread events to the main thread
+ * ============================================================================= */
 
 typedef struct {
     IndexerController* controller;
+    char* library_path;       /* heap-owned */
     indexer_event_t event;
     indexer_progress_t progress;
 } IdleCallbackData;
+
+/* Forward declaration */
+static void try_start_pending(IndexerController* self);
 
 static gboolean on_indexer_event_idle(gpointer user_data) {
     IdleCallbackData* data = user_data;
     IndexerController* self = data->controller;
 
     if (!INDEXER_IS_CONTROLLER(self)) {
+        g_free(data->library_path);
         g_free(data);
         return G_SOURCE_REMOVE;
     }
 
-    // Update internal state from progress
-    self->last_progress = data->progress;
-    self->progress = data->progress.progress * 100.0;  // Convert to percentage
-
-    if (data->progress.current_path) {
-        strncpy(self->current_item, data->progress.current_path, sizeof(self->current_item) - 1);
-        self->current_item[sizeof(self->current_item) - 1] = '\0';
-    } else {
-        self->current_item[0] = '\0';
-    }
+    const char* lib = data->library_path;
 
     switch (data->event) {
         case INDEXER_STARTED:
-            self->running = TRUE;
-            strncpy(self->status, "Scanning", sizeof(self->status));
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_RUNNING]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_STATUS]);
-            g_signal_emit(self, signals[SIGNAL_STARTED], 0);
+            g_signal_emit(self, signals[SIGNAL_STARTED], 0, lib);
             break;
 
         case INDEXER_PROGRESS:
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_PROGRESS]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_CURRENT_ITEM]);
-            g_signal_emit(self, signals[SIGNAL_PROGRESS], 0, &data->progress);
+            g_signal_emit(self, signals[SIGNAL_PROGRESS], 0, lib, &data->progress);
+            break;
+
+        case INDEXER_LIBRARY_UPDATED:
+            g_signal_emit(self, signals[SIGNAL_LIBRARY_UPDATED], 0, lib, &data->progress);
+            break;
+
+        case INDEXER_ARTWORK_UPDATED:
+            g_signal_emit(self, signals[SIGNAL_ARTWORK_UPDATED], 0, lib, &data->progress);
             break;
 
         case INDEXER_COMPLETED:
-            self->running = FALSE;
-            self->progress = 100.0;
-            self->current_item[0] = '\0';
-            strncpy(self->status, "Complete", sizeof(self->status));
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_RUNNING]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_PROGRESS]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_CURRENT_ITEM]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_STATUS]);
-            g_signal_emit(self, signals[SIGNAL_COMPLETED], 0, TRUE, &data->progress);
-            break;
-
         case INDEXER_CANCELLED:
-            self->running = FALSE;
-            self->current_item[0] = '\0';
-            strncpy(self->status, "Cancelled", sizeof(self->status));
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_RUNNING]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_CURRENT_ITEM]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_STATUS]);
-            g_signal_emit(self, signals[SIGNAL_COMPLETED], 0, FALSE, &data->progress);
-            break;
+        case INDEXER_ERROR: {
+            gboolean ok = (data->event == INDEXER_COMPLETED);
+            g_signal_emit(self, signals[SIGNAL_COMPLETED], 0, lib, ok, &data->progress);
 
-        case INDEXER_ERROR:
-            self->running = FALSE;
-            strncpy(self->status, "Error", sizeof(self->status));
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_RUNNING]);
-            g_object_notify_by_pspec(G_OBJECT(self), props[PROP_STATUS]);
-            g_signal_emit(self, signals[SIGNAL_COMPLETED], 0, FALSE, &data->progress);
+            /* Remove the finished scan from the active list */
+            for (guint i = 0; i < self->active->len; i++) {
+                ActiveScan* scan = g_ptr_array_index(self->active, i);
+                if (strcmp(scan->library_path, lib) == 0) {
+                    /* Destroy the indexer and free the slot */
+                    indexer_destroy(scan->indexer);
+                    g_free(scan->library_path);
+                    g_free(scan->cb_data->library_path);
+                    g_free(scan->cb_data);
+                    g_free(scan);
+                    g_ptr_array_remove_index_fast(self->active, i);
+                    break;
+                }
+            }
+
+            /* Start any queued libraries now that a slot is free */
+            try_start_pending(self);
+
+            /* If nothing active and nothing pending, we're done */
+            if (self->active->len == 0 && self->pending->len == 0) {
+                self->running = FALSE;
+                g_object_notify_by_pspec(G_OBJECT(self), props[PROP_RUNNING]);
+                g_signal_emit(self, signals[SIGNAL_ALL_COMPLETED], 0);
+            }
             break;
+        }
     }
 
+    g_free(data->library_path);
     g_free(data);
     return G_SOURCE_REMOVE;
 }
 
-// --- Callback from indexer thread ---
+/* =============================================================================
+ * Indexer thread callback
+ * ============================================================================= */
 
 static void on_indexer_callback(indexer_event_t event,
                                  const indexer_progress_t* progress,
                                  void* user_data) {
-    IndexerController* self = INDEXER_CONTROLLER(user_data);
+    ScanCallbackData* scan_data = user_data;
 
-    // Schedule UI update on main thread
     IdleCallbackData* data = g_new(IdleCallbackData, 1);
-    data->controller = self;
+    data->controller = scan_data->controller;
+    data->library_path = g_strdup(scan_data->library_path);
     data->event = event;
     if (progress) {
         data->progress = *progress;
@@ -151,42 +181,137 @@ static void on_indexer_callback(indexer_event_t event,
     g_idle_add(on_indexer_event_idle, data);
 }
 
-// --- GObject Implementation ---
+/* =============================================================================
+ * Helpers
+ * ============================================================================= */
+
+/* Build an indexer_t with current config for a new library scan */
+static indexer_t* create_indexer_for_scan(IndexerController* self, ScanCallbackData* cb_data) {
+    /* Build list of *other* library roots (exclude the one being scanned) */
+    GPtrArray* others = g_ptr_array_new();
+    for (guint i = 0; i < self->all_roots->len; i++) {
+        const char* root = g_ptr_array_index(self->all_roots, i);
+        if (strcmp(root, cb_data->library_path) != 0)
+            g_ptr_array_add(others, (gpointer)root);
+    }
+
+    indexer_config_t config = {
+        .thread_count = self->thread_count,
+        .process_artwork = self->process_artwork,
+        .art_size = self->art_size,
+        .callback = on_indexer_callback,
+        .user_data = cb_data,
+        .mb_resolve = self->musicbrainz_resolve,
+        .pg_conninfo = self->pg_conninfo,
+        .fanart_api_key = self->fanart_api_key,
+        .other_library_roots = (const char* const*)others->pdata,
+        .other_library_roots_count = others->len,
+    };
+
+    indexer_t* indexer = NULL;
+    quadrature_result_t res = indexer_create(&indexer, &config);
+    g_ptr_array_free(others, TRUE);  /* strings owned by all_roots, not freed here */
+
+    if (res != QUADRATURE_OK) {
+        g_critical("indexer_controller: failed to create indexer for %s", cb_data->library_path);
+        return NULL;
+    }
+    return indexer;
+}
+
+/* Start as many pending libraries as we have free slots */
+static void try_start_pending(IndexerController* self) {
+    while ((int)self->active->len < self->max_concurrent && self->pending->len > 0) {
+        char* lib_path = g_ptr_array_steal_index(self->pending, 0);
+
+        ScanCallbackData* cb_data = g_new(ScanCallbackData, 1);
+        cb_data->controller = self;
+        cb_data->library_path = lib_path;  /* ownership transferred */
+
+        indexer_t* indexer = create_indexer_for_scan(self, cb_data);
+        if (!indexer) {
+            g_free(cb_data->library_path);
+            g_free(cb_data);
+            continue;
+        }
+
+        const char* data_root = g_hash_table_lookup(self->data_root_map, lib_path);
+        if (indexer_scan(indexer, lib_path, data_root) != QUADRATURE_OK) {
+            g_warning("indexer_controller: indexer_scan failed for %s", lib_path);
+            indexer_destroy(indexer);
+            g_free(cb_data->library_path);
+            g_free(cb_data);
+            continue;
+        }
+
+        ActiveScan* scan = g_new(ActiveScan, 1);
+        scan->indexer = indexer;
+        scan->library_path = g_strdup(lib_path);
+        scan->cb_data = cb_data;
+        g_ptr_array_add(self->active, scan);
+    }
+}
+
+/* =============================================================================
+ * GObject implementation
+ * ============================================================================= */
 
 static void indexer_controller_get_property(GObject* object, guint prop_id,
                                              GValue* value, GParamSpec* pspec) {
     IndexerController* self = INDEXER_CONTROLLER(object);
-
     switch (prop_id) {
-        case PROP_PROGRESS:
-            g_value_set_double(value, self->progress);
-            break;
         case PROP_RUNNING:
             g_value_set_boolean(value, self->running);
-            break;
-        case PROP_CURRENT_ITEM:
-            g_value_set_string(value, self->current_item);
-            break;
-        case PROP_STATUS:
-            g_value_set_string(value, self->status);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
     }
 }
 
+static void active_scan_free(gpointer p) {
+    ActiveScan* scan = p;
+    if (scan) {
+        indexer_destroy(scan->indexer);
+        g_free(scan->library_path);
+        if (scan->cb_data) {
+            g_free(scan->cb_data->library_path);
+            g_free(scan->cb_data);
+        }
+        g_free(scan);
+    }
+}
+
 static void indexer_controller_dispose(GObject* object) {
     IndexerController* self = INDEXER_CONTROLLER(object);
 
-    if (self->indexer) {
-        indexer_destroy(self->indexer);
-        self->indexer = NULL;
+    /* Cancel all running indexers so worker threads stop */
+    for (guint i = 0; i < self->active->len; i++) {
+        ActiveScan* scan = g_ptr_array_index(self->active, i);
+        indexer_cancel(scan->indexer);
     }
+    /* Wait for them to finish before freeing */
+    for (guint i = 0; i < self->active->len; i++) {
+        ActiveScan* scan = g_ptr_array_index(self->active, i);
+        indexer_wait(scan->indexer);
+    }
+    g_ptr_array_set_free_func(self->active, active_scan_free);
+    g_ptr_array_free(self->active, TRUE);
+    self->active = NULL;
 
-    g_free(self->art_cache_dir);
-    self->art_cache_dir = NULL;
+    g_ptr_array_free(self->pending, TRUE);
+    self->pending = NULL;
+
+    g_ptr_array_free(self->all_roots, TRUE);
+    self->all_roots = NULL;
+
+    g_hash_table_destroy(self->data_root_map);
+    self->data_root_map = NULL;
+
     g_free(self->pg_conninfo);
     self->pg_conninfo = NULL;
+
+    g_free(self->fanart_api_key);
+    self->fanart_api_key = NULL;
 
     G_OBJECT_CLASS(indexer_controller_parent_class)->dispose(object);
 }
@@ -197,63 +322,113 @@ static void indexer_controller_class_init(IndexerControllerClass* klass) {
     object_class->get_property = indexer_controller_get_property;
     object_class->dispose = indexer_controller_dispose;
 
-    // Properties
-    props[PROP_PROGRESS] = g_param_spec_double(
-        "progress", "Progress", "Progress percentage (0-100)",
-        0.0, 100.0, 0.0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
-
     props[PROP_RUNNING] = g_param_spec_boolean(
-        "running", "Running", "Whether indexing is in progress",
+        "running", "Running", "Whether any library scan is in progress",
         FALSE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
-
-    props[PROP_CURRENT_ITEM] = g_param_spec_string(
-        "current-item", "Current Item", "Currently processing item",
-        "", G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
-
-    props[PROP_STATUS] = g_param_spec_string(
-        "status", "Status", "Current status description",
-        "Idle", G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, props);
 
-    // Signals
+    /**
+     * IndexerController::started:
+     * @library_path: The library root that started scanning
+     */
     signals[SIGNAL_STARTED] = g_signal_new(
         "started",
         G_TYPE_FROM_CLASS(klass),
         G_SIGNAL_RUN_LAST,
         0, NULL, NULL, NULL,
-        G_TYPE_NONE, 0);
+        G_TYPE_NONE, 1, G_TYPE_STRING);
 
+    /**
+     * IndexerController::progress:
+     * @library_path: The library root being updated
+     * @progress: Pointer to indexer_progress_t (valid only during signal emission)
+     */
     signals[SIGNAL_PROGRESS] = g_signal_new(
         "progress",
         G_TYPE_FROM_CLASS(klass),
         G_SIGNAL_RUN_LAST,
         0, NULL, NULL, NULL,
-        G_TYPE_NONE, 1, G_TYPE_POINTER);
+        G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_POINTER);
 
+    /**
+     * IndexerController::library-updated:
+     * @library_path: The library root whose SQLite metadata changed
+     * @progress: Pointer to indexer_progress_t (valid only during signal emission)
+     *
+     * Emitted whenever the library database changes in a way that requires
+     * the library cache to be cleared and re-warmed. Fired after:
+     *   - Phases 1-3 (initial scan + metadata)
+     *   - Phase 6 (MusicBrainz enrichment committed)
+     */
+    signals[SIGNAL_LIBRARY_UPDATED] = g_signal_new(
+        "library-updated",
+        G_TYPE_FROM_CLASS(klass),
+        G_SIGNAL_RUN_LAST,
+        0, NULL, NULL, NULL,
+        G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_POINTER);
+
+    /**
+     * IndexerController::artwork-updated:
+     * @library_path: The library root whose artwork atlas changed
+     * @progress: Pointer to indexer_progress_t with atlas_path set
+     *
+     * Emitted whenever an artwork atlas is written. Fired after:
+     *   - Phase 4 (album artwork atlas)
+     *   - Phase 7 (artist thumbnail atlas, fanart.tv)
+     * The UI should reload the atlas texture and refresh views.
+     */
+    signals[SIGNAL_ARTWORK_UPDATED] = g_signal_new(
+        "artwork-updated",
+        G_TYPE_FROM_CLASS(klass),
+        G_SIGNAL_RUN_LAST,
+        0, NULL, NULL, NULL,
+        G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_POINTER);
+
+    /**
+     * IndexerController::completed:
+     * @library_path: The library root that finished
+     * @ok: TRUE on success, FALSE on cancel or error
+     * @progress: Pointer to final indexer_progress_t
+     */
     signals[SIGNAL_COMPLETED] = g_signal_new(
         "completed",
         G_TYPE_FROM_CLASS(klass),
         G_SIGNAL_RUN_LAST,
         0, NULL, NULL, NULL,
-        G_TYPE_NONE, 2, G_TYPE_BOOLEAN, G_TYPE_POINTER);
+        G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_POINTER);
+
+    /**
+     * IndexerController::all-completed:
+     * Emitted once when every library in the batch is done.
+     */
+    signals[SIGNAL_ALL_COMPLETED] = g_signal_new(
+        "all-completed",
+        G_TYPE_FROM_CLASS(klass),
+        G_SIGNAL_RUN_LAST,
+        0, NULL, NULL, NULL,
+        G_TYPE_NONE, 0);
 }
 
 static void indexer_controller_init(IndexerController* self) {
-    self->thread_count = 0;  // Auto
+    self->thread_count = 0;
     self->process_artwork = TRUE;
     self->art_size = 48;
-    self->progress = 0.0;
+    self->max_concurrent = 2;
     self->running = FALSE;
-    strncpy(self->status, "Idle", sizeof(self->status));
+
+    self->all_roots = g_ptr_array_new_with_free_func(g_free);
+    self->active = g_ptr_array_new();
+    self->pending = g_ptr_array_new_with_free_func(g_free);
+    self->data_root_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 }
 
-// --- Public API ---
+/* =============================================================================
+ * Public API
+ * ============================================================================= */
 
-IndexerController* indexer_controller_new(quadrature_db_t* db) {
-    IndexerController* self = g_object_new(INDEXER_TYPE_CONTROLLER, NULL);
-    self->db = db;
-    return self;
+IndexerController* indexer_controller_new(void) {
+    return g_object_new(INDEXER_TYPE_CONTROLLER, NULL);
 }
 
 void indexer_controller_set_thread_count(IndexerController* self, int thread_count) {
@@ -271,152 +446,100 @@ void indexer_controller_set_art_size(IndexerController* self, int size) {
     self->art_size = size > 0 ? size : 48;
 }
 
-static gboolean ensure_indexer(IndexerController* self) {
-    if (self->indexer) return TRUE;
-
-    indexer_config_t config = {
-        .thread_count = self->thread_count,
-        .process_artwork = self->process_artwork,
-        .art_size = self->art_size,
-        .art_dir = self->art_cache_dir,
-        .callback = on_indexer_callback,
-        .user_data = self,
-        .fingerprint_tracks = self->fingerprint_tracks,
-        .mb_resolve = self->musicbrainz_resolve,
-        .pg_conninfo = self->pg_conninfo,
-    };
-
-    if (indexer_create(&self->indexer, &config) != QUADRATURE_OK) {
-        g_critical("Failed to create indexer");
-        return FALSE;
-    }
-
-    return TRUE;
+void indexer_controller_set_max_concurrent(IndexerController* self, int max_concurrent) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    self->max_concurrent = CLAMP(max_concurrent, 1, 8);
 }
 
 gboolean indexer_controller_start(IndexerController* self,
-                                   const char** paths, gsize path_count) {
+                                   const char** library_roots,
+                                   const char** data_roots,
+                                   gsize path_count) {
     g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), FALSE);
-    g_return_val_if_fail(paths != NULL && path_count > 0, FALSE);
-
-    if (!ensure_indexer(self)) return FALSE;
+    g_return_val_if_fail(library_roots != NULL && path_count > 0, FALSE);
 
     if (self->running) {
-        g_warning("Indexer already running");
+        g_warning("indexer_controller_start: already running");
         return FALSE;
     }
 
-    self->progress = 0.0;
-    self->current_item[0] = '\0';
-    strncpy(self->status, "Starting", sizeof(self->status));
+    /* Remember all roots for cross-library artist art reuse */
+    g_ptr_array_set_size(self->all_roots, 0);
+    for (gsize i = 0; i < path_count; i++)
+        g_ptr_array_add(self->all_roots, g_strdup(library_roots[i]));
 
-    if (indexer_scan(self->indexer, self->db, paths, path_count) != QUADRATURE_OK) {
-        strncpy(self->status, "Error", sizeof(self->status));
+    /* Store data root overrides */
+    g_hash_table_remove_all(self->data_root_map);
+    if (data_roots) {
+        for (gsize i = 0; i < path_count; i++) {
+            if (data_roots[i] && strcmp(data_roots[i], library_roots[i]) != 0)
+                g_hash_table_insert(self->data_root_map,
+                                    g_strdup(library_roots[i]),
+                                    g_strdup(data_roots[i]));
+        }
+    }
+
+    /* Populate the pending queue */
+    g_ptr_array_set_size(self->pending, 0);
+    for (gsize i = 0; i < path_count; i++) {
+        g_ptr_array_add(self->pending, g_strdup(library_roots[i]));
+    }
+
+    self->running = TRUE;
+    g_object_notify_by_pspec(G_OBJECT(self), props[PROP_RUNNING]);
+
+    /* Kick off up to max_concurrent scans immediately */
+    try_start_pending(self);
+
+    /* If nothing could start (all indexer_scan calls failed), clean up */
+    if (self->active->len == 0 && self->pending->len == 0) {
+        self->running = FALSE;
+        g_object_notify_by_pspec(G_OBJECT(self), props[PROP_RUNNING]);
         return FALSE;
     }
 
     return TRUE;
-}
-
-gboolean indexer_controller_start_all(IndexerController* self) {
-    g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), FALSE);
-
-    if (!ensure_indexer(self)) return FALSE;
-
-    if (self->running) {
-        g_warning("Indexer already running");
-        return FALSE;
-    }
-
-    // Get watch paths from database
-    db_watch_path_t* watch_paths = NULL;
-    size_t path_count = 0;
-    if (db_get_watch_paths(self->db, &watch_paths, &path_count) != QUADRATURE_OK ||
-        path_count == 0) {
-        g_warning("No watch paths configured");
-        return FALSE;
-    }
-
-    // Extract path strings for the indexer
-    const char** paths = g_malloc(path_count * sizeof(const char*));
-    for (size_t i = 0; i < path_count; i++) {
-        paths[i] = watch_paths[i].path;
-    }
-
-    self->progress = 0.0;
-    self->current_item[0] = '\0';
-    strncpy(self->status, "Starting", sizeof(self->status));
-
-    quadrature_result_t res = indexer_scan(self->indexer, self->db, paths, path_count);
-
-    g_free(paths);
-    db_free_watch_paths(watch_paths, path_count);
-
-    if (res != QUADRATURE_OK) {
-        strncpy(self->status, "Error", sizeof(self->status));
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-gboolean indexer_controller_add_path(IndexerController* self, const char* path) {
-    g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), FALSE);
-    g_return_val_if_fail(path != NULL, FALSE);
-
-    // Add to watch paths
-    if (db_add_watch_path(self->db, path) != QUADRATURE_OK) {
-        g_critical("Failed to add watch path: %s", path);
-        return FALSE;
-    }
-
-    // Start indexing just this path
-    const char* paths[] = { path };
-    return indexer_controller_start(self, paths, 1);
 }
 
 void indexer_controller_cancel(IndexerController* self) {
     g_return_if_fail(INDEXER_IS_CONTROLLER(self));
-    if (self->indexer) {
-        indexer_cancel(self->indexer);
+
+    /* Clear pending so no new scans start */
+    g_ptr_array_set_size(self->pending, 0);
+
+    /* Cancel all active scans */
+    for (guint i = 0; i < self->active->len; i++) {
+        ActiveScan* scan = g_ptr_array_index(self->active, i);
+        indexer_cancel(scan->indexer);
+    }
+}
+
+void indexer_controller_cancel_library(IndexerController* self, const char* library_path) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    g_return_if_fail(library_path != NULL);
+
+    /* Remove from pending queue if not yet started */
+    for (guint i = 0; i < self->pending->len; i++) {
+        const char* path = g_ptr_array_index(self->pending, i);
+        if (strcmp(path, library_path) == 0) {
+            g_ptr_array_remove_index(self->pending, i);
+            break;
+        }
+    }
+
+    /* Cancel active scan if running */
+    for (guint i = 0; i < self->active->len; i++) {
+        ActiveScan* scan = g_ptr_array_index(self->active, i);
+        if (strcmp(scan->library_path, library_path) == 0) {
+            indexer_cancel(scan->indexer);
+            break;
+        }
     }
 }
 
 gboolean indexer_controller_is_running(IndexerController* self) {
     g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), FALSE);
     return self->running;
-}
-
-double indexer_controller_get_progress(IndexerController* self) {
-    g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), 0.0);
-    return self->progress;
-}
-
-const char* indexer_controller_get_current_item(IndexerController* self) {
-    g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), NULL);
-    return self->current_item[0] ? self->current_item : NULL;
-}
-
-void indexer_controller_get_progress_info(IndexerController* self,
-                                           indexer_progress_t* progress) {
-    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
-    g_return_if_fail(progress != NULL);
-
-    if (self->indexer) {
-        indexer_get_progress(self->indexer, progress);
-    } else {
-        memset(progress, 0, sizeof(*progress));
-    }
-}
-
-const char* indexer_controller_get_status(IndexerController* self) {
-    g_return_val_if_fail(INDEXER_IS_CONTROLLER(self), "Unknown");
-    return self->status;
-}
-
-void indexer_controller_set_fingerprint_tracks(IndexerController* self, gboolean enable) {
-    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
-    self->fingerprint_tracks = enable;
 }
 
 void indexer_controller_set_musicbrainz_resolve(IndexerController* self, gboolean enable) {
@@ -430,11 +553,8 @@ void indexer_controller_set_pg_conninfo(IndexerController* self, const char* con
     self->pg_conninfo = conninfo ? g_strdup(conninfo) : NULL;
 }
 
-void indexer_controller_invalidate(IndexerController* self) {
+void indexer_controller_set_fanart_api_key(IndexerController* self, const char* api_key) {
     g_return_if_fail(INDEXER_IS_CONTROLLER(self));
-    if (self->running) return;
-    if (self->indexer) {
-        indexer_destroy(self->indexer);
-        self->indexer = NULL;
-    }
+    g_free(self->fanart_api_key);
+    self->fanart_api_key = (api_key && api_key[0]) ? g_strdup(api_key) : NULL;
 }

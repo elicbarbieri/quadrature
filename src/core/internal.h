@@ -30,61 +30,9 @@ extern "C" {
 #define QUADRATURE_BUILD_DEBUG
 #endif
 
-/* Feature flags */
-#ifdef QUADRATURE_BUILD_BROADCAST
-    #define QUADRATURE_FEATURE_MULTIPLE_SOURCES  1
-    #define QUADRATURE_FEATURE_NETWORK_MOUNTS    1
-    #define QUADRATURE_FEATURE_FANOTIFY          1
-    #define QUADRATURE_FEATURE_DAEMON            1
-    #define QUADRATURE_FEATURE_REPLICATION       1
-#else
-    #define QUADRATURE_FEATURE_MULTIPLE_SOURCES  0
-    #define QUADRATURE_FEATURE_NETWORK_MOUNTS    0
-    #define QUADRATURE_FEATURE_FANOTIFY          0
-    #define QUADRATURE_FEATURE_DAEMON            0
-    #define QUADRATURE_FEATURE_REPLICATION       0
-#endif
-
-/* Version info */
-#define QUADRATURE_VERSION_MAJOR 0
-#define QUADRATURE_VERSION_MINOR 1
-#define QUADRATURE_VERSION_PATCH 0
-#define QUADRATURE_VERSION_STRING "0.1.0"
-
-/* Default paths */
-#ifndef QUADRATURE_DATA_DIR
-    #define QUADRATURE_DATA_DIR "~/.local/share/quadrature"
-#endif
-
-#ifndef QUADRATURE_CONFIG_DIR
-    #define QUADRATURE_CONFIG_DIR "~/.config/quadrature"
-#endif
-
-/* Build mode name */
-#ifdef QUADRATURE_BUILD_BROADCAST
-    #define QUADRATURE_BUILD_MODE_NAME "Broadcast"
-#else
-    #define QUADRATURE_BUILD_MODE_NAME "Debug"
-#endif
-
 /* =============================================================================
  * Performance Dashboard
  * ============================================================================= */
-
-/* Log Entry */
-typedef enum {
-    PERF_LOG_DEBUG,
-    PERF_LOG_INFO,
-    PERF_LOG_WARN,
-    PERF_LOG_ERROR
-} perf_log_level_t;
-
-typedef struct {
-    uint64_t timestamp_us;
-    perf_log_level_t level;
-    char source[16];      /* "audio", "artwork", "cache" */
-    char message[200];
-} perf_log_entry_t;
 
 /* Histogram (Log-Scale Buckets) */
 #define PERF_HIST_BUCKETS 20  /* 0-1ms, 1-2ms, 2-4ms, ... 512ms+ */
@@ -108,6 +56,38 @@ typedef struct {
     uint64_t bucket_counts[PERF_HIST_BUCKETS];  /* For chart rendering */
 } perf_hist_stats_t;
 
+/* Microsecond-scale histogram — identical layout to perf_histogram_t but
+ * with µs-scale bucket boundaries: [0,1µs), [1,2µs), [2,4µs), ... [512µs+).
+ * Used for cache hit latencies where ms-scale buckets are too coarse.
+ *
+ * Recording is a single atomic_fetch_add — safe for hot-path use. */
+typedef perf_histogram_t perf_histogram_us_t;
+
+/** Record a µs value into a µs-scale histogram.  O(1), lock-free. */
+static inline void perf_histogram_record_us(perf_histogram_us_t *h, uint64_t us) {
+    /* Map to log-spaced bucket: bucket k = floor(log2(us)) + 1, clamped. */
+    int bucket;
+    if (us == 0) {
+        bucket = 0;
+    } else {
+        /* __builtin_clzll: count leading zeros → floor(log2) */
+        bucket = (int)(63 - __builtin_clzll(us)) + 1;
+        if (bucket >= PERF_HIST_BUCKETS) bucket = PERF_HIST_BUCKETS - 1;
+    }
+    atomic_fetch_add_explicit(&h->buckets[bucket], 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&h->count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&h->sum, us, memory_order_relaxed);
+
+    /* Update min/max with CAS loops (relaxed ordering — dashboard-only data) */
+    uint64_t cur_min = atomic_load_explicit(&h->min, memory_order_relaxed);
+    while (us < cur_min && !atomic_compare_exchange_weak_explicit(
+               &h->min, &cur_min, us, memory_order_relaxed, memory_order_relaxed));
+
+    uint64_t cur_max = atomic_load_explicit(&h->max, memory_order_relaxed);
+    while (us > cur_max && !atomic_compare_exchange_weak_explicit(
+               &h->max, &cur_max, us, memory_order_relaxed, memory_order_relaxed));
+}
+
 /* Time Series (Ring Buffer for Line Charts) */
 #define PERF_TIMESERIES_SIZE 300  /* 5 minutes at 1/sec */
 
@@ -117,6 +97,19 @@ typedef struct {
     atomic_uint write_index;
     GMutex lock;  /* For bulk reads */
 } perf_timeseries_t;
+
+/* Multi-Series Memory Time Series (for stacked area chart) */
+#define PERF_MAX_LIBRARIES 8
+
+typedef struct {
+    double audio_cache_mb[PERF_TIMESERIES_SIZE];
+    double lib_cache_mb[PERF_MAX_LIBRARIES][PERF_TIMESERIES_SIZE];
+    double artwork_texture_mb[PERF_TIMESERIES_SIZE];
+    double artwork_atlas_mb[PERF_MAX_LIBRARIES][PERF_TIMESERIES_SIZE];
+    atomic_uint write_index;
+    int lib_count;
+    GMutex lock;
+} perf_memory_multi_t;
 
 /* Audio Health (Per-Player) */
 typedef struct {
@@ -143,50 +136,27 @@ typedef struct {
 } perf_audio_health_t;
 
 /* Dashboard State */
-#define PERF_LOG_SIZE 1000
 #define PERF_MAX_PLAYERS 4
 
 typedef struct perf_dashboard perf_dashboard_t;
 
 struct perf_dashboard {
-    /* Audio metrics */
-    perf_histogram_t audio_decode;
-    perf_histogram_t audio_latency;
-    perf_audio_health_t audio_health[PERF_MAX_PLAYERS];
     uint32_t sample_rate;
 
-    /* Per-player callback latency distribution */
-    perf_histogram_t callback_time[PERF_MAX_PLAYERS];
+    /* Multi-series memory tracking (for stacked area chart) */
+    perf_memory_multi_t memory_multi;
 
-    /* Per-player budget utilization % over time (line chart) */
-    perf_timeseries_t budget_pct[PERF_MAX_PLAYERS];
+    /* PipeWire native metrics (updated from on_process callback) */
+    atomic_uint_fast64_t pw_avail_buffers[PERF_MAX_PLAYERS];
+    atomic_uint_fast64_t pw_queued_buffers[PERF_MAX_PLAYERS];
+    atomic_int_fast64_t pw_delay_samples[PERF_MAX_PLAYERS];
+    perf_timeseries_t pw_queue_depth[PERF_MAX_PLAYERS];
 
-    /* Snapshot state for windowed budget computation (main thread only) */
-    uint64_t budget_last_sum_ns[PERF_MAX_PLAYERS];
-    uint64_t budget_last_count[PERF_MAX_PLAYERS];
-
-    /* Artwork metrics */
-    atomic_uint_fast64_t artwork_hits;
-    atomic_uint_fast64_t artwork_misses;
-    atomic_uint_fast64_t artwork_evictions;
-    atomic_uint_fast64_t artwork_failures;
-    atomic_uint_fast64_t artwork_timeouts;
-    perf_histogram_t artwork_load_time;
-
-    /* Library cache metrics */
-    atomic_uint_fast64_t cache_hits;
-    atomic_uint_fast64_t cache_misses;
-    atomic_uint_fast64_t cache_evictions;
-
-    /* Time series for line charts (1 sample/sec) */
-    perf_timeseries_t artwork_hit_rate;
-    perf_timeseries_t cache_hit_rate;
-    perf_timeseries_t memory_usage;
-
-    /* Log ring buffer */
-    perf_log_entry_t logs[PERF_LOG_SIZE];
-    atomic_uint log_write;
-    atomic_uint log_read;
+    /* Component references for polling (weak pointers, not owned) */
+    void* audio_pipeline;  /* audio_pipeline_t* - use void* to avoid circular dependency */
+    void* audio_cache;     /* audio_cache_t* - use void* to avoid circular dependency */
+    void* library_cache;   /* library_cache_t* */
+    void* artwork_mgr;     /* ArtworkManager* */
 
     /* Control */
     atomic_bool enabled;
@@ -196,57 +166,31 @@ struct perf_dashboard {
 /* Lifecycle */
 quadrature_result_t perf_dashboard_create(uint32_t sample_rate, perf_dashboard_t** out);
 void perf_dashboard_destroy(perf_dashboard_t* d);
-void perf_dashboard_reset(perf_dashboard_t* d);
-void perf_dashboard_pause(perf_dashboard_t* d, bool pause);
 
-/* Recording (Thread-Safe) */
-void perf_record_decode(perf_dashboard_t* d, uint64_t us);
-void perf_record_latency(perf_dashboard_t* d, uint64_t us);
-void perf_record_underrun(perf_dashboard_t* d, int player_id);
-void perf_record_callback(perf_dashboard_t* d, int player_id, uint64_t sample);
-void perf_record_callback_time(perf_dashboard_t* d, int player_id,
-    uint64_t elapsed_ns, uint32_t frame_count);
-void perf_sample_budget_utilization(perf_dashboard_t* d);
-
-/* Fault event recording */
-void perf_record_dequeue_failure(perf_dashboard_t* d, int player_id);
-void perf_record_scrubber_underflow(perf_dashboard_t* d, int player_id);
-void perf_record_track_advance(perf_dashboard_t* d, int player_id, bool instant);
-
-void perf_record_artwork_stats(perf_dashboard_t* d,
-    uint64_t hits, uint64_t misses, uint64_t evictions,
-    uint64_t failures, uint64_t timeouts);
-void perf_record_artwork_load(perf_dashboard_t* d, uint64_t us);
-void perf_record_cache_stats(perf_dashboard_t* d,
-    uint64_t hits, uint64_t misses, uint64_t evictions);
-void perf_log(perf_dashboard_t* d, perf_log_level_t level,
-              const char* source, const char* fmt, ...) G_GNUC_PRINTF(4, 5);
-
-/* Audio Cache Decode Metrics (computed from decode events) */
-typedef struct {
-    uint32_t total_decodes;
-    float avg_decode_time_ms;
-    float p50_decode_time_ms;
-    float p90_decode_time_ms;
-    float p99_decode_time_ms;
-    float max_decode_time_ms;
-    
-    /* File type breakdown */
-    uint32_t mp3_count;
-    uint32_t flac_count;
-    uint32_t m4a_count;
-    uint32_t other_count;
-} audio_cache_decode_metrics_t;
+/* Component Registration (for event polling) */
+void perf_dashboard_set_audio_pipeline(perf_dashboard_t* d, void* pipeline);
+void perf_dashboard_set_audio_cache(perf_dashboard_t* d, void* cache);
 
 /* Querying (UI Thread) */
 void perf_get_histogram_stats(const perf_histogram_t* h, perf_hist_stats_t* out);
-void perf_get_audio_health(const perf_dashboard_t* d, int player,
-    uint64_t* underruns, uint64_t* callbacks, double* jitter_ms);
-/* Note: perf_get_player_stats defined in quadrature_audio.h (audio_pipeline_get_player_stats).
- * Use audio_pipeline API directly - no internal implementation needed. */
 void perf_get_timeseries(perf_timeseries_t* ts, double* out, size_t* count);
-int perf_read_logs(perf_dashboard_t* d, perf_log_entry_t* out, int max);
 void perf_timeseries_add(perf_timeseries_t* ts, double value);
+void perf_sample_pw_queue_depth(perf_dashboard_t* d);
+
+/* Multi-series memory time series helpers */
+void perf_memory_multi_init(perf_memory_multi_t* mm);
+void perf_memory_multi_add(perf_memory_multi_t* mm,
+                           double audio_cache_mb,
+                           const double* lib_cache_mb,
+                           double artwork_texture_mb,
+                           const double* artwork_atlas_mb,
+                           int lib_count);
+void perf_memory_multi_get(perf_memory_multi_t* mm, int series_idx,
+                           double* out, size_t* count);
+
+/* Component registration */
+void perf_dashboard_set_library_cache(perf_dashboard_t* d, void* library_cache);
+void perf_dashboard_set_artwork_mgr(perf_dashboard_t* d, void* artwork_mgr);
 
 #ifdef __cplusplus
 }

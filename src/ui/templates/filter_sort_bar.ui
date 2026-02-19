@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Unified Filter/Sort Bar Template
+
+  Shared across Artists, Albums, and Search views.
+  C code controls visibility of individual children:
+  - filter_search: hidden in Search view (has its own primary search bar)
+  - sort_dropdown_box: hidden by default; shown with view-specific sort options
+  - advanced_toggle: always visible
+-->
+<interface>
+  <object class="GtkBox" id="filter_sort_bar">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">8</property>
+    <property name="margin-end">16</property>
+    <style>
+      <class name="filter-bar"/>
+    </style>
+
+    <!-- Genre filter -->
+    <child>
+      <object class="GtkBox">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">0</property>
+
+        <style>
+          <class name="filter-field"/>
+        </style>
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Genre</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkMenuButton" id="filter_genre">
+            <property name="label">All</property>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Year filter -->
+    <child>
+      <object class="GtkBox">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">0</property>
+
+        <style>
+          <class name="filter-field"/>
+        </style>
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Year</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkMenuButton" id="filter_year">
+            <property name="label">All</property>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Search filter -->
+    <child>
+      <object class="GtkBox" id="filter_search_box">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">0</property>
+
+        <style>
+          <class name="filter-field"/>
+        </style>
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Search</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkSearchEntry" id="filter_search">
+            <property name="placeholder-text">Filter...</property>
+            <property name="width-request">150</property>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- Advanced toggle -->
+    <child>
+      <object class="GtkToggleButton" id="advanced_toggle">
+        <property name="label">Adv</property>
+        <property name="focusable">false</property>
+        <property name="tooltip-text">Advanced credit search</property>
+
+        <style>
+          <class name="filter-chip"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Clear button -->
+    <child>
+      <object class="GtkButton" id="filter_clear">
+        <property name="label">Clear</property>
+        <property name="focusable">false</property>
+
+        <style>
+          <class name="filter-chip"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Spacer -->
+    <child>
+      <object class="GtkBox">
+        <property name="hexpand">true</property>
+      </object>
+    </child>
+
+    <!-- Sort dropdown (hidden by default, shown for Artists/Albums) -->
+    <child>
+      <object class="GtkBox" id="sort_dropdown_box">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">0</property>
+
+        <property name="visible">false</property>
+        <style>
+          <class name="filter-field"/>
+        </style>
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Sort</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkMenuButton" id="sort_dropdown">
+            <property name="label">Default</property>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

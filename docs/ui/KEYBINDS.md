@@ -1,6 +1,6 @@
 # Keyboard Shortcuts
 
-Comprehensive keyboard shortcut reference for the Quadrature UI.
+Keyboard shortcut reference for the Quadrature UI.
 
 ## Global Shortcuts
 
@@ -22,7 +22,7 @@ Control channel strips from anywhere in the UI.
 | `Enter`    | Load selected track to next available channel |
 | `Space`    | Play/Pause focused channel                    |
 
-**Note:** Number key shortcuts (1-4, Enter) only work when a track is selected or hovered in library views.
+Number key shortcuts (1-4, Enter) only work when a track is selected or hovered in library views.
 
 ## Library Navigation
 
@@ -43,16 +43,20 @@ Navigate between main library views.
 
 Available when in the Search view.
 
-| Key       | Action                                   |
-| --------- | ---------------------------------------- |
-| `Ctrl+F`  | Focus search input, set filter to All    |
-| `Ctrl+A`  | Set search filter to Artists only        |
-| `Ctrl+B`  | Set search filter to Albums only         |
-| `Ctrl+S`  | Set search filter to Songs only          |
-| `Escape`  | Clear search query / unfocus search      |
-| `Up/Down` | Navigate search results                  |
-| `Enter`   | Open selected item (artist/album detail) |
-| `1-4`     | Load selected song to channel 1-4        |
+| Key            | Action                                          |
+| -------------- | ----------------------------------------------- |
+| `Ctrl+F`       | Focus search input, set filter to All           |
+| `Ctrl+A`       | Set search filter to Artists only               |
+| `Ctrl+B`       | Set search filter to Albums only                |
+| `Ctrl+S`       | Set search filter to Songs only                 |
+| `Escape`       | Clear search query / unfocus search             |
+| `Up/Down`      | Navigate search results                         |
+| `Ctrl+Down`    | Jump to first item of next section              |
+| `Ctrl+Up`      | Jump to first item of previous section          |
+| `Enter`        | Open selected item (artist/album detail)        |
+| `1-4`          | Load selected song to channel 1-4               |
+
+Sections cycle in order: **Artists → Albums → Songs**.
 
 ## Artists View
 
@@ -70,11 +74,15 @@ Available when browsing the Artists list or Artist detail view.
 
 **In Artist Detail View:**
 
-| Key       | Action                             |
-| --------- | ---------------------------------- |
-| `Up/Down` | Navigate album list within artist  |
-| `Enter`   | Open selected album detail         |
-| `1-4`     | Load selected track to channel 1-4 |
+| Key           | Action                                                      |
+| ------------- | ----------------------------------------------------------- |
+| `Down`        | Enter first track of first album (when nothing selected)    |
+| `Up/Down`     | Navigate tracks within the selected album                   |
+| `Ctrl+Down`   | Jump to first track of next album (wraps)                   |
+| `Ctrl+Up`     | Jump to first track of previous album (wraps)               |
+| `Tab`         | Navigate focusable buttons within the selected row          |
+| `Enter`       | Load selected track                                         |
+| `1-4`         | Load selected track to channel 1-4                          |
 
 ## Albums View
 
@@ -94,7 +102,9 @@ Available when browsing the Albums list or Album detail view.
 
 | Key       | Action                                 |
 | --------- | -------------------------------------- |
+| `Down`    | Enter track list (when nothing selected) |
 | `Up/Down` | Navigate track list                    |
+| `Tab`     | Navigate focusable buttons within the selected row |
 | `Enter`   | Load selected track with album context |
 | `1-4`     | Load selected track to channel 1-4     |
 
@@ -128,7 +138,7 @@ When focus is on a channel strip.
 | `Q` (double) | Exit Queue/On-Air mode                       |
 | `-/+`        | Decrease/Increase shuttle speed              |
 | `0`          | Reset shuttle to 1.0x                        |
-| `K`          | Cycle shuttle mode (OFF → KEYLOCK → PITCHED) |
+| `K`          | Cycle shuttle mode (OFF, KEYLOCK, PITCHED)   |
 
 ## Quick Reference
 
@@ -148,16 +158,16 @@ When focus is on a channel strip.
 
 ### Loading Tracks
 
-Tracks always load with **full album context**, enabling auto-advance and previous/next navigation.
+Tracks always load with full album context, enabling auto-advance and previous/next navigation.
 
-| Method                 | Result                                               |
-| ---------------------- | ---------------------------------------------------- |
-| Press `1-4`            | Load to specific channel (if track selected/hovered) |
-| Press `Enter`          | Load to next available channel                       |
-| Right-click track      | Load to focused/preview channel                      |
-| Drag & drop to channel | Load to target channel                               |
+| Method                   | Result                                               |
+| ------------------------ | ---------------------------------------------------- |
+| Press `1-4`              | Load to specific channel (if track selected/hovered) |
+| Press `Enter`            | Load to next available channel                       |
+| Right-click track        | Load to focused/preview channel                      |
+| Drag and drop to channel | Load to target channel                               |
 
-**Focused Channel:** Set with `Ctrl+1-4`. Right-click and Enter use focused channel when available.
+Focused channel is set with `Ctrl+1-4`. Right-click and Enter use focused channel when available.
 
 ## Conventions
 
@@ -166,6 +176,7 @@ Tracks always load with **full album context**, enabling auto-advance and previo
 - **Special keys:** `Enter`, `Space`, `Escape`, `Tab`
 - **Range notation:** `1-4` means keys 1, 2, 3, or 4
 - **Double press:** `Q` (double) means press Q twice quickly
+- **Tab:** Navigates between focusable buttons *within* a selected row, not between rows
 
 ## Context-Sensitive Behavior
 
@@ -175,5 +186,6 @@ Many shortcuts behave differently based on context:
 - **Enter**: Opens detail view when on list items, loads tracks when on tracks
 - **Escape**: Clears search in Search view, goes back in detail views, clears focus elsewhere
 - **Space**: Play/pause only works when channel strip has focus
+- **Tab**: Within-row button navigation only; `Up/Down` moves between rows
 
 When in doubt, `Escape` returns to a neutral state or previous view.

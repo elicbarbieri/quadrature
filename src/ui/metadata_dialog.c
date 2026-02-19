@@ -33,11 +33,6 @@ static GtkWidget *create_row(const char *label, const char *value) {
     return row;
 }
 
-static char *format_duration(uint32_t ms) {
-    uint32_t secs = ms / 1000;
-    return g_strdup_printf("%u:%02u", secs / 60, secs % 60);
-}
-
 static gboolean on_focus_out(GtkEventControllerFocus *ctrl, gpointer data) {
     (void)ctrl;
     GtkWindow *win = GTK_WINDOW(data);
@@ -65,7 +60,8 @@ static void ui_metadata_dialog_init(UiMetadataDialog *self) {
     gtk_widget_add_controller(GTK_WIDGET(self), focus);
 }
 
-GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t *track) {
+GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t *track,
+                                  const char *resolved_path) {
     UiMetadataDialog *dlg = g_object_new(UI_TYPE_METADATA_DIALOG, NULL);
 
     if (parent) {
@@ -81,7 +77,7 @@ GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t 
 
     /* Populate */
     gtk_box_append(GTK_BOX(dlg->content_box), create_row("Title", track->title));
-    gtk_box_append(GTK_BOX(dlg->content_box), create_row("Artist", track->artist_name));
+    gtk_box_append(GTK_BOX(dlg->content_box), create_row("Artist", track->artist_display));
     gtk_box_append(GTK_BOX(dlg->content_box), create_row("Album", track->album_title));
 
     if (track->year > 0) {
@@ -99,11 +95,11 @@ GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t 
         gtk_box_append(GTK_BOX(dlg->content_box), create_row("Track", buf));
     }
 
-    char *dur = format_duration(track->duration_ms);
-    gtk_box_append(GTK_BOX(dlg->content_box), create_row("Duration", dur));
-    g_free(dur);
+    char dur_buf[16];
+    ui_format_duration(track->duration_ms, dur_buf, sizeof(dur_buf));
+    gtk_box_append(GTK_BOX(dlg->content_box), create_row("Duration", dur_buf));
 
-    gtk_box_append(GTK_BOX(dlg->content_box), create_row("Path", track->path));
+    gtk_box_append(GTK_BOX(dlg->content_box), create_row("Path", resolved_path));
 
     return GTK_WIDGET(dlg);
 }

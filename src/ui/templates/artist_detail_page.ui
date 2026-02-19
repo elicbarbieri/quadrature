@@ -3,7 +3,7 @@
   Artist Detail Page Template
 
   Complete artist detail page with scrollable content.
-  Contains: artist name, stats, albums list, and "Appears On" section with toggle.
+  Contains: artist banner, name, stats, albums list, "Appears On" section, and about section.
 
   C code populates metadata and dynamically adds album cards to containers.
 -->
@@ -17,19 +17,49 @@
       <object class="GtkBox" id="artist_page_content">
         <property name="orientation">vertical</property>
         <property name="spacing">0</property>
-        <property name="margin-start">24</property>
-        <property name="margin-end">24</property>
-        <property name="margin-top">16</property>
         <property name="margin-bottom">24</property>
 
         <!-- ═══════════════════════════════════════════════════════════════════
-             ARTIST HEADER: Name + Stats
+             ARTIST BANNER (fanart.tv musicbanner, hidden if unavailable)
+             GtkOverlay with bottom gradient fade. No top gradient — the
+             floating back button (from unified_detail_view.ui) overlays
+             the top of the banner directly.
+             height-request set dynamically from texture dimensions in C.
+             ═══════════════════════════════════════════════════════════════════ -->
+        <child>
+          <object class="GtkOverlay" id="artist_banner_overlay">
+            <property name="visible">false</property>
+            <child>
+              <object class="GtkPicture" id="artist_banner">
+                <property name="content-fit">cover</property>
+                <property name="can-shrink">true</property>
+                <!-- No height-request in template — set dynamically from texture -->
+              </object>
+            </child>
+            <child type="overlay">
+              <object class="QuadGradientFade" id="artist_banner_fade_bottom">
+                <property name="valign">end</property>
+                <property name="halign">fill</property>
+                <property name="hexpand">true</property>
+                <property name="height-request">40</property>
+                <property name="can-target">false</property>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             ARTIST HEADER: Name + Stats (always instant)
              ═══════════════════════════════════════════════════════════════════ -->
         <child>
           <object class="GtkBox" id="artist_header">
             <property name="orientation">vertical</property>
             <property name="spacing">0</property>
+            <property name="margin-start">24</property>
+            <property name="margin-end">24</property>
+            <property name="margin-top">16</property>
             <property name="margin-bottom">16</property>
+            <property name="visible">false</property>
             <style>
               <class name="artist-header"/>
             </style>
@@ -64,40 +94,69 @@
         </child>
 
         <!-- ═══════════════════════════════════════════════════════════════════
-             ALBUMS SECTION
+             ALBUMS SECTION (header + album cards container)
              ═══════════════════════════════════════════════════════════════════ -->
         <child>
-          <object class="GtkLabel" id="albums_section_header">
-            <property name="label">ALBUMS</property>
-            <property name="xalign">0</property>
-            <property name="margin-top">8</property>
-            <property name="margin-bottom">12</property>
-            <style>
-              <class name="detail-section-header"/>
-            </style>
-          </object>
-        </child>
-
-        <!-- Albums Container (album cards added by C code) -->
-        <child>
-          <object class="GtkBox" id="artist_albums_container">
+          <object class="GtkBox" id="albums_section">
             <property name="orientation">vertical</property>
             <property name="spacing">0</property>
-            <style>
-              <class name="artist-albums-container"/>
-            </style>
-            <!-- Album cards added dynamically by C code -->
+            <property name="margin-start">24</property>
+            <property name="margin-end">24</property>
+
+            <child>
+              <object class="GtkBox" id="albums_section_header_box">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">8</property>
+                <property name="margin-top">8</property>
+                <property name="margin-bottom">12</property>
+                <child>
+                  <object class="GtkLabel" id="albums_section_header">
+                    <property name="label">Albums</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">center</property>
+                    <style>
+                      <class name="detail-section-header"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="orientation">horizontal</property>
+                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
+                    <style>
+                      <class name="section-separator"/>
+                    </style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Albums Container (album cards added by C code) -->
+            <child>
+              <object class="GtkBox" id="artist_albums_container">
+                <property name="orientation">vertical</property>
+                <property name="spacing">0</property>
+                <style>
+                  <class name="artist-albums-container"/>
+                </style>
+                <!-- Album cards added dynamically by C code -->
+              </object>
+            </child>
           </object>
         </child>
 
         <!-- ═══════════════════════════════════════════════════════════════════
-             APPEARS ON SECTION
+             APPEARS ON SECTION (hidden if no appearances)
              ═══════════════════════════════════════════════════════════════════ -->
         <child>
           <object class="GtkBox" id="appears_on_section">
             <property name="orientation">vertical</property>
             <property name="spacing">0</property>
+            <property name="margin-start">24</property>
+            <property name="margin-end">24</property>
             <property name="margin-top">24</property>
+            <property name="visible">false</property>
             <style>
               <class name="appears-on-section"/>
             </style>
@@ -112,11 +171,21 @@
                 <!-- "APPEARS ON" Label -->
                 <child>
                   <object class="GtkLabel" id="appears_on_label">
-                    <property name="label">APPEARS ON</property>
+                    <property name="label">Appears On</property>
                     <property name="xalign">0</property>
-                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
                     <style>
                       <class name="detail-section-header"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="orientation">horizontal</property>
+                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
+                    <style>
+                      <class name="section-separator"/>
                     </style>
                   </object>
                 </child>
@@ -153,43 +222,157 @@
               </object>
             </child>
 
-            <!-- Stack for Albums/Tracks View -->
+            <!-- Albums/Tracks Revealers (slide-down transitions) -->
             <child>
-              <object class="GtkStack" id="appears_on_stack">
-                <property name="transition-type">crossfade</property>
-                <property name="transition-duration">100</property>
+              <object class="GtkBox" id="appears_on_container">
+                <property name="orientation">vertical</property>
 
-                <!-- Appears On: Albums View -->
                 <child>
-                  <object class="GtkStackPage">
-                    <property name="name">albums</property>
-                    <property name="child">
+                  <object class="GtkRevealer" id="appears_on_albums_revealer">
+                    <property name="reveal-child">true</property>
+                    <property name="transition-type">slide-down</property>
+                    <property name="transition-duration">250</property>
+                    <child>
                       <object class="GtkListBox" id="appears_on_albums">
                         <property name="selection-mode">single</property>
                         <property name="activate-on-single-click">false</property>
                         <style>
                           <class name="appears-on-list"/>
+                          <class name="library-list"/>
                         </style>
                         <!-- Album rows added dynamically -->
                       </object>
-                    </property>
+                    </child>
                   </object>
                 </child>
 
-                <!-- Appears On: Tracks View -->
                 <child>
-                  <object class="GtkStackPage">
-                    <property name="name">tracks</property>
-                    <property name="child">
+                  <object class="GtkRevealer" id="appears_on_tracks_revealer">
+                    <property name="reveal-child">false</property>
+                    <property name="transition-type">slide-down</property>
+                    <property name="transition-duration">250</property>
+                    <child>
                       <object class="GtkListBox" id="appears_on_tracks">
                         <property name="selection-mode">single</property>
                         <property name="activate-on-single-click">false</property>
                         <style>
                           <class name="appears-on-list"/>
+                          <class name="library-list"/>
                         </style>
                         <!-- Track rows added dynamically -->
                       </object>
-                    </property>
+                    </child>
+                  </object>
+                </child>
+
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             ABOUT SECTION (hero banner with background image + bio)
+             ═══════════════════════════════════════════════════════════════════ -->
+        <child>
+          <object class="GtkBox" id="about_section">
+            <property name="orientation">vertical</property>
+            <property name="spacing">0</property>
+            <property name="margin-top">32</property>
+            <property name="visible">false</property>
+            <style>
+              <class name="about-section"/>
+            </style>
+
+            <!-- Section Header -->
+            <child>
+              <object class="GtkBox" id="about_section_header_box">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">8</property>
+                <property name="margin-start">24</property>
+                <property name="margin-bottom">12</property>
+                <child>
+                  <object class="GtkLabel" id="about_section_header">
+                    <property name="label">About</property>
+                    <property name="xalign">0</property>
+                    <property name="valign">center</property>
+                    <style>
+                      <class name="detail-section-header"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="orientation">horizontal</property>
+                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
+                    <style>
+                      <class name="section-separator"/>
+                    </style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Background image with gradient overlays.
+                 height-request set dynamically from texture, capped at 400px. -->
+            <child>
+              <object class="GtkOverlay" id="about_hero">
+                <child>
+                  <object class="GtkPicture" id="about_background_image">
+                    <property name="content-fit">cover</property>
+                    <property name="can-shrink">true</property>
+                    <!-- No height-request — set dynamically from texture -->
+                  </object>
+                </child>
+                <child type="overlay">
+                  <object class="QuadGradientFade" id="about_fade_top">
+                    <property name="valign">start</property>
+                    <property name="halign">fill</property>
+                    <property name="hexpand">true</property>
+                    <property name="height-request">40</property>
+                    <property name="can-target">false</property>
+                  </object>
+                </child>
+                <child type="overlay">
+                  <object class="QuadGradientFade" id="about_fade_bottom">
+                    <property name="valign">end</property>
+                    <property name="halign">fill</property>
+                    <property name="hexpand">true</property>
+                    <property name="height-request">50</property>
+                    <property name="can-target">false</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Bio text (below image, in solid black area) -->
+            <child>
+              <object class="GtkLabel" id="about_bio_text">
+                <property name="label"></property>
+                <property name="xalign">0</property>
+                <property name="wrap">true</property>
+                <property name="wrap-mode">word-char</property>
+                <property name="selectable">true</property>
+                <property name="max-width-chars">100</property>
+                <style>
+                  <class name="about-bio-text"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Wikipedia attribution -->
+            <child>
+              <object class="GtkBox" id="about_attribution_box">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">4</property>
+                <property name="halign">start</property>
+
+                <child>
+                  <object class="GtkButton" id="about_wiki_link">
+                    <property name="label">Source: Wikipedia</property>
+                    <style>
+                      <class name="about-wiki-link"/>
+                    </style>
                   </object>
                 </child>
               </object>

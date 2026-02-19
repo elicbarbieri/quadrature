@@ -7,6 +7,7 @@
 <interface>
   <object class="GtkButton" id="album_btn">
     <property name="has-frame">false</property>
+    <property name="halign">start</property>
     <style>
       <class name="album-btn"/>
     </style>

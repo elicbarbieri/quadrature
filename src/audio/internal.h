@@ -9,13 +9,17 @@
 #define QUADRATURE_AUDIO_INTERNAL_H
 
 #include "quadrature/quadrature.h"
+#include "quadrature/audio.h"
 #include "../core/internal.h"
+#include <glib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <time.h>
 #include <math.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
 
 /* FFmpeg headers */
 #include <libavformat/avformat.h>
@@ -25,7 +29,6 @@
 /* PipeWire headers */
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
-#include <spa/utils/ringbuffer.h>
 
 /* Note: FFmpeg is still used for decoding, but scrubbing now uses rubberband */
 
@@ -37,16 +40,15 @@ extern "C" {
  * Consolidated Constants
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Budget ring buffer capacity: 10-min @ ~10ms intervals = 60,000 entries */
+#define BUDGET_RB_CAPACITY        65536  /* must be power-of-2 */
+
+#define LOUDNESS_BINS             1024
 #define DECODE_BUFFER_FRAMES      4096
-#define SPECTRUM_RINGBUF_SIZE     16384
 #define SPECTRUM_BARS             24
 #define FFT_SAMPLES               2048
-#define SPECTRUM_UPDATE_INTERVAL_US 16000
-#define PEAK_HOLD_DECAY_MS        2000
 #define SCRUB_SPEED_MULTIPLIER    3
-#define DECAY_FACTOR              0.85f
 #define MAX_AUDIO_PLAYERS         4
-#define MAX_FILENAME_LENGTH       512
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Forward Declarations
@@ -56,43 +58,70 @@ typedef struct audio_player audio_player_t;
 typedef struct audio_pipeline audio_pipeline_t;
 typedef struct audio_cache audio_cache_t;
 typedef struct audio_buffer audio_buffer_t;
-typedef struct spectrum_channel spectrum_channel_t;
-typedef struct spectrum_analyzer spectrum_analyzer_t;
 typedef struct audio_scrubber audio_scrubber_t;
 typedef struct library_cache library_cache_t;
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Spectrum Analyzer (Full Definition)
+ * Budget Ring Buffer
  *
- * Per-channel spectrum analyzer state using cavacore FFT.
- * Types are opaque in public header; full definition here for implementation.
+ * Lock-free ring buffer recording per-callback budget utilization in centipercent
+ * (0-10000 = 0.00%-100.00%). Written by the audio thread at ~10ms intervals,
+ * read by the UI thread.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#include <pthread.h>
+typedef struct {
+    uint16_t samples[BUDGET_RB_CAPACITY]; /* 0-10000 = centipercent; written by audio thread */
+    uint64_t last_write_ns;               /* audio-thread-only; no sync needed */
+    atomic_uint write_pos;                /* release-store after each write */
+} budget_rb_t;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Latency Ring Buffer
+ *
+ * Lock-free ring buffer recording per-callback latency in µs (capped at 65535).
+ * Written by the audio thread at ~10ms intervals, read by the UI thread.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define LATENCY_RB_CAPACITY 65536  /* must be power-of-2 */
+
+typedef struct {
+    uint16_t  samples[LATENCY_RB_CAPACITY]; /* µs, capped at 65535 */
+    uint64_t  last_write_ns;                /* audio-thread-only; no sync needed */
+    atomic_uint write_pos;                  /* release-store after each write */
+} latency_rb_t;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Callback Interval Ring Buffer
+ *
+ * Lock-free ring buffer recording peak absolute scheduling deviation in raw
+ * nanoseconds. Each sample is the peak |deviation| within a ~10ms sampling
+ * window. Always >= 0. Written by the audio thread with zero conversion;
+ * unit scaling (ns → µs) is performed by the reader (perf UI).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define INTERVAL_RB_CAPACITY 8192   /* must be power-of-2; ~82s at 10ms */
+
+typedef struct {
+    int64_t     samples[INTERVAL_RB_CAPACITY]; /* raw ns, always >= 0 */
+    uint64_t    last_write_ns;                 /* audio-thread-only; no sync needed */
+    atomic_uint write_pos;                     /* release-store after each write */
+} interval_rb_t;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Per-Player Spectrum State (cavacore FFT)
+ *
+ * Processed inline in the PipeWire monitor callback — no separate thread.
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 struct cava_plan;  /* Forward declaration from cavacore */
 
-struct spectrum_channel {
+typedef struct {
     struct cava_plan* plan;
-    double* input_buffer;
-    double* output_bars;
-    float* read_buffer;      /* Per-channel buffer for reading from ring buffer */
+    double* input_buffer;       /* Accumulation buffer for cavacore */
+    double* output_bars;        /* cavacore output (num_bars * 2) */
     size_t input_buffer_size;
     size_t input_buffer_fill;
-};
-
-struct spectrum_analyzer {
-    spectrum_channel_t channels[4];
-    int num_channels;
-    int num_bars;
-    int sample_rate;
-
-    pthread_t thread;
-    atomic_bool running;
-
-    /* Pointer to players array (uses void* to avoid circular include) */
-    void* players;
-};
+} spectrum_state_t;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * FFmpeg Decoder Helper
@@ -159,41 +188,6 @@ void ffmpeg_decoder_close(ffmpeg_decoder_t* dec);
  * Get total duration in frames (at output sample rate).
  */
 uint64_t ffmpeg_decoder_duration(ffmpeg_decoder_t* dec);
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Metering Accumulator
- *
- * Accumulates peak and RMS values during audio processing.
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-typedef struct {
-    float peak_left;
-    float peak_right;
-    float sum_sq_left;
-    float sum_sq_right;
-    size_t frame_count;
-} meter_accum_t;
-
-static inline void meter_accum_init(meter_accum_t* m) {
-    m->peak_left = 0.0f;
-    m->peak_right = 0.0f;
-    m->sum_sq_left = 0.0f;
-    m->sum_sq_right = 0.0f;
-    m->frame_count = 0;
-}
-
-static inline void meter_accum_process(meter_accum_t* m, float left, float right) {
-    float abs_l = fabsf(left);
-    float abs_r = fabsf(right);
-    if (abs_l > m->peak_left) m->peak_left = abs_l;
-    if (abs_r > m->peak_right) m->peak_right = abs_r;
-    m->sum_sq_left += left * left;
-    m->sum_sq_right += right * right;
-    m->frame_count++;
-}
-
-/* Store metering values to player atomics - implemented in audio_pipeline.c */
-void meter_accum_store(meter_accum_t* m, audio_player_t* player);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Time Utilities
@@ -285,6 +279,7 @@ shuttle_mode_t audio_scrubber_get_shuttle_mode(const audio_scrubber_t* s);
 
 /* Stats query (thread-safe) */
 uint64_t audio_scrubber_get_underflows(const audio_scrubber_t* s);
+int audio_scrubber_get_zone(const audio_scrubber_t* s);
 
 /* Audio thread - unified playback at variable speed */
 uint32_t audio_scrubber_process(audio_scrubber_t* s,
@@ -354,17 +349,11 @@ struct audio_player {
     /* Sample counter for RT-safe timestamps (incremented by callback) */
     atomic_uint_fast64_t callback_sample_count;
 
-    /* Track info (kept for backward compatibility during transition) */
-    char filepath[MAX_FILENAME_LENGTH];
+    /* RT timing for fault diagnostics */
+    uint64_t prev_scrubber_underflows; /* Snapshot for delta detection */
 
-    /* Metering (atomic, updated per callback) */
-    _Atomic float peak_left;
-    _Atomic float peak_right;
-    _Atomic float rms_left;
-    _Atomic float rms_right;
-    _Atomic float peak_hold_left;
-    _Atomic float peak_hold_right;
-    atomic_uint_fast64_t peak_hold_age_frames;  /* Frames since last peak (sample-based timing) */
+    /* PipeWire stream state (updated by state_changed callback) */
+    atomic_int pw_stream_state;  /* enum pw_stream_state */
 
     /* Per-player RT stats (atomic — written in callback, read from UI thread) */
     atomic_uint_fast64_t stats_cb_count;            /* Internal: for computing averages */
@@ -377,13 +366,48 @@ struct audio_player {
 
     /* Spectrum analyzer data (stereo: 0..SPECTRUM_BARS-1 = left, SPECTRUM_BARS..2*SPECTRUM_BARS-1 = right) */
     _Atomic float spectrum_bars[SPECTRUM_BARS * 2];
-    struct spa_ringbuffer spectrum_rb;
-    float* spectrum_buffer;
+    spectrum_state_t spectrum;  /* Inline cava state, processed in monitor callback */
 
-    /* PipeWire stream */
+    /* PipeWire streams */
     struct pw_stream* stream;
+    struct spa_hook stream_listener;
+    struct pw_stream* monitor_stream;  /* INPUT stream capturing from device monitor */
+    struct spa_hook monitor_stream_listener;
     char target_device[256];
+    bool exclusive;                    /* PipeWire exclusive mode on device */
+    uint32_t quantum_frames;  /* PipeWire quantum / buffer size (default: 512) */
+
+    /* Device error state + auto-reconnect */
+    atomic_bool    device_error;      /* true when PW stream is in ERROR state */
+    atomic_bool    reconnect_attempted; /* true after first reconnect try; second ERROR deactivates */
+    atomic_bool    streams_active;    /* true when PW streams are connected */
+    atomic_uint    stream_generation; /* bumped on every player_recreate_stream; stale idles check this */
+
+    /* Budget ring buffer (~10-min history, sampled every ~10ms) */
+    budget_rb_t*   budget_rb;   /* heap-allocated, ~128KB */
+
+    /* Callback latency ring buffer (µs, ~10-min history at ~10ms intervals) */
+    latency_rb_t*  latency_rb;  /* heap-allocated, ~128KB */
+
+    /* Callback interval deviation ring buffer (signed µs, peak per ~10ms window) */
+    interval_rb_t* interval_rb;  /* heap-allocated, ~128KB */
+    uint64_t last_callback_ns;   /* audio-thread-only: previous callback timestamp */
+    int64_t  interval_peak_dev_ns; /* audio-thread-only: max |deviation| since last rb write */
+
+    /* Cached SPA pod params for stream reconnect */
+    uint8_t        cached_params_buf[1024];
+    const struct spa_pod* cached_params[1];
+    int            num_cached_params;
 };
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Audio Pipeline Event Types
+ * 
+ * Note: Types defined in public header (quadrature/audio.h).
+ * Ring buffer size defined here since it's internal implementation detail.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define AUDIO_EVENT_RING_SIZE 512  /* Power of 2, large enough for RT events */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Audio Pipeline (Internal Definition)
@@ -392,14 +416,22 @@ struct audio_player {
 struct audio_pipeline {
     audio_player_t players[MAX_AUDIO_PLAYERS];
     uint32_t sample_rate;
+    uint64_t ns_per_frame;  /* 1000000000 / sample_rate, pre-computed at init */
 
     /* PipeWire shared context */
     struct pw_thread_loop* loop;
     struct pw_context* pw_ctx;
     struct pw_core* core;
 
-    /* Spectrum analyzer (shared, processes all players) */
-    spectrum_analyzer_t* spectrum;
+    /* Device hot-plug monitor (persistent PW registry listener) */
+    struct pw_registry *device_monitor_registry;
+    struct spa_hook     device_monitor_registry_listener;
+    struct spa_hook     device_monitor_core_listener;
+    int                 device_monitor_sync_seq;   /* expected seq for settled handshake */
+    bool                device_monitor_settled;    /* true once initial burst is past */
+    GHashTable         *device_monitor_sink_ids;   /* set of known Audio/Sink node IDs */
+    void              (*device_changed_cb)(void *user_data);
+    void               *device_changed_user_data;
 
     /* Audio cache (shared by all players) - track_id based */
     audio_cache_t* cache;
@@ -414,7 +446,12 @@ struct audio_pipeline {
     /* Auto-advance timeout (runs on main thread) */
     guint advance_timeout_id;
 
-    /* Performance dashboard (optional, for detailed timing) */
+    /* Event ring buffer for performance monitoring (lock-free SPSC) */
+    audio_pipeline_event_t events[AUDIO_EVENT_RING_SIZE];
+    atomic_uint event_write;
+    atomic_uint event_read;
+
+    /* Performance dashboard (for aggregated view, not written to directly) */
     perf_dashboard_t* perf;
 
     /* Pipeline statistics (atomic for thread-safe reads) */
@@ -429,33 +466,36 @@ struct audio_pipeline {
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Spectrum Analyzer API
+ * Per-Player Spectrum Init/Destroy
  *
- * Runs a background thread that reads samples from each player's ring buffer,
- * processes through cavacore FFT, and writes spectrum bars to player structs.
+ * Initialize/destroy the cava plan + buffers embedded in audio_player_t.
+ * FFT processing runs inline in the PipeWire monitor callback.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Create and start a spectrum analyzer.
+ * Initialize a player's spectrum state (cava plan + accumulation buffers).
+ * Called from player_init().
+ */
+quadrature_result_t spectrum_init(spectrum_state_t* s, int num_bars, int sample_rate);
+
+/**
+ * Destroy a player's spectrum state.
+ * Called from player_destroy().
+ */
+void spectrum_cleanup(spectrum_state_t* s);
+
+/**
+ * Process audio samples through cavacore FFT.
+ * Called from the PipeWire monitor callback.
+ * Writes results to player->spectrum_bars[] atomically.
  *
- * @param num_bars Number of frequency bars (1-64, typically 24)
- * @param sample_rate Audio sample rate (e.g., 48000)
- * @param num_channels Number of players to analyze (1-4)
- * @param players Pointer to audio_player_t array (must outlive analyzer)
- * @return New spectrum analyzer, or NULL on failure
+ * @param s       Per-player spectrum state
+ * @param in      Interleaved stereo float samples
+ * @param frames  Number of frames (samples / 2)
+ * @param bars    Atomic spectrum_bars array to write results
  */
-spectrum_analyzer_t* spectrum_create(int num_bars, int sample_rate, int num_channels,
-                                     void* players);
-
-/**
- * Stop and destroy a spectrum analyzer.
- */
-void spectrum_destroy(spectrum_analyzer_t* s);
-
-/**
- * Check if the spectrum analyzer is running.
- */
-bool spectrum_is_running(spectrum_analyzer_t* s);
+void spectrum_process(spectrum_state_t* s, const float* in, uint32_t frames,
+                      _Atomic float* bars);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Audio Device Enumeration API
@@ -489,6 +529,28 @@ quadrature_result_t audio_devices_enumerate(audio_pipeline_t *pipeline, audio_de
  * Free device list resources.
  */
 void audio_devices_free(audio_device_list_t *list);
+
+/**
+ * Start a persistent PipeWire registry monitor that calls cb(user_data) whenever
+ * an Audio/Sink node is added or removed.  cb is invoked on the PipeWire thread —
+ * callers must marshal to the GTK main thread themselves (e.g. g_main_context_invoke).
+ *
+ * Uses pw_core_sync to suppress the initial population burst so that only genuine
+ * topology changes after startup trigger the callback.
+ *
+ * Safe to call multiple times — subsequent calls are no-ops if already started.
+ * The pipeline must be started before calling.
+ */
+quadrature_result_t audio_devices_monitor_start(audio_pipeline_t *pipeline,
+                                                  void (*cb)(void *user_data),
+                                                  void *user_data);
+
+/**
+ * Stop the device monitor and release its PipeWire resources.
+ * Safe to call if the monitor was never started.
+ * Must be called before audio_pipeline_destroy.
+ */
+void audio_devices_monitor_stop(audio_pipeline_t *pipeline);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Audio Cache API (Internal)
@@ -527,14 +589,6 @@ typedef struct {
     uint64_t timestamp_ms;        /* When load() was called (monotonic) */
 } audio_cache_decode_event_t;
 
-/* Cache Statistics (simple metrics, histogram computed externally from events) */
-typedef struct {
-    float memory_usage_pct;           /* (used / limit) * 100 */
-    uint32_t cached_buffer_seconds;   /* Total seconds of audio in decoded buffers */
-    uint32_t prefetch_tracks;         /* Total tracks passed to audio_cache_prefetch() */
-    uint32_t event_count;             /* Number of events in ring buffer */
-} audio_cache_stats_t;
-
 /* Cache Lifecycle */
 quadrature_result_t audio_cache_create(library_cache_t* library,
                                         uint32_t sample_rate,
@@ -558,16 +612,8 @@ audio_cache_lock_result_t audio_cache_lock(audio_cache_t* cache, int64_t track_i
 void audio_cache_unlock(audio_cache_t* cache, int64_t track_id);
 void audio_cache_unlock_delayed(audio_cache_t* cache, int64_t track_id);
 
-/* Wait for decode completion (blocks until ready or timeout) */
-bool audio_cache_wait_ready(audio_cache_t* cache, int64_t track_id, int64_t timeout_ms);
-
 /* Buffer Access (For Locked Tracks) */
 audio_buffer_t* audio_cache_get_locked(audio_cache_t* cache, int64_t track_id);
-
-/* Prefetch API */
-void audio_cache_prefetch(audio_cache_t* cache,
-                          const int64_t* track_ids,
-                          size_t count);
 
 /* Status Query */
 audio_cache_status_t audio_cache_get_status(audio_cache_t* cache, int64_t track_id);
@@ -576,17 +622,15 @@ audio_cache_status_t audio_cache_get_status(audio_cache_t* cache, int64_t track_
 int64_t audio_buffer_get_track_id(const audio_buffer_t* buf);
 const float* audio_buffer_get_samples(const audio_buffer_t* buf);
 uint64_t audio_buffer_get_num_frames(const audio_buffer_t* buf);
-uint32_t audio_buffer_get_sample_rate(const audio_buffer_t* buf);
+const float* audio_buffer_get_loudness(const audio_buffer_t* buf);
+bool audio_buffer_is_loudness_ready(const audio_buffer_t* buf);
 
 /* Cache Management */
-void audio_cache_evict(audio_cache_t* cache, int64_t track_id);
-void audio_cache_clear(audio_cache_t* cache);
-void audio_cache_set_memory_limit(audio_cache_t* cache, size_t memory_limit);
+/** Evict unlocked buffers not accessed within max_age_us microseconds. */
+void audio_cache_sweep_stale(audio_cache_t* cache, int64_t max_age_us);
 size_t audio_cache_get_memory_used(audio_cache_t* cache);
-size_t audio_cache_get_count(audio_cache_t* cache);
 
 /* Statistics */
-void audio_cache_get_stats(audio_cache_t* cache, audio_cache_stats_t* stats);
 uint32_t audio_cache_get_decode_events(audio_cache_t* cache,
                                         audio_cache_decode_event_t* out_events,
                                         uint32_t max_events);
@@ -614,18 +658,84 @@ perf_dashboard_t* audio_pipeline_get_perf_dashboard(audio_pipeline_t* pipeline);
 audio_cache_t* audio_pipeline_get_audio_cache(audio_pipeline_t* pipeline);
 
 /**
- * Load an audio file for playback by path (legacy internal API).
- *
- * @deprecated Use audio_pipeline_set_player_track() with track ID instead.
+ * Get budget utilization histogram for a player (10 linear buckets: 0-9%, 10-19%, ...).
+ * Reads from the lock-free budget ring buffer. Safe to call from any thread.
  *
  * @param pipeline   Pipeline instance
  * @param player_id  Player index (0-3)
- * @param path       Path to audio file
- * @return QUADRATURE_OK on success (load started or cache hit)
+ * @param out_buckets Array of 10 bucket counts (caller allocated)
  */
-quadrature_result_t audio_pipeline_player_load(audio_pipeline_t* pipeline,
-                                                int player_id,
-                                                const char* path);
+void audio_pipeline_get_budget_histogram(audio_pipeline_t* pipeline, int player_id,
+                                          uint32_t out_buckets[10]);
+
+/**
+ * Get max budget utilization over the last ~1 second for a player.
+ * Scans the most recent ~100 samples (at ~10ms intervals) from the ring buffer
+ * and returns the peak value. This directly answers "am I close to missing a
+ * deadline?" — the only question that matters for real-time audio.
+ *
+ * @param pipeline   Pipeline instance
+ * @param player_id  Player index (0-3)
+ * @return           Peak budget percentage (0.00-100.00)
+ */
+double audio_pipeline_get_budget_max(audio_pipeline_t* pipeline, int player_id);
+
+/**
+ * Read recent callback latency samples from a player's ring buffer.
+ *
+ * @param pipeline    Pipeline instance
+ * @param player_id   Player index (0-3)
+ * @param out         Caller-allocated buffer for latency samples (µs)
+ * @param max_samples Maximum number of samples to read
+ * @return            Actual number of samples written to out
+ */
+uint32_t audio_pipeline_get_latency_samples(audio_pipeline_t* pipeline, int player_id,
+                                              uint16_t* out, uint32_t max_samples);
+
+/**
+ * Read recent callback interval deviation samples from a player's ring buffer.
+ * Values are raw nanoseconds (always >= 0): peak absolute scheduling deviation
+ * per ~10ms sampling window. Caller is responsible for unit conversion.
+ *
+ * @param pipeline    Pipeline instance
+ * @param player_id   Player index (0-3)
+ * @param out         Caller-allocated buffer for deviation samples (raw ns)
+ * @param max_samples Maximum number of samples to read
+ * @param out_write_pos  If non-NULL, receives the cumulative write position
+ *                       (total samples ever written). Use to align decimation
+ *                       groups to absolute time boundaries.
+ * @return            Actual number of samples written to out
+ */
+uint32_t audio_pipeline_get_interval_samples(audio_pipeline_t* pipeline, int player_id,
+                                               int64_t* out, uint32_t max_samples,
+                                               uint32_t* out_write_pos);
+
+/**
+ * Check if a player has a PipeWire device error.
+ *
+ * @param pipeline   Pipeline instance
+ * @param player_id  Player index (0-3)
+ * @return true if device is in error state (auto-reconnect pending or failed)
+ */
+bool audio_pipeline_player_has_device_error(audio_pipeline_t* pipeline, int player_id);
+
+/**
+ * Check if a player has active PipeWire streams.
+ * Players start dormant (no streams) and are activated when a valid output
+ * device is assigned. Streams are deactivated when the device is removed
+ * or after unrecoverable PipeWire errors.
+ *
+ * @param pipeline   Pipeline instance
+ * @param player_id  Player index (0-3)
+ * @return true if player has active output + monitor streams
+ */
+bool audio_pipeline_player_streams_active(audio_pipeline_t* pipeline, int player_id);
+
+/**
+ * Manually trigger stream reconnect for a player in error state.
+ * Safe to call from main thread; schedules reconnect on next idle.
+ */
+void audio_pipeline_player_reconnect(audio_pipeline_t* pipeline, int player_id);
 
 #ifdef __cplusplus
 }

@@ -1,11 +1,9 @@
 /* Library Styles */
 
 .library-content {
-    background-color: #1e1e1e;
+    background-color: #121212;
     min-width: 200px;
 }
-
-.library-header { margin-bottom: 4px; }
 
 .library-title {
     font-size: 24px;
@@ -19,121 +17,143 @@
     margin-bottom: 8px;
 }
 
-.library-back {
-    background: transparent;
-    border: none;
-    color: #00d4ff;
-    padding: 4px 8px;
-    margin-bottom: 8px;
+/* Errors view container */
+.errors-view-container {
+    margin: 8px 16px 16px 16px;
 }
-
-.library-back:hover { background-color: rgba(0, 212, 255, 0.1); }
-
-.library-section {
-    padding: 12px;
-    background-color: rgba(255, 255, 255, 0.03);
-    border-radius: 8px;
-}
-
-.search-results-section-header {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: #666666;
-    letter-spacing: 1.2px;
-}
-
-.library-list { background: transparent; }
 
 /* Search */
 .search-entry {
-    font-size: 14px;
-    padding: 8px 12px;
+    font-size: 16px;
+    padding: 4px 12px;
     border-radius: 8px;
-    background-color: #2a2a2a;
-    border: 1px solid #444444;
-    color: #e0e0e0;
-    min-height: 40px;
+    background-color: #252525;
+    border: 1px solid #505050;
+    color: #f0f0f0;
+    min-height: 36px;
 }
 
 .search-entry:focus {
-    border-color: #00d4ff;
-    box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.2);
+    border-color: #34d399;
+    box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.2);
 }
 
-/* Search Filters */
-.search-filters { margin-bottom: 8px; }
-
-.search-filter {
-    background-color: #444444;
-    color: #888888;
-    border: none;
-    border-radius: 6px;
-    padding: 6px 12px;
-    min-height: 32px;
+/* Search-type selector chips (All / Artists / Albums / Songs)
+ * Larger and visually distinct from filter-bar chips.
+ * Active state shared with .filter-chip--on modifier. */
+.search-type-chip {
+    background-color: transparent;
+    color: #606060;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 0 20px;
+    min-height: 36px;
+    font-size: 16px;
+    font-weight: 500;
+}
+.search-type-chip:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+    color: #a0a0a0;
+    border-color: rgba(255, 255, 255, 0.15);
 }
 
-.search-filter:hover {
-    background-color: #555555;
-    color: #aaaaaa;
-}
-
-.search-filter-active,
-.search-filter-active:hover {
+/* Active — solid cyan for clear toggle state */
+.search-type-chip.filter-chip--on {
     background-color: #00d4ff;
-    color: #000000;
+    color: #ffffff;
+    border-color: #00d4ff;
+    font-weight: 700;
+}
+.search-type-chip.filter-chip--on:hover {
+    background-color: #33ddff;
+    color: #ffffff;
+    border-color: #33ddff;
 }
 
-.search-filter-active:hover { background-color: #33ddff; }
+/* ═══════════════════════════════════════════════════════════════════════
+ * Filter / Sort Bar System — 4 canonical classes
+ *
+ *   .filter-bar      row container
+ *   .filter-field    label + dropdown/entry frame
+ *   .filter-chip     pill button (type toggles, adv toggle, clear)
+ *   .filter-chip--on active/selected modifier (also via GTK :checked)
+ *
+ * ═══════════════════════════════════════════════════════════════════════ */
 
-/* Filter Container */
-.filter-container {
+.filter-bar {
     padding: 4px 0 8px 0;
 }
 
-/* Filter Button - label + control as one cohesive unit */
-.filter-button {
-    background-color: #2a2a2a;
-    border: 1px solid #444444;
+/* Labeled field frame — holds a label + inner MenuButton or SearchEntry.
+ * min-height matches .filter-chip so GTK's horizontal box equalizes them. */
+.filter-field {
+    background-color: #252525;
+    border: 1px solid #505050;
     border-radius: 6px;
     padding: 0 0 0 10px;
-    min-height: 32px;
+    min-height: 36px;
 }
+.filter-field:hover { border-color: #686868; }
 
-.filter-button:hover {
-    border-color: #555555;
-}
-
-.filter-button > label {
-    font-size: 12px;
-    color: #888888;
+.filter-field > label {
+    font-size: 13px;
+    color: #b0b0b0;
     font-weight: 600;
-    margin-right: 6px;
+    margin-right: 4px;
 }
 
-/* Flatten menu button inside filter button */
-.filter-button menubutton > button {
-    background-color: transparent;
+/* Inner MenuButton — zero vertical padding so min-height drives height */
+.filter-field menubutton > button {
+    background: transparent;
     border: none;
-    padding: 4px 10px;
-    min-height: 28px;
-    min-width: 80px;
-    font-size: 12px;
-    color: #e0e0e0;
+    padding: 0 10px;
+    min-height: 36px;
+    min-width: 72px;
+    font-size: 13px;
+    color: #e8e8e8;
     border-radius: 0 6px 6px 0;
 }
+.filter-field menubutton > button:hover { background: rgba(255,255,255,0.06); }
 
-.filter-button menubutton > button:hover {
-    background-color: rgba(255, 255, 255, 0.05);
+/* Inner SearchEntry — same height driver */
+.filter-field entry {
+    background: transparent;
+    border: none;
+    min-height: 36px;
+    font-size: 13px;
+    margin-left: 4px;
 }
 
-/* Flatten search entry inside filter button */
-.filter-button entry {
-    background-color: transparent;
-    border: none;
-    min-height: 28px;
-    font-size: 12px;
-    margin-left: 6px;
+/* Pill button — search-type toggles, adv toggle, clear.
+ * Zero vertical padding + min-height keeps height equal to .filter-field. */
+.filter-chip {
+    background-color: #363636;
+    color: #cccccc;
+    border: 1px solid #505050;
+    border-radius: 6px;
+    padding: 0 16px;
+    min-height: 36px;
+    font-size: 14px;
+    font-weight: 500;
+}
+.filter-chip:hover {
+    background-color: #444444;
+    color: #ffffff;
+    border-color: #686868;
+}
+
+/* Active/selected — solid bright cyan with maximum contrast */
+.filter-chip--on,
+.filter-chip:checked {
+    background-color: #00d4ff;
+    color: #001520;
+    border-color: #00d4ff;
+    font-weight: 700;
+}
+.filter-chip--on:hover,
+.filter-chip:checked:hover {
+    background-color: #33ddff;
+    border-color: #33ddff;
 }
 
 /* Filter popover (multi-select checkboxes) */
@@ -142,87 +162,11 @@
     padding: 4px;
     min-width: 180px;
 }
-
-.filter-popover checkbutton {
-    padding: 4px 8px;
-    min-height: 24px;
-}
-
-.filter-popover checkbutton label {
-    font-size: 12px;
-    color: #e0e0e0;
-}
-
+.filter-popover checkbutton { padding: 4px 8px; min-height: 24px; }
+.filter-popover checkbutton label { font-size: 12px; color: #e0e0e0; }
 .filter-popover checkbutton:hover {
     background-color: rgba(255, 255, 255, 0.05);
     border-radius: 4px;
-}
-
-/* Filter Clear button */
-.filter-button-clear {
-    background-color: transparent;
-    color: #888888;
-    border: 1px solid #444444;
-    border-radius: 6px;
-    padding: 4px 12px;
-    font-size: 12px;
-    min-height: 28px;
-}
-
-.filter-button-clear:hover {
-    color: #aaaaaa;
-    border-color: #555555;
-    background-color: rgba(255, 255, 255, 0.03);
-}
-
-/* Sort Buttons */
-.sort-button {
-    background-color: #3a3a3a;
-    color: #888888;
-    border: 1px solid #555555;
-    border-radius: 4px;
-    padding: 4px 8px;
-    min-width: 40px;
-    font-size: 12px;
-}
-
-.sort-button:hover {
-    background-color: #4a4a4a;
-    color: #aaaaaa;
-}
-
-.sort-button-active {
-    background-color: #00d4ff;
-    color: #000000;
-    border-color: #00d4ff;
-}
-
-.sort-button-active:hover { background-color: #33ddff; }
-
-/* Preview Track Row */
-.preview-track-row {
-    min-height: 28px;
-    padding: 4px 8px;
-    border-radius: 4px;
-}
-
-.preview-track-row:hover { background-color: rgba(255, 255, 255, 0.05); }
-
-.preview-track-num {
-    font-size: 12px;
-    color: #666666;
-    min-width: 20px;
-}
-
-.preview-track-title {
-    font-size: 13px;
-    color: #e0e0e0;
-}
-
-.preview-track-duration {
-    font-size: 12px;
-    color: #666666;
-    font-family: monospace;
 }
 
 /* Toggle Buttons */
@@ -234,6 +178,7 @@
     background-color: #3a3a3a;
     color: #888888;
     border: 1px solid #555555;
+    transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
 
 .toggle-btn:hover {
@@ -254,7 +199,7 @@
  * ═══════════════════════════════════════════════════════════════════════ */
 
 .library-row-title {
-    font-size: 20px;
+    font-size: 17px;
     font-weight: bold;
     color: #e0e0e0;
 }
@@ -274,8 +219,8 @@
 }
 
 .library-row-duration {
-    font-size: 14px;
-    color: #888888;
+    font-size: 17px;
+    color: #999999;
     font-family: monospace;
     font-feature-settings: "tnum";
     letter-spacing: 0.5px;
@@ -294,51 +239,21 @@
     letter-spacing: 0.2px;
 }
 
+/* Artist thumbnail in artist rows (raw pixels, no decoration) */
+.artist-art-thumb {
+    min-width: 48px;
+    min-height: 48px;
+}
+
 /* Art strip thumbnails (size managed by artwork_manager) */
-.album-art-strip-thumb,
-.album-art-list {
+.album-art-strip-thumb {
     min-width: 48px;  /* Fallback minimum */
     min-height: 48px;
     border-radius: 4px;
     background-color: #333333;
 }
 
-.album-art-detail {
-    border-radius: 8px;
-    background-color: #333333;
-}
-
-/* Column Headers */
-.column-headers {
-    border-bottom: 1px solid #333333;
-    background-color: #222222;
-    padding: 4px 8px;
-}
-
-.column-header {
-    background: transparent;
-    color: #666666;
-    font-size: 11px;
-    font-weight: 600;
-    border: none;
-    padding: 4px 8px;
-    min-height: 24px;
-    letter-spacing: 0.3px;
-}
-
-.column-header:hover {
-    color: #888888;
-    background: transparent;
-}
-
-.column-header-active { color: #00d4ff; }
-
-
-
 /* Library Row Hover Effects */
-list.library-list > row:hover .library-row-title {
-    color: #ffffff;
-}
 
 /* Track row overrides */
 .library-track-row .library-row-title {
@@ -349,121 +264,45 @@ list.library-list > row:hover .library-row-title {
     font-size: 16px;
 }
 
-.album-detail-track {
-    padding: 0;
-    margin: 0;
-}
-
-.library-card-name {
-    font-size: 18px;
-    font-weight: bold;
-    color: #e0e0e0;
-}
-
-.library-card-detail {
+/* Credit annotation line (third row on track rows) */
+.credit-role-label {
     font-size: 12px;
-    color: #666666;
-}
-
-
-
-/* Remove ALL padding from row nodes - GTK4 ListBoxRow uses 'row' CSS node */
-list.album-tracks-list > row {
-    padding: 0;
-    margin: 0;
-    min-height: 0;
-    border: none;
-    background: transparent;
-}
-
-/* Album track row wrapper - minimal padding for centering */
-row.album-track-row {
-    padding: 8px 16px;
-    margin: 0;
-    border: none;
-}
-
-/* Album detail track grid - clean slate */
-.album-detail-track {
-    padding: 0;
-    margin: 0;
-}
-
-/* Album detail track number */
-.album-detail-track-num {
-    font-size: 15px;
-    color: #888888;
-}
-
-/* Album detail track title */
-.album-detail-track-title {
-    font-size: 18px;
     font-weight: 600;
-    color: #e0e0e0;
-}
-
-/* Album detail track duration */
-.album-detail-track-duration {
-    font-size: 13px;
-    color: #666666;
-    font-family: monospace;
-}
-
-/* Album detail track info button */
-.album-detail-track-info-btn {
-    min-width: 24px;
-    min-height: 24px;
-    padding: 4px;
-    opacity: 0.4;
-    transition: opacity 150ms ease-out;
-}
-
-.album-detail-track-info-btn:hover {
-    opacity: 1.0;
-}
-
-row.album-track-row:hover .album-detail-track-info-btn {
-    opacity: 0.7;
-}
-
-.album-detail-track-featuring:empty {
-    display: none;
+    color: #b388ff;
+    border: 1px solid rgba(179, 136, 255, 0.4);
+    border-radius: 4px;
+    padding: 1px 6px;
 }
 
 .library-album-art {
-    border-radius: 4px;
+    border-radius: 0;
     background-color: #333333;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: none;
 }
 
-.library-album-art-large {
-    min-width: 120px;
-    min-height: 120px;
-    border-radius: 8px;
-    background-color: #333333;
+/* Search results section header (Artists / Albums / Songs) */
+.search-section-header {
+    margin: 16px 0 6px 0;  /* top right bottom left — flush horizontal */
 }
 
-/* Search Results Container */
+/* Section header separator rule */
+.section-separator {
+    min-height: 2px;
+    background-color: rgba(180, 180, 180, 0.35);
+}
+
+/* Search Results Container — no padding; rows own their own spacing */
 .search-results-container {
-    padding: 8px 16px 8px 8px;  /* Extra right padding for scrollbar */
+    padding: 0 8px 0 0;  /* Right padding only, for scrollbar clearance */
+    background: transparent;
+    border: none;
 }
 
-/* Table Row */
-.table-row {
-    padding: 6px 8px;
-    border-radius: 2px;
-    min-height: 44px;
+/* Neutralise any GTK4 default list/listview border */
+.library-list {
+    background: transparent;
+    border: none;
 }
-
-.table-row:hover { background-color: #2a2a2a; }
-
-.table-cell {
-    font-size: 13px;
-    color: #e0e0e0;
-}
-
-.table-cell-muted { color: #888888; }
-.table-cell-number { font-family: monospace; }
 
 /* Library Cards */
 .library-card {
@@ -475,12 +314,37 @@ row.album-track-row:hover .album-detail-track-info-btn {
 }
 
 .library-card:hover { border-color: #555555; }
-.library-card-name { font-weight: 600; }
+
+.library-card-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e0e0e0;
+}
 
 .library-card-path {
     font-size: 12px;
     color: #888888;
     font-family: monospace;
+}
+
+.library-card-stats {
+    padding-top: 8px;
+    border-top: 1px solid #333333;
+}
+
+.library-card-stats label {
+    font-size: 13px;
+    color: #cccccc;
+}
+
+.library-card-meta {
+    font-size: 12px;
+    color: #666666;
+}
+
+.library-card-progress {
+    padding-top: 8px;
+    border-top: 1px solid #333333;
 }
 
 .library-card-action {
@@ -489,84 +353,18 @@ row.album-track-row:hover .album-detail-track-info-btn {
     min-height: 24px;
 }
 
-.library-status {
-    font-size: 12px;
-    font-weight: 500;
-    padding: 2px 8px;
-    border-radius: 4px;
+.progress-phase-error .progress-phase-title { color: #f87171; }
+.progress-phase-error .progress-phase-bar progress {
+    background-color: transparent;
+    background-image: repeating-linear-gradient(
+        -45deg,
+        #f87171,
+        #f87171 4px,
+        #b91c1c 4px,
+        #b91c1c 8px
+    );
 }
-
-.library-status-online,
-.library-status-ready {
-    color: #4ade80;
-    background-color: rgba(74, 222, 128, 0.1);
-}
-
-.library-status-indexing,
-.library-status-checking {
-    color: #60a5fa;
-    background-color: rgba(96, 165, 250, 0.1);
-}
-
-.library-status-error {
-    color: #f87171;
-    background-color: rgba(248, 113, 113, 0.1);
-}
-
-.library-status-offline,
-.library-status-new {
-    color: #6b7280;
-    background-color: rgba(107, 114, 128, 0.1);
-}
-
-.library-progress {
-    min-height: 6px;
-    border-radius: 3px;
-    margin-top: 4px;
-}
-
-.library-progress trough {
-    min-height: 6px;
-    background-color: #3a3a3a;
-    border-radius: 3px;
-}
-
-.library-progress progress {
-    min-height: 6px;
-    background-color: #60a5fa;
-    border-radius: 3px;
-}
-
-.library-indexing-indicator {
-    padding: 4px 8px;
-    background-color: rgba(96, 165, 250, 0.1);
-    border-radius: 4px;
-}
-
-.library-indexing-text {
-    font-size: 12px;
-    color: #60a5fa;
-}
-
-/* Track Info Button */
-.track-info-btn {
-    min-width: 24px;
-    min-height: 24px;
-    padding: 4px;
-    opacity: 0.4;
-    transition: opacity 150ms ease-out;
-}
-
-.track-info-btn:hover { opacity: 1.0; }
-list.library-list > row:hover .track-info-btn { opacity: 0.7; }
-
-/* Album row - row meta override */
-
-.library-album-row .library-row-meta,
-.library-track-row .library-row-meta {
-    font-size: 17px;
-    color: #999999;
-}
+.progress-phase-error .progress-phase-label { color: #f87171; }
 
 .library-row-year {
     font-size: 17px;
@@ -580,39 +378,55 @@ list.library-list > row:hover .track-info-btn { opacity: 0.7; }
 .album-btn {
     color: #e5a640;
     background: transparent;
-    border: 2px solid rgba(229, 166, 64, 0.25);
+    border: 1px solid rgba(229, 166, 64, 0.3);
     border-radius: 4px;
     padding: 1px 6px;
     font-size: 16px;
     font-weight: 500;
-    transition: color 150ms ease-out, border-color 150ms ease-out,
-                box-shadow 150ms ease-out;
+    transition: color 150ms ease-out, background-color 150ms ease-out,
+                border-color 150ms ease-out, box-shadow 150ms ease-out;
 }
 
 .album-btn:hover {
     color: #edb85c;
-    background: transparent;
+    background-color: #1e1a0d;
     border-color: rgba(229, 166, 64, 0.5);
     box-shadow: 0 0 8px rgba(229, 166, 64, 0.3);
+}
+
+.album-btn:focus-visible {
+    color: #00cc44;
+    border-color: #00cc44;
+    box-shadow: 0 0 8px rgba(0, 204, 68, 0.5);
+    background-color: rgba(0, 204, 68, 0.12);
 }
 
 .artist-btn {
     color: #00d4ff;
     background: transparent;
-    border: 2px solid rgba(0, 212, 255, 0.25);
+    border: 1px solid rgba(0, 212, 255, 0.3);
     border-radius: 4px;
     padding: 1px 6px;
+    margin-left: 2px;
+    margin-right: 2px;
     font-size: 16px;
     font-weight: 500;
-    transition: color 150ms ease-out, border-color 150ms ease-out,
-                box-shadow 150ms ease-out;
+    transition: color 150ms ease-out, background-color 150ms ease-out,
+                border-color 150ms ease-out, box-shadow 150ms ease-out;
 }
 
 .artist-btn:hover {
     color: #33ddff;
-    background: transparent;
+    background-color: #0d2a30;
     border-color: rgba(0, 212, 255, 0.5);
     box-shadow: 0 0 8px rgba(0, 212, 255, 0.3);
+}
+
+.artist-btn:focus-visible {
+    color: #00cc44;
+    border-color: #00cc44;
+    box-shadow: 0 0 8px rgba(0, 204, 68, 0.5);
+    background-color: rgba(0, 204, 68, 0.12);
 }
 
 
@@ -622,62 +436,78 @@ list.library-list > row:hover .track-info-btn { opacity: 0.7; }
  * This prevents GTK4's default blue background on :selected state
  * ═══════════════════════════════════════════════════════════════════════ */
 
-/* Search results list - section headers (non-activatable) */
-list.search-results-list > row:not(.activatable) {
-    background: transparent;
-}
 
-/* Search results list - content rows */
-list.search-results-list > row.activatable {
-    padding: 4px;
+/* ── Unified Row Styling ───────────────────────────────────────────────
+ * All library rows use ProportionalBox. Row wrapper is transparent.
+ * Child proportional-box carries background, dividers, selection highlight.
+ * Section position classes (library-row-first/last) on the child. */
+
+.library-list > row {
+    padding: 0;
     border: none;
     background: transparent;
-    border-radius: 6px;
-    transition: background-color 150ms ease-out;
 }
 
-list.search-results-list > row.activatable:hover {
-    background-color: rgba(255, 255, 255, 0.03);
+.library-list > row:focus,
+.library-list > row:focus-visible { outline: none; }
+
+.library-list > row > :first-child {
+    padding: 4px 8px;
+    background: #1e1e1e;
+    border-radius: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    transition: box-shadow 150ms ease-out, border-radius 150ms ease-out;
 }
 
-/* Library view lists (artists, albums, tracks) */
-list.library-list > row {
-    padding: 4px;
-    border: none;
-    background: transparent;
-    border-radius: 6px;
-    transition: background-color 150ms ease-out;
+.library-list > row > .library-row-first { border-radius: 8px 8px 0 0; border-top: none; }
+.library-list > row > .library-row-last  { border-radius: 0 0 8px 8px; }
+.library-list > row > .library-row-first.library-row-last { border-radius: 8px; }
+
+.library-list > row:hover > :first-child {
+    border-radius: 8px;
+    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.22);
 }
 
-list.library-list > row:hover {
-    background-color: rgba(255, 255, 255, 0.03);
+.library-list > row:selected > :first-child {
+    border-radius: 8px;
+    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.35);
 }
 
-/* Add subtle spacing between rows */
-list.search-results-list > row + row,
-list.library-list > row + row {
-    margin-top: 2px;
+.library-list:focus-within > row:selected > :first-child {
+    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 1.0);
 }
 
-/* GtkListView rows (virtualized artists/albums views) */
-listview.library-list > row {
-    padding: 6px 4px;
-    border: none;
-    background: transparent;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-    transition: background-color 150ms ease-out;
-}
+.library-list > row:hover .library-row-title { color: #ffffff; }
 
-listview.library-list > row:hover {
-    background-color: rgba(255, 255, 255, 0.04);
-}
-
-listview.library-list > row:hover .library-row-title {
-    color: #ffffff;
-}
-
-listview.library-list > row:hover .genre-pill {
+.library-list > row:hover .genre-pill {
     background-color: #333333;
     border-color: #444444;
     color: #bbbbbb;
+}
+
+/* ── Index Scrubber ──────────────────────────────────────────────────────── */
+
+/* Right-edge strip; GTK_OVERFLOW_VISIBLE lets labels extend leftward.
+ * No background — tick marks + rail are drawn directly over content. */
+scrubber {
+    min-width: 36px;
+    opacity: 0;
+    background: transparent;
+    transition: opacity 180ms ease-out;
+}
+
+scrubber.scrubber-expanded {
+    opacity: 1;
+}
+
+/* Floating section badge shown during drag */
+.scrubber-badge {
+    font-size: 26px;
+    font-weight: 700;
+    color: #e0e0e0;
+    background-color: rgba(18, 18, 18, 0.90);
+    border-radius: 8px;
+    padding: 6px 14px;
+    min-width: 52px;
+    margin-right: 44px;
 }

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Single channel status cell for the performance dashboard.
+  Instantiated 4× from perf_view.c with channel name set programmatically.
+-->
+<interface>
+  <object class="GtkBox" id="cell">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">6</property>
+    <property name="hexpand">true</property>
+    <style><class name="perf-channel-row"/></style>
+    <child>
+      <object class="GtkLabel" id="channel_name">
+        <property name="label">Ch?</property>
+        <property name="width-request">32</property>
+        <property name="margin-start">6</property>
+        <style><class name="perf-channel-name"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="state">
+        <property name="label">Stopped</property>
+        <property name="width-request">52</property>
+        <property name="xalign">0</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="p99">
+        <property name="label">p99: --</property>
+        <property name="width-request">80</property>
+        <property name="xalign">0</property>
+        <style><class name="perf-stat-label"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="bgt">
+        <property name="label">Bgt: --</property>
+        <property name="width-request">60</property>
+        <property name="xalign">0</property>
+        <style><class name="perf-stat-label"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox">
+        <property name="hexpand">true</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="reconnect">
+        <property name="label">↺</property>
+        <property name="visible">false</property>
+        <property name="margin-end">4</property>
+        <style><class name="perf-reconnect-btn"/></style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="dot">
+        <property name="label">●</property>
+        <property name="margin-end">6</property>
+        <style><class name="perf-channel-ok"/></style>
+      </object>
+    </child>
+  </object>
+</interface>

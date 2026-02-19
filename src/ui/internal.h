@@ -8,9 +8,13 @@
 #define QUADRATURE_UI_INTERNAL_H
 
 #include <gtk/gtk.h>
-#include "quadrature/quadrature_audio.h"
-#include "quadrature/quadrature_library.h"
-#include "quadrature/ui/app_settings.h"
+#include "quadrature/audio.h"
+#include "quadrature/library.h"
+#include "quadrature/indexer.h"
+#include "quadrature/metadata.h"
+#include "quadrature/settings.h"
+#include "quadrature/gpio.h"
+#include "quadrature/ui.h"
 
 G_BEGIN_DECLS
 
@@ -41,6 +45,9 @@ static inline void ui_toggle_css(GtkWidget *w, const char *cls, gboolean on) {
 static inline gboolean ui_is_various_artists(const char *name) {
     return name && g_ascii_strcasecmp(name, "Various Artists") == 0;
 }
+
+/* Find a widget by its GtkBuildable ID in the widget tree (recursive). */
+GtkWidget *find_widget_by_name(GtkWidget *parent, const char *name);
 
 /* Clear all children from a GtkBox */
 static inline void ui_box_clear(GtkBox *box) {
@@ -80,6 +87,16 @@ static inline void ui_populate_genre_pills(GtkBox *box, const char *genres, guin
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Popover Shortcut Passthrough
+ *
+ * Install on any autohide popover so navigation hotkeys (Ctrl+F, Ctrl+A,
+ * Ctrl+B, Ctrl+T, Ctrl+R, Escape) dismiss the popover and activate the
+ * corresponding window action. Call once after popover creation.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+void ui_popover_install_shortcuts(GtkPopover *popover);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * SpectrumDisplay Widget
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -88,6 +105,25 @@ G_DECLARE_FINAL_TYPE(UiSpectrum, ui_spectrum, UI, SPECTRUM, GtkWidget)
 
 GtkWidget *ui_spectrum_new(int num_bars);
 void ui_spectrum_set_bars(UiSpectrum *s, const float *left, const float *right, int count);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * WaveformSeekBar Widget
+ *
+ * Loudness-over-time bar visualization that renders behind the seek bar.
+ * Bars before playback position are blue (played), after are gray (unplayed).
+ * Grow-out animation when loudness data first becomes available.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define UI_TYPE_WAVEFORM_SEEK_BAR (ui_waveform_seek_bar_get_type())
+G_DECLARE_FINAL_TYPE(UiWaveformSeekBar, ui_waveform_seek_bar, UI, WAVEFORM_SEEK_BAR, GtkWidget)
+
+GtkWidget      *ui_waveform_seek_bar_new(void);
+GtkAdjustment  *ui_waveform_seek_bar_get_adjustment(UiWaveformSeekBar *w);
+gboolean        ui_waveform_seek_bar_is_dragging(UiWaveformSeekBar *w);
+void            ui_waveform_seek_bar_set_playback_position(UiWaveformSeekBar *w, double value);
+void            ui_waveform_seek_bar_set_loudness(UiWaveformSeekBar *w, const float *bins, int count);
+void            ui_waveform_seek_bar_clear(UiWaveformSeekBar *w);
+gboolean        ui_waveform_seek_bar_is_animating(UiWaveformSeekBar *w);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * ChannelStrip Widget
@@ -103,13 +139,7 @@ typedef enum {
     DEVICE_STATE_INVALID         /* Device was configured but is now missing */
 } DeviceState;
 
-/* Operational mode - broadcast automation states */
-typedef enum {
-    CHANNEL_MODE_IDLE = 0,       /* Normal operation */
-    CHANNEL_MODE_PREVIEW,        /* PFL active */
-    CHANNEL_MODE_QUEUED,         /* Ready for on-air */
-    CHANNEL_MODE_ON_AIR          /* Live broadcast */
-} ChannelMode;
+/* Note: ChannelMode is now defined in quadrature/ui.h (public API) */
 
 GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, library_cache_t *library);
 void ui_channel_strip_update(UiChannelStrip *strip, audio_pipeline_t *pipeline);
@@ -181,7 +211,18 @@ int ui_window_get_focused_channel(UiWindow *win);
 void ui_window_clear_focus(UiWindow *win);
 
 /* Toast notifications */
-void ui_window_show_toast(UiWindow *win, const char *message);
+typedef enum {
+    TOAST_INFO = 0,   /* Neutral -- gray border (default) */
+    TOAST_SUCCESS,    /* Green -- completion, saved, etc. */
+    TOAST_WARNING,    /* Amber -- non-fatal issues */
+    TOAST_ERROR,      /* Red   -- failures */
+} ToastVariant;
+
+/* Show a plain-text toast. duration_ms controls auto-hide (0 = 2000ms default). */
+void ui_window_show_toast(UiWindow *win, const char *message, ToastVariant variant, guint duration_ms);
+
+/* Show a Pango-markup toast (bold, spans, etc.). Same parameters as above. */
+void ui_window_show_toast_markup(UiWindow *win, const char *markup, ToastVariant variant, guint duration_ms);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MetadataDialog Widget
@@ -192,7 +233,8 @@ void ui_window_show_toast(UiWindow *win, const char *message);
 #define UI_TYPE_METADATA_DIALOG (ui_metadata_dialog_get_type())
 G_DECLARE_FINAL_TYPE(UiMetadataDialog, ui_metadata_dialog, UI, METADATA_DIALOG, GtkWindow)
 
-GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t *track);
+GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t *track,
+                                  const char *resolved_path);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Library Module (see library/internal.h for full API)
@@ -201,17 +243,141 @@ GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t 
 #include "library/internal.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * IndexerController
+ *
+ * GTK wrapper around the indexer that supports parallel scanning of multiple
+ * library roots. Each library root gets its own indexer_t instance.
+ *
+ * GSignals (all emitted on the main thread):
+ *   started(library_path: string)
+ *   progress(library_path: string, progress: pointer to indexer_progress_t)
+ *   library-updated(library_path: string, progress: pointer)
+ *   artwork-updated(library_path: string, progress: pointer)
+ *   completed(library_path: string, ok: boolean, progress: pointer)
+ *   all-completed
+ *
+ * GObject properties (read-only):
+ *   running  - TRUE while any library is being scanned
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define INDEXER_TYPE_CONTROLLER (indexer_controller_get_type())
+G_DECLARE_FINAL_TYPE(IndexerController, indexer_controller, INDEXER, CONTROLLER, GObject)
+
+IndexerController* indexer_controller_new(void);
+void indexer_controller_set_thread_count(IndexerController* self, int thread_count);
+void indexer_controller_set_process_artwork(IndexerController* self, gboolean enable);
+void indexer_controller_set_art_size(IndexerController* self, int size);
+void indexer_controller_set_max_concurrent(IndexerController* self, int max_concurrent);
+gboolean indexer_controller_start(IndexerController* self,
+                                   const char** library_roots,
+                                   const char** data_roots,
+                                   gsize path_count);
+void indexer_controller_cancel(IndexerController* self);
+void indexer_controller_cancel_library(IndexerController* self, const char* library_path);
+gboolean indexer_controller_is_running(IndexerController* self);
+void indexer_controller_set_musicbrainz_resolve(IndexerController* self, gboolean enable);
+void indexer_controller_set_pg_conninfo(IndexerController* self, const char* conninfo);
+void indexer_controller_set_fanart_api_key(IndexerController* self, const char* api_key);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ProportionalBox Widget
+ *
+ * Horizontal container with four named slots: art, left, right, meta.
+ * art and meta receive their natural widths; left and right split the
+ * remaining flexible space at left_ratio : (1 - left_ratio).
+ *
+ * Sizing runs inside GTK's own size_allocate pass, so children receive
+ * their final widths before the first frame is drawn -- no tick callback,
+ * no post-allocation correction, no one-frame layout pop.
+ *
+ * GtkBuilder slot assignment via child type= attribute:
+ *   <child type="art">  ... </child>
+ *   <child type="left"> ... </child>
+ *   <child type="right">... </child>
+ *   <child type="meta"> ... </child>
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define QUADRATURE_TYPE_PROPORTIONAL_BOX (proportional_box_get_type())
+G_DECLARE_FINAL_TYPE(ProportionalBox, proportional_box,
+                     QUADRATURE, PROPORTIONAL_BOX, GtkWidget)
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Artist Button Helpers (artist_buttons.c)
+ *
+ * Clickable artist/album buttons with overflow popover support.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Data for resize-aware artist button layout. Stored on artist GtkBox via
+ * g_object_set_data("artist-box-data"). */
+typedef struct {
+    library_cache_t *cache;
+    int64_t          track_id;
+    library_artist_role_t role;
+    RowCallbacks *callbacks;          /* Owned copy */
+    gboolean add_feat_prefix;
+    GtkWidget *constraint_widget;
+    double constraint_fraction;
+    gboolean combined;
+    gboolean show_primary;
+} ArtistBoxData;
+
+GtkWidget* create_artist_button(int64_t artist_id, const char* name, RowCallbacks* callbacks);
+GtkWidget* create_artist_overflow_button(const GPtrArray* artists, RowCallbacks* callbacks);
+
+void on_artist_button_clicked(GtkButton *button, gpointer user_data);
+void on_album_button_clicked(GtkButton *button, gpointer user_data);
+void on_credit_mbid_navigate(GtkButton *button, gpointer user_data);
+
+void populate_artist_buttons(GtkWidget* box,
+                              GtkWidget* constraint_widget,
+                              double constraint_fraction,
+                              library_cache_t *cache,
+                              int64_t track_id,
+                              library_artist_role_t role,
+                              RowCallbacks* callbacks,
+                              gboolean add_feat_prefix);
+
+void populate_artist_buttons_combined(GtkWidget *box,
+                                       GtkWidget *constraint_widget,
+                                       double constraint_fraction,
+                                       library_cache_t *cache,
+                                       int64_t track_id,
+                                       RowCallbacks *callbacks,
+                                       gboolean show_primary);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SelectionGroup (row_helpers.c)
+ *
+ * Mutual-exclusion selection across multiple GtkListBox widgets.
+ * When a row is selected in any member, all other members are deselected.
+ * Reusable by any view (detail view, search results, etc.).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct _SelectionGroup SelectionGroup;
+
+SelectionGroup *ui_selection_group_new(void);
+void ui_selection_group_add(SelectionGroup *group, GtkListBox *list);
+void ui_selection_group_remove(SelectionGroup *group, GtkListBox *list);
+void ui_selection_group_free(SelectionGroup *group);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Row Helpers (row_helpers.c)
  *
  * Functions for creating consistent list rows from LibraryCache data.
  * All row creation functions store entity IDs for handler access.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+GtkWidget *ui_create_library_badge(library_cache_t *cache, int library_index);
+
 /* Size groups for column alignment across multiple rows in a list.
- * Pass NULL for any group to skip alignment for that column. */
-typedef struct {
-    GtkSizeGroup *col1;  /* Left content column (title/name) */
-    GtkSizeGroup *col2;  /* Right content column (metadata/art strip) */
+ * Pass NULL for any group to skip alignment for that column.
+ *   col1: title/name column -- used by artist, album, and track rows
+ *   col2: right content column -- used by artist rows (art strip) and album
+ *         rows only; track rows omit it (ProportionalBox already enforces
+ *         uniform column widths, so a size group here would fight layout) */
+typedef struct UiRowSizeGroups {
+    GtkSizeGroup *col1;
+    GtkSizeGroup *col2;
 } UiRowSizeGroups;
 
 /* Attach click handlers to a row. Handlers receive entity ID from row data. */
@@ -230,11 +396,30 @@ void ui_list_box_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer us
  * Each row stores entity data via g_object_set_data():
  *   - Artist rows: "artist-id"
  *   - Album rows: "album-id"
- *   - Track rows: "track-id", "track-path", "album-id"
+ *   - Track rows: "track-id", "album-id"
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Format duration in milliseconds to "M:SS" string */
 void ui_format_duration(uint32_t ms, char *buf, size_t len);
+
+/* ── Shell / Rebind for GtkListView factory recycling ──
+ * Shell creates the widget tree once (factory setup).
+ * Rebind populates data into the existing tree (factory bind).
+ * This avoids re-parsing GtkBuilder XML on every scroll recycle. */
+
+GtkWidget *ui_create_artist_row_shell(void);
+void ui_rebind_artist_row(GtkWidget *row,
+                           const library_artist_info_t *artist,
+                           library_cache_t *cache,
+                           ArtworkManager *art_mgr);
+
+GtkWidget *ui_create_album_row_shell(void);
+void ui_rebind_album_row(GtkWidget *row,
+                          const library_album_info_t *album,
+                          library_cache_t *cache,
+                          ArtworkManager *art_mgr,
+                          gboolean show_count,
+                          RowCallbacks *artist_cbs);
 
 /* Create artist row with name and album/track counts.
  * Optionally shows album art strip (up to 6 thumbnails).
@@ -245,39 +430,69 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
                                  gboolean show_art_strip,
                                  UiRowSizeGroups *size_groups);
 
+/* Optional credit annotation for album rows.
+ * When non-NULL, displays a third row showing the credited artist name
+ * as a clickable button followed by role pills (e.g. [Guitarist][Vocals]).
+ * Used in appears-on album view for MB-credited artists. */
+typedef struct {
+    const char *artist_name;   /* Credited artist name */
+    int64_t artist_id;         /* Library artist ID for navigation (0 if MB-only) */
+    const char *const *roles;  /* NULL-terminated array of role strings */
+    guint role_count;          /* Number of roles */
+} UiAlbumCreditInfo;
+
 /* Create album row with art, title, artist, year, track count.
  * cache: library cache for resolving first track (NULL to skip first-track-id)
  * artist_cbs: optional callbacks for artist name click (navigate to artist)
  * size_groups: optional size groups for column alignment (NULL to skip)
+ * credit: optional credit annotation (NULL to hide credit row)
  * Stores: "album-id", "first-track-id" (if cache provided and album has tracks) */
 GtkWidget *ui_create_album_row(const library_album_info_t *album,
                                 library_cache_t *cache,
                                 ArtworkManager *art_mgr,
                                 gboolean show_count,
                                 RowCallbacks *artist_cbs,
-                                UiRowSizeGroups *size_groups);
+                                UiRowSizeGroups *size_groups,
+                                const UiAlbumCreditInfo *credit);
+
+/* Optional credit annotation for track rows.
+ * When non-NULL, displays a third line under the artist buttons showing
+ * role pills (purple) and artist name. Used in artist detail views
+ * and credit search results. Matches UiAlbumCreditInfo multi-role layout. */
+typedef struct {
+    const char *const *roles;  /* NULL-terminated array of role strings */
+    guint role_count;          /* Number of roles */
+    const char *artist_name;   /* e.g. "John Smith" */
+    int64_t artist_id;         /* Library artist ID for navigation (0 if MB-only) */
+    const char *artist_mbid;   /* MusicBrainz ID for MBID-based navigation when artist_id==0 */
+    const char *artist_type;   /* MusicBrainz artist type (Person/Group/etc.), NULL if unknown */
+} UiTrackCreditInfo;
 
 /* Create track row with art, title, album, artist buttons, year, duration.
  * show_album_info controls visibility of album column.
  * artist_cbs: callbacks for artist button clicks (navigate to artist)
  * album_cbs: callbacks for album button click (navigate to album)
  * size_groups: optional size groups for column alignment (NULL to skip)
- * Stores: "track-id", "track-path", "track-artists" */
+ * credit: optional credit annotation (NULL to hide third line)
+ * Stores: "track-id" */
 GtkWidget *ui_create_track_row(const library_track_info_t *track,
                                 library_cache_t *cache,
                                 ArtworkManager *art_mgr,
                                 gboolean show_album_info,
                                 RowCallbacks *artist_cbs,
                                 RowCallbacks *album_cbs,
-                                UiRowSizeGroups *size_groups);
+                                UiRowSizeGroups *size_groups,
+                                const UiTrackCreditInfo *credit);
 
 /* Create album detail track item (compact row for album detail view).
  * Shows track number, title, featuring artists, info button, duration.
  * artist_cbs: callbacks for featuring artist button clicks
- * Stores: "track-id", "track-path" */
+ * show_primary_artists: if TRUE, shows primary artist column (for compilations)
+ * Stores: "track-id" */
 GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
                                                library_cache_t *cache,
-                                               RowCallbacks *artist_cbs);
+                                               RowCallbacks *artist_cbs,
+                                               gboolean show_primary_artists);
 
 /* Create disc separator header for multi-disc albums.
  * Shows "DISC N" label with subtle styling. */
@@ -295,7 +510,8 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
                                         ArtworkManager *art_mgr,
                                         guint max_preview_tracks,
                                         RowCallbacks *track_cbs,
-                                        RowCallbacks *artist_cbs);
+                                        RowCallbacks *artist_cbs,
+                                        const db_meta_release_t *meta_release);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * List View Loading States
@@ -304,6 +520,157 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
 void ui_list_view_set_loading(GtkWidget *list, gboolean loading);
 void ui_list_view_set_empty(GtkWidget *list, const char *message);
 void ui_list_view_set_error(GtkWidget *list, const char *message, GCallback retry_cb);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * UiWindow Struct Definition (shared with search/, libraries/, settings/)
+ *
+ * Placed at end of header so all types it references (IndexerController,
+ * ArtworkManager, FilterBarState, etc.) are already declared.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Per-phase state machine — consolidates widgets, timing, and rate tracking */
+typedef enum {
+    PHASE_WAITING,    /* dim, bar at 0, "Waiting" */
+    PHASE_STARTUP,    /* active CSS, bar pulses, "Connecting..." — unknown-duration init */
+    PHASE_ACTIVE,     /* cyan, bar pulses or fills, live rate */
+    PHASE_COMPLETE,   /* green, bar at 1.0, item count + elapsed */
+    PHASE_SKIPPED,    /* muted, bar at 0, "Up to date" */
+    PHASE_ERROR,      /* red, bar at 0 */
+} PhaseState;
+
+typedef struct {
+    /* Widgets */
+    GtkWidget *container;
+    GtkWidget *title;
+    GtkWidget *bar;
+    GtkWidget *label;
+    GtkWidget *rate_label;
+    /* State */
+    PhaseState state;
+    int64_t start_us;       /* g_get_monotonic_time() when activated */
+    int64_t end_us;         /* when completed; 0 = not yet */
+    /* Per-phase rate tracking */
+    size_t  prev_count;
+    int64_t prev_time;
+    double  rate_ema;       /* items/sec, EMA α=0.3 */
+} PhaseRow;
+
+/* Library entry */
+typedef struct {
+    int64_t id;              /* Index into settings->library_paths[] */
+    char *path;
+    char *data_path;         /* Where DB + artwork live (NULL = same as path) */
+    char *name;
+    /* Stats loaded from the library DB */
+    size_t tracks;
+    size_t albums;
+    size_t artists;
+    int64_t last_indexed_time;   /* Unix timestamp, 0 = never */
+    size_t errors;
+    /* Card root widget */
+    GtkWidget *card;
+    /* Progress revealer — slides down below stats during scan */
+    GtkWidget *progress_revealer;
+    /* Stats panel labels (updated in-place after indexing) */
+    GtkWidget *stat_tracks;
+    GtkWidget *stat_albums;
+    GtkWidget *stat_artists;
+    GtkWidget *stat_last_scanned;
+    GtkWidget *stat_errors_btn;  /* Hidden when errors == 0 */
+    /* Per-card phase rows (state machine) */
+    PhaseRow phases[7];
+    guint pulse_timer;  /* 100ms scan pulse */
+    guint hide_timer;   /* 5s delay before crossfading back to stats */
+    gboolean shown_initial_load_toast;  /* TRUE after first library-updated toast */
+} LibEntry;
+
+struct _UiWindow {
+    GtkApplicationWindow parent;
+
+    audio_pipeline_t *pipeline;
+    app_settings_t *settings;
+    quadrature_db_t *errors_lib_db;
+    IndexerController *indexer;
+    library_cache_t *library_cache;
+    ArtworkManager *artwork_mgr;
+
+    /* Template-bound layout widgets */
+    GtkWidget *main_box;
+    GtkWidget *content_stack;
+    GtkWidget *channel_strips_box;
+    GtkWidget *toast_overlay;
+    GtkWidget *toast_label;
+
+    /* Runtime layout */
+    GtkWidget *nav_bar;
+    GSimpleAction *navigate_action;
+    GtkWidget *stack;  /* Alias for content_stack */
+    UiChannelStrip *channels[MAX_CHANNELS];
+    int focused_channel;
+    gboolean show_spectrum;
+    const char *current_view;
+
+    /* Toast timer */
+    guint toast_timer;
+
+    /* Errors */
+    char *errors_library_path;
+
+    /* Library views */
+    GtkWidget *artists_view;
+    GtkWidget *albums_view;
+    GtkWidget *detail_view;     /* Unified detail view */
+    const char *previous_view;  /* For back navigation */
+
+    /* Search */
+    GtkWidget *search_entry;
+    GtkWidget *filter_btns[4];
+    int filter_active;
+    guint search_debounce_timer;
+    char *last_search_query;
+    GtkWidget *search_results_list;  /* Unified GtkListBox for keyboard nav */
+    GtkWidget *search_empty_label;
+
+    /* Shared filter bar for search view (genre/year/advanced/credit) */
+    FilterBarState search_filter_bar;
+
+    /* Shared library callbacks */
+    LibraryCallbacks lib_cbs;
+
+    /* Settings - devices */
+    GtkWidget *device_drops[MAX_CHANNELS];
+    gulong device_drop_handler_ids[MAX_CHANNELS];
+    GtkWidget *exclusive_checks[MAX_CHANNELS];
+    GtkWidget *format_drops[MAX_CHANNELS];
+    GtkWidget *quantum_drops[MAX_CHANNELS];
+    GtkWidget *gpio_entries[MAX_CHANNELS];
+    GtkStringList *device_models[MAX_CHANNELS];  /* Per-channel (filtered) */
+    int device_model_map[MAX_CHANNELS][64];      /* model index → device_names index (-1 = "None") */
+
+    /* Axia GPIO handlers (one per channel) */
+    axia_gpio_t *gpio_handlers[MAX_CHANNELS];
+    GtkStringList *format_model;
+    GtkStringList *quantum_model;
+    char **device_names;
+    char **device_descs;  /* Human-readable descriptions (parallel to device_names) */
+    int device_count;
+    gboolean settings_initializing;  /* Prevents spurious saves during init */
+
+    /* Libraries */
+    LibEntry *libs;
+    size_t lib_count;
+    GtkWidget *libs_box;
+    GtkWidget *libs_empty;
+
+    guint update_tick_id;
+    guint settings_save_timer;      /* Debounced settings save (200ms) */
+    guint device_hotplug_timer_id;  /* Debounced PW device topology change (300ms) */
+    guint device_rebuild_idle_id;   /* Deferred rebuild_device_models (avoids re-entrancy during notify::selected) */
+    GtkCssProvider *css;
+};
+
+/* Debounced settings save — coalesces rapid changes into a single disk write */
+void settings_save_debounced(UiWindow *w);
 
 G_END_DECLS
 

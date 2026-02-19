@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Performance Dashboard View
+
+  Static scaffold for the RT audio diagnostic dashboard.
+  Custom Cairo chart widgets (histograms, timeline, gauge, line chart)
+  are attached programmatically into their named container boxes.
+-->
+<interface>
+  <object class="GtkScrolledWindow" id="perf_view">
+    <property name="vexpand">true</property>
+    <property name="hscrollbar-policy">never</property>
+    <property name="vscrollbar-policy">automatic</property>
+
+    <child>
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+        <property name="margin-start">8</property>
+        <property name="margin-end">8</property>
+        <property name="margin-top">8</property>
+        <property name="margin-bottom">8</property>
+        <style>
+          <class name="view-container"/>
+          <class name="perf-detail-container"/>
+        </style>
+
+        <!-- Title -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Performance Dashboard</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="library-title"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- ═══ SECTION 1: Channel Status (2×2 grid, cells loaded from perf_channel_cell.ui) ═══ -->
+        <child>
+          <object class="GtkGrid" id="channel_grid">
+            <property name="column-spacing">4</property>
+            <property name="row-spacing">4</property>
+            <property name="column-homogeneous">true</property>
+            <property name="hexpand">true</property>
+            <property name="margin-bottom">8</property>
+          </object>
+        </child>
+
+        <!-- ═══ SECTION 2: Fault Timeline ═══ -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Fault Timeline</property>
+            <property name="xalign">0</property>
+            <style><class name="perf-section-title"/></style>
+          </object>
+        </child>
+        <!-- PerfTimelineChart appended here at runtime -->
+        <child>
+          <object class="GtkBox" id="timeline_container">
+            <property name="orientation">vertical</property>
+            <property name="height-request">210</property>
+            <property name="hexpand">true</property>
+            <style><class name="perf-chart"/></style>
+          </object>
+        </child>
+
+        <!-- ═══ SECTION 3: Callback Latency Distribution ═══ -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Callback Latency Distribution</property>
+            <property name="xalign">0</property>
+            <property name="margin-top">8</property>
+            <style><class name="perf-section-title"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="latency_hist_container">
+            <property name="orientation">vertical</property>
+            <property name="height-request">240</property>
+            <property name="hexpand">true</property>
+            <style><class name="perf-chart"/></style>
+          </object>
+        </child>
+
+        <!-- ═══ SECTION 3b: Scheduling Jitter ═══ -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Scheduling Jitter</property>
+            <property name="xalign">0</property>
+            <property name="margin-top">8</property>
+            <style><class name="perf-section-title"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="jitter_container">
+            <property name="orientation">vertical</property>
+            <property name="height-request">240</property>
+            <property name="hexpand">true</property>
+            <style><class name="perf-chart"/></style>
+          </object>
+        </child>
+
+        <!-- ═══ SECTION 4: Memory Usage (stacked area) ═══ -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Memory Usage</property>
+            <property name="xalign">0</property>
+            <property name="margin-top">8</property>
+            <style><class name="perf-section-title"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="memory_container">
+            <property name="orientation">vertical</property>
+            <property name="height-request">240</property>
+            <property name="hexpand">true</property>
+            <style><class name="perf-chart"/></style>
+          </object>
+        </child>
+
+        <!-- ═══ SECTION 5: Cache Latency (log-Y p90 line chart) ═══ -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Cache Latency</property>
+            <property name="xalign">0</property>
+            <property name="margin-top">8</property>
+            <style><class name="perf-section-title"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="cache_lat_container">
+            <property name="orientation">vertical</property>
+            <property name="height-request">240</property>
+            <property name="hexpand">true</property>
+            <style><class name="perf-chart"/></style>
+          </object>
+        </child>
+
+        <!-- ═══ SECTION 6: Decode Time Distribution ═══ -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Decode Time Distribution</property>
+            <property name="xalign">0</property>
+            <property name="margin-top">8</property>
+            <style><class name="perf-section-title"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="decode_container">
+            <property name="orientation">vertical</property>
+            <property name="height-request">240</property>
+            <property name="hexpand">true</property>
+            <style><class name="perf-chart"/></style>
+          </object>
+        </child>
+
+      </object>
+    </child>
+  </object>
+</interface>

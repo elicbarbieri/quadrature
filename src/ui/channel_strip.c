@@ -8,7 +8,7 @@
 #define G_LOG_DOMAIN "quadrature"
 
 #include "internal.h"
-#include "quadrature/quadrature_library.h"
+#include "quadrature/library.h"
 #include "../audio/internal.h"  /* For audio_cache_load() */
 #include <math.h>
 #include <stdio.h>
@@ -19,6 +19,7 @@
 #define MARQUEE_SEPARATOR "   •   "  /* Separator between text copies */
 #define TIME_WARN_SEC 30
 #define TIME_CAUTION_SEC 90
+#define SPECTRUM_DECAY_FRAMES 120  /* ~2s at 60fps: matches cava's slow release curve */
 
 /* Countdown color states */
 typedef enum {
@@ -36,7 +37,6 @@ struct _UiChannelStrip {
     library_cache_t *library;    /* For track navigation queries */
     gboolean show_spectrum;
     time_state_t time_state;  /* Cached to avoid repeated CSS updates */
-    gboolean seek_dragging;  /* TRUE when user is dragging the seek bar */
 
     /* Layered state model */
     DeviceState device_state;    /* Hardware availability */
@@ -60,15 +60,13 @@ struct _UiChannelStrip {
     GtkWidget *autoplay_btn;
     GtkWidget *preview_btn;
     GtkWidget *queue_btn;
-    GtkWidget *seek_bar;
     GtkWidget *right_column;
     GtkWidget *info_box;
 
-    /* Seek bar time labels */
+    /* Seek bar */
     GtkWidget *seek_row;
-    GtkWidget *seek_times_row;
-    GtkWidget *seek_time_start;
-    GtkWidget *seek_time_end;
+    GtkWidget *waveform;
+    int64_t waveform_track_id;  /* Track whose loudness is currently displayed */
 
     /* Metrics column labels */
     GtkWidget *metrics_column;
@@ -81,7 +79,6 @@ struct _UiChannelStrip {
     GtkWidget *status_label;
 
     /* Gesture controllers (must be stored for proper cleanup) */
-    GtkGesture *seek_gesture;
     GtkGesture *channel_click_gesture;
     GtkGesture *shuttle_click_gesture;
     GtkGesture *shuttle_drag_gesture;
@@ -130,6 +127,20 @@ struct _UiChannelStrip {
     /* Cached for seek */
     uint32_t sample_rate;
     uint64_t length_samples;
+
+    /* UI-estimated length from cache duration_ms (used while decode pending) */
+    uint64_t ui_length_samples;
+    uint64_t deferred_seek_pos;   /* Queued seek position (applied when buffer ready) */
+    gboolean has_deferred_seek;
+
+    /* Cached time display strings — avoid per-frame snprintf + gtk_label_set_text */
+    char cached_time_remaining[20];
+    char cached_time_elapsed[20];
+
+    /* Spectrum decay: frames remaining before we stop updating the spectrum.
+     * Reset to SPECTRUM_DECAY_FRAMES when playing; counts down when stopped/paused
+     * so the bars animate to zero before we go fully idle. */
+    int spectrum_decay_frames;
 };
 
 /* Signal IDs */
@@ -176,8 +187,8 @@ static const SensitivityRule sensitivity_rules[] = {
     SENS_RULE(repeat_btn,   SENS_NEEDS_FILE | SENS_NEEDS_DEVICE),
     /* autoplay_btn: file + device (always available when track loaded, even in QUEUED/ON_AIR) */
     SENS_RULE(autoplay_btn, SENS_NEEDS_FILE | SENS_NEEDS_DEVICE),
-    /* seek_bar: file + device + disabled in both modes */
-    SENS_RULE(seek_bar,     SENS_NEEDS_FILE | SENS_NEEDS_DEVICE | SENS_DISABLED_QUEUED | SENS_DISABLED_ON_AIR),
+    /* waveform seek bar: file + device + disabled in both modes */
+    SENS_RULE(waveform,     SENS_NEEDS_FILE | SENS_NEEDS_DEVICE | SENS_DISABLED_QUEUED | SENS_DISABLED_ON_AIR),
     /* preview_btn: file + device + disabled in both modes */
     SENS_RULE(preview_btn,  SENS_NEEDS_FILE | SENS_NEEDS_DEVICE | SENS_DISABLED_QUEUED | SENS_DISABLED_ON_AIR),
     /* queue_btn: only needs device (no file required) */
@@ -255,23 +266,39 @@ static int measure_text_width(GtkLabel *label, const char *text) {
  * If text is wider than container, duplicates it with a separator.
  * Returns the loop point (original width + separator), or 0 if no scrolling needed.
  */
+static void on_marquee_map(GtkWidget *scroll, gpointer label);
+static void marquee_update_loop_point(GtkWidget *scroll, double loop_point);
+
 static double marquee_setup_label(GtkWidget *scroll, GtkWidget *label, const char *text) {
     if (!scroll || !label || !text || !text[0]) {
         if (label) gtk_label_set_text(GTK_LABEL(label), text ? text : "");
+        g_object_set_data(G_OBJECT(scroll), "marquee-pending-text", NULL);
         return 0;
     }
 
-    /* First set the original text to measure it */
-    gtk_label_set_text(GTK_LABEL(label), text);
-
-    /* Force layout calculation */
-    gtk_widget_measure(label, GTK_ORIENTATION_HORIZONTAL, -1, NULL, NULL, NULL, NULL);
-
+    /* Measure text width without setting label (avoids single-frame flash) */
     int text_width = measure_text_width(GTK_LABEL(label), text);
     int container_width = gtk_widget_get_width(scroll);
 
-    /* If text fits, no duplication needed */
-    if (container_width <= 0 || text_width <= container_width) {
+    /* Container not yet allocated — store pending text and defer */
+    if (container_width <= 0) {
+        gtk_label_set_text(GTK_LABEL(label), text);
+        g_object_set_data_full(G_OBJECT(scroll), "marquee-pending-text",
+                               g_strdup(text), g_free);
+        if (!g_object_get_data(G_OBJECT(scroll), "marquee-map-connected")) {
+            g_signal_connect(scroll, "map", G_CALLBACK(on_marquee_map), label);
+            g_object_set_data(G_OBJECT(scroll), "marquee-map-connected",
+                              GINT_TO_POINTER(1));
+        }
+        return 0;
+    }
+
+    /* Clear any pending deferred setup */
+    g_object_set_data(G_OBJECT(scroll), "marquee-pending-text", NULL);
+
+    /* Text fits — set directly, no scrolling needed */
+    if (text_width <= container_width) {
+        gtk_label_set_text(GTK_LABEL(label), text);
         return 0;
     }
 
@@ -284,6 +311,17 @@ static double marquee_setup_label(GtkWidget *scroll, GtkWidget *label, const cha
     /* Loop point: when we've scrolled past original text + separator,
      * the view shows the duplicate which looks identical to position 0 */
     return (double)(text_width + sep_width);
+}
+
+/**
+ * Deferred marquee setup: called when a ScrolledWindow is mapped after
+ * marquee_setup_label() was called before the widget had a valid width.
+ */
+static void on_marquee_map(GtkWidget *scroll, gpointer label) {
+    const char *text = g_object_get_data(G_OBJECT(scroll), "marquee-pending-text");
+    if (!text) return;
+    double loop = marquee_setup_label(scroll, GTK_WIDGET(label), text);
+    marquee_update_loop_point(scroll, loop);
 }
 
 /**
@@ -349,6 +387,7 @@ static gboolean marquee_tick_callback(GtkWidget *widget, GdkFrameClock *clock, g
 
 /**
  * Update marquee state when label text changes.
+ * Manages tick callback lifecycle: installs when scrolling needed, removes when not.
  */
 static void marquee_update_loop_point(GtkWidget *scroll, double loop_point) {
     if (!scroll) return;
@@ -363,20 +402,18 @@ static void marquee_update_loop_point(GtkWidget *scroll, double loop_point) {
     state->pos = 0;
     state->pause_time = 0;
     state->last_frame = 0;
-}
 
-static void setup_marquee_for_scroll(GtkWidget *scroll) {
-    if (!scroll) return;
-
-    /* Remove existing tick callback if any */
     guint tick_id = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(scroll), "marquee-tick-id"));
-    if (tick_id > 0) {
-        gtk_widget_remove_tick_callback(scroll, tick_id);
-    }
 
-    /* Add new tick callback */
-    tick_id = gtk_widget_add_tick_callback(scroll, marquee_tick_callback, scroll, NULL);
-    g_object_set_data(G_OBJECT(scroll), "marquee-tick-id", GUINT_TO_POINTER(tick_id));
+    if (loop_point > 0 && tick_id == 0) {
+        /* Scrolling needed — install tick callback */
+        tick_id = gtk_widget_add_tick_callback(scroll, marquee_tick_callback, scroll, NULL);
+        g_object_set_data(G_OBJECT(scroll), "marquee-tick-id", GUINT_TO_POINTER(tick_id));
+    } else if (loop_point <= 0 && tick_id > 0) {
+        /* Text fits — remove tick callback */
+        gtk_widget_remove_tick_callback(scroll, tick_id);
+        g_object_set_data(G_OBJECT(scroll), "marquee-tick-id", NULL);
+    }
 }
 
 static void on_play_pause(GtkButton *btn, gpointer data) {
@@ -394,18 +431,13 @@ static void on_play_pause(GtkButton *btn, gpointer data) {
 
     /* In QUEUED mode, play transitions to ON_AIR */
     if (s->mode == CHANNEL_MODE_QUEUED) {
-        ui_channel_strip_set_mode(s, CHANNEL_MODE_ON_AIR);
-        quadrature_result_t res = audio_pipeline_player_play(s->pipeline, s->channel_id);
-        if (res == QUADRATURE_OK) {
-            const char *title = gtk_label_get_text(GTK_LABEL(s->title_label));
-            const char *artist = gtk_label_get_text(GTK_LABEL(s->artist_label));
-            g_info("Playback → Channel %d: Start playback (QUEUED → ON_AIR) - '%s' by %s",
-                   s->channel_id + 1,
-                   title && *title ? title : "<no track>",
-                   artist && *artist ? artist : "<unknown>");
-        } else {
-            g_warning("Playback FAILED → Channel %d: result=%d", s->channel_id + 1, res);
-        }
+        ui_channel_strip_play(s);  /* Now uses unified function */
+        const char *title = gtk_label_get_text(GTK_LABEL(s->title_label));
+        const char *artist = gtk_label_get_text(GTK_LABEL(s->artist_label));
+        g_info("Playback → Channel %d: Start playback (QUEUED → ON_AIR) - '%s' by %s",
+               s->channel_id + 1,
+               title && *title ? title : "<no track>",
+               artist && *artist ? artist : "<unknown>");
         return;
     }
 
@@ -430,16 +462,7 @@ static void on_play_pause(GtkButton *btn, gpointer data) {
 static void on_stop(GtkButton *btn, gpointer data) {
     (void)btn;
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
-
-    /* Stop is disabled in QUEUED and ON_AIR modes */
-    if (s->mode == CHANNEL_MODE_QUEUED || s->mode == CHANNEL_MODE_ON_AIR) return;
-
-    if (s->pipeline) {
-        const char *title = gtk_label_get_text(GTK_LABEL(s->title_label));
-        g_info("Playback → Channel %d: Stop - '%s'", s->channel_id + 1,
-               title && *title ? title : "<no track>");
-        audio_pipeline_player_stop(s->pipeline, s->channel_id);
-    }
+    ui_channel_strip_stop(s);  /* Now uses unified function with mode transition */
 }
 
 static void update_visual_state(UiChannelStrip *s);  /* Forward declaration */
@@ -449,13 +472,12 @@ static void on_preview(GtkToggleButton *btn, gpointer data) {
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
     gboolean on = gtk_toggle_button_get_active(btn);
 
-    /* Cannot enable preview if QUEUED or ON_AIR */
-    if (on && (s->mode == CHANNEL_MODE_QUEUED || s->mode == CHANNEL_MODE_ON_AIR)) {
-        gtk_toggle_button_set_active(btn, FALSE);
-        return;
+    /* Use public API functions which handle signal blocking */
+    if (on) {
+        ui_channel_strip_preview_on(s);
+    } else {
+        ui_channel_strip_preview_off(s);
     }
-
-    ui_channel_strip_set_mode(s, on ? CHANNEL_MODE_PREVIEW : CHANNEL_MODE_IDLE);
 }
 
 static void on_repeat(GtkToggleButton *btn, gpointer data) {
@@ -507,8 +529,12 @@ static void on_queue(GtkButton *btn, gpointer data) {
     s->last_queue_click_time = now;
 
     switch (s->mode) {
-    case CHANNEL_MODE_IDLE:
-    case CHANNEL_MODE_PREVIEW: {
+    case CHANNEL_MODE_PREVIEW:
+        /* Exit preview first (clears mode and button state) */
+        ui_channel_strip_preview_off(s);
+        /* FALLTHROUGH - now in IDLE, same logic as IDLE case */
+        
+    case CHANNEL_MODE_IDLE: {
         /* If already playing, go straight to ON_AIR; otherwise QUEUED */
         gboolean playing = s->pipeline &&
             (audio_pipeline_get_player_state(s->pipeline, s->channel_id) == CHANNEL_PLAYING);
@@ -517,6 +543,8 @@ static void on_queue(GtkButton *btn, gpointer data) {
         } else {
             ui_channel_strip_set_mode(s, CHANNEL_MODE_QUEUED);
         }
+        /* Reset so the next click in the new state starts a fresh window */
+        s->last_queue_click_time = 0;
         break;
     }
 
@@ -538,71 +566,63 @@ static void on_queue(GtkButton *btn, gpointer data) {
     }
 }
 
-static void on_seek_drag_begin(GtkGestureDrag *g, double start_x, double start_y, gpointer data) {
-    (void)g; (void)start_x; (void)start_y;
-    if (!UI_IS_CHANNEL_STRIP(data)) return;
+/* Seek signal handler — connected to UiWaveformSeekBar's "seek" signal */
+static void on_seek(UiWaveformSeekBar *waveform, double value, gpointer data) {
+    (void)waveform;
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
-    s->seek_dragging = TRUE;
-}
-
-static void on_seek_drag_end(GtkGestureDrag *g, double offset_x, double offset_y, gpointer data) {
-    (void)g; (void)offset_x; (void)offset_y;
-
-    if (!UI_IS_CHANNEL_STRIP(data)) return;
-    UiChannelStrip *s = UI_CHANNEL_STRIP(data);
-    s->seek_dragging = FALSE;
-
-    if (!s->seek_bar || !s->pipeline || s->length_samples == 0)
-        return;
-
-    /* Seek to final position from seek bar */
-    double val = gtk_range_get_value(GTK_RANGE(s->seek_bar));
-    uint64_t target_pos = (uint64_t)(val * (double)s->length_samples);
-    audio_pipeline_player_seek(s->pipeline, s->channel_id, target_pos);
+    if (s->length_samples > 0) {
+        uint64_t target = (uint64_t)(value * (double)s->length_samples);
+        audio_pipeline_player_seek(s->pipeline, s->channel_id, target);
+    } else if (s->ui_length_samples > 0) {
+        s->deferred_seek_pos = (uint64_t)(value * (double)s->ui_length_samples);
+        s->has_deferred_seek = TRUE;
+    }
 }
 
 /* ===============================================================================
  * Skip/Shuttle Callbacks
  * =============================================================================== */
 
-/* Speed range constants */
-#define RUBBERBAND_SPEED_MAX  4.0f   /* Pitch-preserved mode: 0.5x-4.0x */
-#define RUBBERBAND_SPEED_MIN  0.5f   /* Pitch-preserved mode min */
-#define PITCHED_SPEED_MAX     1.5f   /* Pitched mode: symmetric 0.5x-1.5x */
-#define PITCHED_SPEED_MIN     0.5f   /* Pitched mode min (symmetric: 1 - 0.5 = 0.5) */
-#define SLIDER_MAX_RUBBERBAND 3.0f   /* Slider upper bound for rubberband mode */
-#define SLIDER_MIN_RUBBERBAND -2.0f  /* Slider lower bound for rubberband mode */
-#define SLIDER_MAX_PITCHED    1.0f   /* Slider upper bound for pitched mode (symmetric) */
-#define SLIDER_MIN_PITCHED    -1.0f  /* Slider lower bound for pitched mode (symmetric) */
+/* Speed range constants.
+ * Both KEYLOCK and PITCHED share the same slider range (-2 to +3) so the
+ * scale/thumb position is visually consistent across modes.  The difference
+ * is entirely in the speed mapping curve: KEYLOCK covers a wide range
+ * (0.5x-4.0x) while PITCHED is more conservative (0.5x-1.5x, symmetric)
+ * with a much flatter quadratic curve spread across the same slider travel. */
+#define KEYLOCK_SPEED_MAX  4.0f    /* Pitch-preserved mode: 0.5x-4.0x */
+#define KEYLOCK_SPEED_MIN  0.5f    /* Pitch-preserved mode min */
+#define PITCHED_SPEED_MAX  1.5f    /* Pitched mode: symmetric ±0.5x */
+#define PITCHED_SPEED_MIN  0.5f    /* Pitched mode min */
+#define SHUTTLE_SLIDER_MAX 3.0f    /* Slider upper bound (shared by both modes) */
+#define SHUTTLE_SLIDER_MIN -2.0f   /* Slider lower bound (shared by both modes) */
 
 /**
- * Convert linear shuttle slider value to speed using quadratic curves.
+ * Convert shuttle slider value to speed using quadratic curves.
  *
- * Mode-dependent ranges:
- *   Rubberband (default): slider -2 to +3, speed 0.5x to 4.0x
- *   Pitched (turntable):  slider -1 to +1, speed 0.5x to 1.5x (symmetric)
+ * Both modes share the same slider range (-2 to +3).  The speed mapping
+ * differs:
+ *   KEYLOCK:  slider -2..+3 → speed 0.5x..4.0x  (wide, pitch-preserved)
+ *   PITCHED:  slider -2..+3 → speed 0.5x..1.5x  (conservative, vinyl-style)
  *
- * Uses quadratic curves with zero derivative at center for fine control.
+ * Quadratic curves give zero derivative at center for fine control near 1.0x.
  */
 static float shuttle_value_to_speed(double slider_value, shuttle_mode_t mode) {
     /* In OFF mode, always return 1.0x */
     if (mode == SHUTTLE_MODE_OFF) return 1.0f;
 
-    gboolean use_pitched_range = (mode == SHUTTLE_MODE_PITCHED);
+    gboolean pitched = (mode == SHUTTLE_MODE_PITCHED);
 
     if (slider_value >= 0.0) {
         /* Forward: 1.0x to max with quadratic curve */
-        float speed_max = use_pitched_range ? PITCHED_SPEED_MAX : RUBBERBAND_SPEED_MAX;
-        float slider_max = use_pitched_range ? SLIDER_MAX_PITCHED : SLIDER_MAX_RUBBERBAND;
+        float speed_max = pitched ? PITCHED_SPEED_MAX : KEYLOCK_SPEED_MAX;
         float range = speed_max - 1.0f;
-        float normalized = (float)slider_value / slider_max;
+        float normalized = (float)slider_value / SHUTTLE_SLIDER_MAX;
         return 1.0f + range * normalized * normalized;
     } else {
         /* Backward: 1.0x down to min with quadratic curve */
-        float speed_min = use_pitched_range ? PITCHED_SPEED_MIN : RUBBERBAND_SPEED_MIN;
-        float slider_min = use_pitched_range ? SLIDER_MIN_PITCHED : SLIDER_MIN_RUBBERBAND;
+        float speed_min = pitched ? PITCHED_SPEED_MIN : KEYLOCK_SPEED_MIN;
         float range = 1.0f - speed_min;
-        float normalized = (float)slider_value / slider_min;  /* Both negative, result positive */
+        float normalized = (float)slider_value / SHUTTLE_SLIDER_MIN;  /* Both negative, result positive */
         return 1.0f - range * normalized * normalized;
     }
 }
@@ -723,28 +743,17 @@ static void on_shuttle_mode_clicked(GtkButton *btn, gpointer data) {
         audio_pipeline_player_set_shuttle_mode(s->pipeline, s->channel_id, s->shuttle_mode);
     }
 
-    /* Adjust shuttle slider range and sensitivity based on mode */
-    GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(s->shuttle_scale));
-
+    /* OFF mode: reset slider to center and disable it.
+     * KEYLOCK/PITCHED: enable slider (unless QUEUED/ON_AIR overrides).
+     * Slider range is always -2..+3 — modes only differ in speed mapping. */
     if (s->shuttle_mode == SHUTTLE_MODE_OFF) {
-        /* OFF mode: disable slider, reset to center */
-        gtk_widget_set_sensitive(s->shuttle_scale, FALSE);
         gtk_range_set_value(GTK_RANGE(s->shuttle_scale), 0.0);
+        gtk_widget_set_sensitive(s->shuttle_scale, FALSE);
     } else {
-        gtk_widget_set_sensitive(s->shuttle_scale, TRUE);
-        gboolean use_pitched_range = (s->shuttle_mode == SHUTTLE_MODE_PITCHED);
-        double new_lower = use_pitched_range ? SLIDER_MIN_PITCHED : SLIDER_MIN_RUBBERBAND;
-        double new_upper = use_pitched_range ? SLIDER_MAX_PITCHED : SLIDER_MAX_RUBBERBAND;
-        gtk_adjustment_set_lower(adj, new_lower);
-        gtk_adjustment_set_upper(adj, new_upper);
-
-        /* Clamp current value if outside new range */
-        double current = gtk_range_get_value(GTK_RANGE(s->shuttle_scale));
-        if (current > new_upper) {
-            gtk_range_set_value(GTK_RANGE(s->shuttle_scale), new_upper);
-        } else if (current < new_lower) {
-            gtk_range_set_value(GTK_RANGE(s->shuttle_scale), new_lower);
-        }
+        /* Only enable if not in a locked broadcast state */
+        gboolean locked = (s->mode == CHANNEL_MODE_QUEUED ||
+                           s->mode == CHANNEL_MODE_ON_AIR);
+        gtk_widget_set_sensitive(s->shuttle_scale, !locked);
     }
 
     /* Update label and speed with new mapping */
@@ -824,16 +833,6 @@ static void on_shuttle_drag_update(GtkGestureDrag *gesture, double offset_x,
  * Album Context Helpers (using LibraryCache)
  * =============================================================================== */
 
-/**
- * Format duration in milliseconds to MM:SS string.
- */
-static void format_duration_ms(uint64_t ms, char *buf, size_t buf_size) {
-    uint64_t total_sec = ms / 1000;
-    unsigned long total_min = (unsigned long)(total_sec / 60);
-    unsigned long sec = (unsigned long)(total_sec % 60);
-    snprintf(buf, buf_size, "%lu:%02lu", total_min, sec);
-}
-
 static gboolean can_go_previous(UiChannelStrip *s) {
     if (!s->library || s->current_track_id <= 0) return FALSE;
     return library_cache_get_prev_track_id(s->library, s->current_track_id) > 0;
@@ -900,7 +899,7 @@ static void update_album_display(UiChannelStrip *s) {
             /* Show current track duration when repeating */
             if (s->next_track_duration_label) {
                 char dur_buf[16];
-                format_duration_ms(track->duration_ms, dur_buf, sizeof(dur_buf));
+                ui_format_duration(track->duration_ms, dur_buf, sizeof(dur_buf));
                 gtk_label_set_text(GTK_LABEL(s->next_track_duration_label), dur_buf);
             }
         } else {
@@ -916,7 +915,7 @@ static void update_album_display(UiChannelStrip *s) {
                     /* Show next track duration */
                     if (s->next_track_duration_label) {
                         char dur_buf[16];
-                        format_duration_ms(next_track->duration_ms, dur_buf, sizeof(dur_buf));
+                        ui_format_duration(next_track->duration_ms, dur_buf, sizeof(dur_buf));
                         gtk_label_set_text(GTK_LABEL(s->next_track_duration_label), dur_buf);
                     }
                 }
@@ -1073,17 +1072,79 @@ static void on_album_clicked(GtkGestureClick *g, int n, double x, double y, gpoi
     }
 }
 
+/* Data passed to each artist button inside the popover */
+typedef struct {
+    UiChannelStrip *strip;
+    int64_t         artist_id;
+} ArtistPopoverData;
+
+static void on_artist_popover_btn_clicked(GtkButton *btn, gpointer data) {
+    (void)btn;
+    ArtistPopoverData *d = data;
+    /* Dismiss first so navigation doesn't fight the open popover */
+    GtkWidget *popover = gtk_widget_get_ancestor(GTK_WIDGET(btn), GTK_TYPE_POPOVER);
+    if (popover) gtk_popover_popdown(GTK_POPOVER(popover));
+    g_signal_emit(d->strip, signals[SIGNAL_ARTIST_CLICKED], 0,
+                  d->strip->channel_id, d->artist_id);
+}
+
+static void on_artist_popover_closed(GtkPopover *popover, gpointer data) {
+    (void)data;
+    gtk_widget_unparent(GTK_WIDGET(popover));
+}
+
 static void on_artist_clicked(GtkGestureClick *g, int n, double x, double y, gpointer data) {
     (void)g; (void)n; (void)x; (void)y;
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
     if (!s->library || s->current_track_id <= 0) return;
 
+    const GPtrArray *track_artists = library_cache_get_track_artists(s->library, s->current_track_id);
+
+    /* Multiple artists — show popover so the user can choose */
+    if (track_artists && track_artists->len > 1) {
+        GtkWidget *popover = gtk_popover_new();
+        gtk_widget_set_parent(popover, s->artist_label);
+
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        gtk_popover_set_child(GTK_POPOVER(popover), box);
+
+        for (guint i = 0; i < track_artists->len; i++) {
+            const library_track_artist_t *a = g_ptr_array_index(track_artists, i);
+            if (!a->name || a->artist_id <= 0) continue;
+
+            GtkWidget *btn = gtk_button_new_with_label(a->name);
+            gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
+            gtk_widget_add_css_class(btn, "artist-btn");
+            gtk_widget_set_halign(btn, GTK_ALIGN_START);
+
+            ArtistPopoverData *d = g_new(ArtistPopoverData, 1);
+            d->strip     = s;
+            d->artist_id = a->artist_id;
+            g_object_set_data_full(G_OBJECT(btn), "artist-data", d, g_free);
+            g_signal_connect(btn, "clicked", G_CALLBACK(on_artist_popover_btn_clicked), d);
+
+            gtk_box_append(GTK_BOX(box), btn);
+        }
+
+        g_signal_connect(popover, "closed", G_CALLBACK(on_artist_popover_closed), NULL);
+        gtk_popover_popup(GTK_POPOVER(popover));
+        return;
+    }
+
+    /* Single artist — navigate directly */
+    if (track_artists && track_artists->len == 1) {
+        const library_track_artist_t *primary = g_ptr_array_index(track_artists, 0);
+        if (primary->artist_id > 0) {
+            g_signal_emit(s, signals[SIGNAL_ARTIST_CLICKED], 0, s->channel_id, primary->artist_id);
+            return;
+        }
+    }
+
+    /* Fallback: album artist (standard albums where track artists aren't cached) */
     const library_track_info_t *track = library_cache_get_track(s->library, s->current_track_id);
     if (!track || track->album_id <= 0) return;
-
-    /* Get artist_id from album (track's artist_id not populated by db_get_track) */
     const library_album_info_t *album = library_cache_get_album(s->library, track->album_id);
-    if (album && album->artist_id > 0) {
+    if (album && album->artist_id > 0 && !ui_is_various_artists(album->artist_name)) {
         g_signal_emit(s, signals[SIGNAL_ARTIST_CLICKED], 0, s->channel_id, album->artist_id);
     }
 }
@@ -1142,10 +1203,6 @@ static void ui_channel_strip_dispose(GObject *obj) {
     remove_marquee_tick_callback(s->next_track_scroll);
 
     /* Disconnect gesture signal handlers before widget destruction */
-    if (s->seek_gesture) {
-        g_signal_handlers_disconnect_by_data(s->seek_gesture, s);
-        s->seek_gesture = NULL;
-    }
     if (s->channel_click_gesture) {
         g_signal_handlers_disconnect_by_data(s->channel_click_gesture, s);
         s->channel_click_gesture = NULL;
@@ -1220,6 +1277,9 @@ static void ui_channel_strip_class_init(UiChannelStripClass *klass) {
         0, NULL, NULL, NULL,
         G_TYPE_NONE, 2, G_TYPE_INT, G_TYPE_INT64);  /* channel_id, track_id */
 
+    /* Ensure custom child types are registered before template parsing */
+    g_type_ensure(UI_TYPE_WAVEFORM_SEEK_BAR);
+
     /* Load template from resource */
     gtk_widget_class_set_template_from_resource(wc, "/org/quadrature/ui/channel_strip.ui");
 
@@ -1237,13 +1297,10 @@ static void ui_channel_strip_class_init(UiChannelStripClass *klass) {
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, autoplay_btn);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, preview_btn);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, queue_btn);
-    gtk_widget_class_bind_template_child(wc, UiChannelStrip, seek_bar);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, right_column);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, info_box);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, seek_row);
-    gtk_widget_class_bind_template_child(wc, UiChannelStrip, seek_times_row);
-    gtk_widget_class_bind_template_child(wc, UiChannelStrip, seek_time_start);
-    gtk_widget_class_bind_template_child(wc, UiChannelStrip, seek_time_end);
+    gtk_widget_class_bind_template_child(wc, UiChannelStrip, waveform);
 
     /* Bind album context template children */
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, album_scroll);
@@ -1288,9 +1345,11 @@ static void ui_channel_strip_init(UiChannelStrip *s) {
     s->pipeline = NULL;
     s->show_spectrum = TRUE;
     s->time_state = TIME_STATE_NONE;
-    s->seek_dragging = FALSE;
     s->sample_rate = 0;
     s->length_samples = 0;
+    s->ui_length_samples = 0;
+    s->deferred_seek_pos = 0;
+    s->has_deferred_seek = FALSE;
     s->spectrum = NULL;
     s->status_scroll = NULL;
     s->status_label = NULL;
@@ -1313,13 +1372,9 @@ static void ui_channel_strip_init(UiChannelStrip *s) {
 
     gtk_widget_init_template(GTK_WIDGET(s));
 
-    /* Add gesture controller for seek end detection (not template-able) */
-    /* Use GtkGestureDrag instead of GtkGestureClick to avoid intercepting
-     * press events before GtkScale can handle its native drag */
-    s->seek_gesture = GTK_GESTURE(gtk_gesture_drag_new());
-    g_signal_connect(s->seek_gesture, "drag-begin", G_CALLBACK(on_seek_drag_begin), s);
-    g_signal_connect(s->seek_gesture, "drag-end", G_CALLBACK(on_seek_drag_end), s);
-    gtk_widget_add_controller(s->seek_bar, GTK_EVENT_CONTROLLER(s->seek_gesture));
+    /* Waveform seek bar is now a template child — just connect the seek signal */
+    s->waveform_track_id = 0;
+    g_signal_connect(s->waveform, "seek", G_CALLBACK(on_seek), s);
 
     /* Add click gesture to channel label for selection */
     s->channel_click_gesture = gtk_gesture_click_new();
@@ -1436,11 +1491,8 @@ GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, libr
         gtk_box_append(GTK_BOX(s->right_column), s->spectrum);
     }
 
-    /* Setup frame-synchronized marquee scrolling for each scroll widget */
-    setup_marquee_for_scroll(s->title_scroll);
-    setup_marquee_for_scroll(s->artist_scroll);
-    setup_marquee_for_scroll(s->album_scroll);
-    setup_marquee_for_scroll(s->next_track_scroll);
+    /* Marquee tick callbacks are installed on-demand by marquee_update_loop_point()
+     * when text actually overflows the container — no eagerly running callbacks. */
 
     return GTK_WIDGET(s);
 }
@@ -1451,10 +1503,20 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
 
     channel_state_t st = audio_pipeline_get_player_state(pipeline, s->channel_id);
     uint64_t len = audio_pipeline_get_player_length(pipeline, s->channel_id);
+    uint64_t effective_len = (len > 0) ? len : s->ui_length_samples;
+
+    /* Apply deferred seek when real buffer arrives */
+    if (len > 0 && s->has_deferred_seek && s->ui_length_samples > 0) {
+        double ratio = (double)s->deferred_seek_pos / (double)s->ui_length_samples;
+        uint64_t actual_pos = (uint64_t)(ratio * (double)len);
+        if (actual_pos >= len) actual_pos = len - 1;
+        audio_pipeline_player_seek(s->pipeline, s->channel_id, actual_pos);
+        s->has_deferred_seek = FALSE;
+    }
+    if (len > 0) s->ui_length_samples = 0;
 
     s->sample_rate = audio_pipeline_get_sample_rate(pipeline);
     s->length_samples = len;
-    s->prev_player_state = st;
 
     /* Play state - update icon every frame (GTK4 is idempotent) */
     gboolean playing = (st == CHANNEL_PLAYING);
@@ -1465,14 +1527,18 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
     double display_pos_d = audio_pipeline_get_player_position_smooth(pipeline, s->channel_id, &speed);
 
     /* Override with seek bar position if dragging */
-    if (s->seek_dragging && s->seek_bar && len > 0) {
-        double val = gtk_range_get_value(GTK_RANGE(s->seek_bar));
-        display_pos_d = val * (double)len;
+    gboolean seek_dragging = s->waveform &&
+        ui_waveform_seek_bar_is_dragging(UI_WAVEFORM_SEEK_BAR(s->waveform));
+    if (seek_dragging && effective_len > 0) {
+        GtkAdjustment *adj = ui_waveform_seek_bar_get_adjustment(
+            UI_WAVEFORM_SEEK_BAR(s->waveform));
+        double val = gtk_adjustment_get_value(adj);
+        display_pos_d = val * (double)effective_len;
     }
 
-    if (s->sample_rate > 0 && len > 0) {
+    if (s->sample_rate > 0 && effective_len > 0) {
         /* Remaining time - floating point throughout */
-        double rem_samples = (double)len - display_pos_d;
+        double rem_samples = (double)effective_len - display_pos_d;
         if (rem_samples < 0.0) rem_samples = 0.0;
 
         float abs_speed = fabsf(speed);
@@ -1483,13 +1549,16 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
         unsigned long rem_sec = (unsigned long)fmod(rem_sec_d, 60.0);
         unsigned long rem_cs = (unsigned long)(fmod(rem_sec_d, 1.0) * 100.0);
 
-        char buf[64];
+        char buf[20];
         snprintf(buf, sizeof(buf), "-%lu:%02lu.%02lu", total_rem_min, rem_sec, rem_cs);
-        gtk_label_set_text(GTK_LABEL(s->time_label), buf);
+        if (strcmp(buf, s->cached_time_remaining) != 0) {
+            memcpy(s->cached_time_remaining, buf, sizeof(s->cached_time_remaining));
+            gtk_label_set_text(GTK_LABEL(s->time_label), buf);
+        }
 
         /* Time color state (using floating-point seconds for thresholds) */
         time_state_t new_state = TIME_STATE_NONE;
-        if (!s->seek_dragging && rem_sec_d > 0) {
+        if (!seek_dragging && rem_sec_d > 0) {
             if (rem_sec_d <= TIME_WARN_SEC) {
                 new_state = TIME_STATE_WARNING;
             } else if (rem_sec_d <= TIME_CAUTION_SEC) {
@@ -1529,47 +1598,90 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
 
         if (s->time_elapsed_label) {
             snprintf(buf, sizeof(buf), "%lu:%02lu.%02lu", total_elapsed_min, elapsed_sec, elapsed_cs);
-            gtk_label_set_text(GTK_LABEL(s->time_elapsed_label), buf);
+            if (strcmp(buf, s->cached_time_elapsed) != 0) {
+                memcpy(s->cached_time_elapsed, buf, sizeof(s->cached_time_elapsed));
+                gtk_label_set_text(GTK_LABEL(s->time_elapsed_label), buf);
+            }
         }
 
-        /* Seek bar time labels (simpler format without centiseconds) */
-        if (s->seek_time_start) {
-            snprintf(buf, sizeof(buf), "%lu:%02lu", (unsigned long)(elapsed_sec_d / 60.0), (unsigned long)fmod(elapsed_sec_d, 60.0));
-            gtk_label_set_text(GTK_LABEL(s->seek_time_start), buf);
-        }
-
-        /* Total time */
-        if (s->seek_time_end) {
-            uint64_t total_sec = len / s->sample_rate;
-            snprintf(buf, sizeof(buf), "%lu:%02lu", (unsigned long)(total_sec / 60), (unsigned long)(total_sec % 60));
-            gtk_label_set_text(GTK_LABEL(s->seek_time_end), buf);
-        }
     } else {
-        gtk_label_set_text(GTK_LABEL(s->time_label), "-0:00.00");
-        if (s->time_elapsed_label) {
+        if (strcmp(s->cached_time_remaining, "-0:00.00") != 0) {
+            memcpy(s->cached_time_remaining, "-0:00.00", 9);
+            gtk_label_set_text(GTK_LABEL(s->time_label), "-0:00.00");
+        }
+        if (s->time_elapsed_label && strcmp(s->cached_time_elapsed, "0:00.00") != 0) {
+            memcpy(s->cached_time_elapsed, "0:00.00", 8);
             gtk_label_set_text(GTK_LABEL(s->time_elapsed_label), "0:00.00");
-        }
-        if (s->seek_time_start) {
-            gtk_label_set_text(GTK_LABEL(s->seek_time_start), "0:00");
-        }
-        if (s->seek_time_end) {
-            gtk_label_set_text(GTK_LABEL(s->seek_time_end), "--:--");
         }
     }
 
     /* Seek bar - use interpolated position when not dragging */
-    if (!s->seek_dragging && len > 0) {
-        gtk_range_set_value(GTK_RANGE(s->seek_bar), display_pos_d / (double)len);
+    double seek_frac = 0.0;
+    if (effective_len > 0) {
+        seek_frac = display_pos_d / (double)effective_len;
+        if (s->waveform) {
+            UiWaveformSeekBar *wsb = UI_WAVEFORM_SEEK_BAR(s->waveform);
+            /* Always update playback position (dim trail during drag) */
+            ui_waveform_seek_bar_set_playback_position(wsb, seek_frac);
+            /* Only move the adjustment (playhead) when not dragging */
+            if (!seek_dragging) {
+                GtkAdjustment *adj = ui_waveform_seek_bar_get_adjustment(wsb);
+                gtk_adjustment_set_value(adj, seek_frac);
+            }
+        }
     }
 
-    /* Table-driven button sensitivity */
-    update_button_sensitivity(s, st);
+    /* Waveform seek bar — redraw every frame while playing or animating
+     * so bar colors track the playhead position. */
+    if (s->waveform) {
+        /* Check if loudness data became available for current track.
+         * Read the player's buffer pointer directly — it's locked while playing,
+         * and loudness data is immutable once loudness_ready is set. */
+        if (s->current_track_id > 0 &&
+            s->current_track_id != s->waveform_track_id &&
+            s->pipeline) {
+            audio_buffer_t *buf = atomic_load(&s->pipeline->players[s->channel_id].buffer);
+            if (buf && audio_buffer_get_track_id(buf) == s->current_track_id &&
+                audio_buffer_is_loudness_ready(buf)) {
+                const float *loudness = audio_buffer_get_loudness(buf);
+                if (loudness) {
+                    ui_waveform_seek_bar_set_loudness(
+                        UI_WAVEFORM_SEEK_BAR(s->waveform), loudness, LOUDNESS_BINS);
+                    s->waveform_track_id = s->current_track_id;
+                }
+            }
+        }
 
-    /* Spectrum (stereo: left channel on left, right channel on right) */
+        /* Redraw waveform every frame during playback (bar colors must track
+         * the slider position) and during grow-out animation. */
+        if (playing || seek_dragging ||
+            ui_waveform_seek_bar_is_animating(UI_WAVEFORM_SEEK_BAR(s->waveform))) {
+            gtk_widget_queue_draw(s->waveform);
+        }
+    }
+
+    /* Table-driven button sensitivity — only on player state transitions.
+     * Mode changes and file loads call update_button_sensitivity separately. */
+    if (st != s->prev_player_state) {
+        update_button_sensitivity(s, st);
+        s->prev_player_state = st;
+    }
+
+    /* Spectrum (stereo: left channel on left, right channel on right).
+     * While playing, keep the decay counter pegged at max. When stopped/paused,
+     * count down so bars animate to zero via cava's release curve, then go idle. */
     if (s->spectrum) {
-        float left[SPECTRUM_BARS], right[SPECTRUM_BARS];
-        audio_pipeline_get_player_spectrum(pipeline, s->channel_id, left, right, SPECTRUM_BARS);
-        ui_spectrum_set_bars(UI_SPECTRUM(s->spectrum), left, right, SPECTRUM_BARS);
+        if (playing) {
+            s->spectrum_decay_frames = SPECTRUM_DECAY_FRAMES;
+        }
+        if (s->spectrum_decay_frames > 0) {
+            float left[SPECTRUM_BARS], right[SPECTRUM_BARS];
+            audio_pipeline_get_player_spectrum(pipeline, s->channel_id, left, right, SPECTRUM_BARS);
+            ui_spectrum_set_bars(UI_SPECTRUM(s->spectrum), left, right, SPECTRUM_BARS);
+            if (!playing) {
+                s->spectrum_decay_frames--;
+            }
+        }
     }
 }
 
@@ -1606,13 +1718,29 @@ quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
     g_free(s->artist);   s->artist = g_strdup(artist);
     g_free(s->album);    s->album = g_strdup(album);
     update_display(s);
+    update_button_sensitivity(s, s->prev_player_state);
+
+    /* Clear waveform for new track (will re-animate when loudness arrives) */
+    if (s->waveform)
+        ui_waveform_seek_bar_clear(UI_WAVEFORM_SEEK_BAR(s->waveform));
+    s->waveform_track_id = 0;
+
+    /* Estimate duration from cache for instant seek bar (before decode completes) */
+    s->has_deferred_seek = FALSE;
+    if (s->library) {
+        const library_track_info_t *ti = library_cache_get_track(s->library, track_id);
+        uint32_t rate = s->pipeline ? audio_pipeline_get_sample_rate(s->pipeline) : 0;
+        s->ui_length_samples = (rate > 0 && ti && ti->duration_ms > 0)
+            ? ((uint64_t)ti->duration_ms * rate) / 1000 : 0;
+    }
 
     if (s->pipeline && s->pipeline->cache) {
         /* Load track into cache FIRST (non-blocking, starts decode) */
-        audio_cache_load(s->pipeline->cache, track_id);
+        quadrature_result_t res = audio_cache_load(s->pipeline->cache, track_id);
+        if (res != QUADRATURE_OK) return res;
 
         /* Then set player track (will lock, not wait for decode) */
-        quadrature_result_t res = audio_pipeline_set_player_track(s->pipeline, s->channel_id, track_id);
+        res = audio_pipeline_set_player_track(s->pipeline, s->channel_id, track_id);
         if (res != QUADRATURE_OK) return res;
 
         s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
@@ -1687,16 +1815,12 @@ void ui_channel_strip_set_mode(UiChannelStrip *s, ChannelMode mode) {
         if (s->pipeline)
             audio_pipeline_player_seek(s->pipeline, s->channel_id, 0);
 
-        /* Exit preview if active */
-        if (old_mode == CHANNEL_MODE_PREVIEW) {
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->preview_btn), FALSE);
-        }
+        /* Note: Preview audio cleanup is handled by preview_off() function
+         * (Button state is managed by preview_on/preview_off functions) */
     }
 
-    /* Sync preview button state */
-    gboolean preview = (mode == CHANNEL_MODE_PREVIEW);
-    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->preview_btn)) != preview)
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->preview_btn), preview);
+    /* Note: Preview button state is NOT synced here - that's handled by
+     * ui_channel_strip_preview_on/off public API functions to avoid signal loops */
 
     update_visual_state(s);
 
@@ -1713,6 +1837,113 @@ void ui_channel_strip_set_mode(UiChannelStrip *s, ChannelMode mode) {
 ChannelMode ui_channel_strip_get_mode(UiChannelStrip *s) {
     g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), CHANNEL_MODE_IDLE);
     return s->mode;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Public API - Preview/PFL Control (for GPIO integration)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+void ui_channel_strip_preview_on(UiChannelStrip *s) {
+    g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
+    
+    /* Cannot enable preview if QUEUED or ON_AIR */
+    if (s->mode == CHANNEL_MODE_QUEUED || s->mode == CHANNEL_MODE_ON_AIR) {
+        /* Ensure button is off if we're blocked */
+        g_signal_handlers_block_by_func(s->preview_btn, on_preview, s);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->preview_btn), FALSE);
+        g_signal_handlers_unblock_by_func(s->preview_btn, on_preview, s);
+        return;
+    }
+    
+    /* Already in preview mode, just sync button */
+    if (s->mode == CHANNEL_MODE_PREVIEW) {
+        g_signal_handlers_block_by_func(s->preview_btn, on_preview, s);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->preview_btn), TRUE);
+        g_signal_handlers_unblock_by_func(s->preview_btn, on_preview, s);
+        return;
+    }
+    
+    /* Block signal to prevent recursion */
+    g_signal_handlers_block_by_func(s->preview_btn, on_preview, s);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->preview_btn), TRUE);
+    g_signal_handlers_unblock_by_func(s->preview_btn, on_preview, s);
+    
+    ui_channel_strip_set_mode(s, CHANNEL_MODE_PREVIEW);
+}
+
+void ui_channel_strip_preview_off(UiChannelStrip *s) {
+    g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
+    
+    /* Only transition to IDLE if we're actually in PREVIEW mode */
+    if (s->mode != CHANNEL_MODE_PREVIEW) {
+        /* Still sync button state in case we're out of sync */
+        g_signal_handlers_block_by_func(s->preview_btn, on_preview, s);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->preview_btn), FALSE);
+        g_signal_handlers_unblock_by_func(s->preview_btn, on_preview, s);
+        return;
+    }
+    
+    /* Block signal to prevent recursion */
+    g_signal_handlers_block_by_func(s->preview_btn, on_preview, s);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->preview_btn), FALSE);
+    g_signal_handlers_unblock_by_func(s->preview_btn, on_preview, s);
+    
+    ui_channel_strip_set_mode(s, CHANNEL_MODE_IDLE);
+}
+
+bool ui_channel_strip_get_preview_active(UiChannelStrip *s) {
+    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), false);
+    return s->mode == CHANNEL_MODE_PREVIEW;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Public API - Playback Control (for GPIO integration)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+void ui_channel_strip_play(UiChannelStrip *s) {
+    g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
+    
+    if (!s->pipeline) return;
+    
+    channel_state_t state = audio_pipeline_get_player_state(s->pipeline, s->channel_id);
+    
+    /* If already playing, do nothing */
+    if (state == CHANNEL_PLAYING) return;
+    
+    /* If in QUEUED mode, transition to ON_AIR */
+    if (s->mode == CHANNEL_MODE_QUEUED) {
+        ui_channel_strip_set_mode(s, CHANNEL_MODE_ON_AIR);
+    }
+    
+    /* Start playback (handles both stopped and paused states) */
+    audio_pipeline_player_play(s->pipeline, s->channel_id);
+}
+
+void ui_channel_strip_stop(UiChannelStrip *s) {
+    g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
+    
+    if (!s->pipeline) return;
+    
+    channel_state_t state = audio_pipeline_get_player_state(s->pipeline, s->channel_id);
+    
+    /* If already stopped, do nothing */
+    if (state == CHANNEL_STOPPED) return;
+    
+    /* Stop playback */
+    audio_pipeline_player_stop(s->pipeline, s->channel_id);
+    
+    /* If in ON_AIR or QUEUED mode, return to IDLE */
+    if (s->mode == CHANNEL_MODE_ON_AIR || s->mode == CHANNEL_MODE_QUEUED) {
+        ui_channel_strip_set_mode(s, CHANNEL_MODE_IDLE);
+    }
+}
+
+channel_state_t ui_channel_strip_get_player_state(UiChannelStrip *s) {
+    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), CHANNEL_STOPPED);
+    
+    if (!s->pipeline) return CHANNEL_STOPPED;
+    
+    return audio_pipeline_get_player_state(s->pipeline, s->channel_id);
 }
 
 void ui_channel_strip_set_focused(UiChannelStrip *s, gboolean focused) {
@@ -1780,11 +2011,21 @@ gboolean ui_channel_strip_previous_track(UiChannelStrip *s) {
     if (!track) return FALSE;
 
     s->current_track_id = prev_id;
-    g_free(s->filepath); s->filepath = g_strdup(track->path);
+    g_free(s->filepath); s->filepath = library_cache_resolve_track_path(s->library, prev_id);
     g_free(s->title);    s->title = g_strdup(track->title);
-    g_free(s->artist);   s->artist = g_strdup(track->artist_display ? track->artist_display : track->artist_name);
+    g_free(s->artist);   s->artist = g_strdup(track->artist_display);
     g_free(s->album);    s->album = g_strdup(track->album_title);
     update_display(s);
+
+    /* Clear waveform immediately so stale data isn't visible during decode */
+    if (s->waveform)
+        ui_waveform_seek_bar_clear(UI_WAVEFORM_SEEK_BAR(s->waveform));
+    s->waveform_track_id = 0;
+
+    /* Estimate duration from cache for instant seek bar (reuse rate from above) */
+    s->ui_length_samples = (rate > 0 && track->duration_ms > 0)
+        ? ((uint64_t)track->duration_ms * rate) / 1000 : 0;
+    s->has_deferred_seek = FALSE;
 
     /* Load and set track (non-blocking) */
     if (s->pipeline->cache) {
@@ -1822,11 +2063,22 @@ gboolean ui_channel_strip_next_track(UiChannelStrip *s) {
     if (!track) return FALSE;
 
     s->current_track_id = next_id;
-    g_free(s->filepath); s->filepath = g_strdup(track->path);
+    g_free(s->filepath); s->filepath = library_cache_resolve_track_path(s->library, next_id);
     g_free(s->title);    s->title = g_strdup(track->title);
-    g_free(s->artist);   s->artist = g_strdup(track->artist_display ? track->artist_display : track->artist_name);
+    g_free(s->artist);   s->artist = g_strdup(track->artist_display);
     g_free(s->album);    s->album = g_strdup(track->album_title);
     update_display(s);
+
+    /* Clear waveform immediately so stale data isn't visible during decode */
+    if (s->waveform)
+        ui_waveform_seek_bar_clear(UI_WAVEFORM_SEEK_BAR(s->waveform));
+    s->waveform_track_id = 0;
+
+    /* Estimate duration from cache for instant seek bar */
+    uint32_t rate = audio_pipeline_get_sample_rate(s->pipeline);
+    s->ui_length_samples = (rate > 0 && track->duration_ms > 0)
+        ? ((uint64_t)track->duration_ms * rate) / 1000 : 0;
+    s->has_deferred_seek = FALSE;
 
     /* Load and set track (non-blocking) */
     if (s->pipeline->cache) {

@@ -25,14 +25,13 @@
           <object class="GtkBox" id="search_filters">
             <property name="orientation">horizontal</property>
             <property name="spacing">4</property>
-            <property name="valign">center</property>
             <child>
               <object class="GtkButton" id="filter_all">
                 <property name="label">All</property>
                 <property name="focusable">false</property>
                 <style>
-                  <class name="search-filter"/>
-                  <class name="search-filter-active"/>
+                  <class name="search-type-chip"/>
+                  <class name="filter-chip--on"/>
                 </style>
               </object>
             </child>
@@ -41,7 +40,7 @@
                 <property name="label">Artists</property>
                 <property name="focusable">false</property>
                 <style>
-                  <class name="search-filter"/>
+                  <class name="search-type-chip"/>
                 </style>
               </object>
             </child>
@@ -50,7 +49,7 @@
                 <property name="label">Albums</property>
                 <property name="focusable">false</property>
                 <style>
-                  <class name="search-filter"/>
+                  <class name="search-type-chip"/>
                 </style>
               </object>
             </child>
@@ -59,7 +58,7 @@
                 <property name="label">Songs</property>
                 <property name="focusable">false</property>
                 <style>
-                  <class name="search-filter"/>
+                  <class name="search-type-chip"/>
                 </style>
               </object>
             </child>
@@ -68,78 +67,7 @@
       </object>
     </child>
 
-    <!-- Filter panel: Genre, Year, Clear -->
-    <child>
-      <object class="GtkBox" id="search_filter_panel">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">8</property>
-        <style>
-          <class name="filter-container"/>
-        </style>
-
-        <!-- Genre filter -->
-        <child>
-          <object class="GtkBox">
-            <property name="orientation">horizontal</property>
-            <property name="spacing">0</property>
-            <property name="valign">center</property>
-            <style>
-              <class name="filter-button"/>
-            </style>
-            <child>
-              <object class="GtkLabel">
-                <property name="label">Genre</property>
-              </object>
-            </child>
-            <child>
-              <object class="GtkMenuButton" id="filter_genre">
-                <property name="label">All</property>
-              </object>
-            </child>
-          </object>
-        </child>
-
-        <!-- Year filter -->
-        <child>
-          <object class="GtkBox">
-            <property name="orientation">horizontal</property>
-            <property name="spacing">0</property>
-            <property name="valign">center</property>
-            <style>
-              <class name="filter-button"/>
-            </style>
-            <child>
-              <object class="GtkLabel">
-                <property name="label">Year</property>
-              </object>
-            </child>
-            <child>
-              <object class="GtkMenuButton" id="filter_year">
-                <property name="label">All</property>
-              </object>
-            </child>
-          </object>
-        </child>
-
-        <!-- Spacer -->
-        <child>
-          <object class="GtkBox">
-            <property name="hexpand">true</property>
-          </object>
-        </child>
-
-        <!-- Clear button -->
-        <child>
-          <object class="GtkButton" id="filter_clear">
-            <property name="label">Clear</property>
-            <property name="valign">center</property>
-            <style>
-              <class name="filter-button-clear"/>
-            </style>
-          </object>
-        </child>
-      </object>
-    </child>
+    <!-- Filter bar + advanced panel inserted programmatically by make_search_view() -->
 
     <!-- Scrollable results area -->
     <child>
@@ -169,7 +97,7 @@
                 <property name="visible">false</property>
                 <style>
                   <class name="search-results-container"/>
-                  <class name="search-results-list"/>
+                  <class name="library-list"/>
                 </style>
               </object>
             </child>

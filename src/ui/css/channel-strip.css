@@ -3,7 +3,7 @@
 channel-strip {
     border: 3px solid #555555;
     border-radius: 6px;
-    background-color: #282828;
+    background-color: #1e1e1e;
     min-height: 96px;
 }
 
@@ -15,7 +15,7 @@ channel-strip > box {
     border: 3px solid #555555;
     border-radius: 6px;
     padding: 4px;
-    background-color: #282828;
+    background-color: #1e1e1e;
     min-height: 96px;
 }
 
@@ -188,12 +188,6 @@ channel-strip.channel-strip-focused .channel-number {
     background-color: transparent;
 }
 
-.spectrum-display-bottom {
-    background-color: transparent;
-    min-width: 120px;
-    min-height: 24px;
-}
-
 /* Metrics Column */
 .metrics-column { min-width: 70px; }
 
@@ -210,12 +204,6 @@ channel-strip.channel-strip-focused .channel-number {
 
 .time-warning {
     color: #ff3333;
-    animation: pulse 1s ease-in-out infinite;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1.0; }
-    50% { opacity: 0.5; }
 }
 
 .time-elapsed {
@@ -231,25 +219,8 @@ channel-strip.channel-strip-focused .channel-number {
     color: #666666;
 }
 
-/* Transport Button Active States */
-.preview-active,
-.preview-active:hover {
-    background-color: #ff9500;
-    color: #ffffff;
-    border-color: #ff9500;
-}
-
-.preview-active:hover { background-color: #ffaa33; }
-
 /* Seek Row */
-.seek-row { padding: 8px 0 4px 0; }
-.seek-times-row { padding: 0; }
-
-.seek-time {
-    font-family: monospace;
-    font-size: 11px;
-    color: #666666;
-}
+.seek-row { padding: 4px 0 2px 0; }
 
 /* Seek Bar */
 .seek-bar {
@@ -268,34 +239,30 @@ channel-strip.channel-strip-focused .channel-number {
     border-radius: 3px;
 }
 
+/* Default seek bar slider (circle thumb) */
 .seek-bar slider {
-    min-width: 14px;
-    min-height: 14px;
-    border-radius: 7px;
-    background-color: #ffffff;
+    min-width: 11px;
+    min-height: 11px;
+    border-radius: 6px;
+    background: white;
     border: 2px solid #00d4ff;
-    margin: -4px;
-    transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+    margin: -3px;
+    box-shadow: 0 0 4px rgba(0, 212, 255, 0.3);
+    transition: box-shadow 150ms ease-out;
 }
 
 .seek-bar slider:hover {
     box-shadow: 0 0 8px rgba(0, 212, 255, 0.6);
-    transform: scale(1.3);
 }
 
 .seek-bar:disabled slider {
-    background-color: #555555;
+    background: #555555;
     border-color: #444444;
 }
 
-/* Level Meter */
-.level-meter {
-    background-color: #1a1a1a;
-    border-radius: 3px;
-}
 
 /* Channels Panel */
-.channels-panel { background-color: #1a1a1a; }
+.channels-panel { background-color: #141414; }
 
 /* Per-Channel Skip/Shuttle Controls */
 .skip-shuttle-row { margin-top: 4px; }
@@ -392,26 +359,6 @@ transport-bar {
     padding: 8px 12px;
 }
 
-.transport-bar-inner { padding: 0; }
-
-.transport-bar-btn {
-    min-width: 36px;
-    min-height: 36px;
-    padding: 4px 8px;
-    font-weight: bold;
-    font-size: 12px;
-}
-
-.play-pause-btn {
-    min-width: 48px;
-    min-height: 48px;
-    background-color: #00d4ff;
-    color: #000000;
-    border: none;
-}
-
-.play-pause-btn:hover { background-color: #33ddff; }
-
 .shuttle-container { padding: 0 8px; }
 
 .shuttle-label {
@@ -473,21 +420,9 @@ transport-bar {
     border-bottom-right-radius: 6px;
 }
 
-/* Song Title/Meta */
-.song-title {
-    font-size: 21px;
-    font-weight: 500;
-    color: #e0e0e0;
-}
-
 .info-box,
 .marquee-scroll {
     min-width: 0;
-}
-
-.song-meta {
-    font-size: 12px;
-    color: #888888;
 }
 
 .artist-album {

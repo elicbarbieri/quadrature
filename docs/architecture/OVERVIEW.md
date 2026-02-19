@@ -94,11 +94,26 @@ pg_conninfo = host=localhost dbname=musicbrainz_db user=musicbrainz
 auto_resolve = true
 ```
 
+## Library Storage
+
+Each library root is self-contained:
+
+```
+{library_root}/
+  quadrature.sqlite           ← all metadata for tracks under this root
+  quadrature-metadata.sqlite  ← MusicBrainz recording relations (after Phase 4 runs)
+  artwork/                    ← thumbnail atlas files (96px-{unix_time}.atlas)
+  Artist/Album/               ← audio files (never modified by quadrature)
+```
+
+Multiple libraries can be registered. Each has its own SQLite database and artwork directory — no shared state between libraries.
+
+`quadrature-metadata.sqlite` is written by Phase 4 on successful MB resolution and read on-demand by the UI. If absent, the UI shows no relation data — no crash. See [Metadata Architecture](METADATA.md) for schema details.
+
 ## Platform Requirements
 
 - Linux with PipeWire
 - GTK4, GLib, FFmpeg, SQLite3, FFTW3, libvips, Rubberband
 - Chromaprint (audio fingerprinting)
-- TagLib (tag reading)
 - libpq (PostgreSQL client for MusicBrainz + AcoustID)
 - Self-hosted PostgreSQL with MusicBrainz + AcoustID data

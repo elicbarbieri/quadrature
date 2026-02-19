@@ -7,11 +7,12 @@
  */
 
 #include "quadrature/quadrature.h"
-#include "quadrature/quadrature_database.h"
+#include "quadrature/database.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 
 // =============================================================================
@@ -26,18 +27,19 @@
 // =============================================================================
 
 typedef struct {
-    char* path;         // Full path (owned, must free)
-    char* title;        // Track title (owned, may be NULL)
-    char* artist;       // Artist name (owned, may be NULL)
-    char* album_artist; // Album artist (owned, may be NULL — from ALBUMARTIST tag)
-    char* album;        // Album title (owned, may be NULL)
-    char* genre;        // Genre (owned, may be NULL)
+    char* path;              // Full path (owned, must free)
+    char* title;             // Track title (owned, may be NULL)
+    char* artist;            // Artist name (owned, may be NULL)
+    char* album_artist;      // Album artist (owned, may be NULL — from ALBUMARTIST tag)
+    char* album;             // Album title (owned, may be NULL)
+    char* genre;             // Genre (owned, may be NULL)
+    char* mb_release_id;     // MUSICBRAINZ_ALBUMID tag (owned, may be NULL)
     uint32_t duration_ms;
     uint16_t track_num;
-    uint16_t disc_num;  // From disc/discnumber tag (0 = unset)
+    uint16_t disc_num;       // From disc/discnumber tag (0 = unset)
     uint16_t year;
-    int64_t mtime;      // File modification time (filled by caller)
-    int64_t size;       // File size in bytes (filled by caller)
+    int64_t mtime;           // File modification time (filled by caller)
+    int64_t size;            // File size in bytes (filled by caller)
 } index_item_t;
 
 // =============================================================================
@@ -69,6 +71,35 @@ void dir_scan_single_pass(const char* dir_path, dir_scan_result_t* result);
 void index_item_free(index_item_t* item);
 
 // =============================================================================
+// Utils: Artist Tag Splitting
+// =============================================================================
+
+/**
+ * One parsed credit from an ARTIST tag.
+ * name and join_phrase are heap-allocated; call artist_credits_free() when done.
+ */
+typedef struct {
+    char* name;        /* Artist name, e.g. "ADULT." or "Dorit Chrysler" */
+    char* join_phrase; /* Connector placed after this name: " feat. ", " & ", "" for last */
+} artist_credit_t;
+
+/**
+ * Parse a raw ARTIST tag into individual credits by splitting on common
+ * feat./ft./& delimiters (case-insensitive).
+ *
+ * Always returns at least 1 credit (the whole string if no delimiter found).
+ * join_phrase is normalised: " feat " → " feat. ", " ft " → " ft. ".
+ *
+ * @param tag   Raw ARTIST tag value (non-NULL).
+ * @param out   Output array of credits (owned by caller).
+ * @return      Number of credits written to *out.
+ */
+size_t parse_artist_tag(const char* tag, artist_credit_t** out);
+
+/** Free credits returned by parse_artist_tag. */
+void artist_credits_free(artist_credit_t* credits, size_t count);
+
+// =============================================================================
 // Utils: Audio File Detection & Metadata Extraction
 // =============================================================================
 
@@ -76,7 +107,6 @@ extern const char* AUDIO_EXTENSIONS[];
 
 bool is_audio_file(const char* path);
 quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out);
-size_t scan_audio_files_in_dir(const char* dir, char*** files_out, struct stat** stats_out);
 
 // =============================================================================
 // Utils: Disc Folder Detection (for multi-disc albums)
@@ -101,26 +131,71 @@ bool is_disc_folder(const char* dir_name);
 uint16_t get_disc_number_from_folder(const char* dir_name);
 
 // =============================================================================
+// Phase 2 Producer-Consumer Types
+// =============================================================================
+
+/**
+ * Per-track FFmpeg extraction output (no DB IDs).
+ * Built by worker threads, consumed by the DB writer thread.
+ */
+typedef struct {
+    char* rel_path;        // Track path relative to album dir (owned)
+    char* title;           // From tag or filename fallback (owned, may be NULL)
+    char* artist_tag;      // Raw artist tag string for parse_artist_tag (owned, may be NULL)
+    char* genre;           // Genre tag (owned, may be NULL)
+    uint32_t duration_ms;
+    uint16_t track_num;
+    uint16_t disc_num;
+    uint16_t year;
+    int64_t mtime;         // From stat()
+} extracted_track_t;
+
+/**
+ * Per-album FFmpeg extraction output, pushed to GAsyncQueue by workers.
+ * The DB writer thread pops these, writes to SQLite, and populates results.
+ */
+typedef struct {
+    // Album-level
+    char* dir_path;             // Full album directory path (owned)
+    char* album_rel_path;       // Relative to library_root (owned)
+    char* folder_name;          // Last path component / album title (owned)
+    char* album_artist;         // Best album artist name (owned)
+    char* album_mb_release_id;  // MUSICBRAINZ_ALBUMID tag (owned, may be NULL)
+    int64_t dir_mtime;          // For finalize phase
+    bool mb_resolved;           // Cached from scan phase
+
+    // Tracks
+    extracted_track_t* tracks;
+    size_t track_count;
+
+    // Slot index into processed_album_t results array
+    size_t result_index;
+} metadata_result_t;
+
+void extracted_track_free(extracted_track_t* track);
+void metadata_result_free(metadata_result_t* result);
+
+// =============================================================================
 // Artwork
 // =============================================================================
 
-typedef enum {
-    ART_SOURCE_NONE = 0,
-    ART_SOURCE_COVER,
-    ART_SOURCE_FOLDER,
-    ART_SOURCE_FRONT,
-    ART_SOURCE_ALBUMART,
-    ART_SOURCE_EMBEDDED
-} art_source_t;
+/**
+ * Find the best cover image file in an album directory.
+ * Priority: cover > folder > front > albumart (.jpg/.jpeg/.png/.webp).
+ * @param album_dir  Directory to search
+ * @param art_path   Output buffer for the found path
+ * @param path_size  Size of art_path buffer
+ * @return QUADRATURE_OK with path written, or QUADRATURE_ERROR_FILE_NOT_FOUND
+ */
+quadrature_result_t artwork_find(const char* album_dir, char* art_path, size_t path_size);
 
-quadrature_result_t artwork_find(const char* album_dir, char* art_path,
-                                  size_t path_size, art_source_t* source);
-quadrature_result_t artwork_extract_embedded(const char* audio_path, const char* output_path);
-quadrature_result_t artwork_generate_thumbnail(const char* input_path,
-                                                const char* output_path, int size);
-quadrature_result_t artwork_find_and_process(const char* album_dir, int64_t album_id,
-                                              const char* cache_dir, int thumb_size,
-                                              char* result_path, size_t result_size);
+/**
+ * Return raw image bytes for the best artwork in an album directory.
+ * Tries named cover files first, then falls back to embedded art in audio files.
+ * On success, *data_out is g_malloc'd — caller must g_free().
+ */
+quadrature_result_t artwork_find_bytes(const char* album_dir,
+                                       uint8_t** data_out, size_t* size_out);
 
 // =============================================================================
 // Artwork Atlas Format
@@ -134,36 +209,30 @@ quadrature_result_t artwork_find_and_process(const char* album_dir, int64_t albu
 #define ARTWORK_ATLAS_MAGIC_SIZE 4
 
 /* Current format version */
-#define ARTWORK_ATLAS_VERSION 1
+#define ARTWORK_ATLAS_VERSION 2
 
-/* Default thumbnail size */
+/* Default thumbnail size and channels */
 #define ARTWORK_ATLAS_THUMB_SIZE 48
+#define ARTWORK_ATLAS_CHANNELS 3
 
 /**
  * Atlas file header (32 bytes, fixed size)
+ *
+ * v2 format: fixed-stride raw RGB pixel arrays (no PNG encode/decode).
+ * Layout: [Header 32B] [album_ids: int64_t[count]] [pixels: uint8_t[count][pixel_stride]]
+ * pixel_stride = thumb_size * thumb_size * channels
  */
 typedef struct __attribute__((packed)) {
     char magic[4];          /* "QDRA" */
-    uint32_t version;       /* Format version (currently 1) */
-    uint32_t count;         /* Number of entries in index */
+    uint32_t version;       /* Format version (2) */
+    uint32_t count;         /* Number of entries */
     uint32_t flags;         /* Reserved for future use */
     uint32_t thumb_size;    /* Thumbnail size in pixels (48) */
-    uint8_t reserved[12];   /* Reserved for future use */
+    uint8_t channels;       /* Color channels (3 = RGB) */
+    uint8_t reserved[11];   /* Reserved for future use */
 } artwork_atlas_header_t;
 
-/**
- * Index entry (16 bytes, fixed size)
- * Sorted by album_id for binary search
- */
-typedef struct __attribute__((packed)) {
-    int64_t album_id;       /* Album identifier (database primary key) */
-    uint32_t offset;        /* Byte offset from start of DATA section */
-    uint32_t size;          /* Size of PNG blob in bytes */
-} artwork_atlas_entry_t;
-
-/* Verify struct sizes at compile time */
 _Static_assert(sizeof(artwork_atlas_header_t) == 32, "Header must be 32 bytes");
-_Static_assert(sizeof(artwork_atlas_entry_t) == 16, "Entry must be 16 bytes");
 
 // =============================================================================
 // Artwork Atlas Builder
@@ -191,15 +260,18 @@ quadrature_result_t artwork_atlas_builder_create(const char* atlas_path,
 /**
  * Process a single album's artwork (thread-safe).
  * Can be called concurrently from multiple worker threads.
+ * If no artwork is found, stores a placeholder and sets *used_fallback = true.
  *
  * @param builder The atlas builder handle
  * @param album_id Database album ID
  * @param album_dir Directory containing the album
- * @return QUADRATURE_OK on success, error code if no artwork found
+ * @param used_fallback Out: set to true if placeholder was stored (may be NULL)
+ * @return QUADRATURE_OK on success (including placeholder), error on real failure
  */
 quadrature_result_t artwork_atlas_process_album(artwork_atlas_builder_t* builder,
                                                  int64_t album_id,
-                                                 const char* album_dir);
+                                                 const char* album_dir,
+                                                 bool *used_fallback);
 
 /**
  * Get current progress counters (thread-safe).
@@ -247,24 +319,260 @@ quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t* builde
 void artwork_atlas_builder_destroy(artwork_atlas_builder_t* builder);
 
 /**
- * Add pre-generated PNG data to the atlas (for cached entries).
+ * Add pre-generated raw pixel data to the atlas (for preserved entries).
+ * pixel_data must be exactly pixel_stride bytes (thumb_size * thumb_size * channels).
  */
-quadrature_result_t artwork_atlas_add_cached_png(artwork_atlas_builder_t* builder,
-                                                  int64_t album_id,
-                                                  const void* png_data,
-                                                  size_t png_size);
+quadrature_result_t artwork_atlas_add_cached_pixels(artwork_atlas_builder_t* builder,
+                                                     int64_t album_id,
+                                                     const void* pixel_data,
+                                                     size_t pixel_size);
+
+/**
+ * Per-album profiling stats accumulated by the builder (thread-safe reads).
+ */
+typedef struct {
+    int64_t find_ns;        /* Total time in find_and_load_artwork */
+    int64_t resize_ns;      /* Total time in vips resize (file or buffer path) */
+    size_t fallback_count;  /* Albums with no artwork (used fallback) */
+} artwork_atlas_profile_t;
+
+void artwork_atlas_builder_get_profile(artwork_atlas_builder_t* builder,
+                                        artwork_atlas_profile_t* out);
 
 // =============================================================================
 // Atlas Reader (for loading cached entries from existing atlas)
 // =============================================================================
 
-typedef struct artwork_atlas_reader artwork_atlas_reader_t;  // Defined in artwork.c
+typedef struct artwork_atlas_reader artwork_atlas_reader_t;
 
 artwork_atlas_reader_t* artwork_atlas_reader_open(const char* path);
 void artwork_atlas_reader_close(artwork_atlas_reader_t* reader);
-uint8_t* artwork_atlas_reader_get_png(artwork_atlas_reader_t* reader, int64_t album_id, size_t* size_out);
 size_t artwork_atlas_reader_get_count(artwork_atlas_reader_t* reader);
+uint32_t artwork_atlas_reader_get_pixel_stride(artwork_atlas_reader_t* reader);
 int64_t artwork_atlas_reader_get_album_id_at(artwork_atlas_reader_t* reader, size_t index);
-uint8_t* artwork_atlas_reader_get_png_at(artwork_atlas_reader_t* reader, size_t index, size_t* size_out);
+
+/**
+ * Get direct pointer to raw pixel data at index (zero-copy from file buffer).
+ * Returns pointer valid until reader is closed. Caller must NOT free.
+ * Returns NULL if index is out of range.
+ */
+const uint8_t* artwork_atlas_reader_get_pixels_at(artwork_atlas_reader_t* reader, size_t index);
+
+// =============================================================================
+// Global Artist Atlas (UUID-keyed, shared across libraries)
+//
+// Binary format for artist thumbnails keyed by MusicBrainz UUID.
+// Single global file at ~/.local/share/quadrature/atlas/artists.atlas
+// with flock()-based write serialization via artists.atlas.lock.
+//
+// Layout:
+//   [Header 32B]
+//   [uuid_keys: uint8_t[art_count][16]]          sorted 16-byte binary UUIDs
+//   [pixels: uint8_t[art_count][pixel_stride]]    dense RGB pixel data
+//   [no_art_count: uint32_t]                      number of known-no-artwork entries
+//   [no_art_uuids: uint8_t[no_art_count][16]]     sorted 16-byte binary UUIDs
+// =============================================================================
+
+#define ARTIST_ATLAS_MAGIC "QDAR"
+#define ARTIST_ATLAS_MAGIC_SIZE 4
+#define ARTIST_ATLAS_VERSION 1
+#define ARTIST_ATLAS_UUID_SIZE 16
+
+/**
+ * Global artist atlas header (32 bytes, fixed size).
+ * Same size as artwork_atlas_header_t but different magic + semantics.
+ */
+typedef struct __attribute__((packed)) {
+    char magic[4];          /* "QDAR" */
+    uint32_t version;       /* 1 */
+    uint32_t art_count;     /* Number of entries with artwork */
+    uint32_t no_art_count;  /* Number of known-no-artwork entries */
+    uint32_t thumb_size;    /* Thumbnail size in pixels */
+    uint8_t channels;       /* Color channels (3 = RGB) */
+    uint8_t reserved[11];   /* Pad to 32 bytes */
+} artist_atlas_header_t;
+
+_Static_assert(sizeof(artist_atlas_header_t) == 32, "Artist atlas header must be 32 bytes");
+
+/**
+ * Opaque handle for building/rewriting the global artist atlas.
+ * NOT thread-safe — callers must serialize via flock() on the lockfile.
+ */
+typedef struct artist_atlas_builder artist_atlas_builder_t;
+
+/**
+ * Create a new artist atlas builder.
+ *
+ * @param atlas_path  Final path (e.g. ~/.local/share/quadrature/atlas/artists.atlas)
+ * @param thumb_size  Thumbnail size in pixels
+ * @param out         Output pointer for builder handle
+ */
+quadrature_result_t artist_atlas_builder_create(const char* atlas_path,
+                                                 int thumb_size,
+                                                 artist_atlas_builder_t** out);
+
+/**
+ * Seed the builder with all existing entries from the current atlas on disk.
+ * Call this after create() and before adding new entries, so that a rewrite
+ * preserves other libraries' contributions.
+ */
+quadrature_result_t artist_atlas_builder_load_existing(artist_atlas_builder_t* builder);
+
+/**
+ * Add an artist with artwork (raw pixel data).
+ * uuid must be exactly 16 bytes (binary form).
+ * pixel_data must be exactly pixel_stride bytes.
+ * If UUID already exists, the entry is updated (last writer wins).
+ */
+quadrature_result_t artist_atlas_builder_add_art(artist_atlas_builder_t* builder,
+                                                  const uint8_t uuid[16],
+                                                  const void* pixel_data,
+                                                  size_t pixel_size);
+
+/**
+ * Mark an artist as having no artwork (known-no-art sentinel).
+ * uuid must be exactly 16 bytes (binary form).
+ */
+quadrature_result_t artist_atlas_builder_add_no_art(artist_atlas_builder_t* builder,
+                                                     const uint8_t uuid[16]);
+
+/**
+ * Finish building and write the atlas atomically (temp file + rename).
+ */
+quadrature_result_t artist_atlas_builder_finish(artist_atlas_builder_t* builder);
+
+/**
+ * Destroy the builder and free resources.
+ */
+void artist_atlas_builder_destroy(artist_atlas_builder_t* builder);
+
+// =============================================================================
+// Global Artist Atlas Reader (mmapped, for display-time lookups)
+// =============================================================================
+
+typedef struct artist_atlas_reader artist_atlas_reader_t;
+
+/**
+ * Open and mmap a global artist atlas file.
+ * Returns NULL if file doesn't exist or is invalid.
+ */
+artist_atlas_reader_t* artist_atlas_reader_open(const char* path);
+
+/**
+ * Close the reader and unmap the file.
+ */
+void artist_atlas_reader_close(artist_atlas_reader_t* reader);
+
+/**
+ * Look up an artist by binary UUID (16 bytes).
+ * Returns index into pixel data, or -1 if not found.
+ */
+int32_t artist_atlas_reader_lookup(const artist_atlas_reader_t* reader,
+                                    const uint8_t uuid[16]);
+
+/**
+ * Check if an artist is in the known-no-artwork set.
+ */
+bool artist_atlas_reader_is_no_art(const artist_atlas_reader_t* reader,
+                                    const uint8_t uuid[16]);
+
+/**
+ * Get raw pixel data at the given index (zero-copy into mmap).
+ * Returns pointer valid until reader is closed. Caller must NOT free.
+ * Returns NULL if index is out of range.
+ */
+const uint8_t* artist_atlas_reader_get_pixels(const artist_atlas_reader_t* reader,
+                                               int32_t index);
+
+/** Get the thumbnail size, pixel stride, and channel count. */
+uint32_t artist_atlas_reader_get_thumb_size(const artist_atlas_reader_t* reader);
+uint32_t artist_atlas_reader_get_pixel_stride(const artist_atlas_reader_t* reader);
+uint8_t artist_atlas_reader_get_channels(const artist_atlas_reader_t* reader);
+
+/**
+ * Get the number of artwork entries.
+ */
+uint32_t artist_atlas_reader_get_art_count(const artist_atlas_reader_t* reader);
+
+/**
+ * Get the number of no-art entries.
+ */
+uint32_t artist_atlas_reader_get_no_art_count(const artist_atlas_reader_t* reader);
+
+// =============================================================================
+// UUID Helpers
+// =============================================================================
+
+/**
+ * Parse a MusicBrainz UUID string (36 chars, "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+ * into 16-byte binary form. Returns true on success.
+ */
+bool mbid_parse(const char* str, uint8_t out[16]);
+
+/**
+ * Format a 16-byte binary UUID into a 36-char string (plus NUL terminator).
+ * out must be at least 37 bytes.
+ */
+void mbid_format(const uint8_t uuid[16], char out[37]);
+
+// =============================================================================
+// Artist Art (fanart.tv)
+// =============================================================================
+
+typedef struct {
+    const char* personal_api_key;  // User-supplied personal key (client_key); NULL = no personal key
+    const char* artwork_dir;       // {library_root}/artwork/ (for cached artist image files)
+    quadrature_db_t* db;
+    atomic_int* cancel_flag;
+    int rate_limit_ms;             // Default: 500ms = 2 req/s
+    int art_thumb_size;            // Thumbnail size for atlas (default: 48)
+
+    // Global artist atlas paths (shared across libraries)
+    const char* atlas_path;        // ~/.local/share/quadrature/atlas/artists.atlas
+    const char* atlas_lock_path;   // ~/.local/share/quadrature/atlas/artists.atlas.lock
+
+    // Cross-library art reuse: artwork dirs from other libraries to check
+    // before hitting fanart.tv. NULL-terminated or use count.
+    const char* const* other_artwork_dirs;
+    size_t other_artwork_dirs_count;
+} artist_art_config_t;
+
+typedef struct {
+    size_t total;
+    size_t processed;
+    size_t downloaded;
+    size_t skipped;
+    size_t no_images;
+    size_t errors;
+} artist_art_progress_t;
+
+typedef void (*artist_art_progress_cb)(const artist_art_progress_t*, void*);
+
+quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
+                                          artist_art_progress_cb cb, void* user_data);
+
+// =============================================================================
+// Artist Bios (Wikipedia via Wikidata)
+// =============================================================================
+
+typedef struct {
+    quadrature_db_t* db;           // Main library DB (for artist MBID list)
+    const char* library_root;      // Library root path (for metadata DB)
+    atomic_int* cancel_flag;
+    int rate_limit_ms;             // Default: 500ms
+} artist_bio_config_t;
+
+typedef struct {
+    size_t total;
+    size_t processed;
+    size_t fetched;
+    size_t skipped;
+    size_t no_bio;
+} artist_bio_progress_t;
+
+typedef void (*artist_bio_progress_cb)(const artist_bio_progress_t*, void*);
+
+quadrature_result_t artist_bio_fetch_all(const artist_bio_config_t* config,
+                                          artist_bio_progress_cb cb, void* user_data);
 
 #endif // INDEXER_INTERNAL_H

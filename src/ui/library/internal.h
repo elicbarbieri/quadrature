@@ -9,7 +9,8 @@
 #define QUADRATURE_UI_LIBRARY_INTERNAL_H
 
 #include <gtk/gtk.h>
-#include "quadrature/quadrature_library.h"
+#include "quadrature/library.h"
+#include "quadrature/settings.h"
 
 G_BEGIN_DECLS
 
@@ -30,36 +31,128 @@ typedef enum {
 } LibraryItemKind;
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Artwork Manager (see artwork_manager.h for full API)
+ * Artwork Manager
+ *
+ * Async thumbnail loading: LRU texture cache + per-library mmapped atlases + worker pool.
+ *
+ * Album IDs must be global IDs: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id).
+ * The manager decodes lib_index to route lookups to the correct per-library atlas.
+ * Library 0 global IDs equal their local IDs (backward compatible for single-library use).
+ *
+ * Atlas files live at: {library_root}/artwork/{N}px-artwork-{unix_timestamp}.atlas
+ * The manager always loads the file with the highest timestamp for each library.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#include "artwork_manager.h"
+typedef struct _ArtworkManager ArtworkManager;
+
+ArtworkManager *artwork_manager_new(library_cache_t *library,
+                                    const char **data_roots,
+                                    const char **music_roots,
+                                    int lib_count,
+                                    int cache_size, size_t cache_count);
+void artwork_manager_free(ArtworkManager *mgr);
+void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWidget *image);
+int artwork_manager_get_thumb_size(ArtworkManager *mgr);
+void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int lib_idx,
+                                          const char *atlas_path);
+void artwork_manager_prefetch_fullsize(ArtworkManager *mgr, int64_t album_id);
+
+/* Load full-resolution album art directly from the album directory on disk.
+ * Bypasses the thumbnail atlas — intended for detail views where the raw image
+ * is displayed large and GTK handles the scaling via GtkPicture.
+ * Synchronous: loads the file on the calling thread (fine for single-shot detail views).
+ * picture: must be a GtkPicture widget. */
+void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr, int lib_index,
+                                             int64_t album_id, GtkWidget *picture);
+
+void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id,
+                                           GtkWidget *image);
+void artwork_manager_reload_artist_atlas(ArtworkManager *mgr);
+
+/* Performance stats snapshot (for perf dashboard polling) */
+#define ARTWORK_MANAGER_MAX_LIBRARIES 8
+typedef struct {
+    size_t texture_cache_count;                           /* LRU entries */
+    size_t texture_cache_bytes;                           /* count × thumb² × 4 (RGBA) */
+    size_t atlas_mmap_bytes[ARTWORK_MANAGER_MAX_LIBRARIES]; /* per-library mmap size */
+    int    lib_count;
+    size_t total_hits;
+    size_t total_misses;
+    size_t atlas_hits;
+    size_t evictions;
+    size_t pending_load_count;
+} artwork_manager_stats_t;
+
+void artwork_manager_get_stats(ArtworkManager *mgr, artwork_manager_stats_t *out);
+
+/* Access latency histograms for perf dashboard (returns interior pointer — valid
+ * for the lifetime of the ArtworkManager). The histogram uses µs-scale buckets. */
+struct perf_histogram;  /* forward declare to avoid core/internal.h dependency */
+typedef struct perf_histogram perf_histogram_us_t_fwd;
+const void *artwork_manager_get_texture_hit_hist(ArtworkManager *mgr);
+const void *artwork_manager_get_atlas_decode_hist(ArtworkManager *mgr);
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Navigation Stack - For detail view back navigation
+ * QuadScrubber — Index scrubber overlay for library list views
+ *
+ * Slide-in widget overlaid at halign=END on a GtkOverlay wrapping the
+ * list's GtkScrolledWindow. Shows A-Z or year buckets; click/drag scrolls
+ * the list to that section.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-typedef enum {
-    NAV_ENTRY_VIEW,    /* Main view (Artists, Albums, Search) */
-    NAV_ENTRY_ARTIST,  /* Artist detail */
-    NAV_ENTRY_ALBUM,   /* Album detail */
-} NavEntryType;
+#define QUAD_TYPE_SCRUBBER (quad_scrubber_get_type())
+G_DECLARE_FINAL_TYPE(QuadScrubber, quad_scrubber, QUAD, SCRUBBER, GtkWidget)
 
 typedef struct {
-    NavEntryType type;
-    int64_t id;              /* Artist/album ID (0 for main views) */
-    char *view_name;         /* Source view name for back label */
-    double scroll_pos;       /* Scroll position to restore */
-} NavEntry;
+    char  *label;    /* "A", "2019", "#", etc. */
+    guint  position; /* first item index in GListStore */
+    guint  count;    /* number of items in this bucket */
+} ScrubberBucket;
+
+void scrubber_bucket_free(ScrubberBucket *bucket);
+
+GtkWidget *quad_scrubber_new(void);
+void quad_scrubber_set_list_view(QuadScrubber *self, GtkListView *list_view);
+void quad_scrubber_set_vadj     (QuadScrubber *self, GtkAdjustment *vadj);
+void quad_scrubber_set_badge    (QuadScrubber *self, GtkWidget *badge);
+void quad_scrubber_set_buckets  (QuadScrubber *self, GPtrArray *buckets); /* takes ownership */
+void quad_scrubber_set_total    (QuadScrubber *self, guint total_items);
+void quad_scrubber_clear        (QuadScrubber *self);
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Unified Detail View - Single widget for empty/album/artist states
+ * Gradient Widgets (gradient_widgets.c)
+ *
+ * GPU-accelerated gradient overlays for detail view backgrounds.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-typedef enum {
-    DETAIL_STATE_ALBUM,
-    DETAIL_STATE_ARTIST,
-} DetailState;
+typedef struct {
+    GdkRGBA top;
+    GdkRGBA bottom;
+} EdgeColors;
+
+typedef struct {
+    GdkRGBA edge_color;     /* Sampled from image edge */
+    gboolean from_top;      /* TRUE = page bg at top, image at bottom */
+} GradientData;
+
+#define QUAD_TYPE_GRADIENT_FADE (quad_gradient_fade_get_type())
+G_DECLARE_FINAL_TYPE(QuadGradientFade, quad_gradient_fade, QUAD, GRADIENT_FADE, GtkWidget)
+
+struct _QuadGradientFade {
+    GtkWidget parent;
+    GradientData grad;
+};
+
+struct _QuadGradientFadeClass {
+    GtkWidgetClass parent_class;
+};
+
+/* Sample average color from top and bottom N rows of a texture. */
+EdgeColors sample_edge_colors(GdkTexture *texture, int num_rows);
+
+/* Set gradient edge color and direction. */
+void quad_gradient_fade_set_color(QuadGradientFade *self,
+                                   const GdkRGBA *color, gboolean from_top);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Row Interaction Handlers
@@ -71,6 +164,7 @@ typedef enum {
 typedef struct {
     void (*on_activate)(int64_t entity_id, gpointer data);  /* primary: double-click / Enter */
     void (*on_secondary)(int64_t entity_id, gpointer data); /* secondary: right-click */
+    void (*on_mbid_navigate)(const char *mbid, const char *name, const char *type, gpointer data);
     gpointer user_data;
 } RowCallbacks;
 
@@ -119,6 +213,114 @@ GListStore *lazy_list_get_store(LazyList *ll);
 void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll);
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Unified Filter Bar
+ *
+ * Shared filter/sort UI used by Artists, Albums, and Search views.
+ * Loads filter_sort_bar.ui + optionally advanced_search_bar.ui.
+ * Owns genre/year/credit filter state and sort selection.
+ * Notifies the consumer via on_changed callback when any filter changes.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Sort option descriptor for the sort dropdown */
+typedef struct {
+    const char *label;       /* Display text, e.g. "Name (A-Z)" */
+    library_sort_t sort;     /* Enum value */
+} FilterBarSortOption;
+
+/* Callback fired when any filter or sort state changes */
+typedef void (*filter_bar_changed_cb)(gpointer user_data);
+
+typedef struct {
+    /* Widgets (owned by GTK widget tree, not freed here) */
+    GtkWidget *bar_widget;         /* Top-level GtkBox from filter_sort_bar.ui */
+    GtkWidget *filter_genre;       /* GtkMenuButton */
+    GtkWidget *filter_year;        /* GtkMenuButton */
+    GtkWidget *filter_search;      /* GtkSearchEntry (NULL if hidden) */
+    GtkWidget *filter_search_box;  /* Container box for search (hidden in search view) */
+    GtkWidget *filter_clear;       /* GtkButton */
+    GtkWidget *advanced_toggle;    /* GtkToggleButton */
+    GtkWidget *sort_dropdown;      /* GtkMenuButton (hidden when no sort options) */
+    GtkWidget *sort_dropdown_box;  /* Wrapper GtkBox for sort (visibility toggled here) */
+
+    /* Advanced panel (NULL until filter_bar_attach_advanced) */
+    GtkWidget *advanced_revealer;  /* GtkRevealer */
+    GtkWidget *credit_search_entry;/* GtkSearchEntry */
+    GtkWidget *filter_role;        /* GtkMenuButton */
+
+    /* Filter state */
+    GHashTable *selected_genres;   /* Set of selected genre strings (owned) */
+    uint16_t selected_years_mask;  /* Bitmask: bit 0=2020s .. bit 7=Pre-1960 */
+    guint filter_debounce_timer;
+    guint credit_debounce_timer;
+    int selected_role_index;       /* 0 = All Roles */
+
+    /* Sort state */
+    const FilterBarSortOption *sort_options; /* Array of options (static, not owned) */
+    int sort_option_count;
+    int current_sort_index;
+
+    /* Genre list (for popover rebuild) */
+    GPtrArray *genre_list;         /* Sorted unique genre strings (owned) */
+
+    /* Consumer callback */
+    filter_bar_changed_cb on_changed;
+    gpointer on_changed_data;
+
+    /* Library cache (for building genre popover) */
+    library_cache_t *cache;
+} FilterBarState;
+
+/**
+ * Initialize a FilterBarState by loading filter_sort_bar.ui.
+ * sort_options: array of sort descriptors (NULL = hide sort dropdown).
+ * sort_count: number of sort options.
+ * on_changed: callback invoked when any filter/sort changes.
+ * Returns the top-level GtkBox widget.
+ */
+GtkWidget *filter_bar_init(FilterBarState *fb, library_cache_t *cache,
+                            const FilterBarSortOption *sort_options, int sort_count,
+                            filter_bar_changed_cb on_changed, gpointer user_data);
+
+/**
+ * Load advanced_search_bar.ui and insert the revealer into parent_box
+ * right after the filter bar widget.
+ */
+void filter_bar_attach_advanced(FilterBarState *fb, GtkWidget *parent_box);
+
+/** Reset all filter state to defaults and invoke on_changed. */
+void filter_bar_clear(FilterBarState *fb);
+
+/** Free owned resources (hash tables, genre list, timers). */
+void filter_bar_destroy(FilterBarState *fb);
+
+/** Check if any filter is active (genre, year, search text, or credit search). */
+gboolean filter_bar_is_active(const FilterBarState *fb);
+
+/** Get the current sort enum value. */
+library_sort_t filter_bar_get_sort(const FilterBarState *fb);
+
+/** Get search text (NULL if empty or search field is hidden). */
+const char *filter_bar_get_search_text(const FilterBarState *fb);
+
+/** Get credit search text (NULL if advanced panel closed or empty). */
+const char *filter_bar_get_credit_text(const FilterBarState *fb);
+
+/** Get selected role index (0 = All Roles). */
+int filter_bar_get_role_index(const FilterBarState *fb);
+
+/** Get selected role's MusicBrainz link_type GID (NULL for "All Roles"). */
+const char *filter_bar_get_role_gid(const FilterBarState *fb);
+
+/** Build db_search_opts_t from current genre/year state. Caller must g_free returned genres array. */
+db_search_opts_t filter_bar_build_search_opts(const FilterBarState *fb, const char ***genres_out, size_t *genre_count_out);
+
+/** Hide the search field (for search view which has its own primary search bar). */
+void filter_bar_hide_search(FilterBarState *fb);
+
+/** Rebuild genre popover from library cache (call after cache warming). */
+void filter_bar_rebuild_genre_popover(FilterBarState *fb);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Library Views - GTK4 list views for browsing
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -150,24 +352,139 @@ typedef struct {
     gpointer user_data;
 } LibraryCallbacks;
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Navigation Stack - For detail view back navigation
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    NAV_ENTRY_VIEW,        /* Main view (Artists, Albums, Search) */
+    NAV_ENTRY_ARTIST,      /* Artist detail */
+    NAV_ENTRY_ALBUM,       /* Album detail */
+    NAV_ENTRY_META_ARTIST, /* Metadata-only artist (credits only, no library presence) */
+} NavEntryType;
+
+typedef struct {
+    NavEntryType type;
+    int64_t id;              /* Artist/album ID (0 for main views) */
+    char *view_name;         /* Source view name for back label */
+    double scroll_pos;       /* Scroll position to restore */
+    /* Meta artist fields (only for NAV_ENTRY_META_ARTIST) */
+    char *meta_artist_mbid;
+    char *meta_artist_name;
+    char *meta_artist_type;
+} NavEntry;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Unified Detail View - Single widget for empty/album/artist states
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    DETAIL_STATE_ALBUM,
+    DETAIL_STATE_ARTIST,
+    DETAIL_STATE_META_ARTIST,  /* Credits-only artist (no main DB counterpart) */
+} DetailState;
+
+/* Opaque type — see ui/row_helpers.c */
+typedef struct _SelectionGroup SelectionGroup;
+
+#define MAX_NAV_STACK 24
+
+typedef struct {
+    library_cache_t *cache;
+    ArtworkManager *art_mgr;
+    LibraryCallbacks cbs;
+    app_settings_t *settings;
+
+    DetailState state;
+    int64_t current_id;
+    int64_t album_artist_id;
+
+    NavEntry nav_stack[MAX_NAV_STACK];
+    int nav_depth;
+
+    GtkWidget *container;
+    GtkWidget *back_header;
+    GtkWidget *back_button;
+    GtkWidget *back_label;
+    GtkWidget *header_artist_name;
+    GtkWidget *content_stack;
+    GtkSizeGroup *header_height_group;
+
+    GtkWidget *album_card_container;
+    GtkWidget *album_card_inner;
+
+    GtkWidget *artist_name;
+    GtkWidget *artist_stats;
+    GtkWidget *albums_section;
+    GtkWidget *artist_albums_container;
+    GtkWidget *appears_on_section;
+    GtkWidget *appears_on_albums_revealer;
+    GtkWidget *appears_on_tracks_revealer;
+    GtkWidget *appears_on_albums;
+    GtkWidget *appears_on_tracks;
+    GtkWidget *toggle_albums_btn;
+    GtkWidget *toggle_tracks_btn;
+
+    GtkWidget *artist_banner;
+    GtkWidget *artist_banner_overlay;
+    QuadGradientFade *artist_banner_fade_bottom;
+
+    GtkWidget *about_section;
+    GtkWidget *about_background_image;
+    QuadGradientFade *about_fade_top;
+    QuadGradientFade *about_fade_bottom;
+    GtkWidget *about_bio_text;
+    GtkWidget *about_wiki_link;
+    char *about_wiki_url;
+
+    SelectionGroup *sel_group;
+
+    char *meta_artist_mbid;
+    char *meta_artist_name;
+} UnifiedDetailData;
+
+/* detail_view.c — shared with credits_view.c */
+void on_album_card_artist_navigate(GtkButton *btn, gpointer data);
+
+/* Forward declaration — full definition in src/ui/internal.h */
+typedef struct UiRowSizeGroups UiRowSizeGroups;
+
+/* credits_view.c — info button wiring and MB credits popover builders */
+void wire_info_buttons(GtkWidget *card, UnifiedDetailData *ud);
+guint append_credit_rows(UnifiedDetailData *ud,
+                         const char *artist_mbid,
+                         const char *artist_name,
+                         int64_t viewed_artist_id,
+                         GHashTable *skip_track_ids,
+                         GHashTable *skip_album_ids,
+                         UiRowSizeGroups *track_groups,
+                         UiRowSizeGroups *album_groups);
+
 /* Main list views */
 GtkWidget *library_view_new(LibraryItemKind kind,
                              library_cache_t *cache,
                              ArtworkManager *art_mgr,
-                             const LibraryCallbacks *cbs);
+                             const LibraryCallbacks *cbs,
+                             app_settings_t *settings);
 
 /* Unified Detail View - single widget handling empty/album/artist states */
 GtkWidget *library_unified_detail_view_new(library_cache_t *cache,
                                             ArtworkManager *art_mgr,
-                                            const LibraryCallbacks *cbs);
+                                            const LibraryCallbacks *cbs,
+                                            app_settings_t *settings);
 
 void library_unified_detail_navigate_to_artist(GtkWidget *view, int64_t artist_id,
                                                 const char *source_view);
 void library_unified_detail_navigate_to_album(GtkWidget *view, int64_t album_id,
                                                const char *source_view,
                                                int64_t select_track_id);
+void library_unified_detail_navigate_to_meta_artist(GtkWidget *view,
+                                                      const char *artist_mbid,
+                                                      const char *artist_name,
+                                                      const char *artist_type);
 
 gboolean library_unified_detail_go_back(GtkWidget *view);
+void library_unified_detail_reload(GtkWidget *view);
 void library_unified_detail_clear_nav(GtkWidget *view);
 DetailState library_unified_detail_get_state(GtkWidget *view);
 GtkWidget *library_unified_detail_get_track_list(GtkWidget *view);
@@ -183,6 +500,7 @@ void library_view_clear_filters(GtkWidget *view);
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 GtkWidget *errors_view_new(quadrature_db_t *db);
+void errors_view_set_db(GtkWidget *view, quadrature_db_t *db);
 void errors_view_refresh(GtkWidget *view);
 void errors_view_set_callbacks(GtkWidget *view,
                                 void (*on_path)(const char *path, gpointer data),

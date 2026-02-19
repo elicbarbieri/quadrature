@@ -6,52 +6,123 @@ Two-tier artwork system: managed thumbnails with full caching infrastructure, fu
 
 ## Thumbnail API
 
-For list views. Uses LRU texture cache, mmapped atlas, worker pool, and latency metrics.
+For list views. Uses frequency-weighted LRU texture cache, per-library mmapped atlases, worker pool, and latency metrics.
 
-Thumbnails are generated during library scan, which will load all the artwork, resize it to 48x48, and write it to the atlas.
-Any albums that cannot be resized and written to the atlas will be skipped and have a grey placeholder thumbnail in the UI.
+Thumbnails are generated during library scan, resized to Npx, and packed into a per-library atlas file. Any albums without locatable artwork get a grey placeholder thumbnail in the UI.
 
 ```c
-ArtworkManager *artwork_manager_new(library_cache_t *library, const char *atlas_path, size_t memory_limit);
+ArtworkManager *artwork_manager_new(library_cache_t *library,
+                                    const char **library_roots, int lib_count,
+                                    int cache_size, size_t cache_count);
 void artwork_manager_free(ArtworkManager *mgr);
 
-// Async load with callback
-void artwork_manager_load_thumb(ArtworkManager *mgr, int64_t album_id,
-                                const char *fallback_path, LoadPriority priority,
-                                GCancellable *cancel, ArtLoadCallback cb, gpointer data);
+// Async load thumbnail into widget (cache hit = synchronous, miss = deferred worker)
+void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWidget *image);
 
-// Direct widget binding
-void artwork_manager_load_thumb_into(ArtworkManager *mgr, int64_t album_id,
-                                     const char *fallback_path, LoadPriority priority,
-                                     GtkWidget *image, GCancellable *cancel);
+// Reload a specific library's atlas after indexing completes
+void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int lib_idx,
+                                          const char *atlas_path);
+```
 
-// Scroll prefetch
-void artwork_manager_prefetch_thumbs(ArtworkManager *mgr, const int64_t *album_ids, size_t count);
-void artwork_manager_cancel_prefetches(ArtworkManager *mgr);
+### Global IDs
 
+All `album_id` values passed to the ArtworkManager must be **global IDs** as defined in `library/library_id.h`:
+
+```c
+// Encode: upper 16 bits = library index, lower 48 bits = local SQLite ID
+int64_t global_id = LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id);
+
+// Decode (done internally by ArtworkManager):
+int     lib_idx  = LIBRARY_GLOBAL_ID_LIB(global_id);   // → which per-library atlas
+int64_t local_id = LIBRARY_GLOBAL_ID_LOCAL(global_id); // → binary search key
+```
+
+Library 0 global IDs are identical to their local SQLite IDs (upper 16 bits = 0), providing full backward compatibility for single-library use.
+
+The library_cache already returns global IDs from all entity accessors, so callsites pass `album->album_id` directly without any encoding step.
+
+### Atlas Format
+
+Atlas files live alongside the library database:
+
+```
+{library_root}/artwork/{N}px-artwork-{unix_timestamp}.atlas
+```
+
+- **One atlas per library root** — no shared global atlas
+- **Timestamped filenames** — each indexer run produces a new file, enabling atomic swap without disturbing live readers
+- **3-file rotation** — the indexer keeps only the 3 most recent atlas files per library per size; older files are deleted after a successful write
+- **Startup load** — `artwork_manager_new()` calls `find_latest_atlas()` for each library, which scans `{root}/artwork/` and returns the path with the highest timestamp (lexicographic order is correct for fixed-width Unix timestamps)
+- **Binary search** — entries sorted by `local_id`, O(log n) lookup
+
+### Atlas Lifecycle
+
+```
+Indexer Phase 3 (ARTWORK):
+  1. find_latest_existing_atlas() → preserve unchanged entries
+  2. Generate new path: {N}px-artwork-{timestamp}.atlas
+  3. Build new atlas (parallel image processing)
+  4. artwork_atlas_builder_finish() → atomic rename from temp
+  5. rotate_atlas_files() → delete all but 3 newest
+  6. Store path in idx->atlas_path
+
+INDEXER_COMPLETED callback fires:
+  progress.atlas_path = new atlas path
+
+IndexerController emits "completed" signal on main thread:
+  on_indexer_done() in window.c:
+    → artwork_manager_reload_library_atlas(mgr, lib_idx, progress.atlas_path)
+      → clear texture cache (all entries)
+      → lib_atlas_load() for the affected library slot
 ```
 
 ### Stats:
 
-Each time the UI requests a thumbnail, the manager will be tracking the latency, cache hit/miss rates, etc... Evictions are also tracked, and the
-internal functions to scan/seek album-ids from the atlas have latency hooks to track the time spent in the scan/seek.
-
 `artwork_manager_get_stats()` for hits, misses, evictions, atlas hits, latency percentiles (p50/p90/p99).
+
+## Artist Thumbnails
+
+For artist list views. Same architecture as album thumbnails (mmap'd atlas, texture cache, shared workers) with MBID-based dedup across libraries.
+
+```c
+// Async load artist thumbnail into widget (cache hit = synchronous, miss = deferred worker)
+void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id, GtkWidget *image);
+
+// Reload a specific library's artist atlas after indexing completes
+void artwork_manager_reload_artist_atlas(ArtworkManager *mgr, int lib_idx,
+                                          const char *artist_atlas_path);
+```
 
 ### Atlas Format
 
-The atlas is stored in .local/share/quadrature/unix-timestamp.atlas... When this library manager seeks for an album-id in the atlas, it will use the
-latest atlas file. Atlas files will be re-generated during library indexing/scan to ensure that the album-ids are in sequential order so the file seek/mmap
-offsets can be pre-computed. If albums get deleted from the library, those old album-ids will still be reserved until someone deletes both the sqlite db
-and the atlas file for a full nuke/from-scratch library reset
+Artist atlases use the same binary format as album atlases (same header, sorted int64 keys, fixed-stride raw RGB pixels). They live alongside album atlases:
+
+```
+{library_root}/artwork/{N}px-artists.atlas
+```
+
+- **One per library root** — built during Phase 7 (fanart.tv artist art fetch)
+- **No timestamp rotation** — single file overwritten each indexer run
+- **Keyed by local artist DB ID** — same binary search as album atlas
+
+### MBID Dedup (Multi-Library)
+
+When an artist appears in multiple libraries with the same MusicBrainz ID, the library cache merges them into a single entity with `merged_source_ids[]`. The texture cache keys by the merged artist's global ID, so:
+
+1. First request → tries each source library's artist atlas until found
+2. Subsequent requests → O(1) cache hit on the merged ID
+3. No separate MBID hashmap needed — dedup is implicit via cache merge
+
+### Artist Cache
+
+Separate from the album texture cache to avoid ID collisions. Same frequency-weighted LRU eviction strategy. Default capacity: 500 entries (~4.5 MB at 48x48 RGBA).
 
 ## Full-Size Artwork
 
-For detail views. There is no application-level caching, and `posix_fadvise(WILLNEED)` to prefetch into kernel page cache, then GTK loads directly.
+For detail views. No application-level caching; `posix_fadvise(WILLNEED)` prefetches into kernel page cache, then GTK loads directly.
 
 ```c
-// Prefetch full-size artwork by album ID.
-// Calls LibraryCache to resolve album_id → path and do the prefetch syscall.
+// Prefetch full-size artwork by global album ID.
 void artwork_manager_prefetch_fullsize(ArtworkManager *mgr, int64_t album_id);
 ```
 

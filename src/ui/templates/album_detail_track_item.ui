@@ -2,10 +2,11 @@
 <!-- Album detail track item - uses GtkGrid for precise column alignment -->
 <interface>
   <object class="GtkGrid" id="row">
-    <property name="column-spacing">12</property>
+    <property name="column-spacing">6</property>
     <property name="row-spacing">0</property>
     <property name="vexpand">false</property>
     <property name="valign">center</property>
+    <property name="overflow">visible</property>
     <style>
       <class name="album-detail-track"/>
     </style>
@@ -18,6 +19,7 @@
         <property name="width-chars">3</property>
         <property name="xalign">0</property>
         <property name="hexpand">false</property>
+        <property name="overflow">visible</property>
         <layout>
           <property name="column">0</property>
           <property name="row">0</property>
@@ -47,48 +49,21 @@
       </object>
     </child>
 
-    <!-- Column 2: Featuring artists only (no primary artists in album detail) -->
+    <!-- Column 2: Combined artists (primary + featuring), right-aligned -->
     <child>
-      <object class="GtkBox" id="secondary_artists_box">
+      <object class="GtkBox" id="artists_box">
         <property name="orientation">horizontal</property>
         <property name="valign">center</property>
         <property name="hexpand">false</property>
-        <property name="halign">start</property>
+        <property name="halign">end</property>
         <layout>
           <property name="column">2</property>
           <property name="row">0</property>
         </layout>
-        <style>
-          <class name="album-detail-track-featuring"/>
-        </style>
       </object>
     </child>
 
-    <!-- Column 3: Info button (fixed width) -->
-    <child>
-      <object class="GtkButton" id="info_btn">
-        <property name="valign">center</property>
-        <property name="tooltip-text">Show track metadata</property>
-        <property name="has-frame">false</property>
-        <property name="hexpand">false</property>
-        <layout>
-          <property name="column">3</property>
-          <property name="row">0</property>
-        </layout>
-        <child>
-          <object class="GtkImage">
-            <property name="icon-name">help-about-symbolic</property>
-            <property name="pixel-size">14</property>
-          </object>
-        </child>
-        <style>
-          <class name="flat"/>
-          <class name="album-detail-track-info-btn"/>
-        </style>
-      </object>
-    </child>
-
-    <!-- Column 4: Duration (fixed width, left-aligned) -->
+    <!-- Column 3: Duration (fixed width) -->
     <child>
       <object class="GtkLabel" id="duration">
         <property name="valign">center</property>
@@ -97,11 +72,35 @@
         <property name="xalign">0</property>
         <property name="hexpand">false</property>
         <layout>
-          <property name="column">4</property>
+          <property name="column">3</property>
           <property name="row">0</property>
         </layout>
         <style>
           <class name="album-detail-track-duration"/>
+        </style>
+      </object>
+    </child>
+
+    <!-- Column 4: Info button (fixed width) -->
+    <child>
+      <object class="GtkButton" id="info_btn">
+        <property name="valign">center</property>
+        <property name="tooltip-text">Show track metadata</property>
+        <property name="has-frame">false</property>
+        <property name="hexpand">false</property>
+        <layout>
+          <property name="column">4</property>
+          <property name="row">0</property>
+        </layout>
+        <child>
+          <object class="GtkImage">
+            <property name="icon-name">help-about-symbolic</property>
+            <property name="pixel-size">16</property>
+          </object>
+        </child>
+        <style>
+          <class name="flat"/>
+          <class name="album-detail-track-info-btn"/>
         </style>
       </object>
     </child>

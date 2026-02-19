@@ -9,9 +9,7 @@
   <object class="GtkListBoxRow" id="track_row">
     <property name="vexpand">false</property>
     <property name="valign">fill</property>
-    <style>
-      <class name="album-track-row"/>
-    </style>
+    <property name="overflow">visible</property>
     <!-- Child content (GtkGrid) is set dynamically via gtk_list_box_row_set_child() -->
   </object>
 </interface>

@@ -28,71 +28,67 @@
             <property name="spacing">16</property>
             <property name="margin-top">16</property>
 
-            <!-- Audio Channels Section Header -->
+            <!-- ══════════════════════════════════════════════════
+                 AUDIO CHANNELS
+                 ══════════════════════════════════════════════════ -->
             <child>
               <object class="GtkLabel">
-                <property name="label">AUDIO CHANNELS</property>
+                <property name="label">Audio Channels</property>
                 <property name="xalign">0</property>
                 <style>
-                  <class name="library-section-header"/>
+                  <class name="settings-section-header"/>
                 </style>
               </object>
             </child>
 
-            <!-- Channel frames container (populated programmatically) -->
+            <!-- Channel frames (populated programmatically) -->
             <child>
               <object class="GtkBox" id="channel_frames_box">
                 <property name="orientation">vertical</property>
-                <property name="spacing">12</property>
+                <property name="spacing">10</property>
               </object>
             </child>
 
-            <!-- Display Section Header -->
+            <!-- ══════════════════════════════════════════════════
+                 APPEARANCE
+                 ══════════════════════════════════════════════════ -->
             <child>
               <object class="GtkLabel">
-                <property name="label">DISPLAY</property>
+                <property name="label">Appearance</property>
                 <property name="xalign">0</property>
                 <property name="margin-top">16</property>
                 <style>
-                  <class name="library-section-header"/>
+                  <class name="settings-section-header"/>
                 </style>
               </object>
             </child>
 
-            <!-- Spectrum checkbox -->
-            <child>
-              <object class="GtkCheckButton" id="spectrum_checkbox">
-                <property name="label">Show spectrum analyzer</property>
-                <property name="active">true</property>
-              </object>
-            </child>
-
-            <!-- Library Section Header -->
-            <child>
-              <object class="GtkLabel">
-                <property name="label">LIBRARY</property>
-                <property name="xalign">0</property>
-                <property name="margin-top">16</property>
-                <style>
-                  <class name="library-section-header"/>
-                </style>
-              </object>
-            </child>
-
-            <!-- Thumbnail size dropdown -->
             <child>
               <object class="GtkBox">
+                <style>
+                  <class name="settings-card"/>
+                </style>
                 <property name="orientation">horizontal</property>
-                <property name="spacing">12</property>
+                <property name="spacing">16</property>
                 <child>
-                  <object class="GtkLabel">
-                    <property name="label">Thumbnail size</property>
-                    <property name="xalign">0</property>
+                  <object class="GtkCheckButton" id="spectrum_checkbox">
+                    <property name="label">Show spectrum analyzer</property>
+                    <property name="active">true</property>
                     <property name="hexpand">true</property>
                   </object>
                 </child>
                 <child>
+                  <object class="GtkLabel">
+                    <property name="label">Thumbnail Size</property>
+                    <property name="valign">center</property>
+                    <style>
+                      <class name="settings-label"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
                   <object class="GtkDropDown" id="art_size_dropdown">
+                    <property name="valign">center</property>
                     <property name="model">
                       <object class="GtkStringList">
                         <items>
@@ -107,50 +103,185 @@
                 </child>
               </object>
             </child>
-            <!-- MusicBrainz Section Header -->
+
+            <!-- ══════════════════════════════════════════════════
+                 INTEGRATIONS
+                 ══════════════════════════════════════════════════ -->
             <child>
               <object class="GtkLabel">
-                <property name="label">MUSICBRAINZ</property>
+                <property name="label">Integrations</property>
                 <property name="xalign">0</property>
                 <property name="margin-top">16</property>
                 <style>
-                  <class name="library-section-header"/>
+                  <class name="settings-section-header"/>
                 </style>
               </object>
             </child>
 
-            <!-- Fingerprint tracks toggle -->
-            <child>
-              <object class="GtkCheckButton" id="fingerprint_checkbox">
-                <property name="label">Generate AcoustID fingerprints during indexing</property>
-                <property name="active">false</property>
-              </object>
-            </child>
-
-            <!-- MusicBrainz resolve toggle -->
-            <child>
-              <object class="GtkCheckButton" id="mb_resolve_checkbox">
-                <property name="label">Resolve metadata from MusicBrainz after indexing</property>
-                <property name="active">false</property>
-              </object>
-            </child>
-
-            <!-- PostgreSQL connection string -->
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
-                <property name="spacing">12</property>
+                <style>
+                  <class name="settings-card"/>
+                </style>
+                <property name="orientation">vertical</property>
+                <property name="spacing">8</property>
+
+                <!-- Toggle row -->
                 <child>
-                  <object class="GtkLabel">
-                    <property name="label">PostgreSQL connection</property>
-                    <property name="xalign">0</property>
-                    <property name="valign">center</property>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkCheckButton" id="mb_resolve_checkbox">
+                        <property name="label">Resolve MusicBrainz metadata</property>
+                        <property name="active">false</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="fanart_resolve_checkbox">
+                        <property name="label">Resolve Fanart.tv images</property>
+                        <property name="active">false</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="acoustid_fingerprint_checkbox">
+                        <property name="label">Fingerprint tracks missing MUSICBRAINZ_ tags</property>
+                        <property name="active">false</property>
+                      </object>
+                    </child>
                   </object>
                 </child>
+
+                <!-- Separator -->
                 <child>
-                  <object class="GtkEntry" id="pg_conninfo_entry">
-                    <property name="hexpand">true</property>
-                    <property name="placeholder-text">host=localhost dbname=musicbrainz_db user=musicbrainz</property>
+                  <object class="GtkSeparator">
+                    <style>
+                      <class name="settings-card-separator"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Connection strings grid -->
+                <child>
+                  <object class="GtkGrid" id="integrations_grid">
+                    <property name="row-spacing">8</property>
+                    <property name="column-spacing">14</property>
+
+                    <!-- Row 0: MusicBrainz PostgreSQL -->
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">MusicBrainz PostgreSQL</property>
+                        <property name="xalign">0</property>
+                        <property name="valign">center</property>
+                        <style>
+                          <class name="settings-label"/>
+                        </style>
+                        <layout>
+                          <property name="column">0</property>
+                          <property name="row">0</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkEntry" id="pg_conninfo_entry">
+                        <property name="hexpand">true</property>
+                        <property name="placeholder-text">host=localhost dbname=musicbrainz_db user=musicbrainz</property>
+                        <style>
+                          <class name="settings-entry"/>
+                        </style>
+                        <layout>
+                          <property name="column">1</property>
+                          <property name="row">0</property>
+                        </layout>
+                      </object>
+                    </child>
+
+                    <!-- Row 1: AcoustID PostgreSQL -->
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">AcoustID PostgreSQL</property>
+                        <property name="xalign">0</property>
+                        <property name="valign">center</property>
+                        <style>
+                          <class name="settings-label"/>
+                        </style>
+                        <layout>
+                          <property name="column">0</property>
+                          <property name="row">1</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkEntry" id="acoustid_pg_entry">
+                        <property name="hexpand">true</property>
+                        <property name="placeholder-text">host=localhost dbname=acoustid user=acoustid</property>
+                        <style>
+                          <class name="settings-entry"/>
+                        </style>
+                        <layout>
+                          <property name="column">1</property>
+                          <property name="row">1</property>
+                        </layout>
+                      </object>
+                    </child>
+
+                    <!-- Row 2: AcoustID Index -->
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">AcoustID Index</property>
+                        <property name="xalign">0</property>
+                        <property name="valign">center</property>
+                        <style>
+                          <class name="settings-label"/>
+                        </style>
+                        <layout>
+                          <property name="column">0</property>
+                          <property name="row">2</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkEntry" id="acoustid_index_entry">
+                        <property name="hexpand">true</property>
+                        <property name="placeholder-text">http://localhost:6080</property>
+                        <style>
+                          <class name="settings-entry"/>
+                        </style>
+                        <layout>
+                          <property name="column">1</property>
+                          <property name="row">2</property>
+                        </layout>
+                      </object>
+                    </child>
+
+                    <!-- Row 3: Fanart.tv API Key -->
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Fanart.tv API Key</property>
+                        <property name="xalign">0</property>
+                        <property name="valign">center</property>
+                        <style>
+                          <class name="settings-label"/>
+                        </style>
+                        <layout>
+                          <property name="column">0</property>
+                          <property name="row">3</property>
+                        </layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkEntry" id="fanart_api_key_entry">
+                        <property name="hexpand">true</property>
+                        <property name="placeholder-text">Personal API key from fanart.tv/get-an-api-key</property>
+                        <style>
+                          <class name="settings-entry"/>
+                        </style>
+                        <layout>
+                          <property name="column">1</property>
+                          <property name="row">3</property>
+                        </layout>
+                      </object>
+                    </child>
                   </object>
                 </child>
               </object>

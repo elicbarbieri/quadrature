@@ -1,10 +1,14 @@
-#include <glib.h>
 /**
  * Indexer utilities: audio file detection, metadata extraction.
  */
 
+#define G_LOG_DOMAIN "quadrature"
+
+#include <glib.h>
+
 #include "internal.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -111,12 +115,14 @@ void index_item_free(index_item_t* item) {
     free(item->album_artist);
     free(item->album);
     free(item->genre);
+    free(item->mb_release_id);
     item->path = NULL;
     item->title = NULL;
     item->artist = NULL;
     item->album_artist = NULL;
     item->album = NULL;
     item->genre = NULL;
+    item->mb_release_id = NULL;
 }
 
 // =============================================================================
@@ -134,6 +140,7 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     out->album_artist = NULL;
     out->album = NULL;
     out->genre = NULL;
+    out->mb_release_id = NULL;
     out->duration_ms = 0;
     out->track_num = 0;
     out->disc_num = 0;
@@ -181,6 +188,10 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
         } else if (strcasecmp(tag->key, "genre") == 0) {
             free(out->genre);
             out->genre = strdup(tag->value);
+            for (char* p = out->genre; *p; p++) *p = tolower((unsigned char)*p);
+        } else if (strcasecmp(tag->key, "musicbrainz_albumid") == 0) {
+            free(out->mb_release_id);
+            out->mb_release_id = strdup(tag->value);
         }
     }
 
@@ -199,88 +210,87 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     return QUADRATURE_OK;
 }
 
-size_t scan_audio_files_in_dir(const char* dir, char*** files_out, struct stat** stats_out) {
-    if (!dir) return 0;
+// =============================================================================
+// Artist Tag Splitting
+// =============================================================================
 
-    DIR* d = opendir(dir);
-    if (!d) return 0;
+typedef struct {
+    const char* pattern;   /* delimiter to search for (lowercase) */
+    const char* canonical; /* join_phrase to store in the DB */
+    size_t len;            /* strlen(pattern) */
+} delimiter_t;
 
-    size_t cap = 64;
-    size_t count = 0;
-    char** files = NULL;
-    struct stat* stats = NULL;
+static const delimiter_t DELIMITERS[] = {
+    { " featuring ", " feat. ", 11 },
+    { " feat. ",     " feat. ",  7 },
+    { " feat ",      " feat. ",  6 },
+    { " ft. ",       " ft. ",    5 },
+    { " ft ",        " ft. ",    4 },
+    { " & ",         " & ",      3 },
+};
+#define DELIMITER_COUNT (sizeof(DELIMITERS) / sizeof(DELIMITERS[0]))
 
-    if (files_out) {
-        files = malloc(cap * sizeof(char*));
-        if (!files) {
-            closedir(d);
-            return 0;
-        }
+void artist_credits_free(artist_credit_t* credits, size_t count) {
+    if (!credits) return;
+    for (size_t i = 0; i < count; i++) {
+        free(credits[i].name);
+        free(credits[i].join_phrase);
     }
+    free(credits);
+}
 
-    if (stats_out) {
-        stats = malloc(cap * sizeof(struct stat));
-        if (!stats) {
-            free(files);
-            closedir(d);
-            return 0;
-        }
-    }
+size_t parse_artist_tag(const char* tag, artist_credit_t** out) {
+    g_assert(tag && out);
 
-    char path_buf[INDEXER_PATH_MAX];
-    struct dirent* ent;
+    /* Allocate a growable result array. */
+    size_t cap = 4, count = 0;
+    artist_credit_t* credits = malloc(cap * sizeof(artist_credit_t));
+    g_assert(credits);
 
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+    const char* cursor = tag;
 
-        // Use d_type to skip non-regular files without stat()
-        if (ent->d_type != DT_REG) continue;
+    while (*cursor) {
+        /* Find the earliest delimiter in the remaining string. */
+        const char* best_pos = NULL;
+        const delimiter_t* best_delim = NULL;
 
-        if (!is_audio_file(ent->d_name)) continue;
-
-        snprintf(path_buf, sizeof(path_buf), "%s/%s", dir, ent->d_name);
-
-        // Only stat for mtime/size (required for output), file type already confirmed
-        struct stat st;
-        if (stats_out && stat(path_buf, &st) != 0) continue;
-
-        if (files_out || stats_out) {
-            if (count >= cap) {
-                cap *= 2;
-                if (files) {
-                    char** new_files = realloc(files, cap * sizeof(char*));
-                    if (!new_files) {
-                        for (size_t i = 0; i < count; i++) free(files[i]);
-                        free(files);
-                        free(stats);
-                        closedir(d);
-                        return 0;
+        for (size_t d = 0; d < DELIMITER_COUNT; d++) {
+            const char* p = cursor;
+            size_t dlen = DELIMITERS[d].len;
+            while (*p) {
+                if (g_ascii_strncasecmp(p, DELIMITERS[d].pattern, dlen) == 0) {
+                    if (!best_pos || p < best_pos) {
+                        best_pos   = p;
+                        best_delim = &DELIMITERS[d];
                     }
-                    files = new_files;
+                    break;
                 }
-                if (stats) {
-                    struct stat* new_stats = realloc(stats, cap * sizeof(struct stat));
-                    if (!new_stats) {
-                        for (size_t i = 0; i < count; i++) free(files[i]);
-                        free(files);
-                        free(stats);
-                        closedir(d);
-                        return 0;
-                    }
-                    stats = new_stats;
-                }
+                p++;
             }
+            /* Short-circuit: can't find an earlier match than cursor itself */
+            if (best_pos == cursor) break;
         }
 
-        if (files) files[count] = strdup(path_buf);
-        if (stats) stats[count] = st;
-        count++;
+        if (!best_pos) {
+            /* No delimiter found — emit the rest as the final credit. */
+            if (count == cap) credits = realloc(credits, (cap *= 2) * sizeof(artist_credit_t));
+            credits[count++] = (artist_credit_t){
+                .name        = strdup(cursor),
+                .join_phrase = strdup(""),
+            };
+            break;
+        }
+
+        /* Emit the segment before the delimiter. */
+        if (count == cap) credits = realloc(credits, (cap *= 2) * sizeof(artist_credit_t));
+        credits[count++] = (artist_credit_t){
+            .name        = strndup(cursor, (size_t)(best_pos - cursor)),
+            .join_phrase = strdup(best_delim->canonical),
+        };
+        cursor = best_pos + best_delim->len;
     }
 
-    closedir(d);
-
-    if (files_out) *files_out = files;
-    if (stats_out) *stats_out = stats;
-
+    *out = credits;
     return count;
 }
+

@@ -2,7 +2,7 @@
 
 /* Navigation Bar */
 .nav-bar {
-    background-color: #151515;
+    background-color: #1e1e1e;
     min-width: 56px;
 }
 
@@ -28,8 +28,6 @@
     background-color: rgba(0, 212, 255, 0.1);
 }
 
-.nav-icon { color: inherit; }
-
 .nav-label {
     font-size: 10px;
     font-weight: 500;
@@ -42,43 +40,30 @@
     margin: 8px;
 }
 
-.nav-badge {
-    background-color: #ff3333;
-    color: white;
-    font-size: 9px;
-    font-weight: 600;
-    padding: 1px 4px;
-    border-radius: 8px;
-    min-width: 14px;
-}
-
-/* Settings */
-.settings-section {
-    padding: 16px;
-    background-color: rgba(255, 255, 255, 0.02);
-    border-radius: 8px;
-    margin-bottom: 16px;
-}
-
 .settings-channel-frame {
     background-color: #282828;
     border: 1px solid #3a3a3a;
     border-radius: 8px;
-    margin-bottom: 12px;
 }
 
 .settings-channel-frame > label {
     font-size: 14px;
     font-weight: 600;
     color: #00d4ff;
-    padding: 0 8px;
+    padding: 4px 8px;
     margin-left: 8px;
+    margin-top: 8px;
+    border: 1px solid #00d4ff;
+    border-radius: 6px;
+}
+
+.settings-channel-grid {
+    margin: 10px 14px 14px 14px;
 }
 
 .settings-label {
     font-size: 13px;
     color: #aaaaaa;
-    min-width: 120px;
 }
 
 .settings-entry {
@@ -88,6 +73,31 @@
 
 .settings-entry:disabled { opacity: 0.5; }
 
+.settings-card {
+    background-color: #282828;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    padding: 14px;
+}
+
+.settings-card-separator {
+    background-color: #3a3a3a;
+    min-height: 1px;
+    margin: 10px 0;
+}
+
+.settings-sub-header {
+    font-size: 13px;
+    font-weight: 600;
+    color: #888888;
+}
+
+.settings-section-header {
+    font-size: 28px;
+    font-weight: 600;
+    color: #888888;
+}
+
 /* Help View */
 .help-shortcuts {
     font-family: monospace;
@@ -96,36 +106,21 @@
     line-height: 1.6;
 }
 
-/* Indexing Progress */
-.progress-section {
-    padding: 16px;
-    background-color: #282828;
-    border-radius: 8px;
-    border: 1px solid #3a3a3a;
-    margin-bottom: 16px;
-}
-
-.progress-section-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: #e0e0e0;
-    margin-bottom: 12px;
-}
-
+/* Indexing Progress (per-card phase rows inside GtkStack) */
 .progress-phase { margin-bottom: 16px; }
 .progress-phase:last-child { margin-bottom: 0; }
 
 .progress-phase-title {
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 600;
     color: #e0e0e0;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
 }
 
 .progress-phase-bar {
     min-height: 8px;
     border-radius: 4px;
-    margin-bottom: 4px;
+    margin-bottom: 0;
 }
 
 .progress-phase-bar trough {
@@ -146,8 +141,8 @@
 }
 
 .progress-phase-rate {
-    font-size: 11px;
-    color: #666666;
+    font-size: 12px;
+    color: #888888;
 }
 
 .progress-phase-dim .progress-phase-title { color: #666666; }
@@ -159,10 +154,16 @@
 .progress-phase-active .progress-phase-title { color: #00d4ff; }
 .progress-phase-complete .progress-phase-bar progress { background-color: #4ade80; }
 
+.progress-phase-skipped .progress-phase-bar trough { background-color: #2a2a2a; }
+.progress-phase-skipped .progress-phase-bar progress { background-color: #2a2a2a; }
+.progress-phase-skipped .progress-phase-label { color: #555555; }
+.progress-phase-skipped .progress-phase-rate { color: #444444; }
+
 /* Toast Notifications */
 .toast-notification {
-    background-color: rgba(40, 40, 40, 0.95);
+    background-color: #2a2a2a;
     border: 1px solid #555555;
+    border-left: 3px solid #555555;
     border-radius: 8px;
     padding: 12px 20px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
@@ -172,6 +173,27 @@
     font-size: 14px;
     font-weight: 500;
     color: #e0e0e0;
+}
+
+/* Toast variant: success (indexing complete, saved, etc.) */
+.toast-success {
+    border-color: #2d7a52;
+    border-left-color: #4ade80;
+    background-color: #1a3327;
+}
+
+/* Toast variant: warning */
+.toast-warning {
+    border-color: #7a6020;
+    border-left-color: #fbbf24;
+    background-color: #332b14;
+}
+
+/* Toast variant: error */
+.toast-error {
+    border-color: #7a2d2d;
+    border-left-color: #f87171;
+    background-color: #331a1a;
 }
 
 /* Metadata Dialog */
@@ -188,138 +210,94 @@
     padding: 12px;
 }
 
-.metadata-label {
-    font-size: 12px;
-    color: #888888;
-    font-weight: 500;
+/* Errors Popover */
+.errors-popover > contents {
+    background-color: #252525;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
 }
 
-.metadata-value {
-    font-size: 12px;
-    color: #e0e0e0;
+.errors-content {
+    margin: 16px 20px;
 }
 
-.metadata-value.dim-label {
-    color: #666666;
-    font-style: italic;
-}
-
-/* Errors View */
-.errors-tree-row {
-    padding: 6px 8px;
-    min-height: 32px;
-}
-
-.errors-tree-row:hover { background-color: rgba(255, 255, 255, 0.05); }
-
-.error-artist-row {
-    font-weight: 600;
-    color: #e0e0e0;
-}
-
-.error-album-row {
-    color: #aaaaaa;
-    padding-left: 24px;
-}
-
-.error-track-row {
-    color: #888888;
-    padding-left: 48px;
-    font-size: 12px;
-}
-
-.error-badge {
-    background-color: rgba(255, 107, 107, 0.2);
-    color: #ff6b6b;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 10px;
-    min-width: 20px;
-}
-
-.error-badge-warning { background-color: #ff9500; }
-.error-badge-info { background-color: #666666; }
-
-.error-type-label {
-    font-size: 11px;
-    color: #888888;
-}
-
-.error-expected { color: #33cc33; }
-.error-actual { color: #ff3333; }
-
-.error-folder-row {
-    color: #e0e0e0;
-    font-weight: 500;
-    font-size: 14px;
-}
-
-.error-folder-row image {
-    opacity: 0;
-    min-width: 0;
-    min-height: 0;
-}
-
-.error-item-row {
-    color: #aaaaaa;
-    font-size: 13px;
-}
-
-.error-item-row image {
-    color: #ff6b6b;
-    min-width: 16px;
-}
-
-.error-item-row label { color: #aaaaaa; }
-
-/* Errors Overlay */
-.errors-overlay-backdrop { background-color: #1e1e1e; }
-
-.errors-overlay-panel {
-    background-color: #1e1e1e;
-    margin: 16px;
-}
-
-.errors-overlay-header {
-    padding: 0 0 12px 0;
-    margin-bottom: 8px;
+.errors-header {
+    padding-bottom: 10px;
+    margin-bottom: 4px;
     border-bottom: 1px solid #333333;
 }
 
-.errors-overlay-title {
-    font-size: 24px;
-    font-weight: bold;
+.errors-title {
+    font-size: 18px;
+    font-weight: 600;
     color: #e0e0e0;
 }
 
-.errors-overlay-close {
-    min-width: 32px;
-    min-height: 32px;
-    padding: 4px;
-    border-radius: 6px;
-    background: #3a3a3a;
-    border: 1px solid #555555;
+.errors-count {
+    font-size: 13px;
+    color: #888888;
+}
+
+/* Errors View Rows */
+.errors-list { background: transparent; }
+
+.errors-row {
+    padding: 6px 8px;
+    min-height: 28px;
+}
+
+.errors-folder-row {
+    color: #e0e0e0;
+    font-weight: 500;
+}
+
+.errors-folder-row image {
     color: #aaaaaa;
 }
 
-.errors-overlay-close:hover {
-    background-color: #4a4a4a;
-    color: #ffffff;
+.errors-error-row {
+    color: #999999;
+    font-size: 13px;
+}
+
+.errors-error-row image {
+    color: #ff6b6b;
+}
+
+.error-badge {
+    background-color: rgba(255, 107, 107, 0.15);
+    color: #ff6b6b;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 10px;
 }
 
 /* Performance Dashboard */
 
 /* Section Headers */
 .perf-section-title {
-    font-size: 14px;
+    font-size: 21px;
     font-weight: 700;
     letter-spacing: 0.5px;
     color: #00d4ff;
     margin-top: 16px;
     margin-bottom: 8px;
-    padding-bottom: 4px;
-    border-bottom: 2px solid #333333;
+}
+
+/* Channel name label inside a status row (Ch1/Ch2/Ch3/Ch4) */
+.perf-channel-name {
+    font-size: 20px;
+    font-weight: 700;
+    color: #00d4ff;
+}
+
+/* Compact channel status rows (no min-height) */
+.perf-channel-row {
+    background-color: #1a1a1a;
+    border: 1px solid #282828;
+    border-radius: 6px;
+    padding: 4px 6px;
 }
 
 /* Chart Containers */
@@ -336,71 +314,69 @@
     border-color: #3a3a3a;
 }
 
-.perf-chart-title {
-    font-size: 12px;
-    font-weight: bold;
+/* Stat labels (monospace values in channel rows + thread stability) */
+.perf-stat-label {
+    font-family: monospace;
+    font-size: 16px;
     color: #888888;
-    margin-bottom: 4px;
+    margin: 6px 8px;
 }
 
-/* Histogram Stats */
-.perf-percentile {
-    font-family: monospace;
-    font-size: 11px;
-    color: #00d4ff;
-    font-weight: 500;
+/* Reconnect button */
+.perf-reconnect-btn {
+    font-size: 18px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
 }
-
-/* Health Status Colors */
-.perf-health-ok { 
-    color: #4ade80;
-    font-weight: 600;
-}
-
-.perf-health-warn { 
-    color: #fbbf24;
-    font-weight: 600;
-}
-
-.perf-health-error { 
-    color: #f87171;
-    font-weight: 600;
-}
-
-/* Health Summary Panel */
-.perf-chart frame > label {
-    font-size: 13px;
-    font-weight: 600;
-    color: #00d4ff;
-}
-
-/* Log Viewer */
-.perf-log {
-    font-family: monospace;
-    font-size: 11px;
-    background-color: #0d0d0d;
-    color: #cccccc;
-    padding: 8px;
-    line-height: 1.4;
-}
-
-.perf-log-debug { color: #6b7280; }
-.perf-log-info { color: #d1d5db; }
-.perf-log-warn { color: #fbbf24; }
-.perf-log-error { color: #f87171; }
 
 /* Tooltips */
 .perf-tooltip {
     font-family: monospace;
-    font-size: 11px;
+    font-size: 16px;
     padding: 8px;
     background-color: #282828;
     border: 1px solid #3a3a3a;
     border-radius: 4px;
 }
 
-/* Grid Spacing */
-grid.perf-charts {
-    margin-top: 8px;
-    margin-bottom: 16px;
+/* Channel Status Bar */
+.perf-channel-dimmed {
+    opacity: 0.35;
+}
+
+.perf-channel-ok {
+    color: #4ade80;
+    font-weight: 600;
+}
+
+.perf-channel-warn {
+    color: #fbbf24;
+    font-weight: 600;
+}
+
+.perf-channel-error {
+    color: #f87171;
+    font-weight: 600;
+}
+
+.perf-channel-error-border {
+    border-color: #f87171;
+    border-width: 2px;
+}
+
+/* Library Badge (shown on rows when multiple libraries are configured) */
+
+/* Artist overflow popover list */
+.popover-artist-list {
+    margin: 8px;
+}
+
+.library-badge {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background-color: alpha(@text_dim_color, 0.25);
+    color: @text_secondary_color;
+    margin-top: 2px;
 }

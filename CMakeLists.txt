@@ -8,8 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Options
 option(BUILD_UI "Build GTK4 user interface" OFF)
 option(BUILD_TESTS "Build test suite" OFF)
-option(BUILD_INDEXER "Build indexer daemon" OFF)
-option(BUILD_MUSICBRAINZ "Build MusicBrainz/AcoustID support" OFF)
+option(BUILD_CLI "Build quadrature-cli" OFF)
 option(BUILD_PRODUCTION "Production build with install targets" OFF)
 
 # Build mode: DEBUG (local only) or BROADCAST (full features)
@@ -53,13 +52,11 @@ pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
 pkg_check_modules(FFTW3 REQUIRED fftw3)
 pkg_check_modules(VIPS REQUIRED vips)
 pkg_check_modules(RUBBERBAND REQUIRED rubberband>=3.0)
-
-# MusicBrainz resolution dependencies (optional)
-if(BUILD_MUSICBRAINZ)
-    pkg_check_modules(CHROMAPRINT REQUIRED libchromaprint)
-    pkg_check_modules(TAGLIB REQUIRED taglib)
-    pkg_check_modules(LIBPQ REQUIRED libpq)
-endif()
+pkg_check_modules(CHROMAPRINT REQUIRED libchromaprint)
+pkg_check_modules(TAGLIB REQUIRED taglib)
+pkg_check_modules(LIBPQ REQUIRED libpq)
+pkg_check_modules(LIBSOUP3 REQUIRED libsoup-3.0)
+pkg_check_modules(JSON_GLIB REQUIRED json-glib-1.0)
 
 # Include dirs
 include_directories(
@@ -72,16 +69,12 @@ include_directories(
     ${FFTW3_INCLUDE_DIRS}
     ${VIPS_INCLUDE_DIRS}
     ${RUBBERBAND_INCLUDE_DIRS}
+    ${CHROMAPRINT_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
+    ${LIBPQ_INCLUDE_DIRS}
+    ${LIBSOUP3_INCLUDE_DIRS}
+    ${JSON_GLIB_INCLUDE_DIRS}
 )
-
-# MusicBrainz include dirs (optional)
-if(BUILD_MUSICBRAINZ)
-    include_directories(
-        ${CHROMAPRINT_INCLUDE_DIRS}
-        ${TAGLIB_INCLUDE_DIRS}
-        ${LIBPQ_INCLUDE_DIRS}
-    )
-endif()
 
 # Core sources (audio pipeline with PipeWire + FFmpeg)
 set(CORE_SOURCES
@@ -99,6 +92,8 @@ set(DATABASE_SOURCES
     src/database/db.c
     src/database/db_read.c
     src/database/db_write.c
+    src/database/db_meta.c
+    src/database/db_bios.c
 )
 
 # Library sources
@@ -107,22 +102,19 @@ set(LIBRARY_SOURCES
 )
 
 # Indexer core sources (shared between daemon and embedded)
+# Includes MusicBrainz/AcoustID resolution (always available)
 set(INDEXER_CORE_SOURCES
     src/indexer/indexer.c
     src/indexer/utils.c
     src/indexer/artwork.c
+    src/indexer/musicbrainz/mb_fingerprint.c
+    src/indexer/musicbrainz/mb_acoustid.c
+    src/indexer/musicbrainz/mb_postgres.c
+    src/indexer/musicbrainz/mb_resolver.c
+    src/indexer/artist_art.c
+    src/indexer/artist_atlas.c
+    src/indexer/artist_bio.c
 )
-
-# MusicBrainz/AcoustID sources (optional)
-if(BUILD_MUSICBRAINZ)
-    set(MUSICBRAINZ_SOURCES
-        src/musicbrainz/mb_tags.c
-        src/musicbrainz/mb_fingerprint.c
-        src/musicbrainz/mb_acoustid.c
-        src/musicbrainz/mb_postgres.c
-        src/musicbrainz/mb_resolver.c
-    )
-endif()
 
 # Shared engine library
 add_library(quadrature_engine STATIC ${CORE_SOURCES} ${DATABASE_SOURCES} ${LIBRARY_SOURCES})
@@ -141,48 +133,64 @@ target_link_directories(quadrature_engine PUBLIC ${GLIB_LIBRARY_DIRS} ${FFMPEG_L
 # Note: Spectrum uses cavacore/FFTW which may conflict with Criterion signal handlers.
 # If tests crash, disable spectrum in individual test targets rather than engine-wide.
 
-# MusicBrainz/AcoustID library (optional)
-if(BUILD_MUSICBRAINZ)
-    add_library(quadrature_musicbrainz STATIC ${MUSICBRAINZ_SOURCES})
-    target_include_directories(quadrature_musicbrainz PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/musicbrainz
-        ${CMAKE_SOURCE_DIR}/src/database
-    )
-    target_link_libraries(quadrature_musicbrainz
-        quadrature_engine
-        ${CHROMAPRINT_LIBRARIES}
-        ${TAGLIB_LIBRARIES}
-        ${LIBPQ_LIBRARIES}
-    )
-    target_link_directories(quadrature_musicbrainz PUBLIC
-        ${CHROMAPRINT_LIBRARY_DIRS}
-        ${TAGLIB_LIBRARY_DIRS}
-        ${LIBPQ_LIBRARY_DIRS}
-    )
-endif()
-
 # Indexer core library (shared between daemon and embedded modes)
+# Includes MusicBrainz resolution — chromaprint, taglib, libpq linked here
 add_library(quadrature_indexer_core STATIC ${INDEXER_CORE_SOURCES})
-target_include_directories(quadrature_indexer_core PRIVATE ${CMAKE_SOURCE_DIR}/src/indexer ${CMAKE_SOURCE_DIR}/src/database)
-target_link_libraries(quadrature_indexer_core quadrature_engine OpenMP::OpenMP_C ${VIPS_LIBRARIES})
-target_link_directories(quadrature_indexer_core PUBLIC ${VIPS_LIBRARY_DIRS})
+target_include_directories(quadrature_indexer_core PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/indexer
+    ${CMAKE_SOURCE_DIR}/src/indexer/musicbrainz
+    ${CMAKE_SOURCE_DIR}/src/database
+)
+target_link_libraries(quadrature_indexer_core
+    quadrature_engine
+    OpenMP::OpenMP_C
+    anl
+    ${VIPS_LIBRARIES}
+    ${CHROMAPRINT_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
+    ${LIBPQ_LIBRARIES}
+    ${LIBSOUP3_LIBRARIES}
+    ${JSON_GLIB_LIBRARIES}
+)
+target_link_directories(quadrature_indexer_core PUBLIC
+    ${VIPS_LIBRARY_DIRS}
+    ${CHROMAPRINT_LIBRARY_DIRS}
+    ${TAGLIB_LIBRARY_DIRS}
+    ${LIBPQ_LIBRARY_DIRS}
+    ${LIBSOUP3_LIBRARY_DIRS}
+    ${JSON_GLIB_LIBRARY_DIRS}
+)
 
-# quadrature-indexer daemon
-if(BUILD_INDEXER)
-    set(INDEXER_DAEMON_SOURCES
+# GPIO library (Axia Livewire+ integration)
+set(GPIO_SOURCES
+    src/gpio/axia_gpio.c
+    src/gpio/axia_protocol.c
+)
+add_library(quadrature_gpio STATIC ${GPIO_SOURCES})
+target_include_directories(quadrature_gpio PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/gpio
+)
+target_link_libraries(quadrature_gpio
+    ${GLIB_LIBRARIES}
+    Threads::Threads
+)
+target_link_directories(quadrature_gpio PUBLIC ${GLIB_LIBRARY_DIRS})
+
+# quadrature-cli (unified CLI: indexer, setup-rt, etc.)
+if(BUILD_CLI)
+    set(CLI_SOURCES
+        src/cli/cli_indexer.c
+        src/cli/cli_setup_rt.c
         src/indexer/indexer_daemon.c
         src/indexer/indexer_config.c
         src/indexer/indexer_watcher.c
     )
-    add_executable(quadrature-indexer bin/quadrature_indexer.c ${INDEXER_DAEMON_SOURCES})
-    target_include_directories(quadrature-indexer PRIVATE ${CMAKE_SOURCE_DIR}/src/indexer)
-    target_link_libraries(quadrature-indexer quadrature_indexer_core)
-
-    # Link MusicBrainz/AcoustID if enabled
-    if(BUILD_MUSICBRAINZ)
-        target_link_libraries(quadrature-indexer quadrature_musicbrainz)
-        target_compile_definitions(quadrature-indexer PRIVATE HAVE_MUSICBRAINZ=1)
-    endif()
+    add_executable(quadrature-cli bin/quadrature_cli.c ${CLI_SOURCES})
+    target_include_directories(quadrature-cli PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/cli
+        ${CMAKE_SOURCE_DIR}/src/indexer
+    )
+    target_link_libraries(quadrature-cli quadrature_indexer_core)
 endif()
 
 # GTK4 UI (optional)
@@ -231,10 +239,11 @@ if(BUILD_UI)
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_track_row_wrapper.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_disc_header.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_card.ui
-        ${CMAKE_SOURCE_DIR}/src/ui/templates/artist_menu_button.ui
-        ${CMAKE_SOURCE_DIR}/src/ui/templates/artist_popover.ui
-        ${CMAKE_SOURCE_DIR}/src/ui/templates/artist_popover_row.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_button.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/filter_sort_bar.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/advanced_search_bar.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/perf_view.ui
+        ${CMAKE_SOURCE_DIR}/src/ui/templates/perf_channel_cell.ui
     )
 
     add_custom_command(
@@ -257,27 +266,36 @@ if(BUILD_UI)
         src/ui/metadata_dialog.c
         src/ui/indexer_controller.c
         src/ui/app_settings.c
+        src/ui/utils.c
         src/ui/row_helpers.c
+        src/ui/artist_buttons.c
+        src/ui/row_factories.c
+        src/ui/search/search_view.c
+        src/ui/libraries/libraries_view.c
+        src/ui/libraries/indexer_bridge.c
+        src/ui/settings/settings_view.c
+        src/ui/settings/device_settings.c
+        src/ui/settings/gpio_bridge.c
+        src/ui/library/filter_bar.c
         src/ui/library/views.c
         src/ui/library/lazy_list.c
+        src/ui/library/scrubber.c
         src/ui/library/detail_view.c
+        src/ui/library/gradient_widgets.c
+        src/ui/library/credits_view.c
         src/ui/library/errors_view.c
         src/ui/library/artwork_manager.c
         src/ui/perf/perf_chart.c
+        src/ui/perf/perf_grouped_hist.c
         src/ui/perf/perf_view.c
         ${GRESOURCE_C}
     )
 
 
     add_executable(quadrature ${UI_SOURCES})
-    target_include_directories(quadrature PRIVATE ${GTK4_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/src/ui ${CMAKE_SOURCE_DIR}/src/ui/library ${CMAKE_SOURCE_DIR}/src/ui/perf ${CMAKE_SOURCE_DIR}/src/indexer)
-    target_link_libraries(quadrature quadrature_indexer_core ${GTK4_LIBRARIES})
+    target_include_directories(quadrature PRIVATE ${GTK4_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/src/ui ${CMAKE_SOURCE_DIR}/src/ui/library ${CMAKE_SOURCE_DIR}/src/ui/perf ${CMAKE_SOURCE_DIR}/src/ui/search ${CMAKE_SOURCE_DIR}/src/ui/libraries ${CMAKE_SOURCE_DIR}/src/ui/settings ${CMAKE_SOURCE_DIR}/src/indexer)
+    target_link_libraries(quadrature quadrature_indexer_core quadrature_gpio ${GTK4_LIBRARIES})
     target_link_directories(quadrature PRIVATE ${GTK4_LIBRARY_DIRS})
-
-    if(BUILD_MUSICBRAINZ)
-        target_link_libraries(quadrature quadrature_musicbrainz)
-        target_compile_definitions(quadrature PRIVATE HAVE_MUSICBRAINZ=1)
-    endif()
 endif()
 
 # Tests (optional)
@@ -316,6 +334,44 @@ if(BUILD_TESTS)
             target_link_directories(${TEST_NAME} PRIVATE ${CRITERION_LIBRARY_DIRS})
             add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
             continue()
+        elseif(${TEST_NAME} STREQUAL "test_mb_resolve")
+            # MusicBrainz integration tests
+            add_executable(${TEST_NAME} ${TEST_FILE})
+            target_include_directories(${TEST_NAME} PRIVATE
+                ${CMAKE_SOURCE_DIR}/src/indexer/musicbrainz
+                ${CMAKE_SOURCE_DIR}/src/database
+                ${CRITERION_INCLUDE_DIRS}
+                ${LIBPQ_INCLUDE_DIRS}
+            )
+            target_link_libraries(${TEST_NAME}
+                quadrature_indexer_core
+                quadrature_engine
+                ${CRITERION_LIBRARIES}
+            )
+            target_link_directories(${TEST_NAME} PRIVATE
+                ${CRITERION_LIBRARY_DIRS}
+            )
+            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+            continue()
+        elseif(${TEST_NAME} STREQUAL "test_axia_gpio")
+            # Axia GPIO integration tests
+            add_executable(${TEST_NAME} ${TEST_FILE})
+            target_include_directories(${TEST_NAME} PRIVATE
+                ${CMAKE_SOURCE_DIR}/src/gpio
+                ${CRITERION_INCLUDE_DIRS}
+            )
+            target_link_libraries(${TEST_NAME}
+                quadrature_gpio
+                ${GLIB_LIBRARIES}
+                ${CRITERION_LIBRARIES}
+                Threads::Threads
+            )
+            target_link_directories(${TEST_NAME} PRIVATE
+                ${CRITERION_LIBRARY_DIRS}
+                ${GLIB_LIBRARY_DIRS}
+            )
+            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+            continue()
         else()
             add_executable(${TEST_NAME} ${TEST_FILE})
         endif()
@@ -337,15 +393,8 @@ install(TARGETS quadrature_indexer_core
     ARCHIVE DESTINATION lib
 )
 
-if(BUILD_MUSICBRAINZ)
-    install(TARGETS quadrature_musicbrainz
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib
-    )
-endif()
-
-if(BUILD_INDEXER)
-    install(TARGETS quadrature-indexer RUNTIME DESTINATION bin)
+if(BUILD_CLI)
+    install(TARGETS quadrature-cli RUNTIME DESTINATION bin)
 
     # Install systemd user service
     if(BUILD_PRODUCTION)

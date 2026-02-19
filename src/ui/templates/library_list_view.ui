@@ -2,19 +2,14 @@
 <!--
   Library List View Template
 
-  Complete container for Artists, Albums, and Songs main views.
-  C code:
-  - Sets title text based on view type
-  - Shows/hides sort_buttons (albums) or column_headers (songs)
-  - Creates and adds ListView to scroll window
-  - Connects signals
+  Container for Artists and Albums main views.
+  Title, subtitle, and scroll window. Filter bar is inserted programmatically.
 -->
 <interface>
   <object class="GtkBox" id="container">
     <property name="orientation">vertical</property>
     <property name="spacing">8</property>
     <property name="margin-start">16</property>
-    <property name="margin-end">16</property>
     <property name="margin-top">16</property>
 
     <!-- Title -->
@@ -22,6 +17,7 @@
       <object class="GtkLabel" id="title">
         <property name="label">Title</property>
         <property name="xalign">0</property>
+        <property name="margin-end">16</property>
         <style>
           <class name="library-title"/>
         </style>
@@ -33,158 +29,20 @@
       <object class="GtkLabel" id="subtitle">
         <property name="label">Loading...</property>
         <property name="xalign">0</property>
+        <property name="margin-end">16</property>
         <style>
           <class name="library-subtitle"/>
         </style>
       </object>
     </child>
 
-    <!-- Sort buttons (hidden by default, shown for albums view) -->
-    <child>
-      <object class="GtkBox" id="sort_buttons">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">4</property>
-        <property name="margin-top">4</property>
-        <property name="margin-bottom">8</property>
-        <property name="visible">false</property>
-        <child>
-          <object class="GtkButton" id="sort_title">
-            <property name="label">Title</property>
-            <style>
-              <class name="sort-button"/>
-            </style>
-          </object>
-        </child>
-        <child>
-          <object class="GtkButton" id="sort_year">
-            <property name="label">Year</property>
-            <style>
-              <class name="sort-button"/>
-            </style>
-          </object>
-        </child>
-        <child>
-          <object class="GtkButton" id="sort_artist">
-            <property name="label">Artist</property>
-            <style>
-              <class name="sort-button"/>
-            </style>
-          </object>
-        </child>
-        <child>
-          <object class="GtkButton" id="sort_added">
-            <property name="label">Added</property>
-            <style>
-              <class name="sort-button"/>
-            </style>
-          </object>
-        </child>
-      </object>
-    </child>
-
-    <!-- Column headers placeholder (for songs view, inserted by C code) -->
-
-    <!-- Filter panel: Genre, Year, Search, Clear (hidden by default, shown by C code) -->
-    <child>
-      <object class="GtkBox" id="filter_panel">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">8</property>
-        <property name="visible">false</property>
-        <style>
-          <class name="filter-container"/>
-        </style>
-
-        <!-- Genre filter -->
-        <child>
-          <object class="GtkBox">
-            <property name="orientation">horizontal</property>
-            <property name="spacing">0</property>
-            <property name="valign">center</property>
-            <style>
-              <class name="filter-button"/>
-            </style>
-            <child>
-              <object class="GtkLabel">
-                <property name="label">Genre</property>
-              </object>
-            </child>
-            <child>
-              <object class="GtkMenuButton" id="filter_genre">
-                <property name="label">All</property>
-              </object>
-            </child>
-          </object>
-        </child>
-
-        <!-- Year filter -->
-        <child>
-          <object class="GtkBox">
-            <property name="orientation">horizontal</property>
-            <property name="spacing">0</property>
-            <property name="valign">center</property>
-            <style>
-              <class name="filter-button"/>
-            </style>
-            <child>
-              <object class="GtkLabel">
-                <property name="label">Year</property>
-              </object>
-            </child>
-            <child>
-              <object class="GtkMenuButton" id="filter_year">
-                <property name="label">All</property>
-              </object>
-            </child>
-          </object>
-        </child>
-
-        <!-- Search filter -->
-        <child>
-          <object class="GtkBox">
-            <property name="orientation">horizontal</property>
-            <property name="spacing">0</property>
-            <property name="valign">center</property>
-            <style>
-              <class name="filter-button"/>
-            </style>
-            <child>
-              <object class="GtkLabel">
-                <property name="label">Search</property>
-              </object>
-            </child>
-            <child>
-              <object class="GtkSearchEntry" id="filter_search">
-                <property name="placeholder-text">Filter...</property>
-                <property name="width-request">150</property>
-              </object>
-            </child>
-          </object>
-        </child>
-
-        <!-- Spacer -->
-        <child>
-          <object class="GtkBox">
-            <property name="hexpand">true</property>
-          </object>
-        </child>
-
-        <!-- Clear button -->
-        <child>
-          <object class="GtkButton" id="filter_clear">
-            <property name="label">Clear</property>
-            <property name="valign">center</property>
-            <style>
-              <class name="filter-button-clear"/>
-            </style>
-          </object>
-        </child>
-      </object>
-    </child>
+    <!-- Filter bar inserted programmatically here by C code -->
 
     <!-- Scroll window (GtkListView implements GtkScrollable directly) -->
     <child>
       <object class="GtkScrolledWindow" id="scroll">
         <property name="vexpand">true</property>
+        <property name="overlay-scrolling">false</property>
       </object>
     </child>
   </object>

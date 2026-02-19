@@ -1,9 +1,9 @@
 #define G_LOG_DOMAIN "quadrature"
 
 #include "internal.h"
-#include "quadrature/quadrature_audio.h"
-#include "quadrature/quadrature_library.h"
-
+#include "quadrature/audio.h"
+#include "quadrature/library.h"
+#include "quadrature/settings.h"
 #include <glib.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -17,6 +17,35 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sched.h>
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Generation-Checked Idle Callback Data
+ *
+ * player_reconnect_idle and player_deactivate_idle run on the GTK main thread
+ * and take the PW lock. If player_recreate_stream() ran between scheduling and
+ * execution, the idle would operate on replaced streams → stale/dangerous.
+ * Capture the stream_generation at schedule time; skip if it changed.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    audio_player_t *player;
+    unsigned int    generation;   /* stream_generation at schedule time */
+} player_idle_data_t;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Performance Event Recording (RT-Safe)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Record event to pipeline ring buffer (lock-free, RT-safe).
+ * Used by audio callback thread to log performance issues.
+ */
+static inline void pipeline_record_event(audio_pipeline_t* p, 
+                                         const audio_pipeline_event_t* event) {
+    unsigned int idx = atomic_fetch_add_explicit(&p->event_write, 1, 
+                                                  memory_order_relaxed) % AUDIO_EVENT_RING_SIZE;
+    p->events[idx] = *event;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * FFmpeg Initialization
@@ -207,45 +236,9 @@ uint64_t ffmpeg_decoder_duration(ffmpeg_decoder_t* dec) {
 static void audio_player_flush_all(audio_player_t* p) {
     g_assert(p != NULL);
     g_assert(p->scrubber != NULL);
-    g_assert(p->spectrum_buffer != NULL);
 
     audio_scrubber_flush(p->scrubber);
-    spa_ringbuffer_init(&p->spectrum_rb);
-    memset(p->spectrum_buffer, 0, SPECTRUM_RINGBUF_SIZE * sizeof(float));
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Metering Helper
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-void meter_accum_store(meter_accum_t* m, audio_player_t* player) {
-    if (m->frame_count == 0) return;
-
-    atomic_store(&player->peak_left, m->peak_left);
-    atomic_store(&player->peak_right, m->peak_right);
-    atomic_store(&player->rms_left, sqrtf(m->sum_sq_left / m->frame_count));
-    atomic_store(&player->rms_right, sqrtf(m->sum_sq_right / m->frame_count));
-
-    /* Update peak hold if new peak is higher (sample-based timing, no syscall) */
-    float hold_l = atomic_load(&player->peak_hold_left);
-    float hold_r = atomic_load(&player->peak_hold_right);
-
-    bool new_peak = false;
-    if (m->peak_left > hold_l) {
-        atomic_store(&player->peak_hold_left, m->peak_left);
-        new_peak = true;
-    }
-    if (m->peak_right > hold_r) {
-        atomic_store(&player->peak_hold_right, m->peak_right);
-        new_peak = true;
-    }
-
-    /* Reset age counter on new peak, otherwise increment by frame count */
-    if (new_peak) {
-        atomic_store(&player->peak_hold_age_frames, 0);
-    } else {
-        atomic_fetch_add(&player->peak_hold_age_frames, m->frame_count);
-    }
+    p->spectrum.input_buffer_fill = 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -286,7 +279,7 @@ static inline void player_update_position_snap(audio_player_t* p, uint64_t posit
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static size_t process_buffer_audio(audio_player_t* p, float* out, uint32_t frame_count,
-                                    meter_accum_t* meter) {
+                                   uint64_t cb_start) {
     audio_buffer_t* buffer = atomic_load_explicit(&p->buffer, memory_order_acquire);
     if (!buffer) return 0;
 
@@ -341,10 +334,20 @@ static size_t process_buffer_audio(audio_player_t* p, float* out, uint32_t frame
                 atomic_store(&p->advance_old_track_id, old_track_id);
                 atomic_store(&p->advance_pending, true);
                 atomic_fetch_add_explicit(&p->stats_instant_advances, 1, memory_order_relaxed);
-                
-                /* Record instant advance in perf dashboard */
-                if (p->pipeline && p->pipeline->perf) {
-                    perf_record_track_advance(p->pipeline->perf, p->player_id, true);
+
+                /* Record instant advance event */
+                if (p->pipeline) {
+                    pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                        .timestamp_ns = cb_start,
+                        .type = AUDIO_EVENT_INSTANT_ADVANCE,
+                        .player_id = p->player_id,
+                        .track_id = old_track_id,
+                        .data.transition = {
+                            .speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f,
+                            .old_queue_size = 0,
+                            .new_queue_size = 0,
+                        }
+                    });
                 }
 
                 /* Check autoplay: if disabled, stop after advancing */
@@ -363,9 +366,19 @@ static size_t process_buffer_audio(audio_player_t* p, float* out, uint32_t frame
                     atomic_store(&p->advance_pending, true);
                     atomic_fetch_add_explicit(&p->stats_deferred_advances, 1, memory_order_relaxed);
 
-                    /* Record deferred advance in perf dashboard */
-                    if (p->pipeline && p->pipeline->perf) {
-                        perf_record_track_advance(p->pipeline->perf, p->player_id, false);
+                    /* Record deferred advance event */
+                    if (p->pipeline) {
+                        pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                            .timestamp_ns = cb_start,
+                            .type = AUDIO_EVENT_DEFERRED_ADVANCE,
+                            .player_id = p->player_id,
+                            .track_id = atomic_load(&p->current_track_id),
+                            .data.transition = {
+                                .speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f,
+                                .old_queue_size = 0,
+                                .new_queue_size = 0,
+                            }
+                        });
                     }
 
                     /* If autoplay disabled, stop on the new track at 0:00 */
@@ -381,11 +394,6 @@ static size_t process_buffer_audio(audio_player_t* p, float* out, uint32_t frame
         }
     }
 
-    /* Accumulate meters */
-    for (uint32_t i = 0; i < frame_count; i++) {
-        meter_accum_process(meter, out[i * 2], out[i * 2 + 1]);
-    }
-
     return frame_count;
 }
 
@@ -399,11 +407,58 @@ static void on_process(void* userdata) {
     /* RT-safe timing: VDSO-mapped clock_gettime (~20ns) */
     uint64_t cb_start = time_ns();
 
+    /* Gate all metrics on stream state — skip if not streaming */
+    enum pw_stream_state pw_state = atomic_load_explicit(&p->pw_stream_state, memory_order_relaxed);
+    if (pw_state != PW_STREAM_STATE_STREAMING) {
+        struct pw_buffer* b = pw_stream_dequeue_buffer(p->stream);
+        if (b) {
+            /* Output silence and re-queue without recording any metrics */
+            float* out = (float*)b->buffer->datas[0].data;
+            if (out) {
+                uint32_t max_frames = b->buffer->datas[0].maxsize / (sizeof(float) * 2);
+                uint32_t frame_count = SPA_MIN(b->requested, max_frames);
+                memset(out, 0, frame_count * 2 * sizeof(float));
+                b->buffer->datas[0].chunk->offset = 0;
+                b->buffer->datas[0].chunk->stride = sizeof(float) * 2;
+                b->buffer->datas[0].chunk->size = frame_count * sizeof(float) * 2;
+            }
+            pw_stream_queue_buffer(p->stream, b);
+        }
+        /* Reset interval tracking so first streaming callback doesn't see
+         * a stale timestamp from before a non-streaming gap */
+        p->last_callback_ns = 0;
+        return;
+    }
+
+    /* Callback interval tracking: measure time since last callback.
+     * Only computed here; ring buffer write + event emission happen in the
+     * ~10ms sampling block below to avoid per-callback overhead. */
+    int64_t interval_dev_ns = 0;
+    bool has_interval = (p->last_callback_ns > 0 && p->pipeline);
+    if (has_interval) {
+        uint64_t interval = cb_start - p->last_callback_ns;
+        uint64_t expected = (uint64_t)p->quantum_frames * p->pipeline->ns_per_frame;
+        interval_dev_ns = (int64_t)interval - (int64_t)expected;
+        /* Track peak absolute deviation for ring buffer sampling */
+        int64_t abs_dev = interval_dev_ns > 0 ? interval_dev_ns : -interval_dev_ns;
+        if (abs_dev > p->interval_peak_dev_ns)
+            p->interval_peak_dev_ns = abs_dev;
+    }
+    p->last_callback_ns = cb_start;
+
     struct pw_buffer* b = pw_stream_dequeue_buffer(p->stream);
     if (!b) {
         atomic_fetch_add_explicit(&p->stats_dequeue_failures, 1, memory_order_relaxed);
-        if (p->pipeline && p->pipeline->perf) {
-            perf_record_dequeue_failure(p->pipeline->perf, p->player_id);
+        if (p->pipeline) {
+            pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                .timestamp_ns = cb_start,
+                .type = AUDIO_EVENT_DEQUEUE_FAILURE,
+                .player_id = p->player_id,
+                .track_id = atomic_load(&p->current_track_id),
+                .data.dequeue = {
+                    .queue_size = 0,
+                }
+            });
         }
         return;
     }
@@ -415,6 +470,21 @@ static void on_process(void* userdata) {
     }
     uint32_t max_frames = b->buffer->datas[0].maxsize / (sizeof(float) * 2);
     uint32_t frame_count = SPA_MIN(b->requested, max_frames);
+
+    /* Read PipeWire native metrics (RT-safe via pw_stream_get_time_n) */
+#if PW_CHECK_VERSION(0, 3, 50)
+    if (p->pipeline && p->pipeline->perf) {
+        struct pw_time pw_t;
+        if (pw_stream_get_time_n(p->stream, &pw_t, sizeof(pw_t)) == 0) {
+            atomic_store_explicit(&p->pipeline->perf->pw_avail_buffers[p->player_id],
+                                   (uint64_t)pw_t.avail_buffers, memory_order_relaxed);
+            atomic_store_explicit(&p->pipeline->perf->pw_queued_buffers[p->player_id],
+                                   (uint64_t)pw_t.queued_buffers, memory_order_relaxed);
+            atomic_store_explicit(&p->pipeline->perf->pw_delay_samples[p->player_id],
+                                   pw_t.delay, memory_order_relaxed);
+        }
+    }
+#endif
 
     /* Read current state */
     channel_state_t state = atomic_load(&p->state);
@@ -434,45 +504,48 @@ static void on_process(void* userdata) {
     /* Per-player stats (RT-safe: relaxed atomics) */
     atomic_fetch_add_explicit(&p->stats_cb_count, 1, memory_order_relaxed);
 
-    /* Legacy pipeline-level + perf dashboard (backward compat) */
+    /* Legacy pipeline-level stats + buffer underrun events */
     if (p->pipeline) {
         atomic_fetch_add(&p->pipeline->stats_callback_count, 1);
         if (state == CHANNEL_PLAYING && !buf) {
             atomic_fetch_add(&p->pipeline->stats_underrun_count, 1);
-        }
-        if (p->pipeline->perf) {
-            perf_record_callback(p->pipeline->perf, p->player_id, sample_count);
-            if (state == CHANNEL_PLAYING && !buf) {
-                perf_record_underrun(p->pipeline->perf, p->player_id);
-            }
+            /* Record buffer underrun event */
+            pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                .timestamp_ns = cb_start,
+                .type = AUDIO_EVENT_BUFFER_UNDERRUN,
+                .player_id = p->player_id,
+                .track_id = atomic_load(&p->current_track_id),
+                .data.underrun = {
+                    .requested_frames = frame_count,
+                    .available_frames = 0,
+                    .speed = scrub_speed,
+                }
+            });
         }
     }
 
     if (should_play) {
-        /* Initialize metering accumulator */
-        meter_accum_t meter;
-        meter_accum_init(&meter);
-
         /* Process audio from buffer */
-        size_t metered_frames = process_buffer_audio(p, out, frame_count, &meter);
+        process_buffer_audio(p, out, frame_count, cb_start);
 
-        /* Store metering values */
-        if (metered_frames > 0) {
-            meter_accum_store(&meter, p);
-
-            /* Feed spectrum analyzer ring buffer (non-blocking, lock-free) */
-            if (p->spectrum_buffer) {
-                uint32_t index;
-                int32_t avail = spa_ringbuffer_get_write_index(&p->spectrum_rb, &index);
-                uint32_t to_write = (uint32_t)(metered_frames * 2);
-
-                int32_t space = SPECTRUM_RINGBUF_SIZE - avail;
-                if ((int32_t)to_write <= space) {
-                    spa_ringbuffer_write_data(&p->spectrum_rb, p->spectrum_buffer,
-                        SPECTRUM_RINGBUF_SIZE, index % SPECTRUM_RINGBUF_SIZE,
-                        out, to_write * sizeof(float));
-                    spa_ringbuffer_write_update(&p->spectrum_rb, index + to_write);
-                }
+        /* Detect scrubber underflows by comparing count before/after */
+        if (p->scrubber && p->pipeline) {
+            uint64_t cur_underflows = audio_scrubber_get_underflows(p->scrubber);
+            if (cur_underflows > p->prev_scrubber_underflows) {
+                uint32_t delta = (uint32_t)(cur_underflows - p->prev_scrubber_underflows);
+                pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                    .timestamp_ns = cb_start,
+                    .type = AUDIO_EVENT_SCRUBBER_UNDERFLOW,
+                    .player_id = p->player_id,
+                    .track_id = atomic_load(&p->current_track_id),
+                    .data.underrun = {
+                        .requested_frames = frame_count,
+                        .available_frames = frame_count - delta,
+                        .scrub_fill = 0,
+                        .speed = scrub_speed,
+                    }
+                });
+                p->prev_scrubber_underflows = cur_underflows;
             }
         }
 
@@ -493,6 +566,51 @@ static void on_process(void* userdata) {
     uint64_t cb_elapsed = time_ns() - cb_start;
     atomic_fetch_add_explicit(&p->stats_cb_time_sum_ns, cb_elapsed, memory_order_relaxed);
 
+    /* Pre-compute budget once (multiply, no division in RT path) */
+    uint64_t budget_ns = p->pipeline ? (uint64_t)frame_count * p->pipeline->ns_per_frame : 0;
+
+    /* Budget + latency ring buffers — sample every ~10ms */
+    if (p->pipeline) {
+        uint64_t now_ns = cb_start;
+        if (now_ns - p->budget_rb->last_write_ns >= 10000000ULL) {
+            /* Budget centipercent (0-10000 for 0.01% resolution) */
+            uint32_t cpct = budget_ns > 0 ? (uint32_t)((cb_elapsed * 10000ULL) / budget_ns) : 0;
+            if (cpct > 10000) cpct = 10000;
+            uint32_t pos = atomic_load_explicit(&p->budget_rb->write_pos, memory_order_relaxed);
+            p->budget_rb->samples[pos & (BUDGET_RB_CAPACITY - 1)] = (uint16_t)cpct;
+            atomic_store_explicit(&p->budget_rb->write_pos, pos + 1, memory_order_release);
+            p->budget_rb->last_write_ns = now_ns;
+
+            /* Latency µs */
+            uint16_t lat_us = (cb_elapsed / 1000 > 65535) ? 65535 : (uint16_t)(cb_elapsed / 1000);
+            uint32_t lpos = atomic_load_explicit(&p->latency_rb->write_pos, memory_order_relaxed);
+            p->latency_rb->samples[lpos & (LATENCY_RB_CAPACITY - 1)] = lat_us;
+            atomic_store_explicit(&p->latency_rb->write_pos, lpos + 1, memory_order_release);
+            p->latency_rb->last_write_ns = now_ns;
+
+            /* Interval deviation: write raw peak ns, then reset */
+            uint32_t ipos = atomic_load_explicit(&p->interval_rb->write_pos, memory_order_relaxed);
+            p->interval_rb->samples[ipos & (INTERVAL_RB_CAPACITY - 1)] = p->interval_peak_dev_ns;
+            atomic_store_explicit(&p->interval_rb->write_pos, ipos + 1, memory_order_release);
+            p->interval_rb->last_write_ns = now_ns;
+            p->interval_peak_dev_ns = 0;
+
+            /* Fire SCHEDULING_DELAY event if callback arrived >2x period late */
+            if (has_interval && interval_dev_ns > (int64_t)(budget_ns * 2)) {
+                pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                    .timestamp_ns = cb_start,
+                    .type = AUDIO_EVENT_SCHEDULING_DELAY,
+                    .player_id = p->player_id,
+                    .track_id = atomic_load(&p->current_track_id),
+                    .data.scheduling = {
+                        .deviation_ns = interval_dev_ns,
+                        .expected_ns = (int64_t)budget_ns,
+                    }
+                });
+            }
+        }
+    }
+
     /* Update peak (CAS loop) */
     uint64_t cur_max = atomic_load_explicit(&p->stats_cb_time_max_ns, memory_order_relaxed);
     while (cb_elapsed > cur_max) {
@@ -501,17 +619,22 @@ static void on_process(void* userdata) {
             break;
     }
 
-    /* Budget overrun check (50% of period) */
+    /* Budget overrun check (50% of period) — emit event */
     if (p->pipeline) {
-        uint64_t half_budget = (uint64_t)frame_count * 500000000ULL / p->pipeline->sample_rate;
+        uint64_t half_budget = budget_ns / 2;
         if (cb_elapsed > half_budget) {
             atomic_fetch_add_explicit(&p->stats_budget_overruns, 1, memory_order_relaxed);
+            pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                .timestamp_ns = cb_start,
+                .type = AUDIO_EVENT_BUDGET_OVERRUN,
+                .player_id = p->player_id,
+                .track_id = atomic_load(&p->current_track_id),
+                .data.budget = {
+                    .elapsed_ns = cb_elapsed,
+                    .budget_ns = budget_ns,
+                }
+            });
         }
-    }
-
-    /* Feed perf dashboard: per-player histogram + fix legacy broken timing */
-    if (p->pipeline && p->pipeline->perf) {
-        perf_record_callback_time(p->pipeline->perf, p->player_id, cb_elapsed, frame_count);
     }
     if (p->pipeline) {
         uint64_t us = cb_elapsed / 1000;
@@ -529,9 +652,73 @@ static void on_process(void* userdata) {
     pw_stream_queue_buffer(p->stream, b);
 }
 
+static gboolean player_reconnect_idle(gpointer data);
+static gboolean player_deactivate_idle(gpointer data);
+static void player_deactivate_streams(audio_player_t* p);
+
+static void on_state_changed(void* userdata, enum pw_stream_state old,
+                              enum pw_stream_state state, const char* error) {
+    audio_player_t* p = (audio_player_t*)userdata;
+    (void)old;
+    (void)error;
+    atomic_store_explicit(&p->pw_stream_state, (int)state, memory_order_relaxed);
+
+    if (state == PW_STREAM_STATE_ERROR) {
+        atomic_store_explicit(&p->device_error, true, memory_order_release);
+        if (p->stream)
+            pw_stream_set_active(p->stream, false);
+        if (p->pipeline) {
+            pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                .type = AUDIO_EVENT_PW_ERROR,
+                .timestamp_ns = time_ns(),
+                .player_id = p->player_id,
+                .track_id = atomic_load_explicit(&p->current_track_id, memory_order_relaxed),
+            });
+        }
+
+        /* One reconnect attempt for transient errors (e.g., device config change).
+         * If we already tried once, this is a persistent failure — deactivate. */
+        if (!atomic_exchange(&p->reconnect_attempted, true)) {
+            g_warning("Player %d: PW error (first) — attempting reconnect", p->player_id);
+            player_idle_data_t *d = g_new(player_idle_data_t, 1);
+            d->player = p;
+            d->generation = atomic_load(&p->stream_generation);
+            g_idle_add(player_reconnect_idle, d);
+        } else {
+            g_warning("Player %d: PW error (second) — deactivating streams", p->player_id);
+            player_idle_data_t *d = g_new(player_idle_data_t, 1);
+            d->player = p;
+            d->generation = atomic_load(&p->stream_generation);
+            g_idle_add(player_deactivate_idle, d);
+        }
+    } else if (state == PW_STREAM_STATE_STREAMING) {
+        atomic_store_explicit(&p->device_error, false, memory_order_release);
+        /* Successful stream — reset reconnect counter for next error cycle */
+        atomic_store(&p->reconnect_attempted, false);
+    }
+}
+
+static void on_stream_io_changed(void* data, uint32_t id, void* area, uint32_t size) {
+    audio_player_t* p = data;
+    (void)size;
+    /* area == NULL for SPA_IO_Position signals a PipeWire xrun */
+    if (id == SPA_IO_Position && area == NULL) {
+        if (p->pipeline) {
+            pipeline_record_event(p->pipeline, &(audio_pipeline_event_t){
+                .type = AUDIO_EVENT_PW_XRUN,
+                .timestamp_ns = time_ns(),
+                .player_id = p->player_id,
+                .track_id = atomic_load_explicit(&p->current_track_id, memory_order_relaxed),
+            });
+        }
+    }
+}
+
 static const struct pw_stream_events stream_events = {
     PW_VERSION_STREAM_EVENTS,
-    .process = on_process,
+    .process       = on_process,
+    .state_changed = on_state_changed,
+    .io_changed    = on_stream_io_changed,
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -539,28 +726,32 @@ static const struct pw_stream_events stream_events = {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static quadrature_result_t create_player_stream(audio_player_t* p,
-                                                 uint32_t sample_rate,
-                                                 struct pw_thread_loop* loop) {
+                                                 uint32_t sample_rate) {
     char stream_name[64];
     snprintf(stream_name, sizeof(stream_name), "quadrature-player-%d", p->player_id);
+
+    char latency_str[32];
+    snprintf(latency_str, sizeof(latency_str), "%u/%u", p->quantum_frames, sample_rate);
 
     struct pw_properties* props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback",
         PW_KEY_MEDIA_ROLE, "Music",
-        PW_KEY_NODE_LATENCY, "512/48000",
+        PW_KEY_NODE_LATENCY, latency_str,
         NULL);
 
     if (p->target_device[0]) {
         pw_properties_set(props, PW_KEY_TARGET_OBJECT, p->target_device);
     }
 
-    p->stream = pw_stream_new_simple(
-        pw_thread_loop_get_loop(loop),
-        stream_name,
-        props,
-        &stream_events,
-        p);
+    if (p->exclusive) {
+        pw_properties_set(props, PW_KEY_NODE_EXCLUSIVE, "true");
+    }
+
+    p->stream = pw_stream_new(p->pipeline->core, stream_name, props);
+    if (p->stream) {
+        pw_stream_add_listener(p->stream, &p->stream_listener, &stream_events, p);
+    }
 
     if (!p->stream) {
         return QUADRATURE_ERROR_INTERNAL;
@@ -576,12 +767,19 @@ static quadrature_result_t create_player_stream(audio_player_t* p,
             .rate = sample_rate
         ));
 
+    /* Cache params for auto-reconnect: copy pod bytes + fix up pointer */
+    ptrdiff_t pod_offset = (const uint8_t*)params[0] - buffer;
+    memcpy(p->cached_params_buf, buffer, sizeof(buffer));
+    p->cached_params[0] = (const struct spa_pod*)(p->cached_params_buf + pod_offset);
+    p->num_cached_params = 1;
+
     int res = pw_stream_connect(p->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
         PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
         PW_STREAM_FLAG_RT_PROCESS,
         params, 1);
 
     if (res < 0) {
+        spa_hook_remove(&p->stream_listener);
         pw_stream_destroy(p->stream);
         p->stream = NULL;
         return QUADRATURE_ERROR_INTERNAL;
@@ -591,22 +789,208 @@ static quadrature_result_t create_player_stream(audio_player_t* p,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * PipeWire Monitor Stream (Spectrum Capture from Device)
+ *
+ * Captures audio from the sink's monitor port so the spectrum reflects
+ * actual device output rather than the internal decode pipeline.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void on_monitor_process(void* userdata) {
+    audio_player_t* p = (audio_player_t*)userdata;
+    struct pw_buffer* b = pw_stream_dequeue_buffer(p->monitor_stream);
+    if (!b) return;
+
+    struct spa_data* d = &b->buffer->datas[0];
+    float* in = d->data;
+    if (!in || d->chunk->size == 0) {
+        pw_stream_queue_buffer(p->monitor_stream, b);
+        return;
+    }
+
+    uint32_t n_frames = d->chunk->size / (sizeof(float) * 2);
+
+    /* Process spectrum FFT inline — no ring buffer, no separate thread */
+    spectrum_process(&p->spectrum, in, n_frames, p->spectrum_bars);
+
+    pw_stream_queue_buffer(p->monitor_stream, b);
+}
+
+static const struct pw_stream_events monitor_stream_events = {
+    PW_VERSION_STREAM_EVENTS,
+    .process = on_monitor_process,
+};
+
+static quadrature_result_t create_monitor_stream(audio_player_t* p,
+                                                  uint32_t sample_rate) {
+    char name[64];
+    snprintf(name, sizeof(name), "quadrature-spectrum-%d", p->player_id);
+
+    struct pw_properties* props = pw_properties_new(
+        PW_KEY_MEDIA_TYPE, "Audio",
+        PW_KEY_MEDIA_CATEGORY, "Capture",
+        PW_KEY_MEDIA_ROLE, "Music",
+        PW_KEY_STREAM_CAPTURE_SINK, "true",   /* capture from sink monitor */
+        PW_KEY_NODE_PASSIVE, "true",           /* don't keep sink alive */
+        NULL);
+
+    if (p->target_device[0]) {
+        pw_properties_set(props, PW_KEY_TARGET_OBJECT, p->target_device);
+    }
+
+    p->monitor_stream = pw_stream_new(p->pipeline->core, name, props);
+    if (p->monitor_stream) {
+        pw_stream_add_listener(p->monitor_stream, &p->monitor_stream_listener, &monitor_stream_events, p);
+    }
+
+    if (!p->monitor_stream) {
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    uint8_t buffer[1024];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    const struct spa_pod* params[1];
+    params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat,
+        &SPA_AUDIO_INFO_RAW_INIT(
+            .format = SPA_AUDIO_FORMAT_F32,
+            .channels = 2,
+            .rate = sample_rate
+        ));
+
+    int res = pw_stream_connect(p->monitor_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
+        PW_STREAM_FLAG_RT_PROCESS,
+        params, 1);
+
+    if (res < 0) {
+        spa_hook_remove(&p->monitor_stream_listener);
+        pw_stream_destroy(p->monitor_stream);
+        p->monitor_stream = NULL;
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    return QUADRATURE_OK;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * PipeWire Reconnect (Main Thread)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Reconnect a player's PipeWire stream after a device error.
+ * Runs on the main GLib thread via g_idle_add().
+ */
+static gboolean player_reconnect_idle(gpointer data) {
+    player_idle_data_t* d = data;
+    audio_player_t* p = d->player;
+    unsigned int sched_gen = d->generation;
+    g_free(d);
+
+    audio_pipeline_t* pipeline = p->pipeline;
+
+    /* Stale: stream was recreated since this idle was scheduled */
+    if (atomic_load(&p->stream_generation) != sched_gen) {
+        g_debug("Player %d: reconnect_idle skipped (generation %u → %u)",
+                p->player_id, sched_gen, atomic_load(&p->stream_generation));
+        return G_SOURCE_REMOVE;
+    }
+
+    if (!atomic_load_explicit(&p->device_error, memory_order_acquire))
+        return G_SOURCE_REMOVE;  /* Already recovered */
+
+    pw_thread_loop_lock(pipeline->loop);
+    if (!p->stream) {
+        pw_thread_loop_unlock(pipeline->loop);
+        return G_SOURCE_REMOVE;
+    }
+    pw_stream_disconnect(p->stream);
+    pw_stream_connect(p->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
+        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS,
+        p->cached_params, p->num_cached_params);
+
+    /* Reconnect monitor stream alongside output stream */
+    if (p->monitor_stream) {
+        pw_stream_disconnect(p->monitor_stream);
+        uint8_t mbuf[1024];
+        struct spa_pod_builder mb = SPA_POD_BUILDER_INIT(mbuf, sizeof(mbuf));
+        const struct spa_pod* mparams[1];
+        mparams[0] = spa_format_audio_raw_build(&mb, SPA_PARAM_EnumFormat,
+            &SPA_AUDIO_INFO_RAW_INIT(
+                .format = SPA_AUDIO_FORMAT_F32,
+                .channels = 2,
+                .rate = pipeline->sample_rate
+            ));
+        pw_stream_connect(p->monitor_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+            PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS,
+            mparams, 1);
+    }
+    pw_thread_loop_unlock(pipeline->loop);
+
+    /* state_changed callback will clear device_error when STREAMING */
+    return G_SOURCE_REMOVE;
+}
+
+/**
+ * Deactivate a player's streams after persistent device failure.
+ * Runs on the main GLib thread via g_idle_add().
+ */
+static gboolean player_deactivate_idle(gpointer data) {
+    player_idle_data_t* d = data;
+    audio_player_t* p = d->player;
+    unsigned int sched_gen = d->generation;
+    g_free(d);
+
+    audio_pipeline_t* pipeline = p->pipeline;
+    if (!pipeline) return G_SOURCE_REMOVE;
+
+    /* Stale: stream was recreated since this idle was scheduled */
+    if (atomic_load(&p->stream_generation) != sched_gen) {
+        g_debug("Player %d: deactivate_idle skipped (generation %u → %u)",
+                p->player_id, sched_gen, atomic_load(&p->stream_generation));
+        return G_SOURCE_REMOVE;
+    }
+
+    pw_thread_loop_lock(pipeline->loop);
+    player_deactivate_streams(p);
+    pw_thread_loop_unlock(pipeline->loop);
+
+    g_warning("Player %d: device lost — streams deactivated", p->player_id);
+    return G_SOURCE_REMOVE;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Player Initialization
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static quadrature_result_t player_init(audio_player_t* p, int id, uint32_t sample_rate,
-                                        struct pw_thread_loop* loop, const char* target_device) {
+static quadrature_result_t player_init(audio_player_t* p, int id, uint32_t sample_rate) {
     memset(p, 0, sizeof(*p));
     p->player_id = id;
 
-    /* Allocate spectrum ring buffer */
-    p->spectrum_buffer = malloc(SPECTRUM_RINGBUF_SIZE * sizeof(float));
-    if (!p->spectrum_buffer) {
-        return QUADRATURE_ERROR_OUT_OF_MEMORY;
+    /* Initialize per-player spectrum state (cava FFT plan + buffers) */
+    quadrature_result_t spec_res = spectrum_init(&p->spectrum, SPECTRUM_BARS, sample_rate);
+    if (spec_res != QUADRATURE_OK) {
+        return spec_res;
     }
-    spa_ringbuffer_init(&p->spectrum_rb);
 
     atomic_store(&p->state, CHANNEL_STOPPED);
+    atomic_store(&p->pw_stream_state, (int)PW_STREAM_STATE_UNCONNECTED);
+    atomic_store_explicit(&p->device_error, false, memory_order_relaxed);
+
+    /* Heap-allocate ring buffers (~128KB each, keeps audio_player_t small) */
+    p->budget_rb = calloc(1, sizeof(budget_rb_t));
+    p->latency_rb = calloc(1, sizeof(latency_rb_t));
+    p->interval_rb = calloc(1, sizeof(interval_rb_t));
+    if (!p->budget_rb || !p->latency_rb || !p->interval_rb) {
+        free(p->budget_rb);
+        free(p->latency_rb);
+        free(p->interval_rb);
+        spectrum_cleanup(&p->spectrum);
+        return QUADRATURE_ERROR_OUT_OF_MEMORY;
+    }
+    p->last_callback_ns = 0;
+    p->interval_peak_dev_ns = 0;
+
+    p->num_cached_params = 0;
+    p->prev_scrubber_underflows = 0;
 
     /* Initialize playback options */
     atomic_store(&p->repeat, false);
@@ -627,7 +1011,7 @@ static quadrature_result_t player_init(audio_player_t* p, int id, uint32_t sampl
     /* Create rate processor for variable-speed playback */
     quadrature_result_t scrub_res = audio_scrubber_create(sample_rate, &p->scrubber);
     if (scrub_res != QUADRATURE_OK) {
-        free(p->spectrum_buffer);
+        spectrum_cleanup(&p->spectrum);
         return scrub_res;
     }
 
@@ -637,15 +1021,6 @@ static quadrature_result_t player_init(audio_player_t* p, int id, uint32_t sampl
 
     /* Initialize sample counter for RT-safe timestamps */
     atomic_store(&p->callback_sample_count, 0);
-
-    /* Initialize metering atomics */
-    atomic_store(&p->peak_left, 0.0f);
-    atomic_store(&p->peak_right, 0.0f);
-    atomic_store(&p->rms_left, 0.0f);
-    atomic_store(&p->rms_right, 0.0f);
-    atomic_store(&p->peak_hold_left, 0.0f);
-    atomic_store(&p->peak_hold_right, 0.0f);
-    atomic_store(&p->peak_hold_age_frames, 0);
 
     /* Initialize per-player stats */
     atomic_store(&p->stats_cb_count, 0);
@@ -661,35 +1036,115 @@ static quadrature_result_t player_init(audio_player_t* p, int id, uint32_t sampl
         atomic_store(&p->spectrum_bars[i], 0.0f);
     }
 
-    /* Store target device */
-    if (target_device && target_device[0]) {
-        strncpy(p->target_device, target_device, sizeof(p->target_device) - 1);
-        p->target_device[sizeof(p->target_device) - 1] = '\0';
-    } else {
-        p->target_device[0] = '\0';
-    }
+    /* No target device at init — player starts dormant */
+    p->target_device[0] = '\0';
 
-    /* Create PipeWire stream */
-    quadrature_result_t stream_res = create_player_stream(p, sample_rate, loop);
-    if (stream_res != QUADRATURE_OK) {
-        if (p->scrubber) {
-            audio_scrubber_destroy(p->scrubber);
-            p->scrubber = NULL;
-        }
-        free(p->spectrum_buffer);
-        return stream_res;
-    }
+    /* Default quantum (overridden by settings restore in device_enum_done) */
+    p->quantum_frames = APP_SETTINGS_DEFAULT_QUANTUM;
 
-    if (p->target_device[0]) {
-        g_message("Player %d initialized (%uHz, device: %s)", id, sample_rate, p->target_device);
-    } else {
-        g_message("Player %d initialized (%uHz)", id, sample_rate);
-    }
+    /* Initialize stream activation state — streams are created on-demand
+     * when a valid output device is assigned via set_player_device() */
+    p->stream = NULL;
+    p->monitor_stream = NULL;
+    atomic_store(&p->streams_active, false);
+    atomic_store(&p->reconnect_attempted, false);
+
+    g_message("Player %d initialized (%uHz, dormant — no device)", id, sample_rate);
     return QUADRATURE_OK;
 }
 
-static void player_destroy(audio_player_t* p, audio_cache_t* cache) {
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Stream Activation / Deactivation
+ *
+ * Players start dormant (no PW streams). Streams are created when a valid
+ * output device is assigned, and destroyed when the device is removed or
+ * becomes invalid. This keeps the PipeWire graph clean — only players with
+ * valid output devices have nodes on the graph.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Create PipeWire output + monitor streams for a player.
+ * Precondition: p->target_device is set to a valid device name.
+ * Must be called with PipeWire thread loop lock held.
+ */
+static quadrature_result_t player_activate_streams(audio_player_t* p,
+                                                    uint32_t sample_rate) {
+    g_assert(p->stream == NULL);
+    g_assert(p->monitor_stream == NULL);
+
+    quadrature_result_t res = create_player_stream(p, sample_rate);
+    if (res != QUADRATURE_OK) {
+        g_warning("Player %d: output stream creation failed", p->player_id);
+        return res;
+    }
+
+    /* Monitor stream for spectrum (non-fatal if it fails) */
+    quadrature_result_t mon_res = create_monitor_stream(p, sample_rate);
+    if (mon_res != QUADRATURE_OK) {
+        g_warning("Player %d: monitor stream failed, spectrum will be inactive", p->player_id);
+    }
+
+    atomic_store(&p->streams_active, true);
+    atomic_store(&p->reconnect_attempted, false);
+    atomic_store_explicit(&p->device_error, false, memory_order_release);
+
+    g_message("Player %d streams activated (device: %s)", p->player_id, p->target_device);
+    return QUADRATURE_OK;
+}
+
+/**
+ * Destroy PipeWire streams and reset player to dormant state.
+ * Stops playback, clears spectrum ring buffer, zeroes metering.
+ * Must be called with PipeWire thread loop lock held.
+ */
+static void player_deactivate_streams(audio_player_t* p) {
+    if (!atomic_load(&p->streams_active) && !p->stream && !p->monitor_stream)
+        return;
+
+    /* Stop playback first */
+    int prev_state = atomic_exchange(&p->state, CHANNEL_STOPPED);
+    (void)prev_state;
+
+    if (p->monitor_stream) {
+        spa_hook_remove(&p->monitor_stream_listener);
+        pw_stream_disconnect(p->monitor_stream);
+        pw_stream_destroy(p->monitor_stream);
+        p->monitor_stream = NULL;
+    }
     if (p->stream) {
+        spa_hook_remove(&p->stream_listener);
+        pw_stream_disconnect(p->stream);
+        pw_stream_destroy(p->stream);
+        p->stream = NULL;
+    }
+
+    /* Reset spectrum state so stale data doesn't linger */
+    p->spectrum.input_buffer_fill = 0;
+    for (int i = 0; i < SPECTRUM_BARS * 2; i++) {
+        atomic_store(&p->spectrum_bars[i], 0.0f);
+    }
+
+    /* Reset stream-related state */
+    atomic_store_explicit(&p->pw_stream_state, (int)PW_STREAM_STATE_UNCONNECTED, memory_order_relaxed);
+    atomic_store_explicit(&p->device_error, false, memory_order_release);
+    atomic_store(&p->streams_active, false);
+    atomic_store(&p->reconnect_attempted, false);
+    p->last_callback_ns = 0;
+    p->interval_peak_dev_ns = 0;
+
+    g_message("Player %d streams deactivated", p->player_id);
+}
+
+static void player_destroy(audio_player_t* p, audio_cache_t* cache) {
+    if (p->monitor_stream) {
+        spa_hook_remove(&p->monitor_stream_listener);
+        pw_stream_disconnect(p->monitor_stream);
+        pw_stream_destroy(p->monitor_stream);
+        p->monitor_stream = NULL;
+    }
+    if (p->stream) {
+        spa_hook_remove(&p->stream_listener);
+        pw_stream_disconnect(p->stream);
         pw_stream_destroy(p->stream);
         p->stream = NULL;
     }
@@ -706,8 +1161,13 @@ static void player_destroy(audio_player_t* p, audio_cache_t* cache) {
     if (cache && next_id > 0) {
         audio_cache_unlock(cache, next_id);
     }
-    free(p->spectrum_buffer);
-    p->spectrum_buffer = NULL;
+    spectrum_cleanup(&p->spectrum);
+    free(p->budget_rb);
+    p->budget_rb = NULL;
+    free(p->latency_rb);
+    p->latency_rb = NULL;
+    free(p->interval_rb);
+    p->interval_rb = NULL;
     if (p->scrubber) {
         audio_scrubber_destroy(p->scrubber);
         p->scrubber = NULL;
@@ -719,18 +1179,14 @@ static void player_destroy(audio_player_t* p, audio_cache_t* cache) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static quadrature_result_t player_recreate_stream(audio_player_t* p, uint32_t sample_rate,
-                                                   struct pw_thread_loop* loop, const char* target_device) {
+                                                   const char* target_device) {
     channel_state_t prev_state = atomic_load(&p->state);
-    bool was_playing = (prev_state == CHANNEL_PLAYING);
 
-    if (was_playing) {
-        atomic_store(&p->state, CHANNEL_PAUSED);
-    }
+    /* Bump generation so stale reconnect/deactivate idles are no-ops */
+    atomic_fetch_add(&p->stream_generation, 1);
 
-    if (p->stream) {
-        pw_stream_destroy(p->stream);
-        p->stream = NULL;
-    }
+    /* Tear down existing streams */
+    player_deactivate_streams(p);
 
     /* Update target device */
     if (target_device && target_device[0]) {
@@ -742,11 +1198,17 @@ static quadrature_result_t player_recreate_stream(audio_player_t* p, uint32_t sa
         g_message("Player %d retargeting to default device", p->player_id);
     }
 
-    /* Create new stream using shared helper */
-    quadrature_result_t res = create_player_stream(p, sample_rate, loop);
+    /* Only activate if we have a valid device target */
+    if (!p->target_device[0]) {
+        g_message("Player %d: no device — remaining dormant", p->player_id);
+        return QUADRATURE_OK;
+    }
 
-    if (res == QUADRATURE_OK && was_playing) {
-        atomic_store(&p->state, CHANNEL_PLAYING);
+    quadrature_result_t res = player_activate_streams(p, sample_rate);
+
+    /* Restore previous state: PLAYING resumes, PAUSED stays paused */
+    if (res == QUADRATURE_OK && prev_state != CHANNEL_STOPPED) {
+        atomic_store(&p->state, prev_state);
     }
 
     return res;
@@ -770,6 +1232,7 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
     if (!*pipeline) return QUADRATURE_ERROR_OUT_OF_MEMORY;
 
     (*pipeline)->sample_rate = sample_rate;
+    (*pipeline)->ns_per_frame = 1000000000ULL / sample_rate;
     (*pipeline)->library = library;
     (*pipeline)->track_changed_callback = NULL;
     (*pipeline)->track_changed_user_data = NULL;
@@ -782,6 +1245,10 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
     atomic_store(&(*pipeline)->stats_callback_time_max_us, 0);
     atomic_store(&(*pipeline)->stats_track_changes, 0);
     atomic_store(&(*pipeline)->stats_instant_advances, 0);
+
+    /* Initialize event ring buffer */
+    atomic_store(&(*pipeline)->event_write, 0);
+    atomic_store(&(*pipeline)->event_read, 0);
 
     (*pipeline)->loop = pw_thread_loop_new("quadrature", NULL);
     if (!(*pipeline)->loop) {
@@ -810,7 +1277,7 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
     atomic_store(&(*pipeline)->system_active, false);
 
     for (int i = 0; i < MAX_AUDIO_PLAYERS; i++) {
-        quadrature_result_t r = player_init(&(*pipeline)->players[i], i, sample_rate, (*pipeline)->loop, NULL);
+        quadrature_result_t r = player_init(&(*pipeline)->players[i], i, sample_rate);
         if (r != QUADRATURE_OK) {
             for (int j = 0; j < i; j++) player_destroy(&(*pipeline)->players[j], NULL);
             pw_core_disconnect((*pipeline)->core);
@@ -821,17 +1288,6 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
             return r;
         }
     }
-
-    /* Create spectrum analyzer */
-#ifndef QUADRATURE_DISABLE_SPECTRUM
-    (*pipeline)->spectrum = spectrum_create(SPECTRUM_BARS, sample_rate, MAX_AUDIO_PLAYERS,
-                                             (*pipeline)->players);
-    if (!(*pipeline)->spectrum) {
-        g_warning("Spectrum analyzer creation failed - continuing without spectrum");
-    }
-#else
-    (*pipeline)->spectrum = NULL;
-#endif
 
     /* Create audio cache (requires library for track_id resolution) */
     quadrature_result_t cache_result = audio_cache_create(library, sample_rate, &(*pipeline)->cache);
@@ -847,6 +1303,13 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
         (*pipeline)->perf = NULL;
     }
 
+    /* Link perf dashboard to components for event polling */
+    if ((*pipeline)->perf) {
+        perf_dashboard_set_audio_pipeline((*pipeline)->perf, *pipeline);
+        perf_dashboard_set_audio_cache((*pipeline)->perf, (*pipeline)->cache);
+
+    }
+
     /* Set player back-references */
     for (int i = 0; i < MAX_AUDIO_PLAYERS; i++) {
         (*pipeline)->players[i].pipeline = *pipeline;
@@ -859,14 +1322,25 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
 void audio_pipeline_destroy(audio_pipeline_t* pipeline) {
     if (!pipeline) return;
 
+    /* Remove GLib advance timer before anything else — prevents callbacks
+     * firing on partially-destroyed pipeline state */
+    if (pipeline->advance_timeout_id > 0) {
+        g_source_remove(pipeline->advance_timeout_id);
+        pipeline->advance_timeout_id = 0;
+    }
+
+    /* Clear track-changed callback so no stale pointer can be invoked */
+    pipeline->track_changed_callback = NULL;
+    pipeline->track_changed_user_data = NULL;
+
+    /* Stop device monitor before halting the PW thread.  Null the callback
+     * first so any in-flight PW event cannot call into a stale UI pointer. */
+    pipeline->device_changed_cb = NULL;
+    audio_devices_monitor_stop(pipeline);
+
     if (atomic_load(&pipeline->system_active)) {
         pw_thread_loop_stop(pipeline->loop);
         atomic_store(&pipeline->system_active, false);
-    }
-
-    if (pipeline->spectrum) {
-        spectrum_destroy(pipeline->spectrum);
-        pipeline->spectrum = NULL;
     }
 
     for (int i = 0; i < MAX_AUDIO_PLAYERS; i++) {
@@ -948,6 +1422,12 @@ quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline,
 
     audio_player_t* p = &pipeline->players[player_id];
 
+    /* Reject if player has no active output device */
+    if (!atomic_load(&p->streams_active)) {
+        g_warning("Player %d: cannot set track — no active output device", player_id);
+        return QUADRATURE_ERROR_INVALID_PARAM;
+    }
+
     /* PRECONDITION: Track must already be loaded into cache (caller's responsibility).
      * This allows set_player_track() to be non-blocking. */
     audio_cache_status_t status = audio_cache_get_status(pipeline->cache, track_id);
@@ -976,15 +1456,6 @@ quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline,
     atomic_store(&p->position_samples, 0);
     audio_scrubber_flush(p->scrubber);
 
-    /* Store path for display (get from library cache) */
-    if (pipeline->library) {
-        const library_track_info_t* info = library_cache_get_track(pipeline->library, track_id);
-        if (info && info->path) {
-            strncpy(p->filepath, info->path, MAX_FILENAME_LENGTH - 1);
-            p->filepath[MAX_FILENAME_LENGTH - 1] = '\0';
-        }
-    }
-
     /* Lock the track (already in cache due to precondition) */
     audio_cache_lock_result_t lock_result = audio_cache_lock(pipeline->cache, track_id);
 
@@ -1005,11 +1476,10 @@ quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline,
         atomic_store_explicit(&p->buffer, buf, memory_order_release);
         atomic_store(&p->length_samples, audio_buffer_get_num_frames(buf));
 
-        /* Update snapshot with PipeWire lock to synchronize with callback */
-        pw_thread_loop_lock(pipeline->loop);
-        float speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f;
-        player_update_position_snap(p, 0, speed, false, 0);
-        pw_thread_loop_unlock(pipeline->loop);
+        /* Position snapshot: just store atomic position; the audio callback
+         * will write a full position_snap within ~10ms. Avoids taking the
+         * PW lock on the GTK main thread which can deadlock during device changes. */
+        atomic_store(&p->position_samples, 0);
 
         /* Fire callback immediately */
         if (pipeline->track_changed_callback) {
@@ -1096,11 +1566,10 @@ static void process_pending_advances_internal(audio_pipeline_t* pipeline) {
                     g_debug("Player %d: track %" G_GINT64_FORMAT " decode complete, buffer attached",
                             i, pending_id);
 
-                    /* Update snapshot with PipeWire lock */
-                    pw_thread_loop_lock(pipeline->loop);
-                    float speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f;
-                    player_update_position_snap(p, 0, speed, false, 0);
-                    pw_thread_loop_unlock(pipeline->loop);
+                    /* Position snapshot: just store atomic position; the audio callback
+                     * will write a full position_snap within ~10ms. Avoids taking the
+                     * PW lock on the GTK main thread which can deadlock during device changes. */
+                    atomic_store(&p->position_samples, 0);
 
                     /* Fire callback */
                     if (pipeline->track_changed_callback) {
@@ -1195,11 +1664,11 @@ static gboolean advance_timeout_callback(gpointer user_data) {
     }
     process_pending_advances_internal(pipeline);
 
-    /* Sample budget utilization every ~1 second (20 * 50ms) */
-    static unsigned int budget_sample_counter = 0;
-    if (++budget_sample_counter >= 20 && pipeline->perf) {
-        perf_sample_budget_utilization(pipeline->perf);
-        budget_sample_counter = 0;
+    /* Sample PW queue depth every ~1 second (20 * 50ms) */
+    static unsigned int sample_counter = 0;
+    if (++sample_counter >= 20 && pipeline->perf) {
+        perf_sample_pw_queue_depth(pipeline->perf);
+        sample_counter = 0;
     }
 
     return G_SOURCE_CONTINUE;
@@ -1209,35 +1678,27 @@ quadrature_result_t audio_pipeline_player_play(audio_pipeline_t* pipeline, int p
     if (!pipeline || !valid_player(player_id)) return QUADRATURE_ERROR_INVALID_PARAM;
     audio_player_t* p = &pipeline->players[player_id];
 
+    if (!atomic_load(&p->streams_active)) return QUADRATURE_ERROR_INVALID_PARAM;
+
     /* Atomic state transition: STOPPED or PAUSED → PLAYING */
     int expected = CHANNEL_STOPPED;
-    if (atomic_compare_exchange_strong(&p->state, &expected, CHANNEL_PLAYING)) {
-        pw_thread_loop_lock(pipeline->loop);
-        float speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f;
-        player_update_position_snap(p, atomic_load(&p->position_samples), speed, true, 0);
-        pw_thread_loop_unlock(pipeline->loop);
-        g_message("Player %d playing (from stopped)", player_id);
-        return QUADRATURE_OK;
+    if (!atomic_compare_exchange_strong(&p->state, &expected, CHANNEL_PLAYING)) {
+        expected = CHANNEL_PAUSED;
+        if (!atomic_compare_exchange_strong(&p->state, &expected, CHANNEL_PLAYING)) {
+            if (expected == CHANNEL_PLAYING) return QUADRATURE_OK;
+            g_debug("Player %d play failed: state=%d", player_id, expected);
+            return QUADRATURE_ERROR_INTERNAL;
+        }
     }
 
-    expected = CHANNEL_PAUSED;
-    if (atomic_compare_exchange_strong(&p->state, &expected, CHANNEL_PLAYING)) {
-        pw_thread_loop_lock(pipeline->loop);
-        float speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f;
-        player_update_position_snap(p, atomic_load(&p->position_samples), speed, true, 0);
-        pw_thread_loop_unlock(pipeline->loop);
-        g_message("Player %d playing (from paused)", player_id);
-        return QUADRATURE_OK;
-    }
-
-    /* Already playing or in invalid state */
-    int current = atomic_load(&p->state);
-    if (current == CHANNEL_PLAYING) {
-        return QUADRATURE_OK;  /* Already playing - success */
-    }
-
-    g_debug("Player %d play failed: state=%d", player_id, current);
-    return QUADRATURE_ERROR_INTERNAL;
+    const char *from = (expected == CHANNEL_STOPPED) ? "stopped" : "paused";
+    pw_thread_loop_lock(pipeline->loop);
+    if (p->stream) pw_stream_set_active(p->stream, true);
+    float speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f;
+    player_update_position_snap(p, atomic_load(&p->position_samples), speed, true, 0);
+    pw_thread_loop_unlock(pipeline->loop);
+    g_info("Player %d playing (from %s)", player_id, from);
+    return QUADRATURE_OK;
 }
 
 quadrature_result_t audio_pipeline_player_stop(audio_pipeline_t* pipeline, int player_id) {
@@ -1258,10 +1719,14 @@ quadrature_result_t audio_pipeline_player_stop(audio_pipeline_t* pipeline, int p
     float speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f;
     player_update_position_snap(p, 0, speed, false, 0);
 
+    /* Deactivate stream so PipeWire stops scheduling RT callbacks */
+    if (prev != CHANNEL_STOPPED && p->stream)
+        pw_stream_set_active(p->stream, false);
+
     pw_thread_loop_unlock(pipeline->loop);
 
     if (prev != CHANNEL_STOPPED) {
-        g_message("Player %d stopped", player_id);
+        g_info("Player %d stopped", player_id);
     }
     return QUADRATURE_OK;
 }
@@ -1283,7 +1748,7 @@ quadrature_result_t audio_pipeline_player_toggle_play(audio_pipeline_t* pipeline
             float speed = p->scrubber ? audio_scrubber_get_speed(p->scrubber) : 1.0f;
             player_update_position_snap(p, atomic_load(&p->position_samples), speed, false, 0);
             pw_thread_loop_unlock(pipeline->loop);
-            g_message("Player %d paused", player_id);
+            g_info("Player %d paused", player_id);
             return QUADRATURE_OK;
         }
         return QUADRATURE_OK;  /* Already changed state */
@@ -1340,6 +1805,7 @@ quadrature_result_t audio_pipeline_player_set_speed(audio_pipeline_t* pipeline,
     }
 
     audio_scrubber_set_speed(p->scrubber, speed);
+    g_info("Ch%d: speed set to %.2fx", player_id + 1, speed);
 
     /* Update snapshot with PipeWire lock to synchronize with callback */
     pw_thread_loop_lock(pipeline->loop);
@@ -1355,7 +1821,14 @@ quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t* pip
     if (!pipeline || !valid_player(player_id)) return QUADRATURE_ERROR_INVALID_PARAM;
     audio_player_t* p = &pipeline->players[player_id];
     if (!p->scrubber) return QUADRATURE_ERROR_INTERNAL;
+    
     audio_scrubber_set_shuttle_mode(p->scrubber, mode);
+    
+    /* Log mode change */
+    const char* mode_names[] = { "off", "keylock", "pitched" };
+    const char* mode_name = (mode >= 0 && mode <= 2) ? mode_names[mode] : "unknown";
+    g_info("Ch%d: shuttle mode set to %s", player_id + 1, mode_name);
+    
     return QUADRATURE_OK;
 }
 
@@ -1394,19 +1867,50 @@ quadrature_result_t audio_pipeline_set_player_device(audio_pipeline_t* pipeline,
 
     audio_player_t* p = &pipeline->players[player_id];
 
+    /* Lockless early-out: skip PW lock entirely for no-op device changes.
+     * target_device is only written under the PW lock, so worst case of a
+     * torn read is a single extra lock acquisition — not a safety issue. */
     const char* current = p->target_device[0] ? p->target_device : NULL;
     const char* new_dev = (device_name && device_name[0]) ? device_name : NULL;
-
     if ((current == NULL && new_dev == NULL) ||
-        (current && new_dev && strcmp(current, new_dev) == 0)) {
+        (current && new_dev && strcmp(current, new_dev) == 0))
+        return QUADRATURE_OK;
+
+    pw_thread_loop_lock(pipeline->loop);
+    quadrature_result_t result = player_recreate_stream(p, pipeline->sample_rate, device_name);
+    pw_thread_loop_unlock(pipeline->loop);
+
+    return result;
+}
+
+void audio_pipeline_set_player_exclusive(audio_pipeline_t* pipeline, int player_id, bool exclusive) {
+    if (!pipeline || !valid_player(player_id)) return;
+    audio_player_t* p = &pipeline->players[player_id];
+    p->exclusive = exclusive;
+    /* Takes effect on next stream recreate (device change, reconnect, etc.) */
+}
+
+quadrature_result_t audio_pipeline_set_player_quantum(audio_pipeline_t* pipeline, int player_id, uint32_t quantum_frames) {
+    if (!pipeline || !valid_player(player_id)) return QUADRATURE_ERROR_INVALID_PARAM;
+    if (quantum_frames < 32 || quantum_frames > 2048 || (quantum_frames & (quantum_frames - 1)) != 0)
+        return QUADRATURE_ERROR_INVALID_PARAM;
+
+    audio_player_t* p = &pipeline->players[player_id];
+
+    pw_thread_loop_lock(pipeline->loop);
+
+    if (p->quantum_frames == quantum_frames) {
+        pw_thread_loop_unlock(pipeline->loop);
         return QUADRATURE_OK;
     }
 
-    pw_thread_loop_lock(pipeline->loop);
+    p->quantum_frames = quantum_frames;
+
     quadrature_result_t result = player_recreate_stream(p, pipeline->sample_rate,
-                                                         pipeline->loop, device_name);
+                                                         p->target_device[0] ? p->target_device : NULL);
     pw_thread_loop_unlock(pipeline->loop);
 
+    g_message("Player %d quantum set to %u frames", player_id, quantum_frames);
     return result;
 }
 
@@ -1446,14 +1950,22 @@ double audio_pipeline_get_player_position_smooth(audio_pipeline_t* pipeline,
     position_snapshot_t snap = {0};
     uint32_t seq1, seq2 = 0;
 
-    /* Seqlock read with retry */
+    /* Seqlock read with retry limit.
+     * If the writer is pathologically active (shouldn't happen in practice),
+     * return the last snapshot — stale data for one UI frame is acceptable. */
+    #define SEQLOCK_MAX_RETRIES 4
+    int retries = 0;
     do {
         seq1 = atomic_load_explicit(&p->position_seq, memory_order_acquire);
-        if (seq1 & 1) continue;  /* Writer is active, spin */
+        if (seq1 & 1) {
+            if (++retries >= SEQLOCK_MAX_RETRIES) break;
+            continue;  /* Writer is active, spin */
+        }
         snap = p->position_snap;
         atomic_thread_fence(memory_order_acquire);
         seq2 = atomic_load_explicit(&p->position_seq, memory_order_relaxed);
-    } while (seq1 != seq2);
+        if (seq1 == seq2) break;
+    } while (++retries < SEQLOCK_MAX_RETRIES);
 
     if (out_speed) *out_speed = snap.speed;
 
@@ -1496,6 +2008,14 @@ void audio_pipeline_get_player_spectrum(audio_pipeline_t* pipeline, int player_i
     audio_player_t* p = &pipeline->players[player_id];
     int count = (num_bars > SPECTRUM_BARS) ? SPECTRUM_BARS : num_bars;
 
+    /* When not playing, return zeros — UI smoothing handles fadeout */
+    channel_state_t state = atomic_load(&p->state);
+    if (state != CHANNEL_PLAYING) {
+        memset(left, 0, (size_t)num_bars * sizeof(float));
+        memset(right, 0, (size_t)num_bars * sizeof(float));
+        return;
+    }
+
     for (int i = 0; i < count; i++) {
         left[i] = atomic_load(&p->spectrum_bars[i]);
         right[i] = atomic_load(&p->spectrum_bars[SPECTRUM_BARS + i]);
@@ -1504,24 +2024,6 @@ void audio_pipeline_get_player_spectrum(audio_pipeline_t* pipeline, int player_i
         left[i] = 0.0f;
         right[i] = 0.0f;
     }
-}
-
-void audio_pipeline_get_stats(audio_pipeline_t* pipeline, audio_pipeline_stats_t* stats) {
-    g_assert(pipeline != NULL);
-    g_assert(stats != NULL);
-
-    stats->callback_count = atomic_load(&pipeline->stats_callback_count);
-    stats->underrun_count = atomic_load(&pipeline->stats_underrun_count);
-
-    /* Calculate average callback time */
-    uint64_t sum = atomic_load(&pipeline->stats_callback_time_sum_us);
-    stats->callback_time_avg_us = (stats->callback_count > 0)
-        ? (float)sum / (float)stats->callback_count
-        : 0.0f;
-    stats->callback_time_max_us = (float)atomic_load(&pipeline->stats_callback_time_max_us);
-
-    stats->track_changes = atomic_load(&pipeline->stats_track_changes);
-    stats->instant_advances = atomic_load(&pipeline->stats_instant_advances);
 }
 
 void audio_pipeline_get_player_stats(audio_pipeline_t* pipeline,
@@ -1543,24 +2045,20 @@ void audio_pipeline_get_player_stats(audio_pipeline_t* pipeline,
     stats->callback_time_max_us = (float)((double)max_ns / 1000.0);
 
     /* Budget % = avg_time / budget * 100 */
-    uint64_t period_ns = (uint64_t)512 * 1000000000ULL / pipeline->sample_rate;
+    uint64_t period_ns = (uint64_t)p->quantum_frames * 1000000000ULL / pipeline->sample_rate;
     stats->budget_pct = count > 0
         ? (float)((double)sum_ns / (double)count / (double)period_ns * 100.0)
         : 0.0f;
     stats->budget_overruns = atomic_load_explicit(&p->stats_budget_overruns, memory_order_relaxed);
 
-    /* Audio health — pull from perf dashboard for underruns and jitter */
-    if (pipeline->perf) {
-        uint64_t underruns, callbacks;
-        double jitter;
-        perf_get_audio_health(pipeline->perf, player_id, &underruns, &callbacks, &jitter);
-        stats->underrun_rate_pct = callbacks > 0
-            ? (float)((double)underruns / (double)callbacks * 100.0) : 0.0f;
-        stats->jitter_ms = (float)jitter;
-    } else {
-        stats->underrun_rate_pct = 0.0f;
-        stats->jitter_ms = 0.0f;
-    }
+    /* Compute underrun rate from pipeline stats */
+    uint64_t total_callbacks = atomic_load(&pipeline->stats_callback_count);
+    uint64_t total_underruns = atomic_load(&pipeline->stats_underrun_count);
+    stats->underrun_rate_pct = total_callbacks > 0
+        ? (float)((double)total_underruns / (double)total_callbacks * 100.0) : 0.0f;
+    
+    /* Jitter tracking removed - was never written to since perf_record_callback() not called */
+    stats->jitter_ms = 0.0f;
 
     /* Fault events */
     stats->dequeue_failures = atomic_load_explicit(&p->stats_dequeue_failures, memory_order_relaxed);
@@ -1584,4 +2082,133 @@ perf_dashboard_t* audio_pipeline_get_perf_dashboard(audio_pipeline_t* pipeline) 
 audio_cache_t* audio_pipeline_get_audio_cache(audio_pipeline_t* pipeline) {
     g_assert(pipeline != NULL);
     return pipeline->cache;
+}
+
+void audio_pipeline_get_budget_histogram(audio_pipeline_t* pipeline, int player_id,
+                                          uint32_t out_buckets[10]) {
+    g_assert(pipeline != NULL);
+    g_assert(valid_player(player_id));
+    g_assert(out_buckets != NULL);
+
+    memset(out_buckets, 0, 10 * sizeof(uint32_t));
+
+    const budget_rb_t* rb = pipeline->players[player_id].budget_rb;
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+
+    /* Read up to BUDGET_RB_CAPACITY samples (or all written so far) */
+    uint32_t total = write_pos < BUDGET_RB_CAPACITY ? write_pos : BUDGET_RB_CAPACITY;
+    uint32_t start = write_pos - total;  /* wraps naturally with unsigned arithmetic */
+
+    for (uint32_t i = 0; i < total; i++) {
+        uint16_t cpct = rb->samples[(start + i) & (BUDGET_RB_CAPACITY - 1)];
+        int bucket = cpct / 1000;  /* centipercent → 10% buckets */
+        if (bucket >= 10) bucket = 9;
+        out_buckets[bucket]++;
+    }
+}
+
+double audio_pipeline_get_budget_max(audio_pipeline_t* pipeline, int player_id) {
+    g_assert(pipeline != NULL);
+    g_assert(valid_player(player_id));
+
+    const budget_rb_t* rb = pipeline->players[player_id].budget_rb;
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+
+    /* ~1 second of samples at ~10ms intervals */
+    uint32_t window = 100;
+    uint32_t available = write_pos < BUDGET_RB_CAPACITY ? write_pos : BUDGET_RB_CAPACITY;
+    if (available == 0) return 0.0;
+    if (window > available) window = available;
+
+    uint32_t start = write_pos - window;
+    uint16_t max_cpct = 0;
+    for (uint32_t i = 0; i < window; i++) {
+        uint16_t v = rb->samples[(start + i) & (BUDGET_RB_CAPACITY - 1)];
+        if (v > max_cpct) max_cpct = v;
+    }
+
+    return (double)max_cpct / 100.0;
+}
+
+uint32_t audio_pipeline_get_latency_samples(audio_pipeline_t* pipeline, int player_id,
+                                              uint16_t* out, uint32_t max_samples) {
+    g_assert(pipeline != NULL);
+    g_assert(valid_player(player_id));
+    g_assert(out != NULL);
+
+    const latency_rb_t* rb = pipeline->players[player_id].latency_rb;
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+
+    uint32_t total = write_pos < LATENCY_RB_CAPACITY ? write_pos : LATENCY_RB_CAPACITY;
+    if (total > max_samples) total = max_samples;
+
+    uint32_t start = write_pos - total;
+    for (uint32_t i = 0; i < total; i++) {
+        out[i] = rb->samples[(start + i) & (LATENCY_RB_CAPACITY - 1)];
+    }
+    return total;
+}
+
+uint32_t audio_pipeline_get_interval_samples(audio_pipeline_t* pipeline, int player_id,
+                                               int64_t* out, uint32_t max_samples,
+                                               uint32_t* out_write_pos) {
+    g_assert(pipeline != NULL);
+    g_assert(valid_player(player_id));
+    g_assert(out != NULL);
+
+    const interval_rb_t* rb = pipeline->players[player_id].interval_rb;
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+
+    uint32_t total = write_pos < INTERVAL_RB_CAPACITY ? write_pos : INTERVAL_RB_CAPACITY;
+    if (total > max_samples) total = max_samples;
+
+    uint32_t start = write_pos - total;
+    for (uint32_t i = 0; i < total; i++) {
+        out[i] = rb->samples[(start + i) & (INTERVAL_RB_CAPACITY - 1)];
+    }
+    if (out_write_pos) *out_write_pos = write_pos;
+    return total;
+}
+
+bool audio_pipeline_player_has_device_error(audio_pipeline_t* pipeline, int player_id) {
+    if (!pipeline || !valid_player(player_id)) return false;
+    return atomic_load_explicit(&pipeline->players[player_id].device_error, memory_order_acquire);
+}
+
+bool audio_pipeline_player_streams_active(audio_pipeline_t* pipeline, int player_id) {
+    if (!pipeline || !valid_player(player_id)) return false;
+    return atomic_load(&pipeline->players[player_id].streams_active);
+}
+
+void audio_pipeline_player_reconnect(audio_pipeline_t* pipeline, int player_id) {
+    if (!pipeline || !valid_player(player_id)) return;
+    audio_player_t *p = &pipeline->players[player_id];
+    player_idle_data_t *d = g_new(player_idle_data_t, 1);
+    d->player = p;
+    d->generation = atomic_load(&p->stream_generation);
+    g_idle_add(player_reconnect_idle, d);
+}
+
+int audio_pipeline_get_events(audio_pipeline_t* pipeline,
+                               audio_pipeline_event_t* out,
+                               int max) {
+    if (!pipeline || !out || max <= 0) return 0;
+    
+    unsigned int write_idx = atomic_load(&pipeline->event_write);
+    unsigned int read_idx = atomic_load(&pipeline->event_read);
+    
+    /* Handle wraparound: limit to ring buffer size */
+    if (write_idx - read_idx > AUDIO_EVENT_RING_SIZE) {
+        read_idx = write_idx - AUDIO_EVENT_RING_SIZE;
+    }
+    
+    int count = 0;
+    while (read_idx < write_idx && count < max) {
+        unsigned int idx = read_idx % AUDIO_EVENT_RING_SIZE;
+        out[count++] = pipeline->events[idx];
+        read_idx++;
+    }
+    
+    atomic_store(&pipeline->event_read, read_idx);
+    return count;
 }

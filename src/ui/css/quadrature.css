@@ -3,15 +3,17 @@
 /*
  * Color Palette Reference (GTK4 doesn't support CSS variables)
  *
- * Backgrounds: #1e1e1e (dark), #1a1a1a (darker), #151515 (darkest),
- *              #282828 (elevated), #2a2a2a (input), #3a3a3a (button), #4a4a4a (hover)
+ * Backgrounds (dark → light):
+ *   #141414 (channels panel), #1a1a1a (display panel/LCD), #1e1e1e (nav bar, channel strip),
+ *   #121212 (window base/library content), #282828 (elevated cards), #2a2a2a (input),
+ *   #3a3a3a (button), #4a4a4a (hover)
  * Accents: #00d4ff (cyan), #e5a640 (amber), #ff9500 (orange), #ff3333 (red), #33cc33 (green), #ffcc00 (yellow)
  * Text: #e0e0e0 (primary), #aaaaaa (secondary), #888888 (muted), #666666 (dim)
  * Borders: #555555 (default), #444444 (subtle), #333333 (muted)
  */
 
 /* Window */
-window { background-color: #1e1e1e; }
+window { background-color: #121212; }
 
 /* Base Widgets */
 button {
@@ -80,10 +82,13 @@ scrollbar slider {
 
 scrollbar slider:hover { background-color: #777777; }
 scrollbar slider:active { background-color: #00d4ff; }
+scrollbar trough { background-color: transparent; }
+
+/* Entry placeholder text */
+entry > text > placeholder { color: #666666; }
 
 /* Layout Utilities */
-.view-container { padding: 16px; }
-.padding-8 { padding: 8px; }
+.view-container { padding: 8px 8px 8px 8px; padding-right: 20px; }
 
 /* Button Sizes */
 .btn-xs {
@@ -95,108 +100,6 @@ scrollbar slider:active { background-color: #00d4ff; }
     border-radius: 4px;
 }
 
-.btn-sm {
-    min-width: 32px;
-    min-height: 32px;
-    padding: 4px;
-}
-
-.btn-md {
-    min-width: 36px;
-    min-height: 36px;
-    padding: 4px 8px;
-}
-
-.btn-lg {
-    min-width: 48px;
-    min-height: 48px;
-    padding: 6px 12px;
-}
-
-/* Toggle Active State */
-.btn-active,
-.btn-active:hover {
-    background-color: #00d4ff;
-    color: #000000;
-    border-color: #00d4ff;
-}
-
-.btn-active:hover { background-color: #33ddff; }
-
 /* Text Colors */
-.text-primary { color: #e0e0e0; }
-.text-secondary { color: #aaaaaa; }
-.text-muted { color: #888888; }
 .text-dim { color: #666666; }
-.text-accent { color: #00d4ff; }
-.text-error { color: #ff3333; }
-.text-success { color: #33cc33; }
-.text-warning { color: #ff9500; }
 
-/* Typography */
-.text-title {
-    font-size: 14px;
-    font-weight: 500;
-    color: #e0e0e0;
-}
-
-.text-subtitle {
-    font-size: 12px;
-    color: #888888;
-}
-
-.text-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: #666666;
-    letter-spacing: 0.5px;
-}
-
-.text-mono { font-family: monospace; }
-
-/* Card Base */
-.card {
-    background-color: #282828;
-    border: 1px solid #3a3a3a;
-    border-radius: 8px;
-}
-
-.card:hover { border-color: #555555; }
-
-/* Album Art Base */
-.art-base {
-    background-color: #333333;
-    border-radius: 4px;
-}
-
-.art-thumb {
-    min-width: 48px;
-    min-height: 48px;
-    background-color: #333333;
-    border-radius: 4px;
-}
-
-.art-large {
-    min-width: 120px;
-    min-height: 120px;
-    background-color: #333333;
-    border-radius: 8px;
-}
-
-/* Empty States */
-.empty-state {
-    padding: 32px;
-    color: #888888;
-}
-
-.empty-state-title {
-    font-size: 18px;
-    font-weight: 500;
-    color: #aaaaaa;
-    margin-bottom: 8px;
-}
-
-.empty-state-subtitle {
-    font-size: 14px;
-    color: #666666;
-}

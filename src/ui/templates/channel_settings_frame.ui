@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <object class="GtkFrame" id="channel_frame">
+    <style>
+      <class name="settings-channel-frame"/>
+    </style>
+    <child>
+      <object class="GtkGrid" id="channel_grid">
+        <property name="row-spacing">8</property>
+        <property name="column-spacing">14</property>
+        <style>
+          <class name="settings-channel-grid"/>
+        </style>
+
+        <!-- Row 0, Col 0: Audio Device label -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Audio Device</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="settings-label"/>
+            </style>
+            <layout>
+              <property name="column">0</property>
+              <property name="row">0</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 0, Col 1: Audio Device dropdown -->
+        <child>
+          <object class="GtkDropDown" id="device_dropdown">
+            <property name="hexpand">true</property>
+            <layout>
+              <property name="column">1</property>
+              <property name="row">0</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 0, Col 2: GPIO label -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">GPIO</property>
+            <property name="xalign">1</property>
+            <style>
+              <class name="settings-label"/>
+            </style>
+            <layout>
+              <property name="column">2</property>
+              <property name="row">0</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 0, Col 3: GPIO entry -->
+        <child>
+          <object class="GtkEntry" id="gpio_entry">
+            <property name="placeholder-text">10.1.73.12:93</property>
+            <property name="max-length">21</property>
+            <property name="width-chars">25</property>
+            <property name="tooltip-text">Axia Livewire+ console address — default port: 93</property>
+            <style>
+              <class name="settings-entry"/>
+            </style>
+            <layout>
+              <property name="column">3</property>
+              <property name="row">0</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 1, Col 0: Output Format label -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Output Format</property>
+            <property name="xalign">0</property>
+            <style>
+              <class name="settings-label"/>
+            </style>
+            <layout>
+              <property name="column">0</property>
+              <property name="row">1</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 1, Col 1: Output Format dropdown -->
+        <child>
+          <object class="GtkDropDown" id="format_dropdown">
+            <property name="hexpand">true</property>
+            <layout>
+              <property name="column">1</property>
+              <property name="row">1</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 1, Col 2: Quantum label -->
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Quantum</property>
+            <property name="xalign">1</property>
+            <style>
+              <class name="settings-label"/>
+            </style>
+            <layout>
+              <property name="column">2</property>
+              <property name="row">1</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 1, Col 3: Quantum dropdown -->
+        <child>
+          <object class="GtkDropDown" id="quantum_dropdown">
+            <layout>
+              <property name="column">3</property>
+              <property name="row">1</property>
+            </layout>
+          </object>
+        </child>
+
+        <!-- Row 2, Col 1-3: Lock output device checkbox -->
+        <child>
+          <object class="GtkCheckButton" id="exclusive_check">
+            <property name="label">Lock output device</property>
+            <property name="active">true</property>
+            <property name="tooltip-text">Claim exclusive access to this audio device (disconnects other applications)</property>
+            <layout>
+              <property name="column">1</property>
+              <property name="row">2</property>
+              <property name="column-span">3</property>
+            </layout>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

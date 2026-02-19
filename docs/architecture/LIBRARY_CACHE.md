@@ -340,6 +340,115 @@ void library_cache_clear(library_cache_t* cache);
 
 Joins the warming thread, frees all entity arrays, re-allocates fresh arrays, resets state to IDLE. Called after re-indexing, followed by `start_warming()`.
 
+## Pointer Lifetimes & UI Safety
+
+### Interior Pointers
+
+Every pointer returned by a `library_cache_get_*` function is an **interior pointer** — a raw address into the cache's own heap-allocated slot arrays. These pointers are stable for as long as the cache is warm, but become dangling the moment `library_cache_clear()` or `library_cache_clear_slot()` runs.
+
+```
+cache->slots[lib_idx]->track_artists[local_id]  ← the actual GPtrArray on the heap
+                                          ▲
+library_cache_get_track_artists() ────────┘  returns a raw pointer to this
+```
+
+`library_cache_clear()` calls `free_slot_arrays()`, which calls `g_ptr_array_unref()` on every entry.  Any code still holding a pointer into those arrays is now reading freed memory.
+
+### The Safety Rule
+
+> **Never store a raw cache pointer in widget data that outlives the row-creation call.**
+
+| Safe | Unsafe |
+|---|---|
+| Use a cache pointer to set a label's text, then discard it | Store a cache pointer in a tick-callback struct |
+| Use a cache pointer for artwork lookup and then discard it | Store a cache pointer in a GObject data key for async access |
+| Store `(cache, entity_id)` in long-lived widget data | Store `const GPtrArray *track_artists` in long-lived widget data |
+
+The rule exists because `library_cache_clear()` is called from the main thread after re-indexing, and GTK tick callbacks, `"map"` signal handlers, and other long-lived widget callbacks also run on the main thread. They are interleaved, not concurrent — but they are not scoped to the same call. A tick callback created during row setup at time T may run after `library_cache_clear()` runs at time T+N.
+
+### Correct Pattern: Lookup Key, Not Pointer
+
+When widget data structures need ongoing access to cache relationship data (e.g. to re-populate artist buttons on window resize), store the lookup key and re-fetch:
+
+```c
+// BAD — raw interior pointer in long-lived widget data
+typedef struct {
+    const GPtrArray *track_artists;   // dangling after library_cache_clear()
+    ...
+} ArtistBoxData;
+
+// GOOD — lookup key; re-fetch on every use
+typedef struct {
+    library_cache_t *cache;           // stable for app lifetime
+    int64_t          track_id;        // stable entity ID
+    ...
+} ArtistBoxData;
+
+// In the tick/map callback:
+const GPtrArray *artists = library_cache_get_track_artists(abd->cache, abd->track_id);
+if (!artists || artists->len == 0) { gtk_widget_set_visible(box, FALSE); return; }
+// use `artists` within this call only — do not re-store it
+```
+
+After `library_cache_clear()`, `library_cache_get_track_artists()` returns `NULL` (arrays are reallocated but empty) or falls back to `db_ui` if the on-demand path is triggered. Either way, no dangling pointer is accessed.
+
+### Row Creation Scope
+
+During a row-creation function (e.g. `ui_create_track_row`), all use of cache interior pointers must complete before the function returns. This is safe because `library_cache_clear()` runs on the main thread and cannot race with the row-creation call:
+
+```c
+GtkWidget *ui_create_track_row(const library_track_info_t *track, ...) {
+    // Immediate use of interior pointers — safe within this call scope:
+    gtk_label_set_text(title_label, track->title);          // OK
+    artwork_manager_get_thumbnail(art_mgr, track->album_id, art_image);  // OK
+
+    // Do NOT store track->title, track->album_id, etc. in widget data for
+    // later async use. Store entity IDs and re-fetch when needed.
+
+    g_object_set_data(G_OBJECT(row), "track-id",
+                      GSIZE_TO_POINTER((gsize)track->track_id));  // OK: ID, not pointer
+}
+```
+
+### List View Data Lifecycle
+
+**GtkListBox rows** (`GtkListBox` + `gtk_list_box_append`):
+- Full widget trees created by `ui_create_track_row` / `ui_create_album_row` etc.
+- When a view refreshes, all rows are removed (`gtk_list_box_remove`) and a fresh batch is created.
+- Each row's tick callbacks are removed when the row widget is destroyed. Rows are destroyed synchronously when removed from the list.
+- Between row removal and `library_cache_clear()`, no dangling pointers exist — the widgets are gone.
+
+**GtkListItemFactory rows** (`lazy_list.c`, virtualized lists):
+- Item widgets are recycled. `bind` runs to populate the widget for a specific model item; `unbind` runs to clear it before recycling.
+- Cache pointers used during `bind` for immediate widget setup (setting labels, requesting artwork) are used and discarded within `bind`. They are not stored in the item widget for later re-use.
+- Because the list can be displaying rows while `library_cache_clear()` fires, widget setup code in `bind` callbacks follows the same rule: use and discard cache pointers immediately, never store them.
+
+**ArtworkManager thumbnails** (async, cross-invalidation safe):
+- `artwork_manager_get_thumbnail(mgr, album_id, gtk_image)` registers an async callback.
+- The callback uses `g_object_add_weak_pointer` on the `GtkImage`. If the row is destroyed before the callback fires, the weak pointer is nulled and the callback silently skips the update.
+- This design is safe across both widget destruction and cache invalidation (artwork IDs are stable).
+
+### Post-Reindex Lifecycle
+
+```
+Indexer thread: completes scan + artwork write
+  → g_idle_add or GLib signal → fires on main thread
+
+Main thread:
+  library_cache_clear(cache)         ← joins warm thread, frees all slot arrays
+                                        ALL interior pointers are now invalid
+  artwork_manager_reload_library_atlas(...)  ← remaps atlas file
+  library_cache_start_warming(cache) ← spawns fresh warm thread
+  [views refresh to show loading state]
+
+Warming thread: repopulates slot arrays under cache->lock (brief, no I/O)
+
+Main thread (warm complete, g_idle_add from warm thread):
+  on_cache_ready() → views refresh with new data
+```
+
+Between `clear()` and `on_cache_ready()`, `library_cache_get_*` calls fall back to `db_ui` for on-demand queries — views continue to function, they just don't have the full warmed dataset yet.
+
 ## Thread Safety
 
 ```
@@ -393,23 +502,22 @@ All data is loaded during warming. The flat arrays add minimal overhead (~8 byte
 
 ```c
 // In ui_window_new():
-build_ui(w);  // Views populate via sync fallback
-
+build_ui(w);
 library_cache_set_ready_callback(w->library_cache, on_cache_ready, w);
 library_cache_start_warming(w->library_cache);
 
-// Callback fires on main thread when warming completes:
+// on_cache_ready delegates to centralized refresh:
 static void on_cache_ready(void *data) {
     UiWindow *w = UI_WINDOW(data);
-    library_view_refresh(w->artists_view);
-    library_view_refresh(w->albums_view);
+    refresh_library_views(w);
 }
 
-// After re-indexing:
-library_cache_clear(w->library_cache);
-library_cache_start_warming(w->library_cache);
-library_view_refresh(w->artists_view);
-library_view_refresh(w->albums_view);
+// refresh_library_views is the SINGLE place that decides what to refresh:
+// - artists_view, albums_view (list rebuilds)
+// - detail_view (if open — reloads current album/artist/meta-artist)
+// - search results (if VIEW_SEARCH active)
+//
+// Called from: on_cache_ready (after warm), on_indexer_artwork_ready (after atlas reload)
 ```
 
 **Important:** Warming must start *after* `build_ui()` to ensure views exist before the ready callback can fire, and to let the sync fallback complete before the warming thread can race with it.

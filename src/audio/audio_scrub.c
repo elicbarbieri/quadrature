@@ -31,19 +31,9 @@
 #define WORK_BUFFER_FRAMES   4096    /* Pre-allocated buffer size */
 #define RB_RING_BUFFER_SIZE  8192    /* Output ring buffer for rubberband */
 
-/* Passthrough threshold */
-#define PASSTHROUGH_EPSILON  0.001f  /* |speed - 1.0| < this → passthrough */
-
 /* Speed limits per mode */
 #define RUBBERBAND_MIN       0.5f    /* Pitch-preserved mode min */
 #define RUBBERBAND_MAX       4.0f    /* Pitch-preserved mode max */
-#define TURNTABLE_MAX_SPEED  2.0f    /* Pitched mode max (quality limit) */
-
-/* Ducking: reduce volume at high speeds to avoid harshness */
-#define DUCK_THRESHOLD       2.0f    /* Start ducking above 2x */
-#define DUCK_FLOOR           0.3f    /* Minimum volume at max speed */
-#define DUCK_ATTACK          0.95f   /* Fast attack */
-#define DUCK_RELEASE         0.99f   /* Slow release */
 
 /* Crossfade for smooth zone transitions (prevents clicks) */
 #define CROSSFADE_MS         10      /* 10ms crossfade */
@@ -130,19 +120,17 @@ struct audio_scrubber {
     _Atomic int64_t position;         /* Current position in samples */
     _Atomic int shuttle_mode;         /* shuttle_mode_t: OFF, KEYLOCK, PITCHED */
 
-    /* Rubberband state (lazy-initialized on first use) */
+    /* Rubberband state (pre-allocated on mode change, NOT in RT callback) */
     RubberBandState rb_state;
     float *rb_input[2];               /* Deinterleaved input buffers */
     float *rb_output[2];              /* Deinterleaved output buffers */
     double rb_ratio;                  /* Current time ratio (1/speed) */
     bool rb_initialized;
     bool rb_primed;                   /* Start padding fed, delay discarded */
+    _Atomic bool rb_ready;            /* Set by UI thread after init+prime; checked by RT */
     uint32_t rb_start_delay;          /* Samples to discard from start */
     uint32_t rb_delay_remaining;      /* Remaining samples to discard */
     rb_ring_t rb_ring;                /* Output ring buffer */
-
-    /* Ducking state (audio thread only) */
-    float duck_gain;
 
     /* Pre-allocated work buffers (audio thread only) */
     float *work_buffer;               /* Temp interleaved buffer */
@@ -273,7 +261,6 @@ static void ensure_rubberband(audio_scrubber_t *s, float speed) {
 
     s->rb_initialized = true;
     s->rb_primed = false;
-    /* Priming is deferred to first use in process_rubberband() */
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -287,7 +274,6 @@ quadrature_result_t audio_scrubber_create(uint32_t sample_rate, audio_scrubber_t
     if (!s) return QUADRATURE_ERROR_OUT_OF_MEMORY;
 
     s->sample_rate = sample_rate;
-    s->duck_gain = 1.0f;
     s->fractional_position = 0.0;
     s->prev_zone = ZONE_PASSTHROUGH;
 
@@ -312,9 +298,10 @@ quadrature_result_t audio_scrubber_create(uint32_t sample_rate, audio_scrubber_t
     atomic_store(&s->speed, 1.0f);
     atomic_store(&s->position, 0);
 
-    /* Rubberband is lazy-initialized on first use in that zone */
+    /* Rubberband is pre-allocated on mode change (not in RT callback) */
     s->rb_initialized = false;
     s->rb_primed = false;
+    atomic_store(&s->rb_ready, false);
     s->rb_state = NULL;
     s->rb_input[0] = s->rb_input[1] = NULL;
     s->rb_output[0] = s->rb_output[1] = NULL;
@@ -339,31 +326,21 @@ void audio_scrubber_destroy(audio_scrubber_t *s) {
 void audio_scrubber_flush(audio_scrubber_t *s) {
     g_assert(s != NULL);
 
-    float current_speed = atomic_load(&s->speed);
     shuttle_mode_t mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
-    bool in_passthrough = (fabsf(current_speed - 1.0f) < PASSTHROUGH_EPSILON);
 
-    /*
-     * Only reset rubberband when we actually need it:
-     * - KEYLOCK mode (rubberband) AND not passthrough speed
-     * - OFF mode and PITCHED mode don't use rubberband
-     */
-    bool needs_rubberband = (mode == SHUTTLE_MODE_KEYLOCK) && !in_passthrough;
+    if (s->rb_state && mode == SHUTTLE_MODE_KEYLOCK) {
+        /* Gate RT reads while we reset rubberband state */
+        atomic_store(&s->rb_ready, false);
+        rubberband_reset(s->rb_state);
+        rb_ring_clear(&s->rb_ring);
+        s->rb_primed = false;
 
-    if (s->rb_state) {
-        if (needs_rubberband) {
-            /* Actually using rubberband: reset but defer priming to first use */
-            rubberband_reset(s->rb_state);
-            rb_ring_clear(&s->rb_ring);
-            s->rb_primed = false;
-            /* DON'T re-prime here - let process_rubberband do it lazily */
-        } else {
-            /* Not using rubberband: just clear ring buffer, skip reset/prime */
-            rb_ring_clear(&s->rb_ring);
-        }
+        /* Re-prime immediately so RT path can resume */
+        rubberband_prime(s);
+        atomic_store(&s->rb_ready, s->rb_initialized && s->rb_primed);
+    } else if (s->rb_state) {
+        rb_ring_clear(&s->rb_ring);
     }
-
-    s->duck_gain = 1.0f;
 
     /* Reset high-precision position and crossfade state */
     s->fractional_position = (double)atomic_load(&s->position);
@@ -394,7 +371,26 @@ void audio_scrubber_set_position(audio_scrubber_t *s, int64_t position) {
 
 void audio_scrubber_set_shuttle_mode(audio_scrubber_t *s, shuttle_mode_t mode) {
     g_assert(s != NULL);
+
+    shuttle_mode_t old_mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
     atomic_store(&s->shuttle_mode, (int)mode);
+
+    /*
+     * Pre-allocate rubberband on UI thread when switching TO keylock mode.
+     * This avoids malloc + unbounded rubberband_prime() in the RT callback.
+     * Once allocated, rubberband stays alive (reusable across mode toggles).
+     */
+    if (mode == SHUTTLE_MODE_KEYLOCK && old_mode != SHUTTLE_MODE_KEYLOCK) {
+        float speed = atomic_load(&s->speed);
+        if (fabsf(speed) < 0.01f) speed = 1.0f;  /* Default ratio for stopped state */
+
+        ensure_rubberband(s, speed);
+        if (s->rb_initialized && !s->rb_primed) {
+            rubberband_prime(s);
+        }
+        /* Signal RT path that rubberband is ready */
+        atomic_store(&s->rb_ready, s->rb_initialized && s->rb_primed);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -419,6 +415,21 @@ shuttle_mode_t audio_scrubber_get_shuttle_mode(const audio_scrubber_t *s) {
 uint64_t audio_scrubber_get_underflows(const audio_scrubber_t *s) {
     g_assert(s != NULL);
     return atomic_load_explicit(&s->stats_underflows, memory_order_relaxed);
+}
+
+int audio_scrubber_get_zone(const audio_scrubber_t *s) {
+    g_assert(s != NULL);
+
+    float speed = atomic_load(&s->speed);
+    shuttle_mode_t mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
+
+    if (mode == SHUTTLE_MODE_OFF) {
+        return ZONE_PASSTHROUGH;
+    } else if (mode == SHUTTLE_MODE_PITCHED) {
+        return ZONE_TURNTABLE;
+    } else {
+        return ZONE_RUBBERBAND;
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -459,25 +470,29 @@ static inline void get_sample_safe(const float *samples, int64_t idx, uint64_t n
 static uint32_t process_rubberband(audio_scrubber_t *s,
                                    const float *samples, uint64_t num_frames,
                                    float *output, uint32_t frames) {
-    float speed = fabsf(atomic_load(&s->speed));
-    ensure_rubberband(s, speed);
-
-    if (!s->rb_initialized) {
+    /* RT-safe: only proceed if UI thread has finished init + prime */
+    if (!atomic_load_explicit(&s->rb_ready, memory_order_acquire)) {
         memset(output, 0, frames * 2 * sizeof(float));
         return frames;
     }
 
-    /* Lazy prime on first use after init or flush */
-    if (!s->rb_primed) {
-        rubberband_prime(s);
-    }
+    /* Update ratio if speed changed (RT-safe: no allocation) */
+    float speed = fabsf(atomic_load(&s->speed));
+    ensure_rubberband(s, speed);
 
     /*
      * Feed rubberband until we have enough output in ring buffer.
      * RB produces variable output sizes, so we accumulate in ring buffer
      * and pull from there for consistent output.
+     *
+     * Capped at MAX_RB_ITERATIONS to bound worst-case callback time.
+     * At extreme ratios rubberband may need many iterations; if we
+     * exhaust the cap, the shortfall is zero-padded below.
      */
-    while (rb_ring_available(&s->rb_ring) < frames) {
+    #define MAX_RB_ITERATIONS 8
+    int rb_iters = 0;
+    while (rb_ring_available(&s->rb_ring) < frames && rb_iters < MAX_RB_ITERATIONS) {
+        rb_iters++;
         /* Get how many samples rubberband needs */
         unsigned int required = rubberband_get_samples_required(s->rb_state);
         if (required == 0) required = 256;  /* Minimum chunk */
@@ -600,19 +615,16 @@ uint32_t audio_scrubber_process(audio_scrubber_t *s,
         return frames;
     }
 
-    /* Determine current zone based on shuttle mode */
+    /* Determine current zone based on shuttle mode only */
     float rate = fabsf(speed);
     shuttle_mode_t mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
     int current_zone;
 
-    if (mode == SHUTTLE_MODE_OFF || fabsf(speed - 1.0f) < PASSTHROUGH_EPSILON) {
-        /* OFF mode: always passthrough (ignore speed setting) */
-        /* Also passthrough at exactly 1.0x regardless of mode */
+    if (mode == SHUTTLE_MODE_OFF) {
         current_zone = ZONE_PASSTHROUGH;
     } else if (mode == SHUTTLE_MODE_PITCHED) {
         current_zone = ZONE_TURNTABLE;
     } else {
-        /* KEYLOCK mode: rubberband for pitch-preserved time stretch */
         current_zone = ZONE_RUBBERBAND;
     }
 
@@ -694,23 +706,8 @@ uint32_t audio_scrubber_process(audio_scrubber_t *s,
      * Pitch is preserved across all speeds. Range: 0.5x-4.0x.
      * ═══════════════════════════════════════════════════════════════════════ */
 
-    /* Calculate ducking for high speeds */
-    float duck_target = 1.0f;
-    if (rate > DUCK_THRESHOLD) {
-        float excess = (rate - DUCK_THRESHOLD) / (RUBBERBAND_MAX - DUCK_THRESHOLD);
-        duck_target = 1.0f - excess * (1.0f - DUCK_FLOOR);
-    }
-    float duck_coeff = (duck_target < s->duck_gain) ? DUCK_ATTACK : DUCK_RELEASE;
-    s->duck_gain = s->duck_gain * duck_coeff + duck_target * (1.0f - duck_coeff);
-
     /* Process through rubberband */
     process_rubberband(s, samples, num_frames, output, frames);
-
-    /* Apply ducking to output */
-    for (uint32_t i = 0; i < frames; i++) {
-        output[i * 2] *= s->duck_gain;
-        output[i * 2 + 1] *= s->duck_gain;
-    }
 
     /* Fall through to crossfade application */
 

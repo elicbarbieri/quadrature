@@ -16,7 +16,7 @@
 
             <!-- Nav bar placeholder (custom widget created programmatically) -->
 
-            <!-- Content stack overlay (for errors panel) -->
+            <!-- Content stack overlay (for errors panel and toasts) -->
             <child>
               <object class="GtkOverlay" id="content_overlay">
                 <property name="hexpand">true</property>
@@ -32,62 +32,28 @@
                   </object>
                 </child>
 
-                <!-- Errors overlay (hidden initially) -->
+                <!-- Toast notification (centered over content area, hidden initially) -->
                 <child type="overlay">
-                  <object class="GtkBox" id="errors_overlay">
-                    <property name="orientation">vertical</property>
+                  <object class="GtkBox" id="toast_overlay">
+                    <property name="orientation">horizontal</property>
+                    <property name="halign">center</property>
+                    <property name="valign">start</property>
+                    <property name="margin-top">20</property>
                     <property name="visible">false</property>
-                    <property name="vexpand">true</property>
                     <style>
-                      <class name="errors-overlay-backdrop"/>
+                      <class name="toast-notification"/>
                     </style>
-
                     <child>
-                      <object class="GtkBox" id="errors_panel">
-                        <property name="orientation">vertical</property>
-                        <property name="vexpand">true</property>
+                      <object class="GtkLabel" id="toast_label">
+                        <property name="justify">center</property>
                         <style>
-                          <class name="errors-overlay-panel"/>
+                          <class name="toast-label"/>
                         </style>
-
-                        <!-- Header with title and close button -->
-                        <child>
-                          <object class="GtkBox">
-                            <property name="orientation">horizontal</property>
-                            <style>
-                              <class name="errors-overlay-header"/>
-                            </style>
-                            <child>
-                              <object class="GtkLabel">
-                                <property name="label">Library Errors</property>
-                                <property name="xalign">0</property>
-                                <style>
-                                  <class name="errors-overlay-title"/>
-                                </style>
-                              </object>
-                            </child>
-                            <child>
-                              <object class="GtkButton" id="errors_close_btn">
-                                <property name="icon-name">window-close-symbolic</property>
-                                <style>
-                                  <class name="errors-overlay-close"/>
-                                </style>
-                              </object>
-                            </child>
-                          </object>
-                        </child>
-
-                        <!-- Errors view container (view added programmatically) -->
-                        <child>
-                          <object class="GtkBox" id="errors_view_container">
-                            <property name="orientation">vertical</property>
-                            <property name="vexpand">true</property>
-                          </object>
-                        </child>
                       </object>
                     </child>
                   </object>
                 </child>
+
               </object>
             </child>
 
@@ -125,26 +91,6 @@
           </object>
         </child>
 
-        <!-- Toast notification (hidden initially) -->
-        <child type="overlay">
-          <object class="GtkBox" id="toast_overlay">
-            <property name="orientation">horizontal</property>
-            <property name="halign">center</property>
-            <property name="valign">start</property>
-            <property name="margin-top">20</property>
-            <property name="visible">false</property>
-            <style>
-              <class name="toast-notification"/>
-            </style>
-            <child>
-              <object class="GtkLabel" id="toast_label">
-                <style>
-                  <class name="toast-label"/>
-                </style>
-              </object>
-            </child>
-          </object>
-        </child>
       </object>
     </child>
   </template>

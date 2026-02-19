@@ -2,34 +2,50 @@
 <!--
   Unified Detail View Template
 
-  Container for album/artist detail pages with back navigation.
-  Structure: back button header + content stack (album/artist pages).
+  GtkOverlay container: content stack fills the space, back button floats on top.
+  When artist banner is visible, the back button overlays the banner image with
+  a semi-transparent background.
 -->
 <interface>
-  <object class="GtkBox" id="unified_detail_container">
-    <property name="orientation">vertical</property>
-    <property name="spacing">0</property>
+  <object class="GtkOverlay" id="unified_detail_container">
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         BACK HEADER
+         CONTENT STACK: Album / Artist Pages (main child, fills space)
          ═══════════════════════════════════════════════════════════════════ -->
     <child>
-      <object class="GtkBox" id="back_header">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">0</property>
-        <property name="margin-start">16</property>
-        <property name="margin-end">16</property>
-        <property name="margin-top">12</property>
-        <property name="margin-bottom">8</property>
+      <object class="GtkStack" id="content_stack">
+        <property name="vexpand">true</property>
+        <property name="transition-type">crossfade</property>
+        <property name="transition-duration">150</property>
+        <!-- Album and artist pages added programmatically -->
+      </object>
+    </child>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         BACK HEADER (overlay, floats full-width at top over content)
+
+         Layout: GtkGrid with column-homogeneous=true, 10 equal columns.
+           Columns 0-2 (30%): back button, left-aligned within slot
+           Column  3   (10%): intentionally empty — acts as proportional gap
+           Columns 4-9 (60%): artist name, right-aligned, wraps if long
+         ═══════════════════════════════════════════════════════════════════ -->
+    <child type="overlay">
+      <object class="GtkGrid" id="back_header">
+        <property name="column-homogeneous">true</property>
+        <property name="halign">fill</property>
+        <property name="hexpand">true</property>
+        <property name="valign">start</property>
         <property name="visible">false</property>
         <style>
           <class name="detail-back-header"/>
         </style>
 
-        <!-- Back Button -->
+        <!-- Back Button: columns 0-2 = 30% of header width -->
         <child>
           <object class="GtkButton" id="back_button">
             <property name="halign">start</property>
+            <property name="valign">center</property>
+            <property name="margin-start">8</property>
             <style>
               <class name="flat"/>
               <class name="detail-back"/>
@@ -54,24 +70,45 @@
                 <child>
                   <object class="GtkLabel" id="back_label">
                     <property name="label">Back</property>
+                    <property name="ellipsize">end</property>
                   </object>
                 </child>
               </object>
             </child>
+
+            <layout>
+              <property name="column">0</property>
+              <property name="row">0</property>
+              <property name="column-span">3</property>
+            </layout>
           </object>
         </child>
-      </object>
-    </child>
 
-    <!-- ═══════════════════════════════════════════════════════════════════
-         CONTENT STACK: Album / Artist Pages
-         ═══════════════════════════════════════════════════════════════════ -->
-    <child>
-      <object class="GtkStack" id="content_stack">
-        <property name="vexpand">true</property>
-        <property name="transition-type">crossfade</property>
-        <property name="transition-duration">150</property>
-        <!-- Album and artist pages added programmatically -->
+        <!-- Column 3 = 10% proportional gap — intentionally empty, no widget needed -->
+
+        <!-- Artist Name: columns 4-9 = 60% of header width.
+             xalign=1.0 + halign=fill: text is always flush-right within the slot.
+             wrap=true: long names add height to the bar rather than truncating. -->
+        <child>
+          <object class="GtkLabel" id="header_artist_name">
+            <property name="label"></property>
+            <property name="halign">fill</property>
+            <property name="valign">center</property>
+            <property name="xalign">1.0</property>
+            <property name="ellipsize">end</property>
+            <property name="margin-end">16</property>
+            <style>
+              <class name="detail-header-artist-name"/>
+            </style>
+
+            <layout>
+              <property name="column">4</property>
+              <property name="row">0</property>
+              <property name="column-span">6</property>
+            </layout>
+          </object>
+        </child>
+
       </object>
     </child>
   </object>

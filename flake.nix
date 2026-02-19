@@ -41,6 +41,11 @@
           chromaprint      # AcoustID fingerprinting
           taglib           # Read metadata tags from audio files
           postgresql       # libpq for MusicBrainz PG queries
+          openssl          # libssl/libcrypto (transitive: libpq)
+          libsysprof-capture  # sysprof-capture-4 (transitive: glib-2.0)
+          libsoup_3        # HTTP client for fanart.tv artist art
+          json-glib         # JSON parsing for fanart.tv API responses
+          glib-networking   # GnuTLS TLS backend for GIO (required by libsoup3 for HTTPS)
         ];
 
         buildDeps = with pkgs; [
@@ -117,10 +122,20 @@
             pkgs.dconf
           ];
 
-          # Set up GSettings schemas for GTK4 file dialogs
-          shellHook = ''
+          shellHook = let
+            # Wrap pkg-config to suppress Requires.private "not found" warnings.
+            # Nix isolates packages so transitive .pc deps are unfindable, but
+            # they're only needed for static linking which we don't use. Real
+            # errors (missing direct deps) still surface through CMake itself.
+            pkgConfigWrapper = pkgs.writeShellScript "pkg-config-quiet" ''
+              exec ${pkgs.pkg-config}/bin/pkg-config "$@" 2>/dev/null
+            '';
+          in ''
+            export PKG_CONFIG="${pkgConfigWrapper}"
+
+            # GSettings schemas for GTK4 file dialogs
             export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:$XDG_DATA_DIRS"
-            export GIO_EXTRA_MODULES="${pkgs.dconf.lib}/lib/gio/modules"
+            export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules:${pkgs.dconf.lib}/lib/gio/modules"
           '';
         };
 

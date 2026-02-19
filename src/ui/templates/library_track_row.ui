@@ -2,22 +2,23 @@
 <!--
   Library Track Row Template
 
-  Horizontal GtkBox with proportional column sizing (60/40) enforced
-  programmatically via tick callback in row_helpers.c.
+  Root is QuadratureProportionalBox — a custom widget that splits its
+  interior as:  [art (natural)] [left (60%)] [right (40%)] [meta (natural)]
 
-  [Art] [Title / Primary Artists  60%] [Album / Feat. Artists  40%] [Year/Dur]
+  Sizing is performed inside GTK's size_allocate vfunc, so columns are
+  correct on the very first frame. No tick callback, no layout pop.
 -->
 <interface>
-  <object class="GtkBox" id="row">
-    <property name="orientation">horizontal</property>
+  <object class="ProportionalBox" id="row">
     <property name="spacing">12</property>
+    <property name="left-ratio">0.6</property>
     <property name="hexpand">true</property>
     <style>
       <class name="library-track-row"/>
     </style>
 
-    <!-- Album art thumbnail (pixel-size set dynamically via artwork_manager) -->
-    <child>
+    <!-- art slot: album thumbnail (pixel-size set dynamically via artwork_manager) -->
+    <child type="art">
       <object class="GtkImage" id="art">
         <property name="icon-name">media-optical-symbolic</property>
         <property name="valign">center</property>
@@ -27,8 +28,8 @@
       </object>
     </child>
 
-    <!-- Left content: title + primary artists (60% of flexible space) -->
-    <child>
+    <!-- left slot: title + primary artists (left-ratio of flexible space) -->
+    <child type="left">
       <object class="GtkBox" id="col_left">
         <property name="orientation">vertical</property>
         <property name="spacing">4</property>
@@ -37,7 +38,6 @@
           <object class="GtkLabel" id="title">
             <property name="xalign">0</property>
             <property name="ellipsize">end</property>
-            <property name="hexpand">true</property>
             <style>
               <class name="library-row-title"/>
             </style>
@@ -46,45 +46,72 @@
         <child>
           <object class="GtkBox" id="primary_artists_box">
             <property name="orientation">horizontal</property>
-            <property name="hexpand">true</property>
             <style>
               <class name="library-row-subtitle"/>
             </style>
           </object>
         </child>
+        <!-- credit annotation: hidden unless credit data is set dynamically -->
+        <child>
+          <object class="GtkBox" id="credit_annotation">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">6</property>
+            <property name="visible">false</property>
+            <child>
+              <object class="GtkButton" id="credit_artist_btn">
+                <property name="has-frame">false</property>
+                <style>
+                  <class name="artist-btn"/>
+                </style>
+                <child>
+                  <object class="GtkLabel" id="credit_artist_label">
+                    <property name="ellipsize">end</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <!-- role pills appended dynamically by row_helpers.c -->
+          </object>
+        </child>
       </object>
     </child>
 
-    <!-- Right content: album + featuring artists (40% of flexible space) -->
-    <child>
+    <!-- right slot: album button + featuring artists ((1 - left-ratio) of flexible space) -->
+    <child type="right">
       <object class="GtkBox" id="col_right">
         <property name="orientation">vertical</property>
         <property name="spacing">4</property>
+        <property name="overflow">hidden</property>
         <property name="valign">center</property>
         <child>
           <object class="GtkBox" id="album_box">
             <property name="orientation">horizontal</property>
-            <property name="hexpand">true</property>
           </object>
         </child>
+        <!-- Featuring artists + library badge row -->
         <child>
-          <object class="GtkBox" id="secondary_artists_box">
+          <object class="GtkBox" id="col_right_bottom">
             <property name="orientation">horizontal</property>
-            <property name="hexpand">true</property>
-            <style>
-              <class name="library-row-subtitle"/>
-            </style>
+            <child>
+              <object class="GtkBox" id="secondary_artists_box">
+                <property name="orientation">horizontal</property>
+                <property name="hexpand">true</property>
+                <style>
+                  <class name="library-row-subtitle"/>
+                </style>
+              </object>
+            </child>
+            <!-- library badge appended here dynamically by row_helpers.c (halign=end) -->
           </object>
         </child>
       </object>
     </child>
 
-    <!-- Meta column: year + duration (fixed width, right-aligned) -->
-    <child>
+    <!-- meta slot: year + duration (natural width, right-aligned content) -->
+    <child type="meta">
       <object class="GtkBox" id="col_meta">
         <property name="orientation">vertical</property>
         <property name="spacing">4</property>
-        <property name="halign">end</property>
         <property name="valign">center</property>
         <child>
           <object class="GtkLabel" id="year">

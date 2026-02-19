@@ -10,12 +10,18 @@
     <!-- Widgets -->
     <file>channel_strip.ui</file>
     <file>nav_bar.ui</file>
+    <file>errors_popover.ui</file>
+    <file>add_library_popover.ui</file>
 
     <!-- Content views -->
+    <file>perf_view.ui</file>
+    <file>perf_channel_cell.ui</file>
     <file>search_view.ui</file>
     <file>library_list_view.ui</file>
     <file>libraries_view.ui</file>
+    <file>library_card.ui</file>
     <file>settings_view.ui</file>
+    <file>channel_settings_frame.ui</file>
     <file>help_view.ui</file>
 
     <!-- Library row templates -->
@@ -31,11 +37,14 @@
     <file>album_detail_track_row_wrapper.ui</file>
     <file>album_detail_disc_header.ui</file>
     <file>album_card.ui</file>
+    <file>track_metadata_popover.ui</file>
+    <file>credit_row.ui</file>
     
+    <!-- Shared filter/sort bar -->
+    <file>filter_sort_bar.ui</file>
+    <file>advanced_search_bar.ui</file>
+
     <!-- Button/widget templates -->
-    <file>artist_menu_button.ui</file>
-    <file>artist_popover.ui</file>
-    <file>artist_popover_row.ui</file>
     <file>album_button.ui</file>
   </gresource>
 </gresources>
