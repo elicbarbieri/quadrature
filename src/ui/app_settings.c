@@ -54,6 +54,13 @@
 #define KEY_LIBRARY_PATHS "library_paths"
 #define KEY_LIBRARY_NAMES "library_names"
 #define KEY_LIBRARY_DATA_PATHS "library_data_paths"
+#define KEY_LIBRARY_MB_RESOLVE "library_mb_resolve"
+#define KEY_LIBRARY_ACOUSTID "library_acoustid"
+#define KEY_LIBRARY_FANART "library_fanart"
+#define KEY_LIBRARY_WIKIPEDIA "library_wikipedia"
+
+#define GROUP_WIKIPEDIA "Wikipedia"
+#define KEY_WIKIPEDIA_BIOS "wikipedia_bios"
 
 #define DEFAULT_TIME_WARNING_MS 30000
 
@@ -327,6 +334,30 @@ app_settings_t *app_settings_load(void) {
         g_strfreev(lib_data_paths);
     }
 
+    // Load Wikipedia bios global toggle
+    if (g_key_file_has_key(keyfile, GROUP_WIKIPEDIA, KEY_WIKIPEDIA_BIOS, NULL))
+        settings->wikipedia_bios = g_key_file_get_boolean(keyfile, GROUP_WIKIPEDIA, KEY_WIKIPEDIA_BIOS, NULL);
+
+    // Load per-library integration overrides (integer lists, -1 = inherit global)
+    {
+        struct { const char *key; int **arr; int *count; } overrides[] = {
+            { KEY_LIBRARY_MB_RESOLVE, &settings->library_mb_resolve, &settings->library_mb_resolve_count },
+            { KEY_LIBRARY_ACOUSTID,   &settings->library_acoustid,   &settings->library_acoustid_count },
+            { KEY_LIBRARY_FANART,     &settings->library_fanart,     &settings->library_fanart_count },
+            { KEY_LIBRARY_WIKIPEDIA,  &settings->library_wikipedia,  &settings->library_wikipedia_count },
+        };
+        for (size_t oi = 0; oi < G_N_ELEMENTS(overrides); oi++) {
+            gsize cnt = 0;
+            int *vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY,
+                                                     overrides[oi].key, &cnt, NULL);
+            if (vals && cnt > 0) {
+                *overrides[oi].arr = g_memdup2(vals, cnt * sizeof(int));
+                *overrides[oi].count = (int)cnt;
+            }
+            g_free(vals);
+        }
+    }
+
     g_key_file_free(keyfile);
     g_free(path);
 
@@ -405,6 +436,22 @@ gboolean app_settings_save(const app_settings_t *settings) {
         g_free(dp_list);
     }
 
+    // Save per-library integration overrides
+    {
+        struct { const char *key; const int *arr; int count; } overrides[] = {
+            { KEY_LIBRARY_MB_RESOLVE, settings->library_mb_resolve, settings->library_mb_resolve_count },
+            { KEY_LIBRARY_ACOUSTID,   settings->library_acoustid,   settings->library_acoustid_count },
+            { KEY_LIBRARY_FANART,     settings->library_fanart,     settings->library_fanart_count },
+            { KEY_LIBRARY_WIKIPEDIA,  settings->library_wikipedia,  settings->library_wikipedia_count },
+        };
+        for (size_t oi = 0; oi < G_N_ELEMENTS(overrides); oi++) {
+            if (overrides[oi].count > 0 && overrides[oi].arr) {
+                g_key_file_set_integer_list(keyfile, GROUP_LIBRARY, overrides[oi].key,
+                                            (int *)overrides[oi].arr, (gsize)overrides[oi].count);
+            }
+        }
+    }
+
     // Save MusicBrainz settings
     g_key_file_set_boolean(keyfile, GROUP_MUSICBRAINZ, KEY_MB_RESOLVE, settings->musicbrainz_resolve);
     g_key_file_set_string(keyfile, GROUP_MUSICBRAINZ, KEY_MB_PG_CONNINFO,
@@ -427,6 +474,9 @@ gboolean app_settings_save(const app_settings_t *settings) {
                           settings->acoustid_pg_conninfo ? settings->acoustid_pg_conninfo : "");
     g_key_file_set_string(keyfile, GROUP_ACOUSTID, KEY_ACOUSTID_INDEX_URL,
                           settings->acoustid_index_url ? settings->acoustid_index_url : "");
+
+    // Save Wikipedia settings
+    g_key_file_set_boolean(keyfile, GROUP_WIKIPEDIA, KEY_WIKIPEDIA_BIOS, settings->wikipedia_bios);
 
     // Write to file
     char *path = app_settings_get_path();
@@ -474,6 +524,10 @@ void app_settings_destroy(app_settings_t *settings) {
             g_free(settings->library_data_paths[i]);
         g_free(settings->library_data_paths);
     }
+    g_free(settings->library_mb_resolve);
+    g_free(settings->library_acoustid);
+    g_free(settings->library_fanart);
+    g_free(settings->library_wikipedia);
     g_free(settings);
 }
 
@@ -551,6 +605,23 @@ void app_settings_remove_library_path(app_settings_t *settings, const char *path
                     settings->library_data_paths[j] = settings->library_data_paths[j + 1];
                 settings->library_data_path_count--;
                 settings->library_data_paths[settings->library_data_path_count] = NULL;
+            }
+
+            // Shift parallel integration override arrays
+            {
+                struct { int **arr; int *count; } int_arrs[] = {
+                    { &settings->library_mb_resolve, &settings->library_mb_resolve_count },
+                    { &settings->library_acoustid,   &settings->library_acoustid_count },
+                    { &settings->library_fanart,     &settings->library_fanart_count },
+                    { &settings->library_wikipedia,  &settings->library_wikipedia_count },
+                };
+                for (size_t oi = 0; oi < G_N_ELEMENTS(int_arrs); oi++) {
+                    if (i < *int_arrs[oi].count) {
+                        for (int j = i; j < *int_arrs[oi].count - 1; j++)
+                            (*int_arrs[oi].arr)[j] = (*int_arrs[oi].arr)[j + 1];
+                        (*int_arrs[oi].count)--;
+                    }
+                }
             }
             return;
         }

@@ -383,29 +383,8 @@ if(BUILD_TESTS)
 endif()
 
 # Install targets
-install(TARGETS quadrature_engine
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
-
-install(TARGETS quadrature_indexer_core
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
-
 if(BUILD_CLI)
     install(TARGETS quadrature-cli RUNTIME DESTINATION bin)
-
-    # Install systemd user service
-    if(BUILD_PRODUCTION)
-        configure_file(
-            ${CMAKE_SOURCE_DIR}/data/quadrature-indexer.service.in
-            ${CMAKE_BINARY_DIR}/quadrature-indexer.service
-            @ONLY
-        )
-        install(FILES ${CMAKE_BINARY_DIR}/quadrature-indexer.service
-                DESTINATION lib/systemd/user)
-    endif()
 endif()
 
 if(BUILD_UI)

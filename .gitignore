@@ -1,33 +1,23 @@
-# Build directories
+# Build
 build/
 cmake-build-*/
-
-# CMake artifacts (root level - if cmake run in source dir)
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-CPackConfig.cmake
-CPackSourceConfig.cmake
-CTestTestfile.cmake
-Testing/
 bin/
 
-# Compiled test/example binaries in root
-test_*
-!test_*/
+# Compiled test binaries (root-level only, not tests/unit/test_*.c)
+/test_*
+/Testing
 
-# IDE files
+# IDE / editor
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# Editor/LSP cache
 .cache/
 
-# Compiled binaries
+# Compiled objects and binaries
+*.o
+*.obj
 *.exe
 *.dll
 *.so
@@ -35,40 +25,23 @@ test_*
 *.a
 *.lib
 
-# Object files
-*.o
-*.obj
-
-# Qt generated files
-*_moc.cpp
-*_qrc.cpp
-moc_*.h
-qrc_*.cpp
-ui_*.h
-
-# OS specific files
+# OS junk
 .DS_Store
 Thumbs.db
-desktop.ini
 
 # Temporary files
 *.tmp
 *.temp
 *.log
 
-# Documentation generated files
-docs/html/
-docs/latex/
-*.doxygen_sqlite3
-
-# Third party dependencies
+# Third party (allow cava submodule)
 !third_party/cava/
 
-# Nix build artifacts
+# Nix
 result
 result-*
 .direnv/
 
+# Local config
 .claude/
-
 .env

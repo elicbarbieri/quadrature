@@ -251,18 +251,31 @@ void libs_rebuild(UiWindow *w) {
         gtk_box_append(GTK_BOX(w->libs_box), make_lib_card(w, &w->libs[i]));
 }
 
-/* ── Add-library popover state ────────────────────────────────────────── */
+/* ── Add-library popover ─────────────────────────────────────────────── */
+
+typedef enum {
+    LIB_TYPE_LOCAL = 0,     /* DB alongside music */
+    LIB_TYPE_USB,           /* DB in ~/.local/share/quadrature/libraries/{name} */
+    LIB_TYPE_NETWORK,       /* DB at user-chosen path */
+} LibType;
 
 typedef struct {
     UiWindow   *w;
     GtkWidget  *popover;
     GtkWidget  *music_label;
     GtkWidget  *data_label;
-    GtkWidget  *data_revealer;
+    GtkWidget  *data_browse_btn;
+    GtkWidget  *index_revealer;
+    GtkWidget  *type_description;
+    GtkWidget  *index_hint_label;
     GtkWidget  *confirm_btn;
-    char       *music_path;      /* required */
-    char       *data_path;       /* NULL = same as music_path */
-    gboolean    portable_mode;   /* TRUE when "Portable Drive" is active */
+    GtkWidget  *mb_switch;
+    GtkWidget  *acoustid_switch;
+    GtkWidget  *fanart_switch;
+    GtkWidget  *wikipedia_switch;
+    char       *music_path;
+    char       *data_path;
+    LibType     lib_type;
 } AddLibState;
 
 static void add_lib_state_free(AddLibState *s) {
@@ -279,31 +292,61 @@ static char *generate_portable_data_path(const char *music_path) {
     return data_path;
 }
 
+static void update_confirm_sensitivity(AddLibState *s) {
+    gboolean ok = (s->music_path != NULL);
+    if (s->lib_type == LIB_TYPE_NETWORK)
+        ok = ok && (s->data_path != NULL);
+    gtk_widget_set_sensitive(s->confirm_btn, ok);
+}
+
 static void update_auto_data_path(AddLibState *s) {
-    if (!s->portable_mode || !s->music_path) return;
+    if (s->lib_type != LIB_TYPE_USB || !s->music_path) return;
     g_free(s->data_path);
     s->data_path = generate_portable_data_path(s->music_path);
     gtk_label_set_text(GTK_LABEL(s->data_label), s->data_path);
     gtk_widget_set_opacity(s->data_label, 1.0);
 }
 
-static void on_mode_toggled(GtkToggleButton *btn, gpointer data) {
+static const char *TYPE_DESCRIPTIONS[] = {
+    [LIB_TYPE_LOCAL]   = "Index stored alongside your music files.",
+    [LIB_TYPE_USB]     = "Music on a removable drive. Index stored locally on this computer.",
+    [LIB_TYPE_NETWORK] = "Music on a network mount. Choose where to store the index.",
+};
+
+static void on_type_toggled(GtkToggleButton *btn, gpointer data) {
     AddLibState *s = data;
-    if (!gtk_toggle_button_get_active(btn)) return; /* ignore deactivation */
+    if (!gtk_toggle_button_get_active(btn)) return;
 
     const char *label = gtk_button_get_label(GTK_BUTTON(btn));
-    s->portable_mode = (g_strcmp0(label, "Portable Drive") == 0);
+    if (g_strcmp0(label, "Local Folder") == 0)       s->lib_type = LIB_TYPE_LOCAL;
+    else if (g_strcmp0(label, "USB Drive") == 0)     s->lib_type = LIB_TYPE_USB;
+    else                                             s->lib_type = LIB_TYPE_NETWORK;
 
-    gtk_revealer_set_reveal_child(GTK_REVEALER(s->data_revealer), s->portable_mode);
+    gtk_label_set_text(GTK_LABEL(s->type_description), TYPE_DESCRIPTIONS[s->lib_type]);
 
-    if (s->portable_mode) {
+    gboolean show_index = (s->lib_type != LIB_TYPE_LOCAL);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(s->index_revealer), show_index);
+
+    /* USB: hide Browse, auto-generate path. Network: show Browse. */
+    gtk_widget_set_visible(s->data_browse_btn, s->lib_type == LIB_TYPE_NETWORK);
+
+    if (s->lib_type == LIB_TYPE_USB) {
         update_auto_data_path(s);
+        gtk_label_set_text(GTK_LABEL(s->index_hint_label),
+            "Stored locally so data persists when the drive is disconnected.");
+    } else if (s->lib_type == LIB_TYPE_NETWORK) {
+        g_free(s->data_path);
+        s->data_path = NULL;
+        gtk_label_set_text(GTK_LABEL(s->data_label), "Select a location for the index");
+        gtk_widget_set_opacity(s->data_label, 0.5);
+        gtk_label_set_text(GTK_LABEL(s->index_hint_label),
+            "Database and artwork will be stored at this location.");
     } else {
         g_free(s->data_path);
         s->data_path = NULL;
-        gtk_label_set_text(GTK_LABEL(s->data_label), "Select a music folder first");
-        gtk_widget_set_opacity(s->data_label, 0.5);
     }
+
+    update_confirm_sensitivity(s);
 }
 
 static void on_music_folder_selected(GObject *src, GAsyncResult *res, gpointer data) {
@@ -320,8 +363,8 @@ static void on_music_folder_selected(GObject *src, GAsyncResult *res, gpointer d
     if (s->music_path) {
         gtk_label_set_text(GTK_LABEL(s->music_label), s->music_path);
         gtk_widget_set_opacity(s->music_label, 1.0);
-        gtk_widget_set_sensitive(s->confirm_btn, TRUE);
         update_auto_data_path(s);
+        update_confirm_sensitivity(s);
     }
 }
 
@@ -339,6 +382,7 @@ static void on_data_folder_selected(GObject *src, GAsyncResult *res, gpointer da
     if (s->data_path) {
         gtk_label_set_text(GTK_LABEL(s->data_label), s->data_path);
         gtk_widget_set_opacity(s->data_label, 1.0);
+        update_confirm_sensitivity(s);
     }
 }
 
@@ -358,8 +402,7 @@ static void on_data_browse(GtkButton *btn, gpointer data) {
     (void)btn;
     AddLibState *s = data;
     GtkFileDialog *dlg = gtk_file_dialog_new();
-    gtk_file_dialog_set_title(dlg, "Select Data Directory");
-    /* Start at the music folder if already chosen, else root */
+    gtk_file_dialog_set_title(dlg, "Select Index Location");
     GFile *initial = s->music_path
         ? g_file_new_for_path(s->music_path)
         : g_file_new_for_path("/");
@@ -374,27 +417,38 @@ static void on_add_confirm(GtkButton *btn, gpointer data) {
     AddLibState *s = data;
     if (!s->music_path || !s->w->settings) return;
 
-    /* In local mode, data_path is implicitly the same as music_path */
-    if (!s->portable_mode) {
-        g_free(s->data_path);
-        s->data_path = NULL;
-    }
+    /* Determine effective data_path based on library type */
+    char *effective_data = NULL;
+    if (s->lib_type == LIB_TYPE_USB)
+        effective_data = generate_portable_data_path(s->music_path);
+    else if (s->lib_type == LIB_TYPE_NETWORK && s->data_path)
+        effective_data = g_strdup(s->data_path);
+    /* LIB_TYPE_LOCAL: effective_data stays NULL (same as music_path) */
 
-    /* In portable mode, create data path now to fail fast on permission errors */
-    if (s->data_path) {
-        if (g_mkdir_with_parents(s->data_path, 0755) != 0) {
-            g_warning("on_add_confirm: failed to create data directory: %s", s->data_path);
+    /* Create data directory if separate from music path */
+    if (effective_data) {
+        if (g_mkdir_with_parents(effective_data, 0755) != 0) {
+            g_warning("on_add_confirm: failed to create data directory: %s", effective_data);
+            g_free(effective_data);
             return;
         }
     }
 
     app_settings_add_library_path(s->w->settings, s->music_path);
+    int idx = s->w->settings->library_path_count - 1;
 
-    /* Set data path if different from music path */
-    if (s->data_path && strcmp(s->data_path, s->music_path) != 0) {
-        int idx = s->w->settings->library_path_count - 1;
-        app_settings_set_library_data_path(s->w->settings, idx, s->data_path);
-    }
+    if (effective_data)
+        app_settings_set_library_data_path(s->w->settings, idx, effective_data);
+
+    /* Store per-library integration flags */
+    app_settings_set_library_mb_resolve(s->w->settings, idx,
+        gtk_switch_get_active(GTK_SWITCH(s->mb_switch)) ? 1 : 0);
+    app_settings_set_library_acoustid(s->w->settings, idx,
+        gtk_switch_get_active(GTK_SWITCH(s->acoustid_switch)) ? 1 : 0);
+    app_settings_set_library_fanart(s->w->settings, idx,
+        gtk_switch_get_active(GTK_SWITCH(s->fanart_switch)) ? 1 : 0);
+    app_settings_set_library_wikipedia(s->w->settings, idx,
+        gtk_switch_get_active(GTK_SWITCH(s->wikipedia_switch)) ? 1 : 0);
 
     settings_save_debounced(s->w);
     libs_load(s->w);
@@ -402,10 +456,11 @@ static void on_add_confirm(GtkButton *btn, gpointer data) {
 
     if (s->w->indexer) {
         const char *paths[] = { s->music_path };
-        const char *data_paths[] = { s->data_path ? s->data_path : s->music_path };
-        indexer_controller_start(s->w->indexer, paths, data_paths, 1);
+        const char *dpaths[] = { effective_data ? effective_data : s->music_path };
+        indexer_controller_start(s->w->indexer, paths, dpaths, 1);
     }
 
+    g_free(effective_data);
     gtk_popover_popdown(GTK_POPOVER(s->popover));
 }
 
@@ -429,35 +484,61 @@ static void on_add_library(GtkButton *btn, gpointer data) {
     GtkWidget *popover        = GTK_WIDGET(gtk_builder_get_object(b, "add_library_popover"));
     GtkWidget *music_label    = GTK_WIDGET(gtk_builder_get_object(b, "music_path_label"));
     GtkWidget *data_label     = GTK_WIDGET(gtk_builder_get_object(b, "data_path_label"));
-    GtkWidget *data_revealer  = GTK_WIDGET(gtk_builder_get_object(b, "data_section_revealer"));
-    GtkWidget *music_browse   = GTK_WIDGET(gtk_builder_get_object(b, "music_browse_btn"));
     GtkWidget *data_browse    = GTK_WIDGET(gtk_builder_get_object(b, "data_browse_btn"));
+    GtkWidget *index_revealer = GTK_WIDGET(gtk_builder_get_object(b, "index_section_revealer"));
+    GtkWidget *type_desc      = GTK_WIDGET(gtk_builder_get_object(b, "type_description"));
+    GtkWidget *index_hint     = GTK_WIDGET(gtk_builder_get_object(b, "index_hint_label"));
+    GtkWidget *music_browse   = GTK_WIDGET(gtk_builder_get_object(b, "music_browse_btn"));
     GtkWidget *confirm_btn    = GTK_WIDGET(gtk_builder_get_object(b, "add_confirm_btn"));
     GtkWidget *cancel_btn     = GTK_WIDGET(gtk_builder_get_object(b, "add_cancel_btn"));
-    GtkWidget *mode_local     = GTK_WIDGET(gtk_builder_get_object(b, "mode_local_btn"));
-    GtkWidget *mode_portable  = GTK_WIDGET(gtk_builder_get_object(b, "mode_portable_btn"));
+    GtkWidget *type_local     = GTK_WIDGET(gtk_builder_get_object(b, "type_local_btn"));
+    GtkWidget *type_usb       = GTK_WIDGET(gtk_builder_get_object(b, "type_usb_btn"));
+    GtkWidget *type_network   = GTK_WIDGET(gtk_builder_get_object(b, "type_network_btn"));
+    GtkWidget *mb_switch      = GTK_WIDGET(gtk_builder_get_object(b, "mb_switch"));
+    GtkWidget *acoustid_sw    = GTK_WIDGET(gtk_builder_get_object(b, "acoustid_switch"));
+    GtkWidget *fanart_sw      = GTK_WIDGET(gtk_builder_get_object(b, "fanart_switch"));
+    GtkWidget *wikipedia_sw   = GTK_WIDGET(gtk_builder_get_object(b, "wikipedia_switch"));
     g_object_ref(popover);
     g_object_unref(b);
 
     /* Group toggle buttons for mutual exclusion */
-    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(mode_portable),
-                                GTK_TOGGLE_BUTTON(mode_local));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(type_usb),
+                                GTK_TOGGLE_BUTTON(type_local));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(type_network),
+                                GTK_TOGGLE_BUTTON(type_local));
 
-    AddLibState *s  = g_new0(AddLibState, 1);
-    s->w            = w;
-    s->popover      = popover;
-    s->music_label  = music_label;
-    s->data_label   = data_label;
-    s->data_revealer = data_revealer;
-    s->confirm_btn  = confirm_btn;
+    /* Initialize integration switches from global defaults */
+    if (w->settings) {
+        gtk_switch_set_active(GTK_SWITCH(mb_switch), w->settings->musicbrainz_resolve);
+        gtk_switch_set_active(GTK_SWITCH(acoustid_sw), w->settings->acoustid_fingerprint);
+        gtk_switch_set_active(GTK_SWITCH(fanart_sw), w->settings->fanart_resolve);
+        gtk_switch_set_active(GTK_SWITCH(wikipedia_sw), w->settings->wikipedia_bios);
+    }
 
-    g_signal_connect(mode_local,    "toggled", G_CALLBACK(on_mode_toggled), s);
-    g_signal_connect(mode_portable, "toggled", G_CALLBACK(on_mode_toggled), s);
-    g_signal_connect(music_browse,  "clicked", G_CALLBACK(on_music_browse), s);
-    g_signal_connect(data_browse,   "clicked", G_CALLBACK(on_data_browse),  s);
-    g_signal_connect(confirm_btn,   "clicked", G_CALLBACK(on_add_confirm),  s);
-    g_signal_connect(cancel_btn,    "clicked", G_CALLBACK(on_add_cancel),   s);
-    g_signal_connect(popover,       "closed",  G_CALLBACK(on_add_popover_closed), s);
+    AddLibState *s      = g_new0(AddLibState, 1);
+    s->w                = w;
+    s->popover          = popover;
+    s->music_label      = music_label;
+    s->data_label       = data_label;
+    s->data_browse_btn  = data_browse;
+    s->index_revealer   = index_revealer;
+    s->type_description = type_desc;
+    s->index_hint_label = index_hint;
+    s->confirm_btn      = confirm_btn;
+    s->mb_switch        = mb_switch;
+    s->acoustid_switch  = acoustid_sw;
+    s->fanart_switch    = fanart_sw;
+    s->wikipedia_switch = wikipedia_sw;
+    s->lib_type         = LIB_TYPE_LOCAL;
+
+    g_signal_connect(type_local,   "toggled", G_CALLBACK(on_type_toggled), s);
+    g_signal_connect(type_usb,     "toggled", G_CALLBACK(on_type_toggled), s);
+    g_signal_connect(type_network, "toggled", G_CALLBACK(on_type_toggled), s);
+    g_signal_connect(music_browse, "clicked", G_CALLBACK(on_music_browse), s);
+    g_signal_connect(data_browse,  "clicked", G_CALLBACK(on_data_browse),  s);
+    g_signal_connect(confirm_btn,  "clicked", G_CALLBACK(on_add_confirm),  s);
+    g_signal_connect(cancel_btn,   "clicked", G_CALLBACK(on_add_cancel),   s);
+    g_signal_connect(popover,      "closed",  G_CALLBACK(on_add_popover_closed), s);
 
     /* Size content to match errors popover pattern */
     static const int MARGIN_SIDE = 100;
@@ -467,8 +548,6 @@ static void on_add_library(GtkButton *btn, gpointer data) {
     if (content)
         gtk_widget_set_size_request(content, pop_w, -1);
 
-    /* Anchor to the content stack (like errors/metadata popovers) so the
-     * popover stays alive when the native file dialog steals focus. */
     gtk_widget_set_parent(popover, w->stack);
     g_object_unref(popover);  /* parent now owns it */
 

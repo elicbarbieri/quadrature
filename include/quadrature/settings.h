@@ -63,10 +63,11 @@ typedef struct {
     int art_thumb_size;               // Album art thumbnail size in pixels (default: 48)
     int max_concurrent_library_scans; // Max libraries scanning simultaneously (default: 2)
 
-    // Integration toggles
+    // Integration toggles (global defaults; per-library overrides below)
     gboolean musicbrainz_resolve;     // Resolve MusicBrainz metadata after indexing
     gboolean fanart_resolve;          // Resolve fanart.tv artist images after indexing
     gboolean acoustid_fingerprint;    // Fingerprint tracks missing MUSICBRAINZ_ tags
+    gboolean wikipedia_bios;          // Fetch artist biographies from Wikipedia
 
     // Integration connection strings
     char *musicbrainz_pg_conninfo;    // libpq conninfo for MusicBrainz PostgreSQL
@@ -90,6 +91,17 @@ typedef struct {
     // For read-only library roots, point this to a writable location for DB + artwork
     char **library_data_paths;        // Heap-owned; may be NULL or shorter than library_paths
     int    library_data_path_count;   // Number of entries in library_data_paths
+
+    // Per-library integration overrides (parallel to library_paths[])
+    // Values: -1 = inherit global default, 0 = disabled, 1 = enabled
+    int   *library_mb_resolve;
+    int    library_mb_resolve_count;
+    int   *library_acoustid;
+    int    library_acoustid_count;
+    int   *library_fanart;
+    int    library_fanart_count;
+    int   *library_wikipedia;
+    int    library_wikipedia_count;
 } app_settings_t;
 
 /**
@@ -236,6 +248,20 @@ const char *app_settings_get_library_data_path(const app_settings_t *settings, i
  * Does not save to disk -- caller must call app_settings_save().
  */
 void app_settings_set_library_data_path(app_settings_t *settings, int idx, const char *path);
+
+/**
+ * Per-library integration overrides.
+ * Getter returns: -1 = inherit global, 0 = disabled, 1 = enabled.
+ * Setter accepts the same values.
+ */
+int  app_settings_get_library_mb_resolve(const app_settings_t *settings, int idx);
+void app_settings_set_library_mb_resolve(app_settings_t *settings, int idx, int value);
+int  app_settings_get_library_acoustid(const app_settings_t *settings, int idx);
+void app_settings_set_library_acoustid(app_settings_t *settings, int idx, int value);
+int  app_settings_get_library_fanart(const app_settings_t *settings, int idx);
+void app_settings_set_library_fanart(app_settings_t *settings, int idx, int value);
+int  app_settings_get_library_wikipedia(const app_settings_t *settings, int idx);
+void app_settings_set_library_wikipedia(app_settings_t *settings, int idx, int value);
 
 /**
  * Add a library root path (no-op if already present; copies the string).

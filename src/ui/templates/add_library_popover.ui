@@ -7,10 +7,10 @@
       <object class="GtkBox">
         <property name="orientation">vertical</property>
         <property name="spacing">16</property>
-        <property name="margin-start">16</property>
-        <property name="margin-end">16</property>
-        <property name="margin-top">16</property>
-        <property name="margin-bottom">16</property>
+        <property name="margin-start">20</property>
+        <property name="margin-end">20</property>
+        <property name="margin-top">20</property>
+        <property name="margin-bottom">20</property>
 
         <!-- Title -->
         <child>
@@ -23,31 +23,78 @@
           </object>
         </child>
 
-        <!-- Mode toggles -->
+        <!-- Library Type Selection -->
         <child>
-          <object class="GtkBox" id="mode_toggles">
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">6</property>
+
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Library Type</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="dim-label"/>
+                </style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkBox" id="type_toggles">
+                <property name="orientation">horizontal</property>
+                <property name="halign">fill</property>
+                <property name="homogeneous">true</property>
+                <style>
+                  <class name="linked"/>
+                </style>
+
+                <child>
+                  <object class="GtkToggleButton" id="type_local_btn">
+                    <property name="label">Local Folder</property>
+                    <property name="active">true</property>
+                    <style>
+                      <class name="toggle-btn"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="type_usb_btn">
+                    <property name="label">USB Drive</property>
+                    <style>
+                      <class name="toggle-btn"/>
+                    </style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="type_network_btn">
+                    <property name="label">Network Share</property>
+                    <style>
+                      <class name="toggle-btn"/>
+                    </style>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Context description (changes per type) -->
+            <child>
+              <object class="GtkLabel" id="type_description">
+                <property name="label">Index stored alongside your music files.</property>
+                <property name="xalign">0</property>
+                <property name="wrap">true</property>
+                <property name="opacity">0.5</property>
+                <style>
+                  <class name="caption"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Separator -->
+        <child>
+          <object class="GtkSeparator">
             <property name="orientation">horizontal</property>
-            <property name="halign">center</property>
-            <style>
-              <class name="linked"/>
-            </style>
-            <child>
-              <object class="GtkToggleButton" id="mode_local_btn">
-                <property name="label">Local Folder</property>
-                <property name="active">true</property>
-                <style>
-                  <class name="toggle-btn"/>
-                </style>
-              </object>
-            </child>
-            <child>
-              <object class="GtkToggleButton" id="mode_portable_btn">
-                <property name="label">Portable Drive</property>
-                <style>
-                  <class name="toggle-btn"/>
-                </style>
-              </object>
-            </child>
           </object>
         </child>
 
@@ -89,9 +136,9 @@
           </object>
         </child>
 
-        <!-- Data directory row (hidden by default, revealed in portable mode) -->
+        <!-- Index storage row (USB: info-only, Network: editable) -->
         <child>
-          <object class="GtkRevealer" id="data_section_revealer">
+          <object class="GtkRevealer" id="index_section_revealer">
             <property name="reveal-child">false</property>
             <property name="transition-type">slide-down</property>
             <child>
@@ -129,8 +176,8 @@
                   </object>
                 </child>
                 <child>
-                  <object class="GtkLabel">
-                    <property name="label">Stored locally so it persists when the drive is disconnected.</property>
+                  <object class="GtkLabel" id="index_hint_label">
+                    <property name="label">Stored locally so data persists when the drive is disconnected.</property>
                     <property name="xalign">0</property>
                     <property name="wrap">true</property>
                     <property name="opacity">0.4</property>
@@ -144,12 +191,186 @@
           </object>
         </child>
 
+        <!-- Separator -->
+        <child>
+          <object class="GtkSeparator">
+            <property name="orientation">horizontal</property>
+          </object>
+        </child>
+
+        <!-- Metadata Enhancement Options -->
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="spacing">10</property>
+
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Metadata Enhancement</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="dim-label"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- MusicBrainz toggle row -->
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                <child>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">MusicBrainz</property>
+                        <property name="xalign">0</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Resolve album and artist metadata</property>
+                        <property name="xalign">0</property>
+                        <property name="wrap">true</property>
+                        <property name="opacity">0.4</property>
+                        <style>
+                          <class name="caption"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSwitch" id="mb_switch">
+                    <property name="valign">center</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- AcoustID toggle row -->
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                <child>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">AcoustID</property>
+                        <property name="xalign">0</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Audio fingerprint tracks to identify untagged music</property>
+                        <property name="xalign">0</property>
+                        <property name="wrap">true</property>
+                        <property name="opacity">0.4</property>
+                        <style>
+                          <class name="caption"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSwitch" id="acoustid_switch">
+                    <property name="valign">center</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- fanart.tv toggle row -->
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                <child>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">fanart.tv</property>
+                        <property name="xalign">0</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Download artist images</property>
+                        <property name="xalign">0</property>
+                        <property name="wrap">true</property>
+                        <property name="opacity">0.4</property>
+                        <style>
+                          <class name="caption"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSwitch" id="fanart_switch">
+                    <property name="valign">center</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Wikipedia bios toggle row -->
+            <child>
+              <object class="GtkBox">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">12</property>
+                <child>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="valign">center</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Wikipedia</property>
+                        <property name="xalign">0</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Fetch artist biographies from Wikipedia</property>
+                        <property name="xalign">0</property>
+                        <property name="wrap">true</property>
+                        <property name="opacity">0.4</property>
+                        <style>
+                          <class name="caption"/>
+                        </style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSwitch" id="wikipedia_switch">
+                    <property name="valign">center</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
         <!-- Action buttons -->
         <child>
           <object class="GtkBox">
             <property name="orientation">horizontal</property>
             <property name="spacing">8</property>
             <property name="halign">end</property>
+            <property name="margin-top">4</property>
             <child>
               <object class="GtkButton" id="add_cancel_btn">
                 <property name="label">Cancel</property>
@@ -157,7 +378,7 @@
             </child>
             <child>
               <object class="GtkButton" id="add_confirm_btn">
-                <property name="label">Add</property>
+                <property name="label">Add Library</property>
                 <property name="sensitive">false</property>
                 <style>
                   <class name="suggested-action"/>
