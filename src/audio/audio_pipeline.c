@@ -11,6 +11,7 @@
 
 #include <libavutil/opt.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/log.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,7 @@ static inline void pipeline_record_event(audio_pipeline_t* p,
 
 static pthread_once_t ffmpeg_init_once = PTHREAD_ONCE_INIT;
 static void ffmpeg_init_internal(void) {
+    av_log_set_level(AV_LOG_ERROR);
     avformat_network_init();
     g_message("FFmpeg initialized (%s)", av_version_info());
 }
@@ -810,7 +812,7 @@ static void on_monitor_process(void* userdata) {
     uint32_t n_frames = d->chunk->size / (sizeof(float) * 2);
 
     /* Process spectrum FFT inline — no ring buffer, no separate thread */
-    spectrum_process(&p->spectrum, in, n_frames, p->spectrum_bars);
+    spectrum_process(&p->spectrum, in, n_frames, p->spectrum_bars, &p->spectrum_generation);
 
     pw_stream_queue_buffer(p->monitor_stream, b);
 }
@@ -1596,6 +1598,22 @@ static void process_pending_advances_internal(audio_pipeline_t* pipeline) {
             /* LOADING: continue polling next iteration */
         }
 
+        /* Poll for next_buffer readiness: if next_track_id is set but
+         * next_buffer is NULL, check if decode has completed */
+        if (pipeline->cache) {
+            int64_t next_id = atomic_load(&p->next_track_id);
+            audio_buffer_t* nb = atomic_load_explicit(&p->next_buffer, memory_order_acquire);
+            if (next_id > 0 && !nb) {
+                audio_cache_status_t ns = audio_cache_get_status(pipeline->cache, next_id);
+                if (ns == AUDIO_CACHE_READY) {
+                    audio_buffer_t* next_buf = audio_cache_get_locked(pipeline->cache, next_id);
+                    if (next_buf) {
+                        atomic_store_explicit(&p->next_buffer, next_buf, memory_order_release);
+                    }
+                }
+            }
+        }
+
         /* Check for pending auto-advances */
         if (!atomic_load(&p->advance_pending)) continue;
 
@@ -1954,18 +1972,15 @@ double audio_pipeline_get_player_position_smooth(audio_pipeline_t* pipeline,
      * If the writer is pathologically active (shouldn't happen in practice),
      * return the last snapshot — stale data for one UI frame is acceptable. */
     #define SEQLOCK_MAX_RETRIES 4
-    int retries = 0;
-    do {
+    for (int attempt = 0; attempt < SEQLOCK_MAX_RETRIES; attempt++) {
         seq1 = atomic_load_explicit(&p->position_seq, memory_order_acquire);
-        if (seq1 & 1) {
-            if (++retries >= SEQLOCK_MAX_RETRIES) break;
+        if (seq1 & 1)
             continue;  /* Writer is active, spin */
-        }
         snap = p->position_snap;
         atomic_thread_fence(memory_order_acquire);
         seq2 = atomic_load_explicit(&p->position_seq, memory_order_relaxed);
         if (seq1 == seq2) break;
-    } while (++retries < SEQLOCK_MAX_RETRIES);
+    }
 
     if (out_speed) *out_speed = snap.speed;
 

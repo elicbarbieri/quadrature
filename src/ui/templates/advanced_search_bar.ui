@@ -43,22 +43,10 @@
 
         <!-- Role filter -->
         <child>
-          <object class="GtkBox">
-            <property name="orientation">horizontal</property>
-            <property name="spacing">0</property>
+          <object class="GtkDropDown" id="filter_role">
             <style>
               <class name="filter-field"/>
             </style>
-            <child>
-              <object class="GtkLabel">
-                <property name="label">Role</property>
-              </object>
-            </child>
-            <child>
-              <object class="GtkMenuButton" id="filter_role">
-                <property name="label">All Roles</property>
-              </object>
-            </child>
           </object>
         </child>
       </object>

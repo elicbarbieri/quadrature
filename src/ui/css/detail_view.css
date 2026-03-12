@@ -41,11 +41,13 @@
 .detail-album-art {
     min-width: 300px;
     min-height: 300px;
-    max-width: 300px;
-    max-height: 300px;
     border-radius: 8px;
     background-color: #333333;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.detail-album-art.artwork-loading {
+    background-color: #3a3a3a;
 }
 
 /* Album Detail Artist Link */

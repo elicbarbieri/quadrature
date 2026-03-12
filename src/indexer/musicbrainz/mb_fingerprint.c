@@ -36,14 +36,23 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
     ChromaprintContext* chromaprint_ctx = NULL;
     int16_t* resample_buffer = NULL;
 
-    // Open input file
-    if (avformat_open_input(&fmt_ctx, audio_path, NULL, NULL) < 0) {
+    // Open input file with minimal probing — we only need the first audio stream.
+    // Default probesize (5 MB) and analyzeduration (5s) cause excessive I/O on
+    // network drives. 32 KB + 100ms is sufficient for all common audio formats.
+    AVDictionary* open_opts = NULL;
+    av_dict_set(&open_opts, "probesize", "32768", 0);
+    av_dict_set(&open_opts, "analyzeduration", "100000", 0);
+
+    if (avformat_open_input(&fmt_ctx, audio_path, NULL, &open_opts) < 0) {
         g_warning("Failed to open audio file: %s", audio_path);
+        av_dict_free(&open_opts);
         result = QUADRATURE_ERROR_FILE_NOT_FOUND;
         goto cleanup;
     }
+    av_dict_free(&open_opts);
 
-    // Find stream info
+    // Find stream info — limit to 1 stream (we only care about audio)
+    fmt_ctx->max_streams = 1;
     if (avformat_find_stream_info(fmt_ctx, NULL) < 0) {
         g_warning("Failed to find stream info: %s", audio_path);
         goto cleanup;

@@ -87,11 +87,12 @@ static void rb_ring_write(rb_ring_t *r, const float *data, uint32_t frames) {
     if (frames > rb_ring_space(r)) frames = rb_ring_space(r);
     if (frames == 0) return;
 
-    for (uint32_t i = 0; i < frames; i++) {
-        uint32_t idx = (r->write_idx + i) % r->capacity;
-        r->buffer[idx * 2]     = data[i * 2];
-        r->buffer[idx * 2 + 1] = data[i * 2 + 1];
-    }
+    /* Split into at most two memcpy's — libc memcpy uses best available SIMD */
+    uint32_t first = r->capacity - r->write_idx;
+    if (first > frames) first = frames;
+    memcpy(&r->buffer[r->write_idx * 2], data, first * 2 * sizeof(float));
+    if (frames > first)
+        memcpy(r->buffer, data + first * 2, (frames - first) * 2 * sizeof(float));
     r->write_idx = (r->write_idx + frames) % r->capacity;
     r->count += frames;
 }
@@ -100,11 +101,11 @@ static uint32_t rb_ring_read(rb_ring_t *r, float *data, uint32_t frames) {
     if (frames > r->count) frames = r->count;
     if (frames == 0) return 0;
 
-    for (uint32_t i = 0; i < frames; i++) {
-        uint32_t idx = (r->read_idx + i) % r->capacity;
-        data[i * 2]     = r->buffer[idx * 2];
-        data[i * 2 + 1] = r->buffer[idx * 2 + 1];
-    }
+    uint32_t first = r->capacity - r->read_idx;
+    if (first > frames) first = frames;
+    memcpy(data, &r->buffer[r->read_idx * 2], first * 2 * sizeof(float));
+    if (frames > first)
+        memcpy(data + first * 2, r->buffer, (frames - first) * 2 * sizeof(float));
     r->read_idx = (r->read_idx + frames) % r->capacity;
     r->count -= frames;
     return frames;
@@ -420,7 +421,6 @@ uint64_t audio_scrubber_get_underflows(const audio_scrubber_t *s) {
 int audio_scrubber_get_zone(const audio_scrubber_t *s) {
     g_assert(s != NULL);
 
-    float speed = atomic_load(&s->speed);
     shuttle_mode_t mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
 
     if (mode == SHUTTLE_MODE_OFF) {
@@ -671,23 +671,21 @@ uint32_t audio_scrubber_process(audio_scrubber_t *s,
             int64_t idx = (int64_t)pos;
             double frac = pos - (double)idx;
 
-            /* Get 4 surrounding samples for cubic interpolation */
-            float l0, r0, l1, r1, l2, r2, l3, r3;
-            get_sample_safe(samples, idx - 1, num_frames, &l0, &r0);
-            get_sample_safe(samples, idx,     num_frames, &l1, &r1);
-            get_sample_safe(samples, idx + 1, num_frames, &l2, &r2);
-            get_sample_safe(samples, idx + 2, num_frames, &l3, &r3);
+            /* Clamp index to safe range for 4-sample window [idx-1 .. idx+2].
+             * Eliminates per-sample branching in get_sample_safe. */
+            if (idx < 1) idx = 1;
+            if (idx >= (int64_t)num_frames - 2) idx = (int64_t)num_frames - 3;
 
-            /* Cubic Hermite interpolation */
-            output[i * 2]     = cubic_hermite(l0, l1, l2, l3, (float)frac);
-            output[i * 2 + 1] = cubic_hermite(r0, r1, r2, r3, (float)frac);
+            /* Read 4 contiguous stereo pairs directly — no bounds checks needed */
+            const float *p = samples + (idx - 1) * 2;
+            output[i * 2]     = cubic_hermite(p[0], p[2], p[4], p[6], (float)frac);
+            output[i * 2 + 1] = cubic_hermite(p[1], p[3], p[5], p[7], (float)frac);
 
             pos += step;
-
-            /* Bounds check */
-            if (pos < 0.0) pos = 0.0;
-            if (pos >= (double)num_frames) pos = (double)(num_frames - 1);
         }
+        /* Bounds check once after loop — only matters at track edges */
+        if (pos < 0.0) pos = 0.0;
+        if (pos >= (double)num_frames) pos = (double)(num_frames - 1);
 
         /* Zero remaining frames if any */
         for (uint32_t i = process_frames; i < frames; i++) {
@@ -716,17 +714,17 @@ apply_crossfade:
     if (s->crossfade_frames > 0) {
         uint32_t fade_samples = (s->crossfade_frames < frames) ? s->crossfade_frames : frames;
 
+        /* Pre-compute gain ramp — no loop-carried dependency → auto-vectorizable */
+        float gain_step = 1.0f / (float)s->crossfade_length;
+        float new_gain = 1.0f - (float)s->crossfade_frames / (float)s->crossfade_length;
+
         for (uint32_t i = 0; i < fade_samples; i++) {
-            /* Linear crossfade from old to new */
-            float t = 1.0f - (float)s->crossfade_frames / (float)s->crossfade_length;
-            float old_gain = 1.0f - t;
-            float new_gain = t;
-
-            output[i * 2] = output[i * 2] * new_gain + s->crossfade_buffer[i * 2] * old_gain;
+            float old_gain = 1.0f - new_gain;
+            output[i * 2]     = output[i * 2] * new_gain + s->crossfade_buffer[i * 2] * old_gain;
             output[i * 2 + 1] = output[i * 2 + 1] * new_gain + s->crossfade_buffer[i * 2 + 1] * old_gain;
-
-            s->crossfade_frames--;
+            new_gain += gain_step;
         }
+        s->crossfade_frames -= fade_samples;
     }
 
     /* Save output for potential future crossfade */

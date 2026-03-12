@@ -119,17 +119,12 @@ static void on_popover_credit_navigate(GtkButton *btn, gpointer data) {
 
     /* Check MBID bridge: does this artist exist in any library's main DB? */
     int64_t found_artist_id = 0;
-    if (ud->settings) {
-        for (int i = 0; i < ud->settings->library_path_count && found_artist_id == 0; i++) {
-            const char *dp = app_settings_get_library_data_path(ud->settings, i);
-            char *db_path = g_build_filename(dp, "quadrature.sqlite", NULL);
-            quadrature_db_t *lib_db = NULL;
-            if (db_open_readonly(db_path, &lib_db) == QUADRATURE_OK) {
-                db_get_artist_by_mbid(lib_db, artist_mbid, &found_artist_id);
-                db_close(lib_db);
-            }
-            g_free(db_path);
-        }
+    int lib_count = library_cache_get_library_count(ud->cache);
+    for (int i = 0; i < lib_count && found_artist_id == 0; i++) {
+        if (!library_cache_get_available(ud->cache, i)) continue;
+        quadrature_db_t *lib_db = library_cache_get_db(ud->cache, i);
+        if (lib_db)
+            db_get_artist_by_mbid(lib_db, artist_mbid, &found_artist_id);
     }
 
     if (found_artist_id > 0) {
@@ -213,32 +208,27 @@ guint append_credit_rows(UnifiedDetailData *ud,
     GHashTable *album_roles = g_hash_table_new_full(g_int64_hash, g_int64_equal,
                                                      g_free, credit_role_set_free);
 
-    for (int li = 0; li < ud->settings->library_path_count; li++) {
-        const char *library_root = app_settings_get_library_data_path(ud->settings, li);
-
-        quadrature_meta_db_t *meta_db = NULL;
-        if (db_meta_open_readonly(library_root, &meta_db) != QUADRATURE_OK || !meta_db)
-            continue;
+    int lib_count = library_cache_get_library_count(ud->cache);
+    for (int li = 0; li < lib_count; li++) {
+        if (!library_cache_get_available(ud->cache, li)) continue;
+        quadrature_meta_db_t *meta_db = library_cache_get_meta_db(ud->cache, li);
+        if (!meta_db) continue;
 
         db_meta_artist_credit_t *credits = NULL;
         size_t credit_count = 0;
         quadrature_result_t res = db_meta_get_credits_by_artist(
             meta_db, artist_mbid, NULL, &credits, &credit_count);
-        db_meta_close(meta_db);
 
         if (res != QUADRATURE_OK || credit_count == 0) {
             db_meta_artist_credits_free(credits, credit_count);
             continue;
         }
 
-        char *db_path = g_build_filename(library_root, "quadrature.sqlite", NULL);
-        quadrature_db_t *lib_db = NULL;
-        if (db_open_readonly(db_path, &lib_db) != QUADRATURE_OK || !lib_db) {
-            g_free(db_path);
+        quadrature_db_t *lib_db = library_cache_get_db(ud->cache, li);
+        if (!lib_db) {
             db_meta_artist_credits_free(credits, credit_count);
             continue;
         }
-        g_free(db_path);
 
         for (size_t i = 0; i < credit_count; i++) {
             db_meta_artist_credit_t *c = &credits[i];
@@ -247,13 +237,14 @@ guint append_credit_rows(UnifiedDetailData *ud,
             /* Format role for this credit */
             char *role = format_credit_role(c->link_type_name, c->attributes);
 
-            /* Resolve to track_id */
-            int64_t track_id = 0;
+            /* Resolve to local track_id, then convert to global */
+            int64_t local_tid = 0;
             if (db_get_track_by_position(lib_db, c->release_mbid,
-                    c->disc_num, c->track_num, &track_id) != QUADRATURE_OK) {
+                    c->disc_num, c->track_num, &local_tid) != QUADRATURE_OK) {
                 g_free(role);
                 continue;
             }
+            int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(li, local_tid);
 
             /* Skip tracks from own albums or already shown */
             if (skip_track_ids &&
@@ -263,16 +254,20 @@ guint append_credit_rows(UnifiedDetailData *ud,
                 continue;
             }
 
-            /* Skip if the viewed artist is already primary/featuring */
-            if (viewed_artist_id > 0) {
+            /* Skip if the viewed artist is already primary/featuring.
+             * Compare by name (case-insensitive) rather than ID because the
+             * same artist can have different global IDs across libraries due
+             * to cross-library merging. */
+            {
                 const GPtrArray *track_artists =
                     library_cache_get_track_artists(ud->cache, track_id);
                 gboolean already_credited = FALSE;
-                if (track_artists) {
+                if (track_artists && artist_name) {
                     for (guint j = 0; j < track_artists->len; j++) {
                         const library_track_artist_t *a =
                             g_ptr_array_index(track_artists, j);
-                        if (a->artist_id == viewed_artist_id) {
+                        if (a->artist_id == viewed_artist_id ||
+                            (a->name && g_ascii_strcasecmp(a->name, artist_name) == 0)) {
                             already_credited = TRUE;
                             break;
                         }
@@ -282,6 +277,18 @@ guint append_credit_rows(UnifiedDetailData *ud,
             }
 
             const library_track_info_t *track = library_cache_get_track(ud->cache, track_id);
+
+            /* Skip if the album artist name matches the viewed artist name.
+             * This catches "appears on own album" cases that the ID check
+             * can miss across merged libraries. */
+            if (track && track->album_id > 0) {
+                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id);
+                if (al && al->artist_name && artist_name &&
+                    g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
+                    g_free(role);
+                    continue;
+                }
+            }
             if (!track) { g_free(role); continue; }
 
             /* Accumulate per-album roles */
@@ -311,7 +318,6 @@ guint append_credit_rows(UnifiedDetailData *ud,
             credit_role_set_add(trs, role);  /* ownership transferred */
         }
 
-        db_close(lib_db);
         db_meta_artist_credits_free(credits, credit_count);
     }
 
@@ -385,17 +391,14 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                                  char **rec_mbid_out) {
     if (rec_mbid_out) *rec_mbid_out = NULL;
 
-    if (!release_mbid || !ud->settings ||
-        library_index < 0 || library_index >= ud->settings->library_path_count)
+    if (!release_mbid || library_index < 0)
         return;
 
-    const char *library_root = app_settings_get_library_data_path(ud->settings, library_index);
-    quadrature_meta_db_t *meta_db = NULL;
-    quadrature_result_t res = db_meta_open_readonly(library_root, &meta_db);
+    quadrature_meta_db_t *meta_db = library_cache_get_meta_db(ud->cache, library_index);
 
-    if (res == QUADRATURE_OK && meta_db) {
+    if (meta_db) {
         char *rec_mbid = NULL;
-        res = db_meta_get_recording_mbid(meta_db, release_mbid, disc_num, track_num, &rec_mbid);
+        quadrature_result_t res = db_meta_get_recording_mbid(meta_db, release_mbid, disc_num, track_num, &rec_mbid);
 
         if (res == QUADRATURE_OK && rec_mbid) {
             if (rec_mbid_out)
@@ -434,6 +437,10 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                     /* SizeGroup ensures all artist buttons align across rows */
                     GtkSizeGroup *sg = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL);
 
+                    /* Load credit row template ONCE — reuse for each row */
+                    GBytes *tmpl_bytes = g_resources_lookup_data(
+                        "/org/quadrature/ui/credit_row.ui", 0, NULL);
+
                     for (int b = 0; b < 3; b++) {
                         if (buckets[b]->len == 0) continue;
                         popover_add_subsection(credits_box, bucket_titles[b]);
@@ -441,9 +448,11 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                         for (guint j = 0; j < buckets[b]->len; j++) {
                             const db_meta_link_t *link = g_ptr_array_index(buckets[b], j);
 
-                            /* Load credit row from template */
-                            GtkBuilder *cr_builder = gtk_builder_new_from_resource(
-                                "/org/quadrature/ui/credit_row.ui");
+                            /* Create fresh builder from cached bytes (avoids re-parsing resource) */
+                            GtkBuilder *cr_builder = gtk_builder_new();
+                            gtk_builder_add_from_string(cr_builder,
+                                g_bytes_get_data(tmpl_bytes, NULL),
+                                g_bytes_get_size(tmpl_bytes), NULL);
                             GtkWidget *row = GTK_WIDGET(
                                 gtk_builder_get_object(cr_builder, "credit_row"));
                             GtkWidget *btn = GTK_WIDGET(
@@ -489,13 +498,13 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                             /* Add button to size group for column alignment */
                             gtk_size_group_add_widget(sg, btn);
 
-                            g_object_ref(row);
-                            g_object_unref(cr_builder);
+                            /* row is floating, gtk_box_append sinks it */
                             gtk_box_append(GTK_BOX(credits_box), row);
-                            g_object_unref(row);
+                            g_object_unref(cr_builder);
                         }
                     }
 
+                    g_bytes_unref(tmpl_bytes);
                     g_object_unref(sg);
                 }
 
@@ -507,7 +516,6 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
             g_free(rec_mbid);
         }
 
-        db_meta_close(meta_db);
     }
 }
 

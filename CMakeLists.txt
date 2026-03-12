@@ -33,7 +33,8 @@ endif()
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra)
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        add_compile_options(-O3 -DNDEBUG)
+        add_compile_options(-O3 -DNDEBUG -march=native -mtune=native -ftree-vectorize)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)  # LTO: cross-TU inlining
     endif()
 endif()
 
@@ -106,6 +107,7 @@ set(LIBRARY_SOURCES
 set(INDEXER_CORE_SOURCES
     src/indexer/indexer.c
     src/indexer/utils.c
+    src/indexer/library_validation.c
     src/indexer/artwork.c
     src/indexer/musicbrainz/mb_fingerprint.c
     src/indexer/musicbrainz/mb_acoustid.c
@@ -265,8 +267,11 @@ if(BUILD_UI)
         src/ui/window.c
         src/ui/metadata_dialog.c
         src/ui/indexer_controller.c
+        src/ui/library_monitor.c
         src/ui/app_settings.c
         src/ui/utils.c
+        src/ui/ui_math.c
+        src/ui/overflow_plan.c
         src/ui/row_helpers.c
         src/ui/artist_buttons.c
         src/ui/row_factories.c
@@ -303,83 +308,42 @@ if(BUILD_TESTS)
     enable_testing()
     pkg_check_modules(CRITERION REQUIRED criterion)
 
-    file(GLOB TEST_SOURCES tests/unit/test_*.c)
-    foreach(TEST_FILE ${TEST_SOURCES})
-        get_filename_component(TEST_NAME ${TEST_FILE} NAME_WE)
-        if(${TEST_NAME} STREQUAL "test_database")
-            add_executable(${TEST_NAME} ${TEST_FILE})
-            target_include_directories(${TEST_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src/database ${CRITERION_INCLUDE_DIRS})
-            target_link_libraries(${TEST_NAME} quadrature_engine ${CRITERION_LIBRARIES})
-            target_link_directories(${TEST_NAME} PRIVATE ${CRITERION_LIBRARY_DIRS})
-            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-            continue()
-        elseif(${TEST_NAME} MATCHES "test_indexer" OR ${TEST_NAME} MATCHES "test_multi_disc")
-            add_executable(${TEST_NAME} ${TEST_FILE})
-            target_include_directories(${TEST_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src/indexer ${CMAKE_SOURCE_DIR}/src/database)
-            target_link_libraries(${TEST_NAME} quadrature_indexer_core ${CRITERION_LIBRARIES})
-            target_link_directories(${TEST_NAME} PRIVATE ${CRITERION_LIBRARY_DIRS})
-            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-            continue()
-        elseif(${TEST_NAME} MATCHES "test_audio")
-            # Audio tests need access to internal headers and PipeWire
-            add_executable(${TEST_NAME} ${TEST_FILE})
-            target_include_directories(${TEST_NAME} PRIVATE
-                ${CMAKE_SOURCE_DIR}/src/audio
-                ${CMAKE_SOURCE_DIR}/src/database
-                ${CRITERION_INCLUDE_DIRS}
-                ${PIPEWIRE_INCLUDE_DIRS}
-                ${RUBBERBAND_INCLUDE_DIRS}
-            )
-            target_link_libraries(${TEST_NAME} quadrature_engine ${CRITERION_LIBRARIES})
-            target_link_directories(${TEST_NAME} PRIVATE ${CRITERION_LIBRARY_DIRS})
-            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-            continue()
-        elseif(${TEST_NAME} STREQUAL "test_mb_resolve")
-            # MusicBrainz integration tests
-            add_executable(${TEST_NAME} ${TEST_FILE})
-            target_include_directories(${TEST_NAME} PRIVATE
-                ${CMAKE_SOURCE_DIR}/src/indexer/musicbrainz
-                ${CMAKE_SOURCE_DIR}/src/database
-                ${CRITERION_INCLUDE_DIRS}
-                ${LIBPQ_INCLUDE_DIRS}
-            )
-            target_link_libraries(${TEST_NAME}
-                quadrature_indexer_core
-                quadrature_engine
-                ${CRITERION_LIBRARIES}
-            )
-            target_link_directories(${TEST_NAME} PRIVATE
-                ${CRITERION_LIBRARY_DIRS}
-            )
-            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-            continue()
-        elseif(${TEST_NAME} STREQUAL "test_axia_gpio")
-            # Axia GPIO integration tests
-            add_executable(${TEST_NAME} ${TEST_FILE})
-            target_include_directories(${TEST_NAME} PRIVATE
-                ${CMAKE_SOURCE_DIR}/src/gpio
-                ${CRITERION_INCLUDE_DIRS}
-            )
-            target_link_libraries(${TEST_NAME}
-                quadrature_gpio
-                ${GLIB_LIBRARIES}
-                ${CRITERION_LIBRARIES}
-                Threads::Threads
-            )
-            target_link_directories(${TEST_NAME} PRIVATE
-                ${CRITERION_LIBRARY_DIRS}
-                ${GLIB_LIBRARY_DIRS}
-            )
-            add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-            continue()
-        else()
-            add_executable(${TEST_NAME} ${TEST_FILE})
-        endif()
-        target_include_directories(${TEST_NAME} PRIVATE ${CRITERION_INCLUDE_DIRS})
-        target_link_libraries(${TEST_NAME} quadrature_engine ${CRITERION_LIBRARIES})
-        target_link_directories(${TEST_NAME} PRIVATE ${CRITERION_LIBRARY_DIRS})
-        add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-    endforeach()
+    function(unit_test NAME)
+        cmake_parse_arguments(T "" "" "SOURCES;INCLUDES;LIBS" ${ARGN})
+        add_executable(${NAME} tests/unit/${NAME}.c ${T_SOURCES})
+        target_include_directories(${NAME} PRIVATE ${CRITERION_INCLUDE_DIRS} ${T_INCLUDES})
+        target_link_libraries(${NAME} ${CRITERION_LIBRARIES} ${T_LIBS})
+        target_link_directories(${NAME} PRIVATE ${CRITERION_LIBRARY_DIRS})
+        target_compile_definitions(${NAME} PRIVATE SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+        add_test(NAME ${NAME} COMMAND ${NAME})
+    endfunction()
+
+    set(S ${CMAKE_SOURCE_DIR}/src)
+
+    # Standalone (no engine)
+    unit_test(test_overflow_layout  SOURCES src/ui/overflow_plan.c  LIBS ${GLIB_LIBRARIES})
+    unit_test(test_library_mask                                     LIBS ${GLIB_LIBRARIES})
+
+    # Engine tests
+    unit_test(test_database         INCLUDES ${S}/database          LIBS quadrature_engine)
+    unit_test(test_library_cache                                    LIBS quadrature_engine)
+    unit_test(test_path_resolution                                  LIBS quadrature_engine)
+
+    # Audio tests
+    unit_test(test_audio_pipeline   INCLUDES ${S}/audio ${S}/database  LIBS quadrature_engine)
+    unit_test(test_audio_cache      INCLUDES ${S}/audio ${S}/database  LIBS quadrature_engine)
+    unit_test(test_audio_scrubber   INCLUDES ${S}/audio ${S}/database  LIBS quadrature_engine)
+
+    # Indexer tests
+    unit_test(test_indexer              INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
+    unit_test(test_indexer_integration  INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
+    unit_test(test_multi_disc           INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
+
+    # MusicBrainz tests
+    unit_test(test_mb_resolve  INCLUDES ${S}/indexer/musicbrainz ${S}/database  LIBS quadrature_indexer_core quadrature_engine)
+
+    # GPIO tests
+    unit_test(test_axia_gpio  INCLUDES ${S}/gpio  LIBS quadrature_gpio ${GLIB_LIBRARIES} Threads::Threads)
 endif()
 
 # Install targets

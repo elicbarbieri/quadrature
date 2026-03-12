@@ -53,20 +53,39 @@ ArtworkManager *artwork_manager_new(library_cache_t *library,
 void artwork_manager_free(ArtworkManager *mgr);
 void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWidget *image);
 int artwork_manager_get_thumb_size(ArtworkManager *mgr);
+
+/** Set album thumbnail on a GtkImage (pixel size + async load). */
+static inline void ui_set_album_thumbnail(ArtworkManager *mgr, GtkWidget *img, int64_t album_id) {
+    if (!mgr || !img) return;
+    gtk_image_set_pixel_size(GTK_IMAGE(img), artwork_manager_get_thumb_size(mgr));
+    artwork_manager_get_thumbnail(mgr, album_id, img);
+}
 void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int lib_idx,
                                           const char *atlas_path);
+void artwork_manager_add_library(ArtworkManager *mgr, const char *data_root,
+                                  const char *music_root);
+void artwork_manager_remove_library(ArtworkManager *mgr, int lib_idx);
 void artwork_manager_prefetch_fullsize(ArtworkManager *mgr, int64_t album_id);
 
 /* Load full-resolution album art directly from the album directory on disk.
  * Bypasses the thumbnail atlas — intended for detail views where the raw image
  * is displayed large and GTK handles the scaling via GtkPicture.
- * Synchronous: loads the file on the calling thread (fine for single-shot detail views).
+ * Async: queues work to a worker thread; adds "artwork-loading" CSS class to the
+ * art container during load, then sets the texture via idle callback.
  * picture: must be a GtkPicture widget. */
 void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr, int lib_index,
                                              int64_t album_id, GtkWidget *picture);
 
 void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id,
                                            GtkWidget *image);
+
+/** Set artist thumbnail on a GtkImage (pixel size + async load from artist atlas). */
+static inline void ui_set_artist_thumbnail(ArtworkManager *mgr, GtkWidget *img, int64_t artist_id) {
+    if (!mgr || !img) return;
+    gtk_image_set_pixel_size(GTK_IMAGE(img), artwork_manager_get_thumb_size(mgr));
+    artwork_manager_get_artist_thumbnail(mgr, artist_id, img);
+}
+
 void artwork_manager_reload_artist_atlas(ArtworkManager *mgr);
 
 /* Performance stats snapshot (for perf dashboard polling) */
@@ -209,6 +228,15 @@ GtkWidget *lazy_list_get_widget(LazyList *ll);
 /* Get the GListStore for population */
 GListStore *lazy_list_get_store(LazyList *ll);
 
+/* Get the filtered model (GtkFilterListModel output — the visible item sequence) */
+GListModel *lazy_list_get_filtered_model(LazyList *ll);
+
+/* Set/replace the filter (NULL = no filtering). Caller retains ownership. */
+void lazy_list_set_filter(LazyList *ll, GtkFilter *filter);
+
+/* Set/replace the sorter (NULL = no sorting). Caller retains ownership. */
+void lazy_list_set_sorter(LazyList *ll, GtkSorter *sorter);
+
 /* Attach scroll monitoring to a GtkScrolledWindow */
 void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll);
 
@@ -239,13 +267,15 @@ typedef struct {
     GtkWidget *filter_search_box;  /* Container box for search (hidden in search view) */
     GtkWidget *filter_clear;       /* GtkButton */
     GtkWidget *advanced_toggle;    /* GtkToggleButton */
-    GtkWidget *sort_dropdown;      /* GtkMenuButton (hidden when no sort options) */
-    GtkWidget *sort_dropdown_box;  /* Wrapper GtkBox for sort (visibility toggled here) */
+    GtkWidget *sort_dropdown;      /* GtkDropDown (hidden when no sort options) */
 
     /* Advanced panel (NULL until filter_bar_attach_advanced) */
     GtkWidget *advanced_revealer;  /* GtkRevealer */
     GtkWidget *credit_search_entry;/* GtkSearchEntry */
-    GtkWidget *filter_role;        /* GtkMenuButton */
+    GtkWidget *filter_role;        /* GtkDropDown */
+
+    /* Year filter action group (GSimpleActionGroup with boolean stateful actions) */
+    GSimpleActionGroup *year_actions;
 
     /* Filter state */
     GHashTable *selected_genres;   /* Set of selected genre strings (owned) */
@@ -316,6 +346,7 @@ db_search_opts_t filter_bar_build_search_opts(const FilterBarState *fb, const ch
 
 /** Hide the search field (for search view which has its own primary search bar). */
 void filter_bar_hide_search(FilterBarState *fb);
+
 
 /** Rebuild genre popover from library cache (call after cache warming). */
 void filter_bar_rebuild_genre_popover(FilterBarState *fb);
@@ -398,6 +429,7 @@ typedef struct {
     DetailState state;
     int64_t current_id;
     int64_t album_artist_id;
+    int64_t merged_rep_album_id; /* Representative album ID when viewing a merged group (0 if none) */
 
     NavEntry nav_stack[MAX_NAV_STACK];
     int nav_depth;
@@ -441,6 +473,9 @@ typedef struct {
 
     char *meta_artist_mbid;
     char *meta_artist_name;
+
+    GCancellable *banner_cancel;  /* Cancels async banner load on navigation away */
+    GCancellable *bio_bg_cancel;  /* Cancels async bio background load on navigation away */
 } UnifiedDetailData;
 
 /* detail_view.c — shared with credits_view.c */
@@ -487,6 +522,7 @@ gboolean library_unified_detail_go_back(GtkWidget *view);
 void library_unified_detail_reload(GtkWidget *view);
 void library_unified_detail_clear_nav(GtkWidget *view);
 DetailState library_unified_detail_get_state(GtkWidget *view);
+int64_t library_unified_detail_get_current_entity_id(GtkWidget *view);
 GtkWidget *library_unified_detail_get_track_list(GtkWidget *view);
 
 /* Refresh current view data */

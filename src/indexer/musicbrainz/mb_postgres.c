@@ -55,6 +55,27 @@ void* mb_pg_exec(mb_pg_client_t* client, const char* query,
     return PQexecParams(client->conn, query, nparams, NULL, params, NULL, NULL, 0);
 }
 
+quadrature_result_t mb_pg_prepare(mb_pg_client_t* client, const char* stmt_name,
+                                   const char* query, int nparams) {
+    if (!client || !client->conn || !stmt_name || !query)
+        return QUADRATURE_ERROR_INVALID_PARAM;
+
+    PGresult* res = PQprepare(client->conn, stmt_name, query, nparams, NULL);
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+        g_warning("mb_pg_prepare(%s): %s", stmt_name, PQerrorMessage(client->conn));
+        PQclear(res);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+    PQclear(res);
+    return QUADRATURE_OK;
+}
+
+void* mb_pg_exec_prepared(mb_pg_client_t* client, const char* stmt_name,
+                           int nparams, const char* const* params) {
+    if (!client || !client->conn || !stmt_name) return NULL;
+    return PQexecPrepared(client->conn, stmt_name, nparams, params, NULL, NULL, 0);
+}
+
 void mb_pg_set_schema(mb_pg_client_t* client, const char* schema) {
     if (!client || !client->conn || !schema) return;
     char* sql = g_strdup_printf("SET search_path TO %s", schema);
@@ -659,12 +680,14 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
 // =============================================================================
 
 quadrature_result_t mb_pg_pool_create(const char* mb_conninfo,
-    const char* acoustid_conninfo, size_t count, mb_pg_pool_t** out) {
+    const char* acoustid_conninfo, const char* acoustid_index_url,
+    size_t count, mb_pg_pool_t** out) {
     if (!mb_conninfo || count == 0 || !out) return QUADRATURE_ERROR_INVALID_PARAM;
 
     mb_pg_pool_t* pool = g_new0(mb_pg_pool_t, 1);
     pool->mb_conns = g_new0(mb_pg_client_t*, count);
     pool->acoustid_conns = g_new0(mb_pg_client_t*, count);
+    pool->http_conns = g_new0(mb_http_conn_t*, count);
     pool->count = count;
     pool->next_slot = 0;
 
@@ -684,6 +707,15 @@ quadrature_result_t mb_pg_pool_create(const char* mb_conninfo,
                 pool->acoustid_conns[i] = NULL;
             }
         }
+
+        // Prepare acoustid lookup statements on both PG connections
+        mb_acoustid_prepare_stmts(pool->mb_conns[i], pool->acoustid_conns[i]);
+
+        // Persistent HTTP connection to acoustid-index
+        if (acoustid_index_url && acoustid_index_url[0]) {
+            pool->http_conns[i] = mb_http_conn_create(acoustid_index_url);
+            // Non-fatal if initial connect fails — will retry on first use
+        }
     }
 
     *out = pool;
@@ -695,8 +727,10 @@ void mb_pg_pool_destroy(mb_pg_pool_t* pool) {
     for (size_t i = 0; i < pool->count; i++) {
         mb_pg_client_destroy(pool->mb_conns[i]);
         if (pool->acoustid_conns[i]) mb_pg_client_destroy(pool->acoustid_conns[i]);
+        if (pool->http_conns[i]) mb_http_conn_destroy(pool->http_conns[i]);
     }
     g_free(pool->mb_conns);
     g_free(pool->acoustid_conns);
+    g_free(pool->http_conns);
     g_free(pool);
 }

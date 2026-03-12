@@ -206,6 +206,12 @@ static void decode_worker(gpointer data, gpointer user_data) {
     memset(bin_energy, 0, sizeof(bin_energy));
     memset(bin_counts, 0, sizeof(bin_counts));
 
+    /* Pre-compute bin boundaries — monotonic scan replaces per-sample division */
+    uint64_t bin_edges[LOUDNESS_BINS + 1];
+    for (int b = 0; b <= LOUDNESS_BINS; b++)
+        bin_edges[b] = (uint64_t)b * total_frames / LOUDNESS_BINS;
+    int cur_bin = 0;
+
     while (!atomic_load(&buffer->decode_cancelled)) {
         size_t chunk_size = 4096;
         if (decoded + chunk_size > buffer_frames) {
@@ -227,16 +233,17 @@ static void decode_worker(gpointer data, gpointer user_data) {
             break;
         }
 
-        /* Accumulate RMS energy per bin (samples already in L1 cache) */
+        /* Accumulate RMS energy per bin.  cur_bin advances monotonically
+         * (amortized O(1) per sample), no per-sample division. */
         for (int i = 0; i < frames_read; i++) {
             uint64_t abs_frame = decoded + (uint64_t)i;
-            int bin = (int)((abs_frame * LOUDNESS_BINS) / total_frames);
-            if (bin >= LOUDNESS_BINS) bin = LOUDNESS_BINS - 1;
+            while (cur_bin < LOUDNESS_BINS - 1 && abs_frame >= bin_edges[cur_bin + 1])
+                cur_bin++;
             float L = out_ptr[i * 2];
             float R = out_ptr[i * 2 + 1];
             float sample = fmaxf(fabsf(L), fabsf(R));
-            bin_energy[bin] += (double)(sample * sample);
-            bin_counts[bin] += 1;
+            bin_energy[cur_bin] += (double)(sample * sample);
+            bin_counts[cur_bin] += 1;
         }
 
         decoded += frames_read;

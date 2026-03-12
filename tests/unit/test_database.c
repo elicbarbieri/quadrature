@@ -133,7 +133,7 @@ Test(database, track_upsert) {
 
     int64_t album_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "/music", "Test Album",
-        artist_id, false, 2024, &album_id), QUADRATURE_OK);
+        artist_id, 2024, &album_id), QUADRATURE_OK);
     cr_assert_neq(album_id, 0);
 
     // --- INSERT ---
@@ -202,7 +202,7 @@ Test(database, transaction_rollback) {
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
     int64_t album_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "/music", "Album",
-        artist_id, false, 2024, &album_id), QUADRATURE_OK);
+        artist_id, 2024, &album_id), QUADRATURE_OK);
 
     // Insert one track
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
@@ -313,7 +313,7 @@ Test(database, prune_orphan_artists_removes_unreferenced) {
 
     /* Create an album and a track linked to linked_id only */
     int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music", "Album", linked_id, false, 2020, &album_id), QUADRATURE_OK);
+    cr_assert_eq(db_upsert_folder_album(db, "/music", "Album", linked_id, 2020, &album_id), QUADRATURE_OK);
 
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     db_index_item_t item = {
@@ -356,6 +356,40 @@ Test(database, prune_orphan_artists_removes_unreferenced) {
     db_close(db);
 }
 
+/* An artist referenced only via albums.artist_id (no track_artists) must survive prune. */
+Test(database, prune_orphan_artists_preserves_album_artist) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+
+    int64_t orphan_id = db_get_or_create_artist(db, "TrueOrphan");
+    int64_t album_artist_id = db_get_or_create_artist(db, "AlbumOnlyArtist");
+    cr_assert_gt(orphan_id, 0);
+    cr_assert_gt(album_artist_id, 0);
+
+    /* Create an album whose artist_id references album_artist_id — no track_artists rows */
+    int64_t album_id = 0;
+    cr_assert_eq(db_upsert_folder_album(db, "/music/ao", "Album",
+        album_artist_id, 2024, &album_id), QUADRATURE_OK);
+
+    cr_assert_eq(count_artists(db), 2, "Both artists exist before prune");
+
+    cr_assert_eq(db_prune_orphan_artists(db), QUADRATURE_OK);
+
+    cr_assert_eq(count_artists(db), 1, "True orphan removed, album artist kept");
+
+    /* Verify the album artist survived */
+    db_lock(db);
+    sqlite3_stmt *chk = NULL;
+    sqlite3_prepare_v2(db->db, "SELECT id FROM artists LIMIT 1", -1, &chk, NULL);
+    sqlite3_step(chk);
+    int64_t survivor = sqlite3_column_int64(chk, 0);
+    sqlite3_finalize(chk);
+    db_unlock(db);
+    cr_assert_eq(survivor, album_artist_id, "Album-only artist should survive prune");
+
+    db_close(db);
+}
+
 /* db_get_artists_page must not return artists that have no track_artists rows. */
 Test(database, get_artists_page_excludes_orphans) {
     quadrature_db_t *db = NULL;
@@ -367,7 +401,7 @@ Test(database, get_artists_page_excludes_orphans) {
     /* Create a real artist with a track */
     int64_t real_id = db_get_or_create_artist(db, "RealArtist");
     int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/m2", "Album2", real_id, false, 2021, &album_id), QUADRATURE_OK);
+    cr_assert_eq(db_upsert_folder_album(db, "/m2", "Album2", real_id, 2021, &album_id), QUADRATURE_OK);
 
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     db_index_item_t item = {
@@ -427,7 +461,7 @@ Test(database, mb_resolved_album_artist_not_clobbered_on_reindex) {
 
     int64_t album_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "/music/apollo440/ghoyo", "Gettin' High on Your Own Supply",
-        filetag_artist_id, false, 1999, &album_id), QUADRATURE_OK);
+        filetag_artist_id, 1999, &album_id), QUADRATURE_OK);
     cr_assert_gt(album_id, 0);
 
     /* ── MB phase: resolve to canonical artist + set status ── */
@@ -446,7 +480,7 @@ Test(database, mb_resolved_album_artist_not_clobbered_on_reindex) {
     /* ── Pass 2: re-index — metadata phase runs again with file-tag artist ── */
     int64_t album_id2 = 0;
     cr_assert_eq(db_upsert_folder_album(db, "/music/apollo440/ghoyo", "Gettin' High on Your Own Supply",
-        filetag_artist_id, false, 1999, &album_id2), QUADRATURE_OK);
+        filetag_artist_id, 1999, &album_id2), QUADRATURE_OK);
     cr_assert_eq(album_id2, album_id); /* same album row */
 
     /* ── Assert: MB-resolved artist must survive the re-index ── */
@@ -469,12 +503,12 @@ Test(database, unresolved_album_artist_updated_on_reindex) {
 
     int64_t album_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "/music/somealbum", "Some Album",
-        artist_v1, false, 2020, &album_id), QUADRATURE_OK);
+        artist_v1, 2020, &album_id), QUADRATURE_OK);
 
     /* Re-index with corrected tag — mb_status is still 0 (NOT_ATTEMPTED) */
     int64_t album_id2 = 0;
     cr_assert_eq(db_upsert_folder_album(db, "/music/somealbum", "Some Album",
-        artist_v2, false, 2020, &album_id2), QUADRATURE_OK);
+        artist_v2, 2020, &album_id2), QUADRATURE_OK);
     cr_assert_eq(album_id2, album_id);
 
     /* ── Assert: artist_id must be updated to artist_v2 ── */

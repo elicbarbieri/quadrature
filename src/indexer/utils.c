@@ -59,8 +59,8 @@ static uint16_t parse_disc_number(const char* str) {
     while (*str == ' ' || *str == '-' || *str == '_') str++;
     if (!*str) return 0;
 
-    // Try numeric
-    if (*str >= '1' && *str <= '9') {
+    // Try numeric (allow leading zeros: "01" → 1)
+    if (*str >= '0' && *str <= '9') {
         int num = atoi(str);
         if (num >= 1 && num <= 99) {
             return (uint16_t)num;
@@ -83,6 +83,11 @@ bool is_disc_folder(const char* dir_name) {
 
 uint16_t get_disc_number_from_folder(const char* dir_name) {
     if (!dir_name || !*dir_name) return 0;
+
+    // Pattern: Digital Media[sep]N (MusicBrainz/Picard convention for digital releases)
+    if (strncasecmp(dir_name, "digital media", 13) == 0) {
+        return parse_disc_number(dir_name + 13);
+    }
 
     // Pattern: CD[sep]N or cd[sep]N
     if (strncasecmp(dir_name, "cd", 2) == 0) {
@@ -146,15 +151,19 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     out->disc_num = 0;
     out->year = 0;
 
+    // Minimal probing: tags + stream info for duration.
+    // Must set probesize/analyzeduration via options BEFORE open.
+    AVDictionary* open_opts = NULL;
+    av_dict_set(&open_opts, "probesize", "65536", 0);       // 64 KB
+    av_dict_set(&open_opts, "analyzeduration", "500000", 0); // 0.5s
+
     AVFormatContext* fmt = NULL;
-    if (avformat_open_input(&fmt, path, NULL, NULL) != 0) {
+    if (avformat_open_input(&fmt, path, NULL, &open_opts) != 0) {
         g_debug("Failed to open audio file: %s", path);
+        av_dict_free(&open_opts);
         return QUADRATURE_ERROR_FILE_NOT_FOUND;
     }
-
-    // Reduce probe limits — sufficient for tags + basic stream info
-    fmt->max_analyze_duration = 500000;  // 0.5s (default: 5s)
-    fmt->probesize = 512 * 1024;         // 512KB (default: 5MB)
+    av_dict_free(&open_opts);
 
     if (avformat_find_stream_info(fmt, NULL) < 0) {
         g_debug("Failed to read stream info: %s", path);
@@ -229,6 +238,110 @@ static const delimiter_t DELIMITERS[] = {
     { " & ",         " & ",      3 },
 };
 #define DELIMITER_COUNT (sizeof(DELIMITERS) / sizeof(DELIMITERS[0]))
+
+// =============================================================================
+// Title Featuring Extraction
+// =============================================================================
+
+/**
+ * Featuring prefixes to match inside parentheses/brackets (case-insensitive).
+ * Ordered longest-first to avoid partial matches.
+ */
+static const struct { const char* prefix; size_t len; } FEAT_PREFIXES[] = {
+    { "featuring ", 10 },
+    { "feat. ",     6 },
+    { "feat ",      5 },
+    { "ft. ",       4 },
+    { "ft ",        3 },
+};
+#define FEAT_PREFIX_COUNT (sizeof(FEAT_PREFIXES) / sizeof(FEAT_PREFIXES[0]))
+
+bool title_extract_featuring(const char* title, char** clean_out, char** feat_out) {
+    if (!title || !clean_out || !feat_out) return false;
+
+    for (const char* p = title; *p; p++) {
+        if (*p != '(' && *p != '[') continue;
+
+        char close_char = (*p == '(') ? ')' : ']';
+        const char* inside = p + 1;
+
+        for (size_t i = 0; i < FEAT_PREFIX_COUNT; i++) {
+            if (g_ascii_strncasecmp(inside, FEAT_PREFIXES[i].prefix,
+                                     FEAT_PREFIXES[i].len) != 0)
+                continue;
+
+            const char* artist_start = inside + FEAT_PREFIXES[i].len;
+            const char* end = strchr(artist_start, close_char);
+            if (!end) continue;
+
+            // Found: extract artist names
+            *feat_out = g_strndup(artist_start, (gsize)(end - artist_start));
+
+            // Build clean title: everything before bracket + everything after
+            GString* clean = g_string_sized_new(strlen(title));
+
+            // Before bracket, trimming trailing whitespace
+            const char* before_end = p;
+            while (before_end > title && *(before_end - 1) == ' ')
+                before_end--;
+            g_string_append_len(clean, title, (gssize)(before_end - title));
+
+            // After closing bracket
+            const char* after = end + 1;
+            if (*after && clean->len > 0) {
+                if (*after != ' ')
+                    g_string_append_c(clean, ' ');
+                g_string_append(clean, after);
+            }
+
+            // Trim trailing whitespace
+            while (clean->len > 0 && clean->str[clean->len - 1] == ' ')
+                g_string_truncate(clean, clean->len - 1);
+
+            *clean_out = g_string_free(clean, FALSE);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// =============================================================================
+// Artist Delimiter Detection
+// =============================================================================
+
+/**
+ * Check if a single delimiter character varies across artist tags.
+ * Returns true if 2+ tags have different suffixes after the delimiter.
+ */
+static bool is_delimiter_varying(const char* const* artist_tags, size_t count, char delim) {
+    const char* first_suffix = NULL;
+
+    for (size_t i = 0; i < count; i++) {
+        if (!artist_tags[i]) continue;
+        const char* pos = strchr(artist_tags[i], delim);
+        if (!pos) continue;
+
+        const char* suffix = pos + 1;
+        if (!first_suffix) {
+            first_suffix = suffix;
+        } else if (strcasecmp(suffix, first_suffix) != 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+char detect_artist_delimiter(const char* const* artist_tags, size_t count) {
+    if (is_delimiter_varying(artist_tags, count, ';')) return ';';
+    if (is_delimiter_varying(artist_tags, count, '/')) return '/';
+    return '\0';
+}
+
+// =============================================================================
+// Artist Tag Splitting
+// =============================================================================
 
 void artist_credits_free(artist_credit_t* credits, size_t count) {
     if (!credits) return;

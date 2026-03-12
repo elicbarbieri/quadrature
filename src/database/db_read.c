@@ -255,6 +255,64 @@ quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_
     return QUADRATURE_OK;
 }
 
+/* Shared SQL for track queries — same column order used by both
+ * db_get_tracks_by_album() and db_iter_all_tracks(). */
+#define TRACK_SELECT_COLS \
+    "t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, " \
+    "t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "       \
+    "al.musicbrainz_release_id, t.artist_display"
+
+#define TRACK_SELECT_FROM \
+    " FROM tracks t"                                                            \
+    " LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0"    \
+    " LEFT JOIN artists a ON a.id = ta.artist_id"                              \
+    " LEFT JOIN albums al ON t.album_id = al.id"
+
+/* Fill a db_track_t from the current row of a statement using TRACK_SELECT_COLS order.
+ * If `borrow` is true, string pointers alias SQLite memory (valid until next step/finalize).
+ * If `borrow` is false, strings are strdup'd (caller must free). */
+static void fill_track_from_row(sqlite3_stmt* stmt, db_track_t* t, bool borrow) {
+    t->id          = sqlite3_column_int64(stmt, 0);
+    t->duration_ms = sqlite3_column_int(stmt, 5);
+    t->track_num   = sqlite3_column_int(stmt, 6);
+    t->disc_num    = sqlite3_column_int(stmt, 7);
+    if (t->disc_num == 0) t->disc_num = 1;
+    t->year        = sqlite3_column_int(stmt, 8);
+    t->album_id    = sqlite3_column_int64(stmt, 9);
+    t->artist_id   = sqlite3_column_int64(stmt, 10);
+
+    const char* title          = (const char*)sqlite3_column_text(stmt, 1);
+    const char* artist         = (const char*)sqlite3_column_text(stmt, 2);
+    const char* album          = (const char*)sqlite3_column_text(stmt, 3);
+    const char* path           = (const char*)sqlite3_column_text(stmt, 4);
+    const char* genre          = (const char*)sqlite3_column_text(stmt, 11);
+    const char* album_path     = (const char*)sqlite3_column_text(stmt, 12);
+    const char* album_mbid     = (const char*)sqlite3_column_text(stmt, 13);
+    const char* artist_display = (const char*)sqlite3_column_text(stmt, 14);
+
+    if (borrow) {
+        /* Borrowed pointers — valid only until next sqlite3_step or finalize.
+         * Cast away const; caller must treat as read-only. */
+        t->title          = (char*)(title ? title : "Unknown");
+        t->artist         = (char*)(artist ? artist : "Unknown Artist");
+        t->album          = (char*)(album ? album : "Unknown Album");
+        t->path           = (char*)(path ? path : "");
+        t->genre          = (char*)genre;
+        t->album_path     = (char*)album_path;
+        t->album_musicbrainz_release_id = (char*)album_mbid;
+        t->artist_display = (char*)artist_display;
+    } else {
+        t->title          = strdup(title ? title : "Unknown");
+        t->artist         = strdup(artist ? artist : "Unknown Artist");
+        t->album          = strdup(album ? album : "Unknown Album");
+        t->path           = strdup(path ? path : "");
+        t->genre          = genre ? strdup(genre) : NULL;
+        t->album_path     = album_path ? strdup(album_path) : NULL;
+        t->album_musicbrainz_release_id = album_mbid ? strdup(album_mbid) : NULL;
+        t->artist_display = artist_display ? strdup(artist_display) : NULL;
+    }
+}
+
 quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id, db_track_t** out, size_t* count) {
     if (!db || !out || !count) return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -262,99 +320,44 @@ quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id
 
     db_lock(db);
 
-    // Get count first
-    sqlite3_stmt* cnt_stmt;
-    int rc = sqlite3_prepare_v2(db->db, "SELECT COUNT(*) FROM tracks WHERE album_id = ?", -1, &cnt_stmt, NULL);
+    const char* sql = "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM
+        " WHERE t.album_id = ?"
+        " ORDER BY t.disc_num, t.track_num, t.title COLLATE NOCASE";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        g_warning("db_get_tracks_by_album: prepare failed: %s", sqlite3_errmsg(db->db));
+        g_critical("db_get_tracks_by_album: prepare failed: %s", sqlite3_errmsg(db->db));
         db_unlock(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
-    rc = sqlite3_bind_int64(cnt_stmt, 1, album_id);
-    if (rc != SQLITE_OK) {
-        g_warning("db_get_tracks_by_album: bind failed: %s", sqlite3_errmsg(db->db));
-    }
-    rc = sqlite3_step(cnt_stmt);
-    if (rc != SQLITE_ROW) {
-        g_warning("db_get_tracks_by_album: count query step returned %d (expected SQLITE_ROW=%d) for album_id=%" G_GINT64_FORMAT,
-                  rc, SQLITE_ROW, album_id);
-    }
-    size_t n = sqlite3_column_int64(cnt_stmt, 0);
-    g_info("db_get_tracks_by_album: count=%zu for album_id=%" G_GINT64_FORMAT " (db=%s)",
-           n, album_id, db->db_path ? db->db_path : "memory");
-    sqlite3_finalize(cnt_stmt);
+    sqlite3_bind_int64(stmt, 1, album_id);
 
-    if (n == 0) {
-        db_unlock(db);
-        *out = NULL;
-        *count = 0;
-        gint64 elapsed = g_get_monotonic_time() - start_time;
-        g_debug("db_get_tracks_by_album(%" G_GINT64_FORMAT "): 0 results in %.2f ms", album_id, elapsed / 1000.0);
-        return QUADRATURE_OK;
-    }
-
-    db_track_t* results = calloc(n, sizeof(db_track_t));
+    /* Grow dynamically — no COUNT query needed. Most albums have <30 tracks. */
+    size_t cap = 32;
+    size_t i = 0;
+    db_track_t* results = calloc(cap, sizeof(db_track_t));
     if (!results) {
+        sqlite3_finalize(stmt);
         db_unlock(db);
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
 
-    const char* sql =
-        "SELECT t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, "
-        "       t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "
-        "       al.musicbrainz_release_id, t.artist_display "
-        "FROM tracks t "
-        "LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0 "
-        "LEFT JOIN artists a ON a.id = ta.artist_id "
-        "LEFT JOIN albums al ON t.album_id = al.id "
-        "WHERE t.album_id = ? "
-        "ORDER BY t.disc_num, t.track_num, t.title COLLATE NOCASE";
-
-    sqlite3_stmt* stmt;
-    rc = sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        g_critical("db_get_tracks_by_album: prepare SELECT failed: %s", sqlite3_errmsg(db->db));
-        free(results);
-        db_unlock(db);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-    rc = sqlite3_bind_int64(stmt, 1, album_id);
-    if (rc != SQLITE_OK) {
-        g_critical("db_get_tracks_by_album: bind SELECT failed: %s", sqlite3_errmsg(db->db));
-    }
-
-    size_t i = 0;
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
-        g_warning("db_get_tracks_by_album: first step returned %d: %s", rc, sqlite3_errmsg(db->db));
-    }
-    while (rc == SQLITE_ROW && i < n) {
-        results[i].id = sqlite3_column_int64(stmt, 0);
-        const char* title = (const char*)sqlite3_column_text(stmt, 1);
-        const char* artist = (const char*)sqlite3_column_text(stmt, 2);
-        const char* album = (const char*)sqlite3_column_text(stmt, 3);
-        const char* path = (const char*)sqlite3_column_text(stmt, 4);
-        results[i].title = title ? strdup(title) : strdup("Unknown");
-        results[i].artist = artist ? strdup(artist) : strdup("Unknown Artist");
-        const char* artist_display = (const char*)sqlite3_column_text(stmt, 14);
-        results[i].artist_display = artist_display ? strdup(artist_display) : NULL;
-        results[i].album = album ? strdup(album) : strdup("Unknown Album");
-        results[i].path = path ? strdup(path) : strdup("");
-        results[i].duration_ms = sqlite3_column_int(stmt, 5);
-        results[i].track_num = sqlite3_column_int(stmt, 6);
-        results[i].disc_num = sqlite3_column_int(stmt, 7);
-        if (results[i].disc_num == 0) results[i].disc_num = 1;
-        results[i].year = sqlite3_column_int(stmt, 8);
-        results[i].album_id = sqlite3_column_int64(stmt, 9);
-        results[i].artist_id = sqlite3_column_int64(stmt, 10);
-        const char* genre = (const char*)sqlite3_column_text(stmt, 11);
-        results[i].genre = genre ? strdup(genre) : NULL;
-        const char* album_path = (const char*)sqlite3_column_text(stmt, 12);
-        results[i].album_path = album_path ? strdup(album_path) : NULL;
-        const char* album_mbid = (const char*)sqlite3_column_text(stmt, 13);
-        results[i].album_musicbrainz_release_id = album_mbid ? strdup(album_mbid) : NULL;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (i == cap) {
+            cap *= 2;
+            db_track_t* grown = realloc(results, cap * sizeof(db_track_t));
+            if (!grown) {
+                db_tracks_free(results, i);
+                sqlite3_finalize(stmt);
+                db_unlock(db);
+                return QUADRATURE_ERROR_OUT_OF_MEMORY;
+            }
+            results = grown;
+            memset(results + i, 0, (cap - i) * sizeof(db_track_t));
+        }
+        fill_track_from_row(stmt, &results[i], false);
         i++;
-        rc = sqlite3_step(stmt);
     }
 
     sqlite3_finalize(stmt);
@@ -363,8 +366,43 @@ quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id
     gint64 elapsed = g_get_monotonic_time() - start_time;
     g_debug("db_get_tracks_by_album(%" G_GINT64_FORMAT "): %zu results in %.2f ms", album_id, i, elapsed / 1000.0);
 
+    if (i == 0) {
+        free(results);
+        results = NULL;
+    }
+
     *out = results;
     *count = i;
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_iter_all_tracks(quadrature_db_t* db, db_track_iter_cb cb, void* user_data) {
+    if (!db || !cb) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    db_lock(db);
+
+    const char* sql = "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM
+        " ORDER BY t.album_id, t.disc_num, t.track_num";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        /* Table may not exist yet on first run (before indexer creates schema) */
+        db_unlock(db);
+        return QUADRATURE_OK;
+    }
+
+    /* Stream rows at drive speed — zero intermediate allocation.
+     * Callback receives borrowed pointers (valid only during callback). */
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        db_track_t track = {0};
+        fill_track_from_row(stmt, &track, true);
+        if (!cb(&track, user_data))
+            break;
+    }
+
+    sqlite3_finalize(stmt);
+    db_unlock(db);
     return QUADRATURE_OK;
 }
 
@@ -383,13 +421,18 @@ quadrature_result_t db_get_artist_appearances(quadrature_db_t* db, int64_t artis
 
     db_lock(db);
 
-    // Get count of distinct albums where artist appears but isn't the album artist
+    // Get count of distinct albums where artist appears but isn't the album artist.
+    // Filter by both ID and name to catch edge cases where the same physical artist
+    // exists with different IDs (shouldn't happen per UNIQUE, but defensive).
     sqlite3_stmt* cnt_stmt;
     const char* cnt_sql =
         "SELECT COUNT(DISTINCT al.id) FROM albums al "
         "INNER JOIN tracks t ON t.album_id = al.id "
         "INNER JOIN track_artists ta ON ta.track_id = t.id "
-        "WHERE ta.artist_id = ? AND al.artist_id != ?";
+        "INNER JOIN artists album_ar ON album_ar.id = al.artist_id "
+        "INNER JOIN artists track_ar ON track_ar.id = ta.artist_id "
+        "WHERE ta.artist_id = ? AND al.artist_id != ? "
+        "AND album_ar.name != track_ar.name COLLATE NOCASE";
     sqlite3_prepare_v2(db->db, cnt_sql, -1, &cnt_stmt, NULL);
     sqlite3_bind_int64(cnt_stmt, 1, artist_id);
     sqlite3_bind_int64(cnt_stmt, 2, artist_id);
@@ -411,17 +454,20 @@ quadrature_result_t db_get_artist_appearances(quadrature_db_t* db, int64_t artis
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
 
-    // Get distinct albums where artist appears as track artist but not album artist
+    // Get distinct albums where artist appears as track artist but not album artist.
+    // Uses same INNER JOINs and filters as count query above for consistency.
     const char* sql =
-        "SELECT DISTINCT al.id, al.title, ar.name, al.artist_id, al.year, "
+        "SELECT DISTINCT al.id, al.title, album_ar.name, al.artist_id, al.year, "
         "  (SELECT COUNT(*) FROM tracks t2 WHERE t2.album_id = al.id) AS track_count, "
         "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g FROM tracks WHERE album_id = al.id AND genre IS NOT NULL AND genre != '')) AS genres, "
         "  al.path, al.musicbrainz_release_id "
         "FROM albums al "
         "INNER JOIN tracks t ON t.album_id = al.id "
         "INNER JOIN track_artists ta ON ta.track_id = t.id "
-        "LEFT JOIN artists ar ON al.artist_id = ar.id "
+        "INNER JOIN artists album_ar ON album_ar.id = al.artist_id "
+        "INNER JOIN artists track_ar ON track_ar.id = ta.artist_id "
         "WHERE ta.artist_id = ? AND al.artist_id != ? "
+        "AND album_ar.name != track_ar.name COLLATE NOCASE "
         "ORDER BY al.year DESC, al.title COLLATE NOCASE";
 
     sqlite3_stmt* stmt;
@@ -471,13 +517,19 @@ quadrature_result_t db_get_artist_appearance_tracks(quadrature_db_t* db, int64_t
 
     db_lock(db);
 
-    // Get count of tracks where artist appears but album is by different artist
+    // Get count of tracks where artist appears but album is by different artist.
+    // Name comparison prevents counting tracks on the artist's own albums.
+    // INNER JOIN on album_ar ensures albums without an artist are excluded
+    // (consistent with data query below).
     sqlite3_stmt* cnt_stmt;
     const char* cnt_sql =
         "SELECT COUNT(*) FROM tracks t "
         "INNER JOIN albums al ON t.album_id = al.id "
         "INNER JOIN track_artists ta ON ta.track_id = t.id "
-        "WHERE ta.artist_id = ? AND al.artist_id != ?";
+        "INNER JOIN artists album_ar ON album_ar.id = al.artist_id "
+        "INNER JOIN artists track_ar ON track_ar.id = ta.artist_id "
+        "WHERE ta.artist_id = ? AND al.artist_id != ? "
+        "AND album_ar.name != track_ar.name COLLATE NOCASE";
     sqlite3_prepare_v2(db->db, cnt_sql, -1, &cnt_stmt, NULL);
     sqlite3_bind_int64(cnt_stmt, 1, artist_id);
     sqlite3_bind_int64(cnt_stmt, 2, artist_id);
@@ -499,15 +551,19 @@ quadrature_result_t db_get_artist_appearance_tracks(quadrature_db_t* db, int64_t
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
 
-    // Get tracks where artist appears but album belongs to different artist
+    // Get tracks where artist appears but album belongs to different artist.
+    // Uses same INNER JOINs and filters as count query above for consistency.
     const char* sql =
-        "SELECT t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, "
-        "       t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, t.artist_display "
+        "SELECT t.id, t.title, track_ar.name, al.title, t.path, t.duration_ms, t.track_num, "
+        "       t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, t.artist_display, "
+        "       al.musicbrainz_release_id "
         "FROM tracks t "
         "INNER JOIN albums al ON t.album_id = al.id "
         "INNER JOIN track_artists ta ON ta.track_id = t.id "
-        "LEFT JOIN artists a ON a.id = ta.artist_id "
+        "INNER JOIN artists track_ar ON track_ar.id = ta.artist_id "
+        "INNER JOIN artists album_ar ON album_ar.id = al.artist_id "
         "WHERE ta.artist_id = ? AND al.artist_id != ? "
+        "AND album_ar.name != track_ar.name COLLATE NOCASE "
         "GROUP BY t.id "
         "ORDER BY al.title COLLATE NOCASE, t.disc_num, t.track_num";
 
@@ -538,6 +594,8 @@ quadrature_result_t db_get_artist_appearance_tracks(quadrature_db_t* db, int64_t
         results[i].artist_id = sqlite3_column_int64(stmt, 10);
         const char* genre = (const char*)sqlite3_column_text(stmt, 11);
         results[i].genre = genre ? strdup(genre) : NULL;
+        const char* album_mbid = (const char*)sqlite3_column_text(stmt, 13);
+        results[i].album_musicbrainz_release_id = album_mbid ? strdup(album_mbid) : NULL;
         i++;
     }
 
@@ -1418,7 +1476,10 @@ quadrature_result_t db_get_artist_ids_filtered(quadrature_db_t* db,
     gboolean has_genre = opts->filters && opts->filters->genre_count > 0;
     gboolean has_year = opts->filters && opts->filters->year_mask != 0;
 
-    GString *sql_str = g_string_new("SELECT a.id FROM artists a WHERE 1=1");
+    GString *sql_str = g_string_new(
+        "SELECT a.id FROM artists a WHERE ("
+        "EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id) OR "
+        "EXISTS (SELECT 1 FROM albums al WHERE al.artist_id = a.id))");
 
     if (has_search)
         g_string_append(sql_str, " AND a.id IN (SELECT rowid FROM artists_fts WHERE artists_fts MATCH ?)");

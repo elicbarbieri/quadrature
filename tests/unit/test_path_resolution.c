@@ -52,7 +52,7 @@ static int64_t insert_album_track(quadrature_db_t *db,
 
     int64_t album_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, album_path, album_title,
-                                         artist_id, false, 2024, &album_id),
+                                         artist_id, 2024, &album_id),
                  QUADRATURE_OK);
 
     db_index_item_t item = {

@@ -17,6 +17,8 @@
 
 static const char *UNIFIED_DATA_KEY = "unified-detail-data";
 
+static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t select_track_id);
+
 static void unified_detail_data_free(UnifiedDetailData *ud) {
     if (!ud) return;
     for (int i = 0; i < ud->nav_depth; i++) {
@@ -28,6 +30,14 @@ static void unified_detail_data_free(UnifiedDetailData *ud) {
     g_free(ud->meta_artist_mbid);
     g_free(ud->meta_artist_name);
     g_free(ud->about_wiki_url);
+    if (ud->banner_cancel) {
+        g_cancellable_cancel(ud->banner_cancel);
+        g_object_unref(ud->banner_cancel);
+    }
+    if (ud->bio_bg_cancel) {
+        g_cancellable_cancel(ud->bio_bg_cancel);
+        g_object_unref(ud->bio_bg_cancel);
+    }
     ui_selection_group_free(ud->sel_group);
     g_clear_object(&ud->header_height_group);
     g_free(ud);
@@ -40,7 +50,7 @@ static void unified_detail_data_free(UnifiedDetailData *ud) {
 static char *find_artist_background(app_settings_t *settings, const char *mbid) {
     if (!settings || !mbid) return NULL;
 
-    for (int i = 0; i < settings->library_path_count; i++) {
+    for (int i = 0; i < settings->library_count; i++) {
         const char *dp = app_settings_get_library_data_path(settings, i);
         char *path = g_strdup_printf("%s/artwork/artists/%s/background_0.jpg", dp, mbid);
         if (g_file_test(path, G_FILE_TEST_EXISTS))
@@ -55,58 +65,92 @@ static char *find_artist_background(app_settings_t *settings, const char *mbid) 
  * Shows the about section only if both a background image and bio text exist.
  * Synchronous — reads from quadrature-bios.sqlite (written by indexer Phase 8).
  */
-static void load_artist_bio(UnifiedDetailData *ud, const char *mbid) {
-    /* Check for background image first — no image means no hero banner */
-    char *bg_path = find_artist_background(ud->settings, mbid);
-    if (!bg_path) return;
+/* ─── Async image loading helpers ──────────────────────────────────────── */
 
-    /* Load background image into GtkPicture */
-    GFile *bg_file = g_file_new_for_path(bg_path);
-    GError *bg_error = NULL;
-    GdkTexture *bg_texture = gdk_texture_new_from_file(bg_file, &bg_error);
-    if (bg_texture) {
-        int tex_w = gdk_texture_get_width(bg_texture);
-        int tex_h_orig = gdk_texture_get_height(bg_texture);
-        /* Compute proportional height at ~1000px display width, capped at 600px.
-         * This preserves aspect ratio so cover-fit doesn't clip excessively. */
-        int proportional_h = (int)((double)tex_h_orig / tex_w * 1000);
-        int tex_h = MIN(proportional_h, 600);
-        g_debug("about background loaded: %s (%dx%d, proportional_h=%d, display_h=%d)",
-                      bg_path, tex_w, tex_h_orig, proportional_h, tex_h);
-        gtk_widget_set_size_request(ud->about_background_image, -1, tex_h);
-        gtk_picture_set_paintable(GTK_PICTURE(ud->about_background_image),
-                                  GDK_PAINTABLE(bg_texture));
+typedef struct {
+    GdkTexture *texture;
+    EdgeColors  edge_colors;
+    char       *path;
+} AsyncImageResult;
 
-        /* Sample edge colors and update gradient widgets */
-        EdgeColors ec = sample_edge_colors(bg_texture, 5);
-        quad_gradient_fade_set_color(ud->about_fade_top, &ec.top, TRUE);
-        quad_gradient_fade_set_color(ud->about_fade_bottom, &ec.bottom, FALSE);
+static void async_image_result_free(AsyncImageResult *r) {
+    g_clear_object(&r->texture);
+    g_free(r->path);
+    g_free(r);
+}
 
-        g_object_unref(bg_texture);
-    } else {
-        g_warning("about background load failed: %s: %s",
-                     bg_path, bg_error->message);
-        g_error_free(bg_error);
-        g_object_unref(bg_file);
-        g_free(bg_path);
-        return;  /* No image → skip bio entirely */
+/* Worker thread: load texture + sample edge colors (both are thread-safe) */
+static void load_image_thread(GTask *task, gpointer src, gpointer data, GCancellable *cancel) {
+    (void)src;
+    char *path = data;
+    if (g_cancellable_is_cancelled(cancel)) return;
+
+    GFile *file = g_file_new_for_path(path);
+    GError *error = NULL;
+    GdkTexture *texture = gdk_texture_new_from_file(file, &error);
+    g_object_unref(file);
+
+    if (!texture) {
+        g_task_return_error(task, error);
+        return;
     }
-    g_object_unref(bg_file);
-    g_free(bg_path);
 
-    /* Query bios DB for bio text */
-    for (int i = 0; i < ud->settings->library_path_count; i++) {
-        quadrature_bios_db_t *bios_db = NULL;
-        const char *dp = app_settings_get_library_data_path(ud->settings, i);
-        quadrature_result_t res = db_bios_open_readonly(dp, &bios_db);
-        if (res != QUADRATURE_OK) continue;
+    AsyncImageResult *result = g_new0(AsyncImageResult, 1);
+    result->texture = texture;  /* transfer ownership */
+    result->edge_colors = sample_edge_colors(texture, 5);
+    result->path = g_strdup(path);
+    g_task_return_pointer(task, result, (GDestroyNotify)async_image_result_free);
+}
+
+/* Callback: apply background image + gradients, then load bio text */
+static void on_bio_background_loaded(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    UnifiedDetailData *ud = data;
+    GError *error = NULL;
+    AsyncImageResult *result = g_task_propagate_pointer(G_TASK(res), &error);
+    if (!result) {
+        if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+            g_warning("about background load failed: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+
+    int tex_w = gdk_texture_get_width(result->texture);
+    int tex_h_orig = gdk_texture_get_height(result->texture);
+    int proportional_h = (int)((double)tex_h_orig / tex_w * 1000);
+    int tex_h = MIN(proportional_h, 600);
+    gtk_widget_set_size_request(ud->about_background_image, -1, tex_h);
+    gtk_picture_set_paintable(GTK_PICTURE(ud->about_background_image),
+                              GDK_PAINTABLE(result->texture));
+    quad_gradient_fade_set_color(ud->about_fade_top, &result->edge_colors.top, TRUE);
+    quad_gradient_fade_set_color(ud->about_fade_bottom, &result->edge_colors.bottom, FALSE);
+    async_image_result_free(result);
+
+    /* Now query bios DB for bio text (fast, stays on main thread) */
+    /* Extract MBID from the most recent nav entry */
+    const char *mbid = NULL;
+    if (ud->nav_depth > 0) {
+        NavEntry *top = &ud->nav_stack[ud->nav_depth - 1];
+        if (top->meta_artist_mbid) mbid = top->meta_artist_mbid;
+    }
+    if (!mbid && ud->meta_artist_mbid) mbid = ud->meta_artist_mbid;
+    if (!mbid && ud->state == DETAIL_STATE_ARTIST && ud->current_id > 0) {
+        const library_artist_info_t *a = library_cache_get_artist(ud->cache, ud->current_id);
+        if (a) mbid = a->musicbrainz_id;
+    }
+    if (!mbid) return;
+
+    int lib_count = library_cache_get_library_count(ud->cache);
+    for (int i = 0; i < lib_count; i++) {
+        if (!library_cache_get_available(ud->cache, i)) continue;
+        quadrature_bios_db_t *bios_db = library_cache_get_bios_db(ud->cache, i);
+        if (!bios_db) continue;
 
         char *bio_text = NULL;
         char *wiki_url = NULL;
-        res = db_bios_get(bios_db, mbid, &bio_text, &wiki_url);
-        db_bios_close(bios_db);
+        quadrature_result_t r = db_bios_get(bios_db, mbid, &bio_text, &wiki_url);
 
-        if (res == QUADRATURE_OK && bio_text && bio_text[0]) {
+        if (r == QUADRATURE_OK && bio_text && bio_text[0]) {
             gtk_label_set_text(GTK_LABEL(ud->about_bio_text), bio_text);
             g_free(ud->about_wiki_url);
             ud->about_wiki_url = wiki_url;
@@ -119,6 +163,25 @@ static void load_artist_bio(UnifiedDetailData *ud, const char *mbid) {
     }
 }
 
+static void load_artist_bio(UnifiedDetailData *ud, const char *mbid) {
+    /* Check for background image first — no image means no hero banner */
+    char *bg_path = find_artist_background(ud->settings, mbid);
+    if (!bg_path) return;
+
+    /* Cancel any in-flight bio background load */
+    if (ud->bio_bg_cancel) {
+        g_cancellable_cancel(ud->bio_bg_cancel);
+        g_object_unref(ud->bio_bg_cancel);
+    }
+    ud->bio_bg_cancel = g_cancellable_new();
+
+    /* Async: load texture + sample edge colors off main thread */
+    GTask *task = g_task_new(NULL, ud->bio_bg_cancel, on_bio_background_loaded, ud);
+    g_task_set_task_data(task, bg_path, g_free);
+    g_task_run_in_thread(task, load_image_thread);
+    g_object_unref(task);
+}
+
 /**
  * Find the first banner image for an artist across all library roots.
  * Returns a newly-allocated path, or NULL if not found.
@@ -126,7 +189,7 @@ static void load_artist_bio(UnifiedDetailData *ud, const char *mbid) {
 static char *find_artist_banner(app_settings_t *settings, const char *mbid) {
     if (!settings || !mbid) return NULL;
 
-    for (int i = 0; i < settings->library_path_count; i++) {
+    for (int i = 0; i < settings->library_count; i++) {
         const char *dp = app_settings_get_library_data_path(settings, i);
         char *path = g_strdup_printf("%s/artwork/artists/%s/banner_0.jpg", dp, mbid);
         if (g_file_test(path, G_FILE_TEST_EXISTS))
@@ -136,42 +199,50 @@ static char *find_artist_banner(app_settings_t *settings, const char *mbid) {
     return NULL;
 }
 
-/**
- * Load the artist banner image. Shows if file exists, hides if not.
- */
-static void load_artist_banner(UnifiedDetailData *ud, const char *mbid) {
-    char *banner_path = find_artist_banner(ud->settings, mbid);
-    if (banner_path) {
-        GFile *file = g_file_new_for_path(banner_path);
-        GError *error = NULL;
-        GdkTexture *texture = gdk_texture_new_from_file(file, &error);
-        if (texture) {
-            int tex_h = gdk_texture_get_height(texture);
-            g_debug("artist banner loaded: %s (%dx%d)",
-                          banner_path,
-                          gdk_texture_get_width(texture), tex_h);
-            gtk_widget_set_size_request(ud->artist_banner, -1, tex_h);
-            gtk_picture_set_paintable(GTK_PICTURE(ud->artist_banner),
-                                      GDK_PAINTABLE(texture));
-
-            /* Sample bottom edge color for gradient fade */
-            EdgeColors ec = sample_edge_colors(texture, 5);
-            quad_gradient_fade_set_color(ud->artist_banner_fade_bottom, &ec.bottom, FALSE);
-
-            gtk_widget_set_visible(ud->artist_banner_overlay, TRUE);
-            g_object_unref(texture);
-        } else {
-            g_warning("artist banner load failed: %s: %s",
-                         banner_path, error->message);
-            g_error_free(error);
+/* Callback: apply banner image + gradient */
+static void on_banner_loaded(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    UnifiedDetailData *ud = data;
+    GError *error = NULL;
+    AsyncImageResult *result = g_task_propagate_pointer(G_TASK(res), &error);
+    if (!result) {
+        if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            g_warning("artist banner load failed: %s", error->message);
             gtk_widget_set_visible(ud->artist_banner_overlay, FALSE);
         }
-        g_object_unref(file);
-        g_free(banner_path);
-    } else {
+        g_clear_error(&error);
+        return;
+    }
+
+    int tex_h = gdk_texture_get_height(result->texture);
+    gtk_widget_set_size_request(ud->artist_banner, -1, tex_h);
+    gtk_picture_set_paintable(GTK_PICTURE(ud->artist_banner),
+                              GDK_PAINTABLE(result->texture));
+    quad_gradient_fade_set_color(ud->artist_banner_fade_bottom, &result->edge_colors.bottom, FALSE);
+    gtk_widget_set_visible(ud->artist_banner_overlay, TRUE);
+    async_image_result_free(result);
+}
+
+static void load_artist_banner(UnifiedDetailData *ud, const char *mbid) {
+    char *banner_path = find_artist_banner(ud->settings, mbid);
+    if (!banner_path) {
         gtk_picture_set_paintable(GTK_PICTURE(ud->artist_banner), NULL);
         gtk_widget_set_visible(ud->artist_banner_overlay, FALSE);
+        return;
     }
+
+    /* Cancel any in-flight banner load */
+    if (ud->banner_cancel) {
+        g_cancellable_cancel(ud->banner_cancel);
+        g_object_unref(ud->banner_cancel);
+    }
+    ud->banner_cancel = g_cancellable_new();
+
+    /* Async: load texture + sample edge colors off main thread */
+    GTask *task = g_task_new(NULL, ud->banner_cancel, on_banner_loaded, ud);
+    g_task_set_task_data(task, banner_path, g_free);
+    g_task_run_in_thread(task, load_image_thread);
+    g_object_unref(task);
 }
 
 /* Wikipedia link button handler */
@@ -179,10 +250,12 @@ static void on_wiki_link_clicked(GtkButton *btn, gpointer data) {
     (void)btn;
     UnifiedDetailData *ud = data;
     if (ud->about_wiki_url) {
+        GtkUriLauncher *launcher = gtk_uri_launcher_new(ud->about_wiki_url);
         GtkWidget *toplevel = GTK_WIDGET(gtk_widget_get_root(ud->container));
-        if (GTK_IS_WINDOW(toplevel)) {
-            gtk_show_uri(GTK_WINDOW(toplevel), ud->about_wiki_url, GDK_CURRENT_TIME);
-        }
+        gtk_uri_launcher_launch(launcher,
+                                GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : NULL,
+                                NULL, NULL, NULL);
+        g_object_unref(launcher);
     }
 }
 
@@ -295,6 +368,63 @@ static void attach_album_card_handlers(GtkWidget *card, UnifiedDetailData *ud, i
  * State Loading
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Callback for library toggle buttons in merged album detail view. */
+static void on_library_toggle_clicked(GtkToggleButton *btn, gpointer data) {
+    UnifiedDetailData *ud = data;
+    if (!gtk_toggle_button_get_active(btn))
+        return;  /* Ignore deactivation — the newly activated button triggers reload */
+
+    int64_t target_id = (int64_t)GPOINTER_TO_SIZE(
+        g_object_get_data(G_OBJECT(btn), "album-id"));
+    if (target_id == ud->current_id)
+        return;  /* Already showing this version */
+
+    load_album_state(ud, target_id, 0);
+}
+
+/* Populate library toggle buttons for merged albums.
+ * rep_album is the representative (has merged_source_ids).
+ * active_album_id is which version is currently displayed. */
+static void populate_library_toggles(UnifiedDetailData *ud, GtkWidget *toggles_box,
+                                      const library_album_info_t *rep_album,
+                                      int64_t active_album_id) {
+    int n = 1 + rep_album->merged_source_count;
+    GtkToggleButton *first_btn = NULL;
+
+    for (int i = 0; i < n; i++) {
+        int64_t ver_id;
+        int lib_idx;
+        if (i == 0) {
+            ver_id = rep_album->album_id;
+            lib_idx = LIBRARY_GLOBAL_ID_LIB(ver_id);
+        } else {
+            ver_id = rep_album->merged_source_ids[i - 1];
+            lib_idx = LIBRARY_GLOBAL_ID_LIB(ver_id);
+        }
+
+        const char *lib_name = library_cache_get_library_name(ud->cache, lib_idx);
+        GtkWidget *btn = gtk_toggle_button_new_with_label(lib_name ? lib_name : "Library");
+        gtk_widget_add_css_class(btn, "toggle-btn");
+
+        /* Group all toggles so only one can be active */
+        if (first_btn)
+            gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(btn), first_btn);
+        else
+            first_btn = GTK_TOGGLE_BUTTON(btn);
+
+        g_object_set_data(G_OBJECT(btn), "album-id", GSIZE_TO_POINTER((gsize)ver_id));
+
+        /* Set active state BEFORE connecting signal to avoid triggering reload */
+        if (ver_id == active_album_id)
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
+
+        g_signal_connect(btn, "toggled", G_CALLBACK(on_library_toggle_clicked), ud);
+        gtk_box_append(GTK_BOX(toggles_box), btn);
+    }
+
+    gtk_widget_set_visible(toggles_box, TRUE);
+}
+
 static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t select_track_id) {
     ud->state = DETAIL_STATE_ALBUM;
     ud->current_id = album_id;
@@ -306,6 +436,35 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
     const library_album_info_t *album = library_cache_get_album(ud->cache, album_id);
     if (!album)
         return;
+
+    /* Resolve the representative album for merged groups.
+     * If this album IS the representative, use it directly.
+     * If this is a source album (navigated via toggle), use the stored rep ID.
+     * The representative has the merged_source_ids list we need for toggles. */
+    const library_album_info_t *rep_album = NULL;
+    if (album->merged_source_count > 0) {
+        /* This is the representative */
+        rep_album = album;
+        ud->merged_rep_album_id = album_id;
+    } else if (ud->merged_rep_album_id > 0) {
+        /* Check if stored rep still applies (same MBID) */
+        const library_album_info_t *stored_rep =
+            library_cache_get_album(ud->cache, ud->merged_rep_album_id);
+        if (stored_rep && stored_rep->merged_source_count > 0 &&
+            album->musicbrainz_release_id && stored_rep->musicbrainz_release_id &&
+            strcmp(album->musicbrainz_release_id, stored_rep->musicbrainz_release_id) == 0) {
+            rep_album = stored_rep;
+        } else {
+            ud->merged_rep_album_id = 0;
+        }
+    }
+
+    /* For source albums, determine library_index for metadata DB lookup */
+    int lib_idx = album->library_index;
+    if (lib_idx < 0 && rep_album) {
+        /* Merged representative: use its own library for metadata */
+        lib_idx = LIBRARY_GLOBAL_ID_LIB(album->album_id);
+    }
 
     const GPtrArray *tracks = library_cache_get_tracks_by_album(ud->cache, album_id);
     if (!tracks || tracks->len == 0)
@@ -324,15 +483,10 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
 
     /* Query metadata DB for enriched release info (non-fatal) */
     db_meta_release_t *meta_release = NULL;
-    if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] &&
-        ud->settings && album->library_index >= 0 &&
-        album->library_index < ud->settings->library_path_count) {
-        const char *lib_root = app_settings_get_library_data_path(ud->settings, album->library_index);
-        quadrature_meta_db_t *meta_db = NULL;
-        if (db_meta_open_readonly(lib_root, &meta_db) == QUADRATURE_OK && meta_db) {
+    if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] && lib_idx >= 0) {
+        quadrature_meta_db_t *meta_db = library_cache_get_meta_db(ud->cache, lib_idx);
+        if (meta_db)
             db_meta_get_release(meta_db, album->musicbrainz_release_id, &meta_release);
-            db_meta_close(meta_db);
-        }
     }
 
     /* Clear inner container and create album card */
@@ -348,6 +502,13 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
     /* Wire info button handlers for track rows */
     wire_info_buttons(card, ud);
 
+    /* Populate library toggles for merged albums */
+    if (rep_album) {
+        GtkWidget *toggles_box = find_widget_by_name(card, "card_library_toggles");
+        if (toggles_box)
+            populate_library_toggles(ud, toggles_box, rep_album, album_id);
+    }
+
     /* Find and connect artist link button */
     GtkWidget *artist_link = find_widget_by_name(card, "card_artist_link");
     if (artist_link) {
@@ -358,7 +519,7 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
             g_signal_connect(artist_link, "clicked", G_CALLBACK(on_unified_artist_link_clicked), ud);
         }
     }
-    
+
     /* Find track list for selection handling */
     GtkWidget *track_list = find_widget_by_name(card, "track_list");
     if (track_list && select_track_id > 0) {
@@ -389,6 +550,7 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
 static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     ud->state = DETAIL_STATE_ARTIST;
     ud->current_id = artist_id;
+    ud->merged_rep_album_id = 0;
 
     /* Reset sections */
     gtk_widget_set_visible(ud->artist_banner_overlay, FALSE);
@@ -405,9 +567,6 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
 
     /* Check if artist may have MB credits (don't bail early) */
     const library_artist_info_t *artist_check = library_cache_get_artist(ud->cache, artist_id);
-    g_debug("artist detail: id=%" G_GINT64_FORMAT " mbid=%s",
-            artist_id,
-            artist_check ? (artist_check->musicbrainz_id ?: "(null)") : "(no artist)");
     gboolean may_have_credits = artist_check && artist_check->musicbrainz_id && ud->settings;
 
     if (!has_albums && !has_appearances && !may_have_credits)
@@ -441,6 +600,40 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     }
 
     guint album_count = has_albums ? albums->len : 0;
+
+    /* Compute stats: total tracks and duration across own albums */
+    {
+        guint total_tracks = 0;
+        int64_t total_ms = 0;
+        for (guint i = 0; i < album_count; i++) {
+            const library_album_info_t *al = g_ptr_array_index(albums, i);
+            const GPtrArray *trks = library_cache_get_tracks_by_album(ud->cache, al->album_id);
+            if (!trks) continue;
+            total_tracks += trks->len;
+            for (guint j = 0; j < trks->len; j++) {
+                const library_track_info_t *t = g_ptr_array_index(trks, j);
+                total_ms += t->duration_ms;
+            }
+        }
+        char stats[128];
+        int total_secs = (int)(total_ms / 1000);
+        int hours = total_secs / 3600;
+        int mins  = (total_secs % 3600) / 60;
+        if (album_count > 0 && hours > 0)
+            snprintf(stats, sizeof(stats), "%u album%s \u00b7 %u track%s \u00b7 %dh %dm",
+                     album_count, album_count == 1 ? "" : "s",
+                     total_tracks, total_tracks == 1 ? "" : "s",
+                     hours, mins);
+        else if (album_count > 0)
+            snprintf(stats, sizeof(stats), "%u album%s \u00b7 %u track%s \u00b7 %dm",
+                     album_count, album_count == 1 ? "" : "s",
+                     total_tracks, total_tracks == 1 ? "" : "s",
+                     mins);
+        else
+            stats[0] = '\0';
+        gtk_label_set_text(GTK_LABEL(ud->artist_stats), stats);
+        gtk_widget_set_visible(ud->artist_stats, stats[0] != '\0');
+    }
 
     /* Load artist banner and bio if artist has MBID */
     if (artist_check && artist_check->musicbrainz_id) {
@@ -659,7 +852,7 @@ void on_album_card_artist_navigate(GtkButton *btn, gpointer data) {
 
 /* Called when a revealer finishes its hide animation.
  * Chains: hide completes → set slow duration on target → reveal target. */
-static void on_revealer_hidden(GtkRevealer *revealer, GParamSpec *pspec, gpointer data) {
+static void on_revealer_hidden(GtkRevealer *revealer, GParamSpec *pspec G_GNUC_UNUSED, gpointer data) {
     if (gtk_revealer_get_child_revealed(revealer))
         return;  /* Only act on hide completion */
 
@@ -985,9 +1178,10 @@ static GtkWidget *build_artist_page(UnifiedDetailData *ud) {
  * appears_on_tracks with credit-annotated track rows.
  */
 static void load_meta_artist_state(UnifiedDetailData *ud, const char *artist_mbid,
-                                    const char *artist_name, const char *artist_type) {
+                                    const char *artist_name, const char *artist_type G_GNUC_UNUSED) {
     ud->state = DETAIL_STATE_META_ARTIST;
     ud->current_id = 0;
+    ud->merged_rep_album_id = 0;
 
     /* Reset sections */
     gtk_widget_set_visible(ud->artist_banner_overlay, FALSE);
@@ -1000,9 +1194,11 @@ static void load_meta_artist_state(UnifiedDetailData *ud, const char *artist_mbi
     ud->meta_artist_mbid = g_strdup(artist_mbid);
     ud->meta_artist_name = g_strdup(artist_name);
 
-    /* Set name in the full-width header bar; hide albums (meta artist has no own albums) */
+    /* Set name in the full-width header bar; hide albums and stats (meta artist has no own albums) */
     gtk_label_set_text(GTK_LABEL(ud->header_artist_name),
                        artist_name ? artist_name : "Unknown Artist");
+    gtk_label_set_text(GTK_LABEL(ud->artist_stats), "");
+    gtk_widget_set_visible(ud->artist_stats, FALSE);
     gtk_widget_set_visible(ud->albums_section, FALSE);
 
     /* Reset selection group before clearing widgets (stale pointers) */
@@ -1343,6 +1539,11 @@ void library_unified_detail_clear_nav(GtkWidget *view) {
 DetailState library_unified_detail_get_state(GtkWidget *view) {
     UnifiedDetailData *ud = g_object_get_data(G_OBJECT(view), UNIFIED_DATA_KEY);
     return ud ? ud->state : DETAIL_STATE_ALBUM;
+}
+
+int64_t library_unified_detail_get_current_entity_id(GtkWidget *view) {
+    UnifiedDetailData *ud = g_object_get_data(G_OBJECT(view), UNIFIED_DATA_KEY);
+    return ud ? ud->current_id : 0;
 }
 
 GtkWidget *library_unified_detail_get_track_list(GtkWidget *view) {

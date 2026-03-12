@@ -5,7 +5,7 @@
   Shared across Artists, Albums, and Search views.
   C code controls visibility of individual children:
   - filter_search: hidden in Search view (has its own primary search bar)
-  - sort_dropdown_box: hidden by default; shown with view-specific sort options
+  - sort_dropdown: GtkDropDown, hidden by default; shown with view-specific sort options
   - advanced_toggle: always visible
 -->
 <interface>
@@ -109,33 +109,15 @@
       </object>
     </child>
 
-    <!-- Spacer -->
-    <child>
-      <object class="GtkBox">
-        <property name="hexpand">true</property>
-      </object>
-    </child>
-
     <!-- Sort dropdown (hidden by default, shown for Artists/Albums) -->
     <child>
-      <object class="GtkBox" id="sort_dropdown_box">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">0</property>
-
+      <object class="GtkDropDown" id="sort_dropdown">
         <property name="visible">false</property>
+        <property name="halign">end</property>
+        <property name="hexpand">true</property>
         <style>
           <class name="filter-field"/>
         </style>
-        <child>
-          <object class="GtkLabel">
-            <property name="label">Sort</property>
-          </object>
-        </child>
-        <child>
-          <object class="GtkMenuButton" id="sort_dropdown">
-            <property name="label">Default</property>
-          </object>
-        </child>
       </object>
     </child>
   </object>

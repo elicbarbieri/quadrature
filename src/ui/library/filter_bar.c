@@ -77,10 +77,10 @@ static void update_year_label(FilterBarState *fb) {
     }
 }
 
-static void update_sort_label(FilterBarState *fb) {
+static void sync_sort_dropdown(FilterBarState *fb) {
     if (!fb->sort_dropdown || fb->sort_option_count == 0) return;
-    const char *label = fb->sort_options[fb->current_sort_index].label;
-    gtk_menu_button_set_label(GTK_MENU_BUTTON(fb->sort_dropdown), label);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(fb->sort_dropdown),
+                                (guint)fb->current_sort_index);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -128,16 +128,27 @@ static void on_genre_toggled(GtkCheckButton *check, gpointer data) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Year Toggle Handler
+ * Year Filter — GAction-driven
+ *
+ * Each decade is a boolean stateful GAction. GtkPopoverMenu renders them
+ * as checkmark items automatically. The bitmask is derived from action state.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void on_year_toggled(GtkCheckButton *check, gpointer data) {
+static void on_year_action_toggle(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)param;
     FilterBarState *fb = data;
-    int bit = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(check), "bit-index"));
-    if (gtk_check_button_get_active(check))
-        fb->selected_years_mask |= (uint16_t)(1 << bit);
-    else
-        fb->selected_years_mask &= (uint16_t)~(1 << bit);
+    gboolean active = g_variant_get_boolean(g_action_get_state(G_ACTION(action)));
+    g_simple_action_set_state(action, g_variant_new_boolean(!active));
+
+    /* Rebuild bitmask from action states */
+    fb->selected_years_mask = 0;
+    for (int i = 0; i < NUM_DECADES; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "decade-%d", i);
+        GAction *a = g_action_map_lookup_action(G_ACTION_MAP(fb->year_actions), name);
+        if (a && g_variant_get_boolean(g_action_get_state(a)))
+            fb->selected_years_mask |= (uint16_t)(1 << i);
+    }
     update_year_label(fb);
     notify_changed(fb);
 }
@@ -146,7 +157,13 @@ static void on_year_toggled(GtkCheckButton *check, gpointer data) {
  * Search Filter (debounced)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static gboolean on_search_debounce(gpointer data) {
+/** Restart a debounce timer — cancel any pending fire and schedule a new one. */
+static void debounce_restart(guint *timer, GSourceFunc fire_cb, gpointer data) {
+    if (*timer) g_source_remove(*timer);
+    *timer = g_timeout_add(200, fire_cb, data);
+}
+
+static gboolean on_filter_debounce_fire(gpointer data) {
     FilterBarState *fb = data;
     fb->filter_debounce_timer = 0;
     notify_changed(fb);
@@ -156,9 +173,7 @@ static gboolean on_search_debounce(gpointer data) {
 static void on_filter_search_changed(GtkSearchEntry *entry, gpointer data) {
     (void)entry;
     FilterBarState *fb = data;
-    if (fb->filter_debounce_timer)
-        g_source_remove(fb->filter_debounce_timer);
-    fb->filter_debounce_timer = g_timeout_add(200, on_search_debounce, fb);
+    debounce_restart(&fb->filter_debounce_timer, on_filter_debounce_fire, fb);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -168,14 +183,22 @@ static void on_filter_search_changed(GtkSearchEntry *entry, gpointer data) {
 static void clear_multiselect(FilterBarState *fb) {
     if (fb->selected_genres) g_hash_table_remove_all(fb->selected_genres);
     fb->selected_years_mask = 0;
+
     if (fb->filter_genre) {
         uncheck_popover(GTK_MENU_BUTTON(fb->filter_genre));
         update_genre_label(fb);
     }
-    if (fb->filter_year) {
-        uncheck_popover(GTK_MENU_BUTTON(fb->filter_year));
-        update_year_label(fb);
+
+    /* Reset year GActions to FALSE */
+    if (fb->year_actions) {
+        for (int i = 0; i < NUM_DECADES; i++) {
+            char name[16];
+            snprintf(name, sizeof(name), "decade-%d", i);
+            GAction *a = g_action_map_lookup_action(G_ACTION_MAP(fb->year_actions), name);
+            if (a) g_simple_action_set_state(G_SIMPLE_ACTION(a), g_variant_new_boolean(FALSE));
+        }
     }
+    if (fb->filter_year) update_year_label(fb);
 }
 
 static void on_clear_clicked(GtkButton *btn, gpointer data) {
@@ -185,50 +208,37 @@ static void on_clear_clicked(GtkButton *btn, gpointer data) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Sort Dropdown Handler
+ * Sort Dropdown Handler (GtkDropDown)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void on_sort_selected(GtkCheckButton *check, gpointer data) {
+static void on_sort_dropdown_selected(GtkDropDown *dd, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
     FilterBarState *fb = data;
-    if (!gtk_check_button_get_active(check)) return;
-
-    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(check), "sort-index"));
-    fb->current_sort_index = idx;
-    update_sort_label(fb);
-
-    /* Close popover */
-    GtkWidget *pop = GTK_WIDGET(gtk_menu_button_get_popover(GTK_MENU_BUTTON(fb->sort_dropdown)));
-    if (pop) gtk_popover_popdown(GTK_POPOVER(pop));
-
+    guint idx = gtk_drop_down_get_selected(dd);
+    if (idx == GTK_INVALID_LIST_POSITION) return;
+    fb->current_sort_index = (int)idx;
     notify_changed(fb);
 }
 
-static void build_sort_popover(FilterBarState *fb) {
+/* (build_checkbox_popover removed — year filter now uses GMenu + GAction) */
+
+static void setup_sort_dropdown(FilterBarState *fb) {
     if (!fb->sort_dropdown || fb->sort_option_count == 0) return;
 
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    GtkCheckButton *group = NULL;
+    const char **labels = g_new(const char *, fb->sort_option_count + 1);
+    for (int i = 0; i < fb->sort_option_count; i++)
+        labels[i] = fb->sort_options[i].label;
+    labels[fb->sort_option_count] = NULL;
 
-    for (int i = 0; i < fb->sort_option_count; i++) {
-        GtkWidget *radio = gtk_check_button_new_with_label(fb->sort_options[i].label);
-        g_object_set_data(G_OBJECT(radio), "sort-index", GINT_TO_POINTER(i));
+    GtkStringList *model = gtk_string_list_new(labels);
+    g_free(labels);
 
-        if (group)
-            gtk_check_button_set_group(GTK_CHECK_BUTTON(radio), group);
-        else
-            group = GTK_CHECK_BUTTON(radio);
+    gtk_drop_down_set_model(GTK_DROP_DOWN(fb->sort_dropdown), G_LIST_MODEL(model));
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(fb->sort_dropdown), 0);
+    g_object_unref(model);
 
-        if (i == 0)
-            gtk_check_button_set_active(GTK_CHECK_BUTTON(radio), TRUE);
-
-        g_signal_connect(radio, "toggled", G_CALLBACK(on_sort_selected), fb);
-        gtk_box_append(GTK_BOX(box), radio);
-    }
-
-    GtkWidget *popover = gtk_popover_new();
-    gtk_widget_add_css_class(popover, "filter-popover");
-    gtk_popover_set_child(GTK_POPOVER(popover), box);
-    gtk_menu_button_set_popover(GTK_MENU_BUTTON(fb->sort_dropdown), popover);
+    g_signal_connect(fb->sort_dropdown, "notify::selected",
+                     G_CALLBACK(on_sort_dropdown_selected), fb);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -238,7 +248,7 @@ static void build_sort_popover(FilterBarState *fb) {
 void filter_bar_rebuild_genre_popover(FilterBarState *fb) {
     if (!fb->filter_genre || !fb->cache) return;
 
-    GPtrArray *albums = library_cache_get_albums_filtered(fb->cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+    GPtrArray *albums = library_cache_get_albums_filtered(fb->cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     if (!albums) return;
 
     /* Collect unique genres */
@@ -293,21 +303,37 @@ void filter_bar_rebuild_genre_popover(FilterBarState *fb) {
  * Year Popover Builder
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/** Build year filter using GMenu + boolean stateful GActions.
+ *  GtkPopoverMenu renders boolean-state actions as checkmark items. */
 static void build_year_popover(FilterBarState *fb) {
     if (!fb->filter_year) return;
 
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    /* Create action group with one boolean action per decade */
+    fb->year_actions = g_simple_action_group_new();
+    GMenu *menu = g_menu_new();
+
     for (int i = 0; i < NUM_DECADES; i++) {
-        GtkWidget *check = gtk_check_button_new_with_label(DECADE_NAMES[i]);
-        g_object_set_data(G_OBJECT(check), "bit-index", GINT_TO_POINTER(i));
-        g_signal_connect(check, "toggled", G_CALLBACK(on_year_toggled), fb);
-        gtk_box_append(GTK_BOX(box), check);
+        char name[16];
+        snprintf(name, sizeof(name), "decade-%d", i);
+
+        GSimpleAction *action = g_simple_action_new_stateful(
+            name, NULL, g_variant_new_boolean(FALSE));
+        g_signal_connect(action, "activate",
+                         G_CALLBACK(on_year_action_toggle), fb);
+        g_action_map_add_action(G_ACTION_MAP(fb->year_actions), G_ACTION(action));
+        g_object_unref(action);
+
+        char detailed[32];
+        snprintf(detailed, sizeof(detailed), "year.decade-%d", i);
+        g_menu_append(menu, DECADE_NAMES[i], detailed);
     }
 
-    GtkWidget *popover = gtk_popover_new();
-    gtk_widget_add_css_class(popover, "filter-popover");
-    gtk_popover_set_child(GTK_POPOVER(popover), box);
-    gtk_menu_button_set_popover(GTK_MENU_BUTTON(fb->filter_year), popover);
+    /* Attach action group to the menu button and set the menu model */
+    gtk_widget_insert_action_group(GTK_WIDGET(fb->filter_year),
+                                   "year", G_ACTION_GROUP(fb->year_actions));
+    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(fb->filter_year),
+                                    G_MENU_MODEL(menu));
+    g_object_unref(menu);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -323,12 +349,12 @@ static void on_advanced_toggled(GtkToggleButton *btn, gpointer data) {
         gtk_editable_set_text(GTK_EDITABLE(fb->credit_search_entry), "");
         fb->selected_role_index = 0;
         if (fb->filter_role)
-            gtk_menu_button_set_label(GTK_MENU_BUTTON(fb->filter_role), "All Roles");
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(fb->filter_role), 0);
         notify_changed(fb);
     }
 }
 
-static gboolean on_credit_debounce(gpointer data) {
+static gboolean on_credit_debounce_fire(gpointer data) {
     FilterBarState *fb = data;
     fb->credit_debounce_timer = 0;
     notify_changed(fb);
@@ -338,9 +364,7 @@ static gboolean on_credit_debounce(gpointer data) {
 static void on_credit_search_changed(GtkSearchEntry *entry, gpointer data) {
     (void)entry;
     FilterBarState *fb = data;
-    if (fb->credit_debounce_timer)
-        g_source_remove(fb->credit_debounce_timer);
-    fb->credit_debounce_timer = g_timeout_add(200, on_credit_debounce, fb);
+    debounce_restart(&fb->credit_debounce_timer, on_credit_debounce_fire, fb);
 }
 
 static void on_credit_search_activate(GtkSearchEntry *entry, gpointer data) {
@@ -353,46 +377,30 @@ static void on_credit_search_activate(GtkSearchEntry *entry, gpointer data) {
     notify_changed(fb);
 }
 
-static void on_role_selected(GtkCheckButton *check, gpointer data) {
+static void on_role_dropdown_selected(GtkDropDown *dd, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
     FilterBarState *fb = data;
-    if (!gtk_check_button_get_active(check)) return;
-
-    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(check), "role-index"));
-    fb->selected_role_index = idx;
-    gtk_menu_button_set_label(GTK_MENU_BUTTON(fb->filter_role), ROLE_FILTERS[idx].name);
-
-    GtkWidget *pop = GTK_WIDGET(gtk_menu_button_get_popover(GTK_MENU_BUTTON(fb->filter_role)));
-    if (pop) gtk_popover_popdown(GTK_POPOVER(pop));
-
+    guint idx = gtk_drop_down_get_selected(dd);
+    if (idx == GTK_INVALID_LIST_POSITION) return;
+    fb->selected_role_index = (int)idx;
     notify_changed(fb);
 }
 
-static void build_role_popover(FilterBarState *fb) {
+static void setup_role_dropdown(FilterBarState *fb) {
     if (!fb->filter_role) return;
 
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    GtkCheckButton *group = NULL;
+    const char *labels[NUM_ROLE_FILTERS + 1];
+    for (int i = 0; i < NUM_ROLE_FILTERS; i++)
+        labels[i] = ROLE_FILTERS[i].name;
+    labels[NUM_ROLE_FILTERS] = NULL;
 
-    for (int i = 0; i < NUM_ROLE_FILTERS; i++) {
-        GtkWidget *radio = gtk_check_button_new_with_label(ROLE_FILTERS[i].name);
-        g_object_set_data(G_OBJECT(radio), "role-index", GINT_TO_POINTER(i));
+    GtkStringList *model = gtk_string_list_new(labels);
+    gtk_drop_down_set_model(GTK_DROP_DOWN(fb->filter_role), G_LIST_MODEL(model));
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(fb->filter_role), 0);
+    g_object_unref(model);
 
-        if (group)
-            gtk_check_button_set_group(GTK_CHECK_BUTTON(radio), group);
-        else
-            group = GTK_CHECK_BUTTON(radio);
-
-        if (i == 0)
-            gtk_check_button_set_active(GTK_CHECK_BUTTON(radio), TRUE);
-
-        g_signal_connect(radio, "toggled", G_CALLBACK(on_role_selected), fb);
-        gtk_box_append(GTK_BOX(box), radio);
-    }
-
-    GtkWidget *popover = gtk_popover_new();
-    gtk_widget_add_css_class(popover, "filter-popover");
-    gtk_popover_set_child(GTK_POPOVER(popover), box);
-    gtk_menu_button_set_popover(GTK_MENU_BUTTON(fb->filter_role), popover);
+    g_signal_connect(fb->filter_role, "notify::selected",
+                     G_CALLBACK(on_role_dropdown_selected), fb);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -424,7 +432,6 @@ GtkWidget *filter_bar_init(FilterBarState *fb, library_cache_t *cache,
     fb->filter_clear = GTK_WIDGET(gtk_builder_get_object(builder, "filter_clear"));
     fb->advanced_toggle = GTK_WIDGET(gtk_builder_get_object(builder, "advanced_toggle"));
     fb->sort_dropdown = GTK_WIDGET(gtk_builder_get_object(builder, "sort_dropdown"));
-    fb->sort_dropdown_box = GTK_WIDGET(gtk_builder_get_object(builder, "sort_dropdown_box"));
 
     g_object_unref(builder);
 
@@ -435,11 +442,10 @@ GtkWidget *filter_bar_init(FilterBarState *fb, library_cache_t *cache,
     filter_bar_rebuild_genre_popover(fb);
     build_year_popover(fb);
 
-    /* Sort dropdown */
+    /* Sort dropdown (GtkDropDown with GtkStringList model) */
     if (sort_options && sort_count > 0) {
-        gtk_widget_set_visible(fb->sort_dropdown_box, TRUE);
-        build_sort_popover(fb);
-        update_sort_label(fb);
+        gtk_widget_set_visible(fb->sort_dropdown, TRUE);
+        setup_sort_dropdown(fb);
     }
 
     /* Connect signals */
@@ -472,8 +478,8 @@ void filter_bar_attach_advanced(FilterBarState *fb, GtkWidget *parent_box) {
     GtkWidget *sibling = fb->bar_widget;
     gtk_box_insert_child_after(GTK_BOX(parent_box), fb->advanced_revealer, sibling);
 
-    /* Build role popover */
-    build_role_popover(fb);
+    /* Setup role dropdown (GtkDropDown with GtkStringList model) */
+    setup_role_dropdown(fb);
 
     /* Connect signals */
     g_signal_connect(fb->credit_search_entry, "search-changed",
@@ -494,7 +500,7 @@ void filter_bar_clear(FilterBarState *fb) {
 
     /* Reset sort to first option */
     fb->current_sort_index = 0;
-    update_sort_label(fb);
+    sync_sort_dropdown(fb);
 
     /* Clear advanced panel */
     if (fb->credit_search_entry)
@@ -505,7 +511,7 @@ void filter_bar_clear(FilterBarState *fb) {
     }
     fb->selected_role_index = 0;
     if (fb->filter_role)
-        gtk_menu_button_set_label(GTK_MENU_BUTTON(fb->filter_role), "All Roles");
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(fb->filter_role), 0);
     if (fb->advanced_toggle)
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(fb->advanced_toggle), FALSE);
     if (fb->advanced_revealer)
@@ -531,6 +537,7 @@ void filter_bar_destroy(FilterBarState *fb) {
         g_ptr_array_unref(fb->genre_list);
         fb->genre_list = NULL;
     }
+    g_clear_object(&fb->year_actions);
     if (fb->bar_widget) {
         g_object_unref(fb->bar_widget);
         fb->bar_widget = NULL;
@@ -623,3 +630,4 @@ void filter_bar_hide_search(FilterBarState *fb) {
     if (fb->filter_search_box)
         gtk_widget_set_visible(fb->filter_search_box, FALSE);
 }
+

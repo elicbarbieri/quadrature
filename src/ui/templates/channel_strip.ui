@@ -34,19 +34,14 @@
 
                 <!-- Display panel: inset "LCD module" with song info + time -->
                 <child>
-                  <object class="GtkFrame" id="display_panel">
+                  <object class="GtkBox" id="display_panel">
+                    <property name="orientation">horizontal</property>
+                    <property name="spacing">12</property>
                     <property name="hexpand">true</property>
                     <property name="vexpand">true</property>
                     <style>
                       <class name="display-panel"/>
                     </style>
-                    <child>
-                      <object class="GtkBox" id="display_inner">
-                        <property name="orientation">horizontal</property>
-                        <property name="spacing">12</property>
-                        <style>
-                          <class name="display-inner"/>
-                        </style>
 
                         <!-- Left column: Song info (main content) -->
                         <child>
@@ -137,17 +132,12 @@
                               </object>
                             </child>
 
-                            <!-- Spacer -->
-                            <child>
-                              <object class="GtkBox">
-                                <property name="vexpand">true</property>
-                              </object>
-                            </child>
-
-                            <!-- Bottom group: Next track preview -->
+                            <!-- Bottom group: Next track preview (pushed to bottom via valign) -->
                             <child>
                               <object class="GtkBox" id="info_bottom">
                                 <property name="orientation">vertical</property>
+                                <property name="valign">end</property>
+                                <property name="vexpand">true</property>
                                 <property name="spacing">2</property>
                                 <property name="valign">end</property>
 
@@ -222,19 +212,13 @@
                               </object>
                             </child>
 
-                            <!-- Spacer -->
-                            <child>
-                              <object class="GtkBox">
-                                <property name="vexpand">true</property>
-                              </object>
-                            </child>
-
-                            <!-- Bottom group: Track position and Next duration -->
+                            <!-- Bottom group: Track position and Next duration (pushed to bottom via valign) -->
                             <child>
                               <object class="GtkBox" id="metrics_bottom">
                                 <property name="orientation">vertical</property>
                                 <property name="spacing">2</property>
                                 <property name="valign">end</property>
+                                <property name="vexpand">true</property>
                                 <property name="halign">end</property>
 
                                 <!-- Track position (e.g., 3/12) -->
@@ -266,8 +250,6 @@
                         </child>
                       </object>
                     </child>
-                  </object>
-                </child>
 
                 <!-- Right column: transport grid (top) + spectrum (fills remaining height) -->
                 <child>

@@ -90,6 +90,20 @@ static void on_fanart_api_key_changed(GtkEditable *editable, gpointer data) {
         indexer_controller_set_fanart_api_key(w->indexer, text);
 }
 
+static void on_mb_solr_url_changed(GtkEditable *editable, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (w->settings_initializing) return;
+
+    const char *text = gtk_editable_get_text(editable);
+    if (w->settings) {
+        g_free(w->settings->mb_solr_url);
+        w->settings->mb_solr_url = g_strdup(text);
+        settings_save_debounced(w);
+    }
+    if (w->indexer)
+        indexer_controller_set_mb_solr_url(w->indexer, text);
+}
+
 /* Generic settings callbacks — field targeted via g_object_set_data("field-offset") */
 
 static void on_bool_setting_toggled(GtkCheckButton *btn, gpointer data) {
@@ -182,6 +196,13 @@ GtkWidget *make_settings_view(UiWindow *w) {
         if (s && s->musicbrainz_pg_conninfo)
             gtk_editable_set_text(GTK_EDITABLE(pg_conninfo_entry), s->musicbrainz_pg_conninfo);
         g_signal_connect(pg_conninfo_entry, "changed", G_CALLBACK(on_pg_conninfo_changed), w);
+    }
+
+    GtkWidget *mb_solr_entry = GTK_WIDGET(gtk_builder_get_object(builder, "mb_solr_entry"));
+    if (mb_solr_entry) {
+        if (s && s->mb_solr_url)
+            gtk_editable_set_text(GTK_EDITABLE(mb_solr_entry), s->mb_solr_url);
+        g_signal_connect(mb_solr_entry, "changed", G_CALLBACK(on_mb_solr_url_changed), w);
     }
 
     GtkWidget *fanart_api_key_entry = GTK_WIDGET(gtk_builder_get_object(builder, "fanart_api_key_entry"));

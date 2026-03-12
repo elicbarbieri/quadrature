@@ -79,6 +79,8 @@
             pname = "quadrature";
             version = "0.1.0";
             src = ./.;
+            # Allow -march=native for audio DSP performance
+            env.NIX_ENFORCE_NO_NATIVE = "";
             nativeBuildInputs = buildDeps;
             buildInputs = coreDeps ++ uiDeps;
             cmakeFlags = [
@@ -131,6 +133,9 @@
               exec ${pkgs.pkg-config}/bin/pkg-config "$@" 2>/dev/null
             '';
           in ''
+            # Allow -march=native for local dev builds (high-perf audio DSP)
+            unset NIX_ENFORCE_NO_NATIVE
+
             export PKG_CONFIG="${pkgConfigWrapper}"
 
             # GSettings schemas for GTK4 file dialogs

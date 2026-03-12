@@ -181,6 +181,15 @@ quadrature_result_t db_get_album_by_id(quadrature_db_t* db, int64_t album_id,
 quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_id, db_album_t** out, size_t* count);
 quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id, db_track_t** out, size_t* count);
 
+/**
+ * Stream ALL tracks ordered by album_id, disc_num, track_num.
+ * Single prepared statement — designed for cache warming to avoid N+1 per-album queries.
+ * Callback receives a borrowed db_track_t (string pointers valid only during callback).
+ * Return false from callback to stop iteration (e.g. cancellation).
+ */
+typedef bool (*db_track_iter_cb)(const db_track_t* track, void* user_data);
+quadrature_result_t db_iter_all_tracks(quadrature_db_t* db, db_track_iter_cb cb, void* user_data);
+
 /* =============================================================================
  * Track Artist Operations (multi-artist via junction table)
  * ============================================================================= */
@@ -218,6 +227,7 @@ quadrature_result_t db_get_artist_appearances(quadrature_db_t* db, int64_t artis
  */
 quadrature_result_t db_get_artist_appearance_tracks(quadrature_db_t* db, int64_t artist_id,
                                                      db_track_t** out, size_t* count);
+
 void db_artists_free(db_artist_t* artists, size_t count);
 void db_albums_free(db_album_t* albums, size_t count);
 
@@ -380,10 +390,14 @@ quadrature_result_t db_set_album_release_id_from_tags(quadrature_db_t* db,
 char* db_get_album_musicbrainz_release_id(quadrature_db_t* db, int64_t album_id);
 
 /**
- * Get album IDs eligible for MB resolution (mb_status is NOT_ATTEMPTED or HAS_RELEASE_ID).
+ * Get album IDs eligible for MB resolution.
+ * Includes: NOT_ATTEMPTED (0), HAS_RELEASE_ID (1), FAILED (4),
+ * and NO_MATCH (3) albums older than retry_no_match_before timestamp.
+ * Pass 0 for retry_no_match_before to skip NO_MATCH retry.
  * Caller must g_free(*album_ids).
  */
 quadrature_result_t db_get_unresolved_albums(quadrature_db_t* db,
+    int64_t retry_no_match_before,
     int64_t** album_ids, size_t* count);
 
 /**
@@ -419,7 +433,6 @@ quadrature_result_t db_upsert_folder_album(quadrature_db_t* db,
                                             const char* folder_path,
                                             const char* title,
                                             int64_t artist_id,
-                                            bool is_compilation,
                                             uint16_t year,
                                             int64_t* album_id_out);
 

@@ -98,11 +98,14 @@ static void indexer_progress_callback(indexer_event_t event,
 static void print_start_help(void) {
     printf("Usage: quadrature-cli indexer start [options] <path>\n\n"
            "Options:\n"
-           "  -R, --mb-resolve            Resolve metadata from MusicBrainz (requires --pg-conninfo)\n"
-           "  -p, --pg-conninfo <str>     PostgreSQL connection string for MB+AcoustID database\n"
-           "  -F, --fanart-api-key <key>  fanart.tv API key for artist artwork\n"
-           "  -v, --verbose               Verbose output\n"
-           "  -h, --help                  Show help\n");
+           "  -R, --mb-resolve                 Resolve metadata from MusicBrainz (requires --pg-conninfo)\n"
+           "  -p, --pg-conninfo <str>          PostgreSQL connection string for MusicBrainz database\n"
+           "  -a, --acoustid-pg-conninfo <str> PostgreSQL connection string for AcoustID database\n"
+           "  -i, --acoustid-index-url <url>   AcoustID index HTTP URL (e.g. http://host:8081)\n"
+           "  -S, --mb-solr-url <url>          MusicBrainz Solr URL (e.g. http://host:8983)\n"
+           "  -F, --fanart-api-key <key>       fanart.tv API key for artist artwork\n"
+           "  -v, --verbose                    Verbose output\n"
+           "  -h, --help                       Show help\n");
 }
 
 static int cmd_start(int argc, char** argv) {
@@ -110,27 +113,36 @@ static int cmd_start(int argc, char** argv) {
     bool verbose = false;
     bool mb_resolve = false;
     const char* pg_conninfo = NULL;
+    const char* acoustid_pg_conninfo = NULL;
+    const char* acoustid_index_url = NULL;
+    const char* mb_solr_url = NULL;
     const char* fanart_api_key = NULL;
 
     static struct option long_options[] = {
-        {"verbose",            no_argument,       0, 'v'},
-        {"help",               no_argument,       0, 'h'},
-        {"mb-resolve",         no_argument,       0, 'R'},
-        {"pg-conninfo",        required_argument, 0, 'p'},
-        {"fanart-api-key",     required_argument, 0, 'F'},
+        {"verbose",               no_argument,       0, 'v'},
+        {"help",                  no_argument,       0, 'h'},
+        {"mb-resolve",            no_argument,       0, 'R'},
+        {"pg-conninfo",           required_argument, 0, 'p'},
+        {"acoustid-pg-conninfo",  required_argument, 0, 'a'},
+        {"acoustid-index-url",    required_argument, 0, 'i'},
+        {"mb-solr-url",           required_argument, 0, 'S'},
+        {"fanart-api-key",        required_argument, 0, 'F'},
         {0, 0, 0, 0}
     };
 
     optind = 1; /* reset getopt for subcommand parsing */
     int opt;
-    while ((opt = getopt_long(argc, argv, "vhRp:F:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhRp:a:i:S:F:", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'v': verbose = true;            break;
-            case 'h': print_start_help();        return 0;
-            case 'R': mb_resolve = true;         break;
-            case 'p': pg_conninfo = optarg;      break;
-            case 'F': fanart_api_key = optarg;   break;
-            default:  print_start_help();        return 1;
+            case 'v': verbose = true;                  break;
+            case 'h': print_start_help();              return 0;
+            case 'R': mb_resolve = true;               break;
+            case 'p': pg_conninfo = optarg;            break;
+            case 'a': acoustid_pg_conninfo = optarg;   break;
+            case 'i': acoustid_index_url = optarg;     break;
+            case 'S': mb_solr_url = optarg;            break;
+            case 'F': fanart_api_key = optarg;         break;
+            default:  print_start_help();              return 1;
         }
     }
 
@@ -157,6 +169,9 @@ static int cmd_start(int argc, char** argv) {
         .user_data       = NULL,
         .mb_resolve      = mb_resolve,
         .pg_conninfo     = pg_conninfo,
+        .mb_solr_url     = mb_solr_url,
+        .acoustid_pg_conninfo = acoustid_pg_conninfo,
+        .acoustid_index_url   = acoustid_index_url,
         .fanart_api_key  = fanart_api_key,
     };
 

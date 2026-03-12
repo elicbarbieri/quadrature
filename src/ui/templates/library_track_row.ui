@@ -88,20 +88,14 @@
             <property name="orientation">horizontal</property>
           </object>
         </child>
-        <!-- Featuring artists + library badge row -->
+        <!-- Featuring artists + library badge (badge appended dynamically by row_helpers.c) -->
         <child>
-          <object class="GtkBox" id="col_right_bottom">
+          <object class="GtkBox" id="secondary_artists_box">
             <property name="orientation">horizontal</property>
-            <child>
-              <object class="GtkBox" id="secondary_artists_box">
-                <property name="orientation">horizontal</property>
-                <property name="hexpand">true</property>
-                <style>
-                  <class name="library-row-subtitle"/>
-                </style>
-              </object>
-            </child>
-            <!-- library badge appended here dynamically by row_helpers.c (halign=end) -->
+            <property name="hexpand">true</property>
+            <style>
+              <class name="library-row-subtitle"/>
+            </style>
           </object>
         </child>
       </object>

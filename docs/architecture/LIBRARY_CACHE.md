@@ -2,6 +2,8 @@
 
 **Foundation layer** for all library data access. Uses flat arrays indexed by entity ID for O(1) lookups, with a background warming thread that pages all data into cache after startup. Two DB connections (`db_ui` for the main thread, `db_warm` for the warming thread) provide zero contention via SQLite WAL.
 
+Cross-library deduplication (merged artists, album MBID dedup, library filtering) is documented in DEDUPLICATION.md.
+
 ## Architecture
 
 ```
@@ -99,24 +101,29 @@ Arrays are sized at creation via `SELECT MAX(id) FROM table`. Gaps from deleted 
 
 ```c
 typedef struct {
-    int64_t artist_id;
+    int64_t artist_id;           // Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_idx, local_id)
     char* name;
-    uint32_t album_count;
+    char* musicbrainz_id;        // MBID for cross-library merging; NULL if unknown
+    uint32_t album_count;        // Accumulated across merged sources if merged
     uint32_t track_count;
-    uint32_t total_duration_ms;
+    int library_index;           // Source library (0-based); -1 if merged across libraries
+    int64_t *merged_source_ids;  // NULL if single-library; global IDs from each merged source
+    int merged_source_count;     // 0 = single-library, >0 = cross-library merged
 } library_artist_info_t;
 
 typedef struct {
-    int64_t album_id;
-    int64_t artist_id;
+    int64_t album_id;            // Global ID
+    int64_t artist_id;           // Global ID of album artist
     char* title;
     char* artist_name;
-    char* path;              // Relative path to album directory
-    char* genres;            // Semicolon-separated distinct genres, or NULL
+    char* path;                  // Relative path to album directory
+    char* genres;                // Semicolon-separated distinct genres, or NULL
+    char* musicbrainz_release_id; // For cross-library album dedup; NULL if unresolved
     uint16_t year;
     uint16_t track_count;
     uint16_t disc_count;
     uint32_t total_duration_ms;
+    int library_index;           // Source library (0-based)
 } library_album_info_t;
 
 typedef struct {
@@ -289,10 +296,13 @@ const GPtrArray* library_cache_get_artist_appearances(library_cache_t* cache, in
 const GPtrArray* library_cache_get_artist_appearance_tracks(library_cache_t* cache, int64_t artist_id);
 
 // Filtered queries (caller owns array, cache owns items — g_ptr_array_unref when done)
+// library_filter: -1 = all libraries (deduplicated), 0..N = specific library
 GPtrArray* library_cache_get_artists_filtered(library_cache_t* cache,
-    library_sort_t sort, const char* search_text, const db_search_opts_t* filters);
+    library_sort_t sort, const char* search_text, const db_search_opts_t* filters,
+    int library_filter);
 GPtrArray* library_cache_get_albums_filtered(library_cache_t* cache,
-    library_sort_t sort, const char* search_text, const db_search_opts_t* filters);
+    library_sort_t sort, const char* search_text, const db_search_opts_t* filters,
+    int library_filter);
 ```
 
 If `all_artists`/`all_albums` is NULL (warming not done), a sync fallback loads from `db_ui`.
@@ -307,7 +317,8 @@ library_search_results_t* library_cache_search(
     const char* query,
     library_search_filter_t filter,
     size_t limit,
-    const db_search_opts_t* opts
+    const db_search_opts_t* opts,
+    int library_filter                  // -1 = all libraries, 0..N = specific
 );
 void library_search_results_free(library_search_results_t* results);
 ```

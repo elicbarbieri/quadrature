@@ -7,6 +7,7 @@
 #define G_LOG_DOMAIN "quadrature"
 
 #include "../internal.h"
+#include "../library/internal.h"
 #include "internal.h"
 #include <string.h>
 
@@ -43,16 +44,16 @@ void libs_free(UiWindow *w) {
 
 void libs_load(UiWindow *w) {
     libs_free(w);
-    if (!w->settings || w->settings->library_path_count == 0) return;
+    if (!w->settings || w->settings->library_count == 0) return;
 
-    size_t count = (size_t)w->settings->library_path_count;
+    size_t count = (size_t)w->settings->library_count;
     w->libs = g_new0(LibEntry, count);
     w->lib_count = count;
 
     for (size_t i = 0; i < count; i++) {
         w->libs[i].id   = (int64_t)i;
-        w->libs[i].path = g_strdup(w->settings->library_paths[i]);
-        w->libs[i].name = app_settings_get_effective_library_name(w->settings, (int)i);
+        w->libs[i].path = g_strdup(w->settings->libraries[i].path);
+        w->libs[i].name = app_settings_get_library_name(w->settings, (int)i);
         const char *dp = app_settings_get_library_data_path(w->settings, (int)i);
         w->libs[i].data_path = (dp && strcmp(dp, w->libs[i].path) != 0)
                                 ? g_strdup(dp) : NULL;
@@ -78,10 +79,24 @@ static void on_remove(GtkButton *btn, gpointer data) {
         if (w->indexer)
             indexer_controller_cancel_library(w->indexer, e->path);
 
-        app_settings_remove_library_path(w->settings, e->path);
+        /* Remove cache/artwork slots BEFORE settings removal (which shifts indices).
+         * find_lib_idx uses settings, so must resolve while settings are still intact. */
+        int lib_idx = find_lib_idx(w, e->path);
+        if (lib_idx >= 0) {
+            if (w->library_cache)
+                library_cache_remove_slot(w->library_cache, lib_idx);
+            if (w->artwork_mgr)
+                artwork_manager_remove_library(w->artwork_mgr, lib_idx);
+        }
+
+        app_settings_remove_library(w->settings, e->path);
         settings_save_debounced(w);
         libs_load(w);
         libs_rebuild(w);
+
+        /* Rewarm shifted slots (their cached data was cleared during removal) */
+        if (w->library_cache)
+            library_cache_start_warming(w->library_cache);
     }
 }
 
@@ -163,10 +178,22 @@ static void on_lib_name_editing_done(GtkEditableLabel *label, GParamSpec *pspec,
     LibEntry *e = g_object_get_data(G_OBJECT(label), "entry");
     if (!e || !w->settings) return;
     const char *new_name = gtk_editable_get_text(GTK_EDITABLE(label));
-    app_settings_set_library_name(w->settings, (int)e->id, new_name);
+    g_free(w->settings->libraries[(int)e->id].name);
+    w->settings->libraries[(int)e->id].name = (new_name && new_name[0]) ? g_strdup(new_name) : NULL;
     settings_save_debounced(w);
     g_free(e->name);
-    e->name = app_settings_get_effective_library_name(w->settings, (int)e->id);
+    e->name = app_settings_get_library_name(w->settings, (int)e->id);
+
+    /* Push updated name into the library cache so badges reflect the change */
+    if (w->library_cache)
+        library_cache_set_library_name(w->library_cache, (int)e->id, e->name);
+}
+
+static void on_edit_name(GtkButton *btn, gpointer data) {
+    (void)data;
+    GtkWidget *label = g_object_get_data(G_OBJECT(btn), "editable-label");
+    if (label)
+        gtk_editable_label_start_editing(GTK_EDITABLE_LABEL(label));
 }
 
 static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
@@ -198,6 +225,7 @@ static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
 
     /* Grab action widgets before releasing builder */
     GtkWidget *name      = GTK_WIDGET(gtk_builder_get_object(builder, "card_name"));
+    GtkWidget *edit_btn  = GTK_WIDGET(gtk_builder_get_object(builder, "card_edit_name"));
     GtkWidget *path      = GTK_WIDGET(gtk_builder_get_object(builder, "card_path"));
     GtkWidget *data_path = GTK_WIDGET(gtk_builder_get_object(builder, "card_data_path"));
     GtkWidget *rescan    = GTK_WIDGET(gtk_builder_get_object(builder, "card_rescan"));
@@ -221,8 +249,12 @@ static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
     g_object_set_data(G_OBJECT(name), "entry", e);
     g_signal_connect(name, "notify::editing", G_CALLBACK(on_lib_name_editing_done), w);
 
+    g_object_set_data(G_OBJECT(edit_btn), "editable-label", name);
+    g_signal_connect(edit_btn, "clicked", G_CALLBACK(on_edit_name), w);
+
     g_object_set_data(G_OBJECT(rescan), "entry", e);
     g_signal_connect(rescan, "clicked", G_CALLBACK(on_rescan), w);
+    g_object_set_data(G_OBJECT(card), "rescan-btn", rescan);
 
     g_object_set_data(G_OBJECT(remove), "entry", e);
     g_signal_connect(remove, "clicked", G_CALLBACK(on_remove), w);
@@ -231,7 +263,33 @@ static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
     g_signal_connect(e->stat_errors_btn, "clicked", G_CALLBACK(on_errors), w);
 
     update_card_stats_labels(e);
+
+    /* Set initial availability state */
+    e->available = library_cache_get_available(w->library_cache, (int)e->id);
+    if (!e->available) {
+        gtk_widget_add_css_class(card, "library-disconnected");
+        gtk_widget_set_sensitive(rescan, FALSE);
+    }
+
     return card;
+}
+
+void update_lib_card_availability(UiWindow *w, int lib_idx, gboolean available) {
+    if (!w || (size_t)lib_idx >= w->lib_count) return;
+    LibEntry *e = &w->libs[lib_idx];
+    e->available = available;
+
+    if (!e->card) return;
+
+    if (available) {
+        gtk_widget_remove_css_class(e->card, "library-disconnected");
+    } else {
+        gtk_widget_add_css_class(e->card, "library-disconnected");
+    }
+
+    GtkWidget *rescan = g_object_get_data(G_OBJECT(e->card), "rescan-btn");
+    if (rescan)
+        gtk_widget_set_sensitive(rescan, available);
 }
 
 void libs_rebuild(UiWindow *w) {
@@ -265,7 +323,6 @@ typedef struct {
     GtkWidget  *music_label;
     GtkWidget  *data_label;
     GtkWidget  *data_browse_btn;
-    GtkWidget  *index_revealer;
     GtkWidget  *type_description;
     GtkWidget  *index_hint_label;
     GtkWidget  *confirm_btn;
@@ -324,14 +381,17 @@ static void on_type_toggled(GtkToggleButton *btn, gpointer data) {
 
     gtk_label_set_text(GTK_LABEL(s->type_description), TYPE_DESCRIPTIONS[s->lib_type]);
 
-    gboolean show_index = (s->lib_type != LIB_TYPE_LOCAL);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(s->index_revealer), show_index);
-
-    /* USB: hide Browse, auto-generate path. Network: show Browse. */
-    gtk_widget_set_visible(s->data_browse_btn, s->lib_type == LIB_TYPE_NETWORK);
+    /* Update index section content — use opacity to avoid popover resize on Wayland */
+    gboolean show_browse = (s->lib_type == LIB_TYPE_NETWORK);
+    gtk_widget_set_opacity(s->data_browse_btn, show_browse ? 1.0 : 0.0);
+    gtk_widget_set_sensitive(s->data_browse_btn, show_browse);
 
     if (s->lib_type == LIB_TYPE_USB) {
         update_auto_data_path(s);
+        if (!s->music_path) {
+            gtk_label_set_text(GTK_LABEL(s->data_label), "Select a music folder first");
+            gtk_widget_set_opacity(s->data_label, 0.5);
+        }
         gtk_label_set_text(GTK_LABEL(s->index_hint_label),
             "Stored locally so data persists when the drive is disconnected.");
     } else if (s->lib_type == LIB_TYPE_NETWORK) {
@@ -344,6 +404,10 @@ static void on_type_toggled(GtkToggleButton *btn, gpointer data) {
     } else {
         g_free(s->data_path);
         s->data_path = NULL;
+        gtk_label_set_text(GTK_LABEL(s->data_label), "Alongside your music files");
+        gtk_widget_set_opacity(s->data_label, 0.5);
+        gtk_label_set_text(GTK_LABEL(s->index_hint_label),
+            "Index stored alongside your music files.");
     }
 
     update_confirm_sensitivity(s);
@@ -434,29 +498,47 @@ static void on_add_confirm(GtkButton *btn, gpointer data) {
         }
     }
 
-    app_settings_add_library_path(s->w->settings, s->music_path);
-    int idx = s->w->settings->library_path_count - 1;
+    app_settings_add_library(s->w->settings, s->music_path);
+    int idx = s->w->settings->library_count - 1;
 
-    if (effective_data)
-        app_settings_set_library_data_path(s->w->settings, idx, effective_data);
+    if (effective_data) {
+        g_free(s->w->settings->libraries[idx].data_path);
+        s->w->settings->libraries[idx].data_path = effective_data ? g_strdup(effective_data) : NULL;
+    }
 
     /* Store per-library integration flags */
-    app_settings_set_library_mb_resolve(s->w->settings, idx,
-        gtk_switch_get_active(GTK_SWITCH(s->mb_switch)) ? 1 : 0);
-    app_settings_set_library_acoustid(s->w->settings, idx,
-        gtk_switch_get_active(GTK_SWITCH(s->acoustid_switch)) ? 1 : 0);
-    app_settings_set_library_fanart(s->w->settings, idx,
-        gtk_switch_get_active(GTK_SWITCH(s->fanart_switch)) ? 1 : 0);
-    app_settings_set_library_wikipedia(s->w->settings, idx,
-        gtk_switch_get_active(GTK_SWITCH(s->wikipedia_switch)) ? 1 : 0);
+    s->w->settings->libraries[idx].mb_resolve =
+        gtk_switch_get_active(GTK_SWITCH(s->mb_switch)) ? 1 : 0;
+    s->w->settings->libraries[idx].acoustid =
+        gtk_switch_get_active(GTK_SWITCH(s->acoustid_switch)) ? 1 : 0;
+    s->w->settings->libraries[idx].fanart =
+        gtk_switch_get_active(GTK_SWITCH(s->fanart_switch)) ? 1 : 0;
+    s->w->settings->libraries[idx].wikipedia =
+        gtk_switch_get_active(GTK_SWITCH(s->wikipedia_switch)) ? 1 : 0;
 
     settings_save_debounced(s->w);
+
+    /* Add cache and artwork slots for the new library */
+    const char *dp = effective_data ? effective_data : s->music_path;
+    if (s->w->library_cache) {
+        char *dbpath = g_build_filename(dp, "quadrature.sqlite", NULL);
+        library_cache_source_t src = {
+            .db_path      = dbpath,
+            .music_base   = s->music_path,
+            .display_name = NULL,
+        };
+        library_cache_add_slot(s->w->library_cache, &src);
+        g_free(dbpath);
+    }
+    if (s->w->artwork_mgr)
+        artwork_manager_add_library(s->w->artwork_mgr, dp, s->music_path);
+
     libs_load(s->w);
     libs_rebuild(s->w);
 
     if (s->w->indexer) {
         const char *paths[] = { s->music_path };
-        const char *dpaths[] = { effective_data ? effective_data : s->music_path };
+        const char *dpaths[] = { dp };
         indexer_controller_start(s->w->indexer, paths, dpaths, 1);
     }
 
@@ -485,7 +567,6 @@ static void on_add_library(GtkButton *btn, gpointer data) {
     GtkWidget *music_label    = GTK_WIDGET(gtk_builder_get_object(b, "music_path_label"));
     GtkWidget *data_label     = GTK_WIDGET(gtk_builder_get_object(b, "data_path_label"));
     GtkWidget *data_browse    = GTK_WIDGET(gtk_builder_get_object(b, "data_browse_btn"));
-    GtkWidget *index_revealer = GTK_WIDGET(gtk_builder_get_object(b, "index_section_revealer"));
     GtkWidget *type_desc      = GTK_WIDGET(gtk_builder_get_object(b, "type_description"));
     GtkWidget *index_hint     = GTK_WIDGET(gtk_builder_get_object(b, "index_hint_label"));
     GtkWidget *music_browse   = GTK_WIDGET(gtk_builder_get_object(b, "music_browse_btn"));
@@ -521,7 +602,6 @@ static void on_add_library(GtkButton *btn, gpointer data) {
     s->music_label      = music_label;
     s->data_label       = data_label;
     s->data_browse_btn  = data_browse;
-    s->index_revealer   = index_revealer;
     s->type_description = type_desc;
     s->index_hint_label = index_hint;
     s->confirm_btn      = confirm_btn;

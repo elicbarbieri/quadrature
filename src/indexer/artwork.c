@@ -137,8 +137,16 @@ quadrature_result_t artwork_find_bytes(const char* album_dir,
         char audio_path[INDEXER_PATH_MAX];
         snprintf(audio_path, sizeof(audio_path), "%s/%s", album_dir, dent->d_name);
 
+        AVDictionary* open_opts = NULL;
+        av_dict_set(&open_opts, "probesize", "65536", 0);
+        av_dict_set(&open_opts, "analyzeduration", "0", 0);
+
         AVFormatContext* fmt = NULL;
-        if (avformat_open_input(&fmt, audio_path, NULL, NULL) != 0) continue;
+        if (avformat_open_input(&fmt, audio_path, NULL, &open_opts) != 0) {
+            av_dict_free(&open_opts);
+            continue;
+        }
+        av_dict_free(&open_opts);
         if (avformat_find_stream_info(fmt, NULL) < 0) { avformat_close_input(&fmt); continue; }
 
         int pic_stream = -1;
@@ -203,8 +211,21 @@ static void ensure_vips_init(void) {
  */
 static quadrature_result_t vips_to_raw_rgb(VipsImage* img, int thumb_size,
                                             uint8_t** output_data, size_t* output_size) {
-    /* Flatten alpha channel if present */
-    if (vips_image_get_bands(img) == 4) {
+    int bands = vips_image_get_bands(img);
+
+    /* Convert grayscale (1-band) to 3-band sRGB */
+    if (bands == 1) {
+        VipsImage *rgb = NULL;
+        if (vips_colourspace(img, &rgb, VIPS_INTERPRETATION_sRGB, NULL) != 0) {
+            g_warning("vips_colourspace (grey→sRGB) failed: %s", vips_error_buffer());
+            vips_error_clear();
+            g_object_unref(img);
+            return QUADRATURE_ERROR_INTERNAL;
+        }
+        g_object_unref(img);
+        img = rgb;
+    } else if (bands == 4) {
+        /* Flatten alpha channel (RGBA → RGB) */
         VipsImage *flat = NULL;
         if (vips_flatten(img, &flat, NULL) != 0) {
             g_warning("vips_flatten failed: %s", vips_error_buffer());
@@ -624,9 +645,14 @@ quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t* builde
         return QUADRATURE_ERROR_INTERNAL;
     }
 
-    /* Write sorted album_id array */
-    for (size_t i = 0; i < builder->entry_count; i++) {
-        if (fwrite(&builder->entries[i].album_id, sizeof(int64_t), 1, f) != 1) {
+    /* Write sorted album_id array — batch into flat array for single fwrite */
+    {
+        int64_t *ids = g_malloc(builder->entry_count * sizeof(int64_t));
+        for (size_t i = 0; i < builder->entry_count; i++)
+            ids[i] = builder->entries[i].album_id;
+        size_t written = fwrite(ids, sizeof(int64_t), builder->entry_count, f);
+        g_free(ids);
+        if (written != builder->entry_count) {
             fclose(f); unlink(builder->temp_path);
             return QUADRATURE_ERROR_INTERNAL;
         }

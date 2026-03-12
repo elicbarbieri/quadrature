@@ -165,7 +165,6 @@ quadrature_result_t db_upsert_folder_album(quadrature_db_t* db,
                                             const char* folder_path,
                                             const char* title,
                                             int64_t artist_id,
-                                            bool is_compilation,
                                             uint16_t year,
                                             int64_t* album_id_out) {
     if (!db || !folder_path || !title) return QUADRATURE_ERROR_INVALID_PARAM;
@@ -188,7 +187,7 @@ quadrature_result_t db_upsert_folder_album(quadrature_db_t* db,
         // Update existing album (WHERE mb_status != 1 preserves MB-resolved albums)
         sqlite3_bind_text(db->update_album_by_id, 1, title, -1, SQLITE_STATIC);
         sqlite3_bind_int64(db->update_album_by_id, 2, artist_id);
-        sqlite3_bind_int(db->update_album_by_id, 3, is_compilation ? 1 : 0);
+        sqlite3_bind_int(db->update_album_by_id, 3, 0);
         if (year > 0) {
             sqlite3_bind_int(db->update_album_by_id, 4, year);
         } else {
@@ -208,7 +207,7 @@ quadrature_result_t db_upsert_folder_album(quadrature_db_t* db,
         } else {
             sqlite3_bind_null(db->insert_folder_album, 4);
         }
-        sqlite3_bind_int(db->insert_folder_album, 5, is_compilation ? 1 : 0);
+        sqlite3_bind_int(db->insert_folder_album, 5, 0);
 
         int rc = sqlite3_step(db->insert_folder_album);
         if (rc != SQLITE_DONE) {
@@ -605,6 +604,7 @@ quadrature_result_t db_set_album_release_id_from_tags(quadrature_db_t* db,
 }
 
 quadrature_result_t db_get_unresolved_albums(quadrature_db_t* db,
+    int64_t retry_no_match_before,
     int64_t** album_ids, size_t* count) {
     if (!db || !album_ids || !count) return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -616,8 +616,11 @@ quadrature_result_t db_get_unresolved_albums(quadrature_db_t* db,
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(db->db,
         "SELECT id FROM albums "
-        "WHERE mb_status IN (0, 1) AND path != '' ORDER BY id",
+        "WHERE (mb_status IN (0, 1, 4) "
+        "   OR (mb_status = 3 AND mb_resolved_at < ?)) "
+        "AND path != '' ORDER BY id",
         -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, retry_no_match_before);
 
     size_t cap = 256;
     int64_t* ids = g_new(int64_t, cap);
@@ -869,13 +872,16 @@ quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db) {
     sqlite3_exec(db->db, "BEGIN", NULL, NULL, &err);
     if (err) { sqlite3_free(err); err = NULL; }
 
-    /* NOT EXISTS short-circuits at the first matching track_artists row —
-     * faster than NOT IN (SELECT ...) which materialises the full subquery. */
+    /* An artist is "alive" if it appears in track_artists OR is an album artist.
+     * Both must be checked: MusicBrainz resolve can replace track credits with
+     * corrected artists, orphaning Phase 2 entries that may still be album artists. */
     sqlite3_stmt* del;
     sqlite3_prepare_v2(db->db,
         "DELETE FROM artists "
         "WHERE NOT EXISTS "
-        "(SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.id)",
+        "  (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.id) "
+        "AND NOT EXISTS "
+        "  (SELECT 1 FROM albums al WHERE al.artist_id = artists.id)",
         -1, &del, NULL);
     sqlite3_step(del);
     int changes = sqlite3_changes(db->db);

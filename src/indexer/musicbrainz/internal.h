@@ -20,12 +20,15 @@
 #define MB_PATH_MAX 4096
 
 // Fingerprinting
-#define MB_FINGERPRINT_DURATION 120  // Seconds of audio to fingerprint
+#define MB_FINGERPRINT_DURATION 30   // Seconds of audio to fingerprint (30s is sufficient for reliable identification)
 #define MB_FINGERPRINT_TRACKS 4      // Max tracks to fingerprint per album (with early exit)
 #define MB_MATCH_CONFIDENCE 0.80     // 80% of tracks must match same release
 
 // Batch resolution
 #define MB_BATCH_SIZE 50             // Albums per PG round-trip
+
+// NO_MATCH retry interval (re-attempt resolution after this many seconds)
+#define MB_NO_MATCH_RETRY_SECONDS (30 * 24 * 3600)  // 30 days
 
 // =============================================================================
 // Standard MusicBrainz Tag Names
@@ -46,13 +49,34 @@
 typedef struct mb_pg_client mb_pg_client_t;
 
 // =============================================================================
+// Persistent HTTP Connection (mb_acoustid.c)
+// =============================================================================
+
+/**
+ * Persistent HTTP connection to acoustid-index.
+ * Reused across multiple lookups on the same worker thread.
+ * Reconnects transparently on failure.
+ */
+typedef struct {
+    int fd;
+    char host[256];
+    int port;
+    char* url;      // Original URL, kept for reconnection
+    bool alive;     // Keep-alive state from last response
+} mb_http_conn_t;
+
+mb_http_conn_t* mb_http_conn_create(const char* base_url);
+void mb_http_conn_destroy(mb_http_conn_t* conn);
+
+// =============================================================================
 // AcoustID Lookup (mb_acoustid.c) — Local PostgreSQL
 // =============================================================================
 
 typedef struct {
-    char* recording_id;   // MusicBrainz recording ID
-    char* release_id;     // MusicBrainz release ID (may be NULL)
-    float score;          // Match confidence (0.0-1.0)
+    char* recording_id;       // MusicBrainz recording ID
+    char* release_id;         // MusicBrainz release ID (may be NULL)
+    char* release_group_id;   // MusicBrainz release group ID (may be NULL)
+    float score;              // Match confidence (0.0-1.0)
 } mb_acoustid_result_t;
 
 typedef struct {
@@ -69,14 +93,16 @@ typedef struct {
  *
  * @param mb_client    PostgreSQL client connected to MusicBrainz database
  * @param acoustid_client PostgreSQL client connected to acoustid database (may be NULL to skip)
- * @param acoustid_index_url  Base URL for acoustid-index, e.g. "http://192.168.1.220:8081" (may be NULL to skip)
+ * @param http_conn    Persistent HTTP connection to acoustid-index (may be NULL to skip)
  * @param fingerprint  Fingerprint to look up
  * @param response     Output response (caller must free with mb_acoustid_response_free)
- * @return QUADRATURE_OK on success (empty response is not an error)
+ * @return QUADRATURE_OK on success (empty response means no match found),
+ *         QUADRATURE_ERROR_SERVICE_UNAVAILABLE if acoustid-index HTTP or PG is unreachable,
+ *         QUADRATURE_ERROR_INVALID_PARAM for bad inputs
  */
 quadrature_result_t mb_acoustid_lookup(mb_pg_client_t* mb_client,
                                         mb_pg_client_t* acoustid_client,
-                                        const char* acoustid_index_url,
+                                        mb_http_conn_t* http_conn,
                                         const mb_fingerprint_t* fingerprint,
                                         mb_acoustid_response_t* response);
 
@@ -84,6 +110,48 @@ quadrature_result_t mb_acoustid_lookup(mb_pg_client_t* mb_client,
  * Free AcoustID response.
  */
 void mb_acoustid_response_free(mb_acoustid_response_t* response);
+
+/**
+ * Prepare acoustid lookup SQL statements on PG connections.
+ * Call once per connection pair (during pool setup).
+ * After this, mb_acoustid_lookup uses PQexecPrepared for zero-parse overhead.
+ */
+quadrature_result_t mb_acoustid_prepare_stmts(mb_pg_client_t* mb_client,
+                                               mb_pg_client_t* acoustid_client);
+
+/**
+ * Look up ISRCs via MusicBrainz PostgreSQL.
+ * Returns (release_id, release_group_id) pairs in the same response type
+ * as mb_acoustid_lookup, so results can be fed through the same voting logic.
+ *
+ * @param mb_client  PostgreSQL client connected to MusicBrainz database
+ * @param isrcs      Array of ISRC strings
+ * @param count      Number of ISRCs
+ * @param response   Output response (caller must free with mb_acoustid_response_free)
+ */
+quadrature_result_t mb_isrc_lookup(mb_pg_client_t* mb_client,
+                                    const char** isrcs, size_t count,
+                                    mb_acoustid_response_t* response);
+
+/**
+ * Search MusicBrainz Solr for releases matching artist + album name.
+ * Solr handles diacritics, Unicode normalization, and aliases via Lucene.
+ * Candidates validated against PG for exact track count + total duration ±5%.
+ *
+ * @param mb_client   PG client for duration validation
+ * @param solr_url    Solr base URL (e.g., "http://localhost:8983")
+ * @param album_title Album title from audio file metadata tags
+ * @param artist_name Artist name from audio file metadata tags
+ * @param local_track_count  Number of tracks in local album
+ * @param local_total_duration_ms  Total duration of local tracks
+ * @return Allocated release_id string, or NULL. Caller must g_free().
+ */
+char* mb_solr_search_release(mb_pg_client_t* mb_client,
+                              const char* solr_url,
+                              const char* album_title,
+                              const char* artist_name,
+                              size_t local_track_count,
+                              int64_t local_total_duration_ms);
 
 // =============================================================================
 // MusicBrainz Data Types
@@ -151,6 +219,19 @@ void mb_pg_client_destroy(mb_pg_client_t* client);
  */
 void* mb_pg_exec(mb_pg_client_t* client, const char* query,
                   int nparams, const char* const* params);
+
+/**
+ * Prepare a named statement for later execution with mb_pg_exec_prepared.
+ */
+quadrature_result_t mb_pg_prepare(mb_pg_client_t* client, const char* stmt_name,
+                                   const char* query, int nparams);
+
+/**
+ * Execute a previously-prepared statement.
+ * Returns a PGresult* (caller must PQclear).
+ */
+void* mb_pg_exec_prepared(mb_pg_client_t* client, const char* stmt_name,
+                           int nparams, const char* const* params);
 
 /**
  * Set the PostgreSQL search_path to the given schema name.
@@ -231,12 +312,21 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
 typedef struct {
     mb_pg_client_t** mb_conns;
     mb_pg_client_t** acoustid_conns;
+    mb_http_conn_t** http_conns;       // Persistent HTTP connections to acoustid-index
     size_t count;
     volatile gint next_slot;
 } mb_pg_pool_t;
 
+/**
+ * Create connection pool for fingerprint workers.
+ * Each slot gets: MB PG conn, acoustid PG conn, HTTP conn to acoustid-index.
+ * Prepared statements are installed on all PG connections.
+ *
+ * @param acoustid_index_url  acoustid-index HTTP URL (may be NULL to skip HTTP+acoustid)
+ */
 quadrature_result_t mb_pg_pool_create(const char* mb_conninfo,
-    const char* acoustid_conninfo, size_t count, mb_pg_pool_t** out);
+    const char* acoustid_conninfo, const char* acoustid_index_url,
+    size_t count, mb_pg_pool_t** out);
 void mb_pg_pool_destroy(mb_pg_pool_t* pool);
 
 #endif // MUSICBRAINZ_INTERNAL_H

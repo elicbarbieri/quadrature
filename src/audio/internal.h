@@ -228,27 +228,19 @@ static inline uint64_t time_ns(void) {
 
 static inline float soft_limit(float x) {
     float abs_x = fabsf(x);
-
-    /* Below threshold: pass through */
-    if (abs_x <= LIMITER_THRESHOLD) {
-        return x;
-    }
-
-    /* Soft knee region: gradual compression */
-    float sign = (x >= 0.0f) ? 1.0f : -1.0f;
+    float sign = copysignf(1.0f, x);
     float overshoot = abs_x - LIMITER_THRESHOLD;
 
-    /* Attempt soft compression first */
-    if (overshoot < 1.0f) {
-        /* Soft knee: asymptotic approach to 1.0 */
-        float compressed = LIMITER_THRESHOLD + (1.0f - LIMITER_THRESHOLD) * (overshoot / (overshoot + LIMITER_KNEE));
-        return sign * compressed;
-    }
-
-    /* Hard saturation for extreme values (fast tanh approximation) */
-    if (abs_x > 2.0f) return sign * 1.0f;
+    /* Compute all paths unconditionally — select via ternary (cmov, no branches).
+     * Enables auto-vectorization of caller loops with -O3 -march=native. */
+    float knee = LIMITER_THRESHOLD + (1.0f - LIMITER_THRESHOLD) * (overshoot / (overshoot + LIMITER_KNEE));
     float x2 = abs_x * abs_x;
-    return sign * (abs_x * (27.0f + x2) / (27.0f + 9.0f * x2));
+    float tanh_approx = abs_x * (27.0f + x2) / (27.0f + 9.0f * x2);
+
+    return (abs_x <= LIMITER_THRESHOLD) ? x :
+           (overshoot < 1.0f)           ? sign * knee :
+           (abs_x > 2.0f)              ? sign :
+                                          sign * tanh_approx;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -366,6 +358,7 @@ struct audio_player {
 
     /* Spectrum analyzer data (stereo: 0..SPECTRUM_BARS-1 = left, SPECTRUM_BARS..2*SPECTRUM_BARS-1 = right) */
     _Atomic float spectrum_bars[SPECTRUM_BARS * 2];
+    _Atomic uint32_t spectrum_generation;  /* Incremented after cava_execute produces new output */
     spectrum_state_t spectrum;  /* Inline cava state, processed in monitor callback */
 
     /* PipeWire streams */
@@ -495,7 +488,7 @@ void spectrum_cleanup(spectrum_state_t* s);
  * @param bars    Atomic spectrum_bars array to write results
  */
 void spectrum_process(spectrum_state_t* s, const float* in, uint32_t frames,
-                      _Atomic float* bars);
+                      _Atomic float* bars, _Atomic uint32_t* generation);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Audio Device Enumeration API

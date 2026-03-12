@@ -55,9 +55,6 @@ EdgeColors sample_edge_colors(GdkTexture *texture, int num_rows) {
         .top    = { tr / count / 255.0, tg / count / 255.0, tb / count / 255.0, 1.0 },
         .bottom = { br / count / 255.0, bg_ / count / 255.0, bb / count / 255.0, 1.0 },
     };
-    g_debug("edge colors: top=(%.2f,%.2f,%.2f) bottom=(%.2f,%.2f,%.2f)",
-            colors.top.red, colors.top.green, colors.top.blue,
-            colors.bottom.red, colors.bottom.green, colors.bottom.blue);
     return colors;
 }
 

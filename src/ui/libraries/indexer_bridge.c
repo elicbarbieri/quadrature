@@ -259,6 +259,19 @@ static void lib_stats_done(GObject *src, GAsyncResult *res, gpointer data) {
     e->errors = d->errors;
     update_card_stats_labels(e);
 
+    /* Show deferred "Library Loaded" toast now that stats are populated */
+    if (e->pending_load_toast) {
+        e->pending_load_toast = FALSE;
+        char *folder = g_path_get_basename(e->path);
+        char *markup = g_markup_printf_escaped(
+            "<b>Library \"%s\" Loaded</b>\n"
+            "<span size=\"small\" alpha=\"70%%\">%zu Albums · %zu Tracks · Processing artwork…</span>",
+            folder, e->albums, e->tracks);
+        g_free(folder);
+        ui_window_show_toast_markup(d->window, markup, TOAST_SUCCESS, 5000);
+        g_free(markup);
+    }
+
     lib_stats_data_free(d);
 }
 
@@ -564,10 +577,10 @@ void on_cache_ready(void *data) {
 }
 
 /* Resolve lib_idx for a library_path (returns -1 if not found). */
-static int find_lib_idx(UiWindow *w, const char *library_path) {
+int find_lib_idx(UiWindow *w, const char *library_path) {
     if (!w->settings || !library_path) return -1;
-    for (int i = 0; i < w->settings->library_path_count; i++) {
-        if (strcmp(w->settings->library_paths[i], library_path) == 0)
+    for (int i = 0; i < w->settings->library_count; i++) {
+        if (strcmp(w->settings->libraries[i].path, library_path) == 0)
             return i;
     }
     return -1;
@@ -603,17 +616,11 @@ void on_indexer_library_updated(IndexerController *idx, const char *library_path
 
     libs_load_entry_stats(e, w);
 
-    /* Show "Library Loaded" toast only on the first library-updated per scan */
+    /* Defer "Library Loaded" toast until async stats arrive (Bug fix: stats are
+     * zeroed by libs_load_entry_stats above; showing now would display "0 Albums"). */
     if (!e->shown_initial_load_toast) {
         e->shown_initial_load_toast = TRUE;
-        char *folder = g_path_get_basename(library_path);
-        char *markup = g_markup_printf_escaped(
-            "<b>Library \"%s\" Loaded</b>\n"
-            "<span size=\"small\" alpha=\"70%%\">%zu Albums · %zu Tracks · Processing artwork…</span>",
-            folder, e->albums, e->tracks);
-        g_free(folder);
-        ui_window_show_toast_markup(w, markup, TOAST_SUCCESS, 5000);
-        g_free(markup);
+        e->pending_load_toast = TRUE;
     }
 }
 

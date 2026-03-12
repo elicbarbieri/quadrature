@@ -61,11 +61,11 @@ static void setup_test_data(void) {
     // Album paths are relative to music_base ("/music")
     int64_t album1_id = 0, album2_id = 0, album3_id = 0;
     cr_assert_eq(db_upsert_folder_album(test_db, "Artist1/Album1",
-        "First Album", test_artist_id, false, 2020, &album1_id), QUADRATURE_OK);
+        "First Album", test_artist_id, 2020, &album1_id), QUADRATURE_OK);
     cr_assert_eq(db_upsert_folder_album(test_db, "Artist1/Album2",
-        "Double Album", test_artist_id, false, 2021, &album2_id), QUADRATURE_OK);
+        "Double Album", test_artist_id, 2021, &album2_id), QUADRATURE_OK);
     cr_assert_eq(db_upsert_folder_album(test_db, "Artist2/Album",
-        "Another Album", another_artist_id, false, 2022, &album3_id), QUADRATURE_OK);
+        "Another Album", another_artist_id, 2022, &album3_id), QUADRATURE_OK);
 
     // Album 1: Single disc album with 3 tracks
     // Track paths are relative to album directory
@@ -357,11 +357,11 @@ Test(library_cache, next_track_multi_disc, .init = setup, .fini = teardown) {
 
 Test(library_cache, navigation_invalid_track, .init = setup, .fini = teardown) {
     cr_assert_eq(library_cache_get_next_track_id(test_cache, 0), 0);
-    cr_assert_eq(library_cache_get_next_track_id(test_cache, -1), 0);
+    cr_assert_eq(library_cache_get_next_track_id(test_cache, LIBRARY_MASK_ALL), 0);
     cr_assert_eq(library_cache_get_next_track_id(test_cache, 9999), 0);
 
     cr_assert_eq(library_cache_get_prev_track_id(test_cache, 0), 0);
-    cr_assert_eq(library_cache_get_prev_track_id(test_cache, -1), 0);
+    cr_assert_eq(library_cache_get_prev_track_id(test_cache, LIBRARY_MASK_ALL), 0);
     cr_assert_eq(library_cache_get_prev_track_id(test_cache, 9999), 0);
 }
 
@@ -394,13 +394,13 @@ Test(library_cache, get_albums_by_artist, .init = setup, .fini = teardown) {
 }
 
 Test(library_cache, get_artists_loads_all, .init = setup, .fini = teardown) {
-    GPtrArray* artists = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+    GPtrArray* artists = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(artists);
     cr_assert_eq(artists->len, 2);  // "Test Artist" and "Another Artist"
     g_ptr_array_unref(artists);
 
     // Second call should also work
-    GPtrArray* artists2 = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+    GPtrArray* artists2 = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(artists2);
     cr_assert_eq(artists2->len, 2);
     g_ptr_array_unref(artists2);
@@ -408,7 +408,7 @@ Test(library_cache, get_artists_loads_all, .init = setup, .fini = teardown) {
 
 Test(library_cache, get_artists_sorted, .init = setup, .fini = teardown) {
     // Name ascending
-    GPtrArray* artists = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+    GPtrArray* artists = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(artists);
     cr_assert_eq(artists->len, 2);
 
@@ -418,7 +418,7 @@ Test(library_cache, get_artists_sorted, .init = setup, .fini = teardown) {
     g_ptr_array_unref(artists);
 
     // Name descending
-    GPtrArray* artists_desc = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_DESC, NULL, NULL);
+    GPtrArray* artists_desc = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_DESC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(artists_desc);
 
     first = g_ptr_array_index(artists_desc, 0);
@@ -428,7 +428,7 @@ Test(library_cache, get_artists_sorted, .init = setup, .fini = teardown) {
 }
 
 Test(library_cache, get_albums_sorted, .init = setup, .fini = teardown) {
-    GPtrArray* albums = library_cache_get_albums_filtered(test_cache, LIBRARY_SORT_YEAR_ASC, NULL, NULL);
+    GPtrArray* albums = library_cache_get_albums_filtered(test_cache, LIBRARY_SORT_YEAR_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(albums);
     cr_assert_eq(albums->len, 3);  // Three albums total
 
@@ -446,7 +446,7 @@ Test(library_cache, get_albums_sorted, .init = setup, .fini = teardown) {
 Test(library_cache, search_returns_results, .init = setup, .fini = teardown) {
     // Search should return results
     library_search_results_t* results = library_cache_search(
-        test_cache, "Track", LIBRARY_SEARCH_FILTER_ALL, 10, NULL);
+        test_cache, "Track", LIBRARY_SEARCH_FILTER_ALL, 10, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(results);
     cr_assert(results->tracks->len > 0, "Expected track results");
 
@@ -456,12 +456,12 @@ Test(library_cache, search_returns_results, .init = setup, .fini = teardown) {
 Test(library_cache, search_different_query_gives_results, .init = setup, .fini = teardown) {
     // First search
     library_search_results_t* results1 = library_cache_search(
-        test_cache, "Track", LIBRARY_SEARCH_FILTER_ALL, 10, NULL);
+        test_cache, "Track", LIBRARY_SEARCH_FILTER_ALL, 10, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(results1);
 
     // Different query should also give results
     library_search_results_t* results2 = library_cache_search(
-        test_cache, "Album", LIBRARY_SEARCH_FILTER_ALL, 10, NULL);
+        test_cache, "Album", LIBRARY_SEARCH_FILTER_ALL, 10, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(results2);
 
     library_search_results_free(results1);
@@ -470,7 +470,7 @@ Test(library_cache, search_different_query_gives_results, .init = setup, .fini =
 
 Test(library_cache, search_filter_artists, .init = setup, .fini = teardown) {
     library_search_results_t* results = library_cache_search(
-        test_cache, "Test", LIBRARY_SEARCH_FILTER_ARTISTS, 10, NULL);
+        test_cache, "Test", LIBRARY_SEARCH_FILTER_ARTISTS, 10, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(results);
     cr_assert(results->artists->len > 0, "Expected artist results");
 
@@ -509,7 +509,7 @@ Test(library_cache, prefetch_audio_files_empty, .init = setup, .fini = teardown)
 Test(library_cache, clear_removes_all, .init = setup, .fini = teardown) {
     // Cache some data
     const library_track_info_t* track = library_cache_get_track(test_cache, 1);
-    GPtrArray* artists = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+    GPtrArray* artists = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(track);
     cr_assert_not_null(artists);
     g_ptr_array_unref(artists);
@@ -519,7 +519,7 @@ Test(library_cache, clear_removes_all, .init = setup, .fini = teardown) {
 
     // Data should be fresh after clear
     const library_track_info_t* track2 = library_cache_get_track(test_cache, 1);
-    GPtrArray* artists2 = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+    GPtrArray* artists2 = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(track2);
     cr_assert_not_null(artists2);
     cr_assert_neq(track, track2);
@@ -537,10 +537,10 @@ static void* reader_thread(void* arg) {
         // Mix of operations
         library_cache_get_track(cache, 1);
         library_cache_get_next_track_id(cache, 1);
-        GPtrArray* artists = library_cache_get_artists_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL);
+        GPtrArray* artists = library_cache_get_artists_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
         if (artists) g_ptr_array_unref(artists);
         library_search_results_t* results = library_cache_search(
-            cache, "Track", LIBRARY_SEARCH_FILTER_ALL, 5, NULL);
+            cache, "Track", LIBRARY_SEARCH_FILTER_ALL, 5, NULL, LIBRARY_MASK_ALL);
         library_search_results_free(results);
     }
 

@@ -148,6 +148,13 @@ typedef struct {
     bool mb_resolve;          /* Run MusicBrainz resolver in Phase 4 (requires pg_conninfo) */
     const char* pg_conninfo;  /* libpq conninfo for MB+AcoustID PG database */
 
+    /* MusicBrainz Solr search (for fuzzy text search — diacritics, Unicode) */
+    const char* mb_solr_url;          /* Solr base URL, e.g. "http://host:8983" (NULL = skip text search) */
+
+    /* AcoustID fingerprinting (Phase 5) */
+    const char* acoustid_pg_conninfo;  /* libpq conninfo for AcoustID PG (NULL = skip fingerprinting) */
+    const char* acoustid_index_url;    /* acoustid-index HTTP URL, e.g. "http://host:8081" (NULL = skip) */
+
     /* Artist art (Phase 7) */
     const char* fanart_api_key;  /* fanart.tv personal API key (NULL = skip artist art) */
 
@@ -224,6 +231,7 @@ typedef struct {
     const char* pg_conninfo;            /* libpq connection string for self-hosted MusicBrainz database */
     const char* acoustid_pg_conninfo;  /* libpq connection string for acoustid database (optional) */
     const char* acoustid_index_url;    /* URL for acoustid-index HTTP service, e.g. "http://host:8081" (optional) */
+    const char* mb_solr_url;           /* MusicBrainz Solr base URL, e.g. "http://host:8983" (optional) */
     int parallelism;                    /* 0 = auto */
     const char* library_root;          /* Absolute path to library root; required for fingerprinting */
 } mb_resolver_options_t;

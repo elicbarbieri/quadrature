@@ -76,6 +76,25 @@ static gboolean on_update_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer
     return G_SOURCE_CONTINUE;
 }
 
+/** Install or remove the per-frame tick callback based on channel state.
+ *  Option A: tick runs whenever any channel has a loaded track. */
+static void ensure_update_tick(UiWindow *w) {
+    gboolean need_tick = FALSE;
+    for (int i = 0; i < MAX_CHANNELS; i++) {
+        if (w->channels[i] && ui_channel_strip_has_track(w->channels[i])) {
+            need_tick = TRUE;
+            break;
+        }
+    }
+    if (need_tick && !w->update_tick_id) {
+        w->update_tick_id = gtk_widget_add_tick_callback(
+            GTK_WIDGET(w), on_update_tick, w, NULL);
+    } else if (!need_tick && w->update_tick_id) {
+        gtk_widget_remove_tick_callback(GTK_WIDGET(w), w->update_tick_id);
+        w->update_tick_id = 0;
+    }
+}
+
 /**
  * Track changed callback - called when audio pipeline auto-advances to next track.
  * Updates the channel strip display with the new track's metadata.
@@ -526,7 +545,7 @@ static void on_artist_mbid_navigate(const char *mbid, const char *name, const ch
     /* Try MBID bridge: check if this artist exists in any library's main DB */
     int64_t found_id = 0;
     if (w->settings) {
-        for (int i = 0; i < w->settings->library_path_count && found_id == 0; i++) {
+        for (int i = 0; i < w->settings->library_count && found_id == 0; i++) {
             const char *dp = app_settings_get_library_data_path(w->settings, i);
             char *db_path = g_build_filename(dp, "quadrature.sqlite", NULL);
             quadrature_db_t *lib_db = NULL;
@@ -616,6 +635,15 @@ static void on_library_play(const char *path, const char *title,
                             int64_t track_id, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
 
+    /* Reject tracks from disconnected libraries */
+    if (track_id > 0 && w->library_cache) {
+        int lib_idx = LIBRARY_GLOBAL_ID_LIB(track_id);
+        if (!library_cache_get_available(w->library_cache, lib_idx)) {
+            ui_window_show_toast(w, "Library disconnected", TOAST_WARNING, 3000);
+            return;
+        }
+    }
+
     /* Check if a channel is focused */
     if (w->focused_channel < 0) {
         ui_window_show_toast(w,
@@ -655,6 +683,7 @@ static void on_library_play(const char *path, const char *title,
 
     /* Load the track - album context is resolved via LibraryCache in channel_strip */
     ui_channel_strip_load_track(w->channels[ch], track_id, path, title, artist, album);
+    ensure_update_tick(w);
 }
 
 static void on_library_back(gpointer data) {
@@ -685,6 +714,13 @@ static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
     if (!w->library_cache || track_id <= 0) return;
 
+    /* Reject tracks from disconnected libraries */
+    int lib_idx = LIBRARY_GLOBAL_ID_LIB(track_id);
+    if (!library_cache_get_available(w->library_cache, lib_idx)) {
+        ui_window_show_toast(w, "Library disconnected", TOAST_WARNING, 3000);
+        return;
+    }
+
     /* Validate channel */
     if (channel < 0 || channel >= MAX_CHANNELS || !w->channels[channel])
         return;  /* Fail silently */
@@ -706,6 +742,7 @@ static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
                                  track->artist_display,
                                  track->album_title);
     g_free(resolved);
+    ensure_update_tick(w);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -731,6 +768,88 @@ static void load_css(UiWindow *w) {
         GTK_STYLE_PROVIDER(w->css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Library Bar (global multi-toggle filter)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void sync_library_toggles(UiWindow *w) {
+    w->library_toggle_updating = TRUE;
+    for (int i = 0; i < w->library_toggle_count; i++) {
+        gboolean active = (w->library_mask & (1u << i)) != 0;
+        gtk_toggle_button_set_active(w->library_toggles[i], active);
+    }
+    w->library_toggle_updating = FALSE;
+}
+
+static void set_library_mask(UiWindow *w, uint32_t mask) {
+    if (mask == 0) mask = LIBRARY_MASK_ALL;  /* Never empty — reactivate all */
+    w->library_mask = mask;
+    sync_library_toggles(w);
+    refresh_library_views(w);
+}
+
+static void on_library_toggle(GtkToggleButton *btn, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    if (w->library_toggle_updating) return;
+
+    int lib_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "lib-idx"));
+    gboolean now_active = gtk_toggle_button_get_active(btn);
+    uint32_t new_mask = library_mask_after_toggle(
+        w->library_mask, lib_idx, now_active);
+    set_library_mask(w, new_mask);
+}
+
+static void on_library_right_click(GtkGestureClick *gesture, int n_press,
+                                   double x, double y, gpointer data) {
+    (void)gesture; (void)n_press; (void)x; (void)y;
+    UiWindow *w = UI_WINDOW(data);
+    set_library_mask(w, LIBRARY_MASK_ALL);
+}
+
+static void build_library_bar(UiWindow *w) {
+    int lib_count = library_cache_get_library_count(w->library_cache);
+    if (lib_count <= 1) {
+        gtk_widget_set_visible(w->library_bar, FALSE);
+        return;
+    }
+
+    /* Label */
+    GtkWidget *label = gtk_label_new("Libraries:");
+    gtk_widget_add_css_class(label, "library-bar-label");
+    gtk_box_append(GTK_BOX(w->library_bar), label);
+
+    /* Toggle buttons */
+    w->library_toggle_count = lib_count;
+    w->library_toggles = g_new0(GtkToggleButton*, lib_count);
+
+    for (int i = 0; i < lib_count; i++) {
+        const char *name = library_cache_get_library_name(w->library_cache, i);
+        GtkWidget *btn = gtk_toggle_button_new_with_label(name ? name : "Library");
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
+        gtk_widget_add_css_class(btn, "library-toggle");
+        g_object_set_data(G_OBJECT(btn), "lib-idx", GINT_TO_POINTER(i));
+        g_signal_connect(btn, "toggled", G_CALLBACK(on_library_toggle), w);
+
+        /* Right-click → select all libraries */
+        GtkGesture *rc = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rc), 3);
+        g_signal_connect(rc, "pressed", G_CALLBACK(on_library_right_click), w);
+        gtk_widget_add_controller(btn, GTK_EVENT_CONTROLLER(rc));
+
+        gtk_box_append(GTK_BOX(w->library_bar), btn);
+        w->library_toggles[i] = GTK_TOGGLE_BUTTON(btn);
+    }
+
+    /* Spacer for future right-side info */
+    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_hexpand(spacer, TRUE);
+    gtk_box_append(GTK_BOX(w->library_bar), spacer);
+
+    gtk_widget_set_visible(w->library_bar, TRUE);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
 
 static void build_ui(UiWindow *w) {
     /* Template already set window title and size, load CSS */
@@ -810,6 +929,9 @@ static void build_ui(UiWindow *w) {
                                                       w->settings);
     gtk_stack_add_named(GTK_STACK(w->stack), w->detail_view, "detail");
 
+    /* Build library bar (hidden for single library) */
+    build_library_bar(w);
+
     /* Create channel strips and add to template container */
     for (int i = 0; i < MAX_CHANNELS; i++) {
         GtkWidget *strip = ui_channel_strip_new(i, w->pipeline, w->library_cache);
@@ -824,7 +946,6 @@ static void build_ui(UiWindow *w) {
         
         /* Connect mode-changed signal for GPIO LED feedback */
         g_signal_connect(strip, "mode-changed", G_CALLBACK(on_channel_mode_changed), w);
-        gtk_box_append(GTK_BOX(w->channel_strips_box), strip);
     }
 
     /* Set fixed width on channels panel - CSS min/max-width alone isn't reliable */
@@ -837,8 +958,8 @@ static void build_ui(UiWindow *w) {
     /* Setup keyboard shortcut actions */
     setup_keyboard_actions(w);
 
-    /* Update timer */
-    w->update_tick_id = gtk_widget_add_tick_callback(GTK_WIDGET(w), on_update_tick, w, NULL);
+    /* Update timer: demand-driven, installed when first track loads */
+    w->update_tick_id = 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -847,6 +968,10 @@ static void build_ui(UiWindow *w) {
 
 static void ui_window_dispose(GObject *obj) {
     UiWindow *w = UI_WINDOW(obj);
+
+    /* Library bar cleanup */
+    g_free(w->library_toggles);
+    w->library_toggles = NULL;
 
     /* ── 1. Deregister external callbacks that reference this window ─────── */
 
@@ -873,6 +998,14 @@ static void ui_window_dispose(GObject *obj) {
     /* Clear cache ready callback so warming-complete idle can't call us */
     if (w->library_cache) {
         library_cache_set_ready_callback(w->library_cache, NULL, NULL);
+    }
+
+    /* Stop library monitor before anything else — prevents availability
+     * callbacks firing during teardown */
+    if (w->lib_monitor) {
+        g_signal_handlers_disconnect_by_data(w->lib_monitor, w);
+        library_monitor_stop(w->lib_monitor);
+        g_clear_object(&w->lib_monitor);
     }
 
     /* Cancel running indexers before unreffing — indexer_controller_dispose
@@ -947,6 +1080,8 @@ static void ui_window_class_init(UiWindowClass *klass) {
     /* Bind template children */
     gtk_widget_class_bind_template_child(widget_class, UiWindow, main_box);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, content_stack);
+    gtk_widget_class_bind_template_child(widget_class, UiWindow, content_column);
+    gtk_widget_class_bind_template_child(widget_class, UiWindow, library_bar);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, channel_strips_box);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, toast_overlay);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, toast_label);
@@ -958,6 +1093,7 @@ static void ui_window_init(UiWindow *w) {
 
     /* Set alias for stack */
     w->stack = w->content_stack;
+    w->library_mask = LIBRARY_MASK_ALL;
 
     /* Initialize non-template fields */
     w->pipeline = NULL;
@@ -1018,24 +1154,85 @@ static gboolean init_devices_idle(gpointer data) {
 }
 
 /** Build a temporary array of data root paths from settings. Caller must g_free(). */
-static const char **build_data_roots(app_settings_t *s) {
-    if (!s || s->library_path_count == 0) return NULL;
-    const char **roots = g_new(const char *, s->library_path_count);
-    for (int i = 0; i < s->library_path_count; i++)
-        roots[i] = app_settings_get_library_data_path(s, i);
-    return roots;
+/* =============================================================================
+ * Library availability changed — drive mounted/unmounted
+ * ============================================================================= */
+
+static void on_library_availability_changed(LibraryMonitor *mon,
+                                             int            lib_idx,
+                                             gboolean       available,
+                                             gpointer       data) {
+    (void)mon;
+    UiWindow *w = UI_WINDOW(data);
+
+    /* 1. Toast notification */
+    char *name = app_settings_get_library_name(w->settings, lib_idx);
+    char *msg = g_strdup_printf("Library \"%s\" %s",
+                                name ? name : "Unknown",
+                                available ? "reconnected" : "disconnected");
+    ui_window_show_toast(w, msg,
+                         available ? TOAST_SUCCESS : TOAST_WARNING,
+                         available ? 3000 : 5000);
+    g_free(msg);
+    g_free(name);
+
+    if (available) {
+        /* Rewarm slot (data may have changed while disconnected) */
+        library_cache_clear_slot(w->library_cache, lib_idx);
+        library_cache_warm_slot(w->library_cache, lib_idx);
+        /* on_cache_ready fires refresh_library_views when warming completes */
+
+        /* Auto-rescan to detect file changes */
+        if (w->indexer && w->settings && w->settings->auto_scan_on_startup &&
+            lib_idx < w->settings->library_count) {
+            const char *paths[] = { w->settings->libraries[lib_idx].path };
+            const char *dp = app_settings_get_library_data_path(w->settings, lib_idx);
+            const char *dpaths[] = { dp };
+            indexer_controller_start(w->indexer, paths, dpaths, 1);
+        }
+    } else {
+        /* Cancel any running indexer for this library */
+        if (w->indexer && w->settings && lib_idx < w->settings->library_count)
+            indexer_controller_cancel_library(w->indexer,
+                                              w->settings->libraries[lib_idx].path);
+
+        /* If detail view is showing entity from this library, navigate back */
+        if (w->current_view && strcmp(w->current_view, "detail") == 0 && w->detail_view) {
+            int64_t eid = library_unified_detail_get_current_entity_id(w->detail_view);
+            if (eid > 0 && LIBRARY_GLOBAL_ID_LIB(eid) == lib_idx) {
+                const char *back_to = w->previous_view ? w->previous_view : "artists";
+                gtk_stack_set_visible_child_name(GTK_STACK(w->stack), back_to);
+                w->current_view = back_to;
+            }
+        }
+    }
+
+    /* Update library card state */
+    update_lib_card_availability(w, lib_idx, available);
+
+    /* Refresh all browse/search views */
+    refresh_library_views(w);
 }
 
 static gboolean auto_scan_idle(gpointer data) {
     UiWindow *w = UI_WINDOW(data);
     if (w->indexer && w->settings && w->settings->auto_scan_on_startup &&
-        w->settings->library_path_count > 0) {
-        const char **dr = build_data_roots(w->settings);
-        indexer_controller_start(w->indexer,
-                                  (const char **)w->settings->library_paths,
-                                  dr,
-                                  (gsize)w->settings->library_path_count);
-        g_free(dr);
+        w->settings->library_count > 0) {
+        /* Build arrays of only available libraries */
+        int total = w->settings->library_count;
+        const char **paths = g_new(const char *, total);
+        const char **dpaths = g_new(const char *, total);
+        gsize count = 0;
+        for (int i = 0; i < total; i++) {
+            if (!library_cache_get_available(w->library_cache, i)) continue;
+            paths[count]  = w->settings->libraries[i].path;
+            dpaths[count] = app_settings_get_library_data_path(w->settings, i);
+            count++;
+        }
+        if (count > 0)
+            indexer_controller_start(w->indexer, paths, dpaths, count);
+        g_free(paths);
+        g_free(dpaths);
     }
     return G_SOURCE_REMOVE;
 }
@@ -1058,6 +1255,9 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
         indexer_controller_set_max_concurrent(w->indexer, settings->max_concurrent_library_scans);
         indexer_controller_set_musicbrainz_resolve(w->indexer, settings->musicbrainz_resolve);
         indexer_controller_set_pg_conninfo(w->indexer, settings->musicbrainz_pg_conninfo);
+        indexer_controller_set_mb_solr_url(w->indexer, settings->mb_solr_url);
+        indexer_controller_set_acoustid_pg_conninfo(w->indexer, settings->acoustid_pg_conninfo);
+        indexer_controller_set_acoustid_index_url(w->indexer, settings->acoustid_index_url);
         indexer_controller_set_fanart_api_key(w->indexer, settings->fanart_api_key);
     }
 
@@ -1066,17 +1266,22 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
     int thumb_size = settings ? settings->art_thumb_size : 48;
     const char **art_roots = NULL;
     int art_root_count = 0;
-    if (settings && settings->library_path_count > 0) {
-        art_root_count = settings->library_path_count;
+    const char **lib_roots = NULL;
+    if (settings && settings->library_count > 0) {
+        art_root_count = settings->library_count;
         art_roots = g_new(const char *, art_root_count);
-        for (int i = 0; i < art_root_count; i++)
+        lib_roots = g_new(const char *, art_root_count);
+        for (int i = 0; i < art_root_count; i++) {
             art_roots[i] = app_settings_get_library_data_path(settings, i);
+            lib_roots[i] = settings->libraries[i].path;
+        }
     }
     w->artwork_mgr = artwork_manager_new(
         w->library_cache, art_roots,
-        settings ? (const char **)settings->library_paths : NULL,
+        lib_roots,
         art_root_count, thumb_size, 0);
     g_free(art_roots);
+    g_free(lib_roots);
 
     build_ui(w);
 
@@ -1100,6 +1305,12 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
         g_signal_connect(w->indexer, "artwork-updated", G_CALLBACK(on_indexer_artwork_updated), w);
         g_signal_connect(w->indexer, "completed",     G_CALLBACK(on_indexer_done),          w);
     }
+
+    /* Library availability monitor (GVolumeMonitor + stat() heartbeat) */
+    w->lib_monitor = library_monitor_new(w->library_cache, w->settings);
+    g_signal_connect(w->lib_monitor, "availability-changed",
+                     G_CALLBACK(on_library_availability_changed), w);
+    library_monitor_start(w->lib_monitor);
 
     g_idle_add(init_devices_idle, w);
 

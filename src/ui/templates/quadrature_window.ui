@@ -16,10 +16,28 @@
 
             <!-- Nav bar placeholder (custom widget created programmatically) -->
 
-            <!-- Content stack overlay (for errors panel and toasts) -->
+            <!-- Content column: library bar + content stack overlay -->
             <child>
-              <object class="GtkOverlay" id="content_overlay">
+              <object class="GtkBox" id="content_column">
+                <property name="orientation">vertical</property>
                 <property name="hexpand">true</property>
+
+                <!-- Library bar (populated programmatically, hidden for single library) -->
+                <child>
+                  <object class="GtkBox" id="library_bar">
+                    <property name="orientation">horizontal</property>
+                    <property name="spacing">6</property>
+                    <property name="visible">false</property>
+                    <style>
+                      <class name="library-bar"/>
+                    </style>
+                  </object>
+                </child>
+
+                <!-- Content stack overlay (for errors panel and toasts) -->
+                <child>
+                  <object class="GtkOverlay" id="content_overlay">
+                    <property name="vexpand">true</property>
 
                 <!-- Content stack -->
                 <child>
@@ -53,6 +71,9 @@
                     </child>
                   </object>
                 </child>
+
+              </object>
+            </child>
 
               </object>
             </child>

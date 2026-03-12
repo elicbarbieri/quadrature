@@ -108,7 +108,7 @@ void on_axia_status_changed(int channel_id, bool connected, void *user_data) {
 }
 
 /* Called when channel mode changes (app → console LED feedback) */
-void on_channel_mode_changed(UiChannelStrip *strip, int channel_id, int mode, gpointer user_data) {
+void on_channel_mode_changed(UiChannelStrip *strip G_GNUC_UNUSED, int channel_id, int mode, gpointer user_data) {
     UiWindow *w = (UiWindow *)user_data;
     axia_gpio_t *gpio = w->gpio_handlers[channel_id];
     

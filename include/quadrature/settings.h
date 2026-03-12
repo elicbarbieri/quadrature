@@ -45,25 +45,41 @@ typedef struct {
 } channel_config_t;
 
 /**
+ * Per-library configuration.
+ * All per-library state lives here — no parallel arrays.
+ */
+typedef struct {
+    char *path;           // Music folder root (required, heap-owned)
+    char *name;           // Display name (NULL = use basename of path)
+    char *data_path;      // Index/DB location (NULL = same as path)
+    int   mb_resolve;     // -1 = inherit global, 0 = disabled, 1 = enabled
+    int   acoustid;       // -1 = inherit global, 0 = disabled, 1 = enabled
+    int   fanart;         // -1 = inherit global, 0 = disabled, 1 = enabled
+    int   wikipedia;      // -1 = inherit global, 0 = disabled, 1 = enabled
+    int   locked;         // 0 = unlocked, 1 = locked (prevents reorder + edit)
+    int   library_index;  // Stable slot ID; persisted as sort key in settings.ini
+} library_config_t;
+
+/**
  * Application settings structure.
  * Loaded from and saved to settings.ini file.
  */
 typedef struct {
-    // Per-channel settings (replaces flat arrays)
+    // Per-channel settings
     channel_config_t channels[APP_SETTINGS_MAX_CHANNELS];
 
     // Display settings
     gboolean show_spectrum;
     int time_warning_threshold_ms;
 
-    // Library settings
+    // Library settings (global)
     gboolean auto_scan_on_startup;    // Auto-scan watch paths on startup (default: TRUE)
     gboolean process_artwork;         // Extract and process album artwork (default: TRUE)
     int indexer_thread_count;         // Number of indexer threads per library (0 = auto)
     int art_thumb_size;               // Album art thumbnail size in pixels (default: 48)
     int max_concurrent_library_scans; // Max libraries scanning simultaneously (default: 2)
 
-    // Integration toggles (global defaults; per-library overrides below)
+    // Integration toggles (global defaults; per-library overrides in library_config_t)
     gboolean musicbrainz_resolve;     // Resolve MusicBrainz metadata after indexing
     gboolean fanart_resolve;          // Resolve fanart.tv artist images after indexing
     gboolean acoustid_fingerprint;    // Fingerprint tracks missing MUSICBRAINZ_ tags
@@ -73,35 +89,17 @@ typedef struct {
     char *musicbrainz_pg_conninfo;    // libpq conninfo for MusicBrainz PostgreSQL
     char *acoustid_pg_conninfo;       // libpq conninfo for AcoustID PostgreSQL
     char *acoustid_index_url;         // AcoustID index HTTP endpoint URL
+    char *mb_solr_url;                // MusicBrainz Solr search URL (e.g., "http://host:8983")
     char *fanart_api_key;             // fanart.tv personal API key
-    
+
     // Axia Livewire+ GPIO credentials (global for all channels)
     char *axia_username;              // LWRP username (NULL if not required)
     char *axia_password;              // LWRP password (NULL if not required)
 
-    // Library root paths (client-side; not stored in SQLite)
-    char **library_paths;             // NULL-terminated array of library root paths (heap-owned)
-    int    library_path_count;        // Number of entries in library_paths
-
-    // Library display names (parallel to library_paths[]; NULL entry = use basename)
-    char **library_names;             // Heap-owned; may be NULL or shorter than library_paths
-    int    library_name_count;        // Number of entries in library_names
-
-    // Library data paths (parallel to library_paths[]; NULL entry = use library_path)
-    // For read-only library roots, point this to a writable location for DB + artwork
-    char **library_data_paths;        // Heap-owned; may be NULL or shorter than library_paths
-    int    library_data_path_count;   // Number of entries in library_data_paths
-
-    // Per-library integration overrides (parallel to library_paths[])
-    // Values: -1 = inherit global default, 0 = disabled, 1 = enabled
-    int   *library_mb_resolve;
-    int    library_mb_resolve_count;
-    int   *library_acoustid;
-    int    library_acoustid_count;
-    int   *library_fanart;
-    int    library_fanart_count;
-    int   *library_wikipedia;
-    int    library_wikipedia_count;
+    // Libraries — ordered array, position = display order.
+    // library_config_t.library_index is the stable slot ID for cache/artwork.
+    library_config_t *libraries;      // Heap-owned array (NULL if none)
+    int               library_count;  // Number of configured libraries
 } app_settings_t;
 
 /**
@@ -226,58 +224,44 @@ const char *app_settings_get_axia_password(const app_settings_t *settings);
  * Returns the custom name if set, otherwise the basename of the path.
  * Caller must g_free() the result.
  */
-char *app_settings_get_effective_library_name(const app_settings_t *settings, int idx);
+char *app_settings_get_library_name(const app_settings_t *settings, int idx);
 
 /**
- * Set the display name for library at index.
- * Pass NULL or "" to clear (falls back to basename).
- * Does not save to disk -- caller must call app_settings_save().
- */
-void app_settings_set_library_name(app_settings_t *settings, int idx, const char *name);
-
-/**
- * Get data path for library at index.
- * Returns the custom data path if set, otherwise the library path itself.
+ * Get effective data path for library at index.
+ * Returns data_path if set, otherwise the library path itself.
  * Do not free the result.
  */
 const char *app_settings_get_library_data_path(const app_settings_t *settings, int idx);
 
 /**
- * Set the data path for library at index (where DB + artwork are stored).
- * Pass NULL or "" to clear (falls back to library path).
- * Does not save to disk -- caller must call app_settings_save().
+ * Add a library with the given music path. Assigns the next available library_index.
+ * No-op if the path is already present.
+ * Does not save to disk.
  */
-void app_settings_set_library_data_path(app_settings_t *settings, int idx, const char *path);
+void app_settings_add_library(app_settings_t *settings, const char *path);
 
 /**
- * Per-library integration overrides.
- * Getter returns: -1 = inherit global, 0 = disabled, 1 = enabled.
- * Setter accepts the same values.
+ * Remove the library with the given music path. No-op if not found.
+ * Does not save to disk.
  */
-int  app_settings_get_library_mb_resolve(const app_settings_t *settings, int idx);
-void app_settings_set_library_mb_resolve(app_settings_t *settings, int idx, int value);
-int  app_settings_get_library_acoustid(const app_settings_t *settings, int idx);
-void app_settings_set_library_acoustid(app_settings_t *settings, int idx, int value);
-int  app_settings_get_library_fanart(const app_settings_t *settings, int idx);
-void app_settings_set_library_fanart(app_settings_t *settings, int idx, int value);
-int  app_settings_get_library_wikipedia(const app_settings_t *settings, int idx);
-void app_settings_set_library_wikipedia(app_settings_t *settings, int idx, int value);
+void app_settings_remove_library(app_settings_t *settings, const char *path);
 
 /**
- * Add a library root path (no-op if already present; copies the string).
- *
- * @param settings Settings to modify
- * @param path Library root path
+ * Swap two libraries by array position (display order).
+ * Both positions must be valid (0 .. library_count-1).
+ * Does not save to disk.
  */
-void app_settings_add_library_path(app_settings_t *settings, const char *path);
+void app_settings_swap_libraries(app_settings_t *settings, int pos_a, int pos_b);
 
 /**
- * Remove a library root path (no-op if not present).
- *
- * @param settings Settings to modify
- * @param path Library root path to remove
+ * Find library array index by path. Returns -1 if not found.
  */
-void app_settings_remove_library_path(app_settings_t *settings, const char *path);
+int app_settings_find_library(const app_settings_t *settings, const char *path);
+
+/**
+ * Find library array index by library_index (stable slot ID). Returns -1 if not found.
+ */
+int app_settings_find_library_by_index(const app_settings_t *settings, int library_index);
 
 /**
  * Set a channel's PipeWire quantum (buffer size in frames).

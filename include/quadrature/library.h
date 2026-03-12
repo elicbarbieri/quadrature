@@ -29,6 +29,46 @@ extern "C" {
 #endif
 
 /* =============================================================================
+ * Library Mask (Multi-Library Filtering)
+ *
+ * Bitmask where bit N = library N is enabled. LIBRARY_MASK_ALL = no filter.
+ * Supports up to 32 libraries.
+ * ============================================================================= */
+
+#define LIBRARY_MASK_ALL  UINT32_MAX
+
+/**
+ * Compute new mask after a left-click toggle on a library pill.
+ *
+ * @param current_mask  Current library_mask before GTK flips the button.
+ * @param lib_idx       Index of the clicked library (0–31).
+ * @param now_active    Button state AFTER GTK toggled it (TRUE = was OFF, now ON).
+ * @return              New mask (never 0 — falls back to LIBRARY_MASK_ALL).
+ */
+static inline uint32_t library_mask_after_toggle(uint32_t current_mask,
+                                                  int lib_idx,
+                                                  gboolean now_active) {
+    uint32_t result;
+
+    if (now_active) {
+        /* Button was OFF → add to active set */
+        result = current_mask | (1u << lib_idx);
+    } else {
+        /* Button was ON → check if all were on before this click */
+        uint32_t pre_click_mask = current_mask | (1u << lib_idx);
+        if (pre_click_mask == LIBRARY_MASK_ALL) {
+            /* All were on before click → solo this library */
+            result = 1u << lib_idx;
+        } else {
+            /* Remove this library from active set */
+            result = current_mask & ~(1u << lib_idx);
+        }
+    }
+
+    return (result == 0) ? LIBRARY_MASK_ALL : result;
+}
+
+/* =============================================================================
  * Global ID Encoding (Multi-Library Support)
  *
  * Bit-packed global entity IDs:
@@ -57,6 +97,8 @@ extern "C" {
  * ============================================================================= */
 
 typedef struct quadrature_db quadrature_db_t;
+typedef struct quadrature_meta_db quadrature_meta_db_t;
+typedef struct quadrature_bios_db quadrature_bios_db_t;
 
 /* =============================================================================
  * Entity Info Types (cache owns all strings)
@@ -179,8 +221,8 @@ typedef struct {
  * LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id). Library 0 global IDs are
  * identical to their local DB IDs (backward compatible).
  *
- * @param sources Array of library source descriptors
- * @param source_count Number of sources (must be >= 1)
+ * @param sources Array of library source descriptors (NULL if source_count == 0)
+ * @param source_count Number of sources (0 = empty cache, slots added later)
  * @param out Output pointer for created cache
  * @return QUADRATURE_OK on success
  */
@@ -208,6 +250,36 @@ quadrature_result_t library_cache_create(const char* db_path,
  * @param cache Cache to destroy (NULL-safe)
  */
 void library_cache_destroy(library_cache_t* cache);
+
+/**
+ * Add a new library slot to an existing cache.
+ *
+ * Cancels all warming threads (realloc may move the slots array), initializes
+ * the new slot from the source descriptor, and returns its 0-based index.
+ * Caller should call library_cache_warm_slot() afterward to populate it.
+ *
+ * @param cache Library cache
+ * @param source Source descriptor for the new library
+ * @return New slot index on success, -1 on failure
+ */
+int library_cache_add_slot(library_cache_t *cache,
+                           const library_cache_source_t *source);
+
+/**
+ * Remove a library slot and shift remaining slots down.
+ *
+ * Cancels all warming threads, destroys the target slot, shifts higher slots
+ * down by one (clearing their cached entities since baked-in global IDs change),
+ * and rebuilds cross-library artist merging.
+ *
+ * After removal, shifted slots are in IDLE state and must be rewarmed
+ * (e.g. via library_cache_start_warming()).
+ *
+ * @param cache Library cache
+ * @param lib_idx 0-based slot index to remove
+ * @return QUADRATURE_OK on success
+ */
+quadrature_result_t library_cache_remove_slot(library_cache_t *cache, int lib_idx);
 
 /* =============================================================================
  * Entity Getters (Single Item)
@@ -361,25 +433,27 @@ const GPtrArray* library_cache_get_artist_appearance_tracks(library_cache_t* cac
 GPtrArray* library_cache_get_artists_filtered(library_cache_t* cache,
                                                library_sort_t sort,
                                                const char* search_text,
-                                               const db_search_opts_t* filters);
+                                               const db_search_opts_t* filters,
+                                               uint32_t library_mask);
 
 /**
  * Get albums matching filters (queries DB for IDs, resolves from cache).
  * Returns a caller-owned GPtrArray (caller must g_ptr_array_unref).
  * Individual album pointers inside are cache-owned (do not free them).
- *
- * Pass NULL for search_text and filters to get all albums (replaces get_albums).
+ * Cross-library albums with the same musicbrainz_release_id are deduplicated.
  *
  * @param cache Library cache
  * @param sort Sort order
  * @param search_text Text to match album title or artist name (NULL = no text filter)
  * @param filters Genre/year filter options (NULL = no genre/year filter)
+ * @param library_mask Bitmask of enabled libraries (LIBRARY_MASK_ALL = all)
  * @return GPtrArray of library_album_info_t* (caller owns array, cache owns items)
  */
 GPtrArray* library_cache_get_albums_filtered(library_cache_t* cache,
                                               library_sort_t sort,
                                               const char* search_text,
-                                              const db_search_opts_t* filters);
+                                              const db_search_opts_t* filters,
+                                              uint32_t library_mask);
 
 /* =============================================================================
  * Search
@@ -400,7 +474,8 @@ library_search_results_t* library_cache_search(library_cache_t* cache,
                                                 const char* query,
                                                 library_search_filter_t filter,
                                                 size_t limit,
-                                                const db_search_opts_t* opts);
+                                                const db_search_opts_t* opts,
+                                                uint32_t library_mask);
 
 /**
  * Free search results returned by library_cache_search().
@@ -516,6 +591,15 @@ int library_cache_get_library_count(library_cache_t* cache);
 size_t library_cache_get_slot_memory_bytes(library_cache_t* cache, int library_index);
 
 /**
+ * Get cached readonly DB handles for a library slot.
+ * Returns NULL if index is invalid or the DB file doesn't exist.
+ * Caller must NOT close the returned handle.
+ */
+quadrature_meta_db_t *library_cache_get_meta_db(library_cache_t *cache, int lib_idx);
+quadrature_bios_db_t *library_cache_get_bios_db(library_cache_t *cache, int lib_idx);
+quadrature_db_t *library_cache_get_db(library_cache_t *cache, int lib_idx);
+
+/**
  * Get the display name for a library slot.
  * Returns the configured display name, or the basename of the library path
  * if none was configured.
@@ -525,6 +609,36 @@ size_t library_cache_get_slot_memory_bytes(library_cache_t* cache, int library_i
  * @return Static string owned by the cache; do not free. NULL if index invalid.
  */
 const char* library_cache_get_library_name(library_cache_t* cache, int library_index);
+
+/**
+ * Update the display name for a library slot.
+ *
+ * Replaces the current display_name. Pass NULL to revert to basename fallback.
+ * The cache takes ownership of a copy of @p name.
+ *
+ * @param cache  Library cache
+ * @param lib_idx  Slot index (0-based)
+ * @param name  New display name, or NULL
+ */
+void library_cache_set_library_name(library_cache_t* cache, int lib_idx, const char* name);
+
+/**
+ * Set availability for a library slot.
+ *
+ * When FALSE, filtered queries (artists, albums, search) skip this slot
+ * entirely — its entities vanish from the UI.  Single-entity getters
+ * (get_track, get_album, get_artist) still work for in-flight operations
+ * like currently-playing tracks.
+ *
+ * Thread-safe (atomic store).
+ */
+void library_cache_set_available(library_cache_t* cache, int lib_idx, gboolean available);
+
+/**
+ * Get availability for a library slot.
+ * Thread-safe (atomic load).
+ */
+gboolean library_cache_get_available(library_cache_t* cache, int lib_idx);
 
 #ifdef __cplusplus
 }

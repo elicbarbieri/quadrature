@@ -15,10 +15,14 @@ void       libs_load(UiWindow *w);
 void       libs_rebuild(UiWindow *w);
 void       libs_free(UiWindow *w);
 
+/* Library availability */
+void update_lib_card_availability(UiWindow *w, int lib_idx, gboolean available);
+
 /* Indexer bridge — stats and card updates (called from libraries_view.c) */
 void libs_load_entry_stats(LibEntry *e, UiWindow *w);
 void update_card_stats_labels(LibEntry *e);
 void refresh_library_views(UiWindow *w);
+int  find_lib_idx(UiWindow *w, const char *library_path);
 void on_cache_ready(void *data);
 
 /* Indexer signal handlers (connected in window.c build_ui) */

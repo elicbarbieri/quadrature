@@ -119,15 +119,35 @@ static void proportional_box_measure(GtkWidget *widget, GtkOrientation orientati
 {
     (void)for_size;
     ProportionalBox *self = QUADRATURE_PROPORTIONAL_BOX(widget);
-    GtkWidget *slots[] = { self->art, self->col_left, self->col_right, self->col_meta };
+    /* Fixed slots (art, meta) contribute their full minimum width.
+     * Flexible slots (left, right) only contribute to natural width —
+     * they accept whatever proportional space remains after fixed slots.
+     * This prevents content-heavy rows (e.g. many credit pills) from
+     * inflating the minimum width and pushing sibling panels off-screen. */
+    GtkWidget *fixed_slots[]    = { self->art, self->col_meta };
+    GtkWidget *flexible_slots[] = { self->col_left, self->col_right };
     int min_acc = 0, nat_acc = 0, n_visible = 0;
 
-    for (int i = 0; i < 4; i++) {
-        if (!slots[i] || !gtk_widget_get_visible(slots[i])) continue;
+    for (int i = 0; i < 2; i++) {
+        if (!fixed_slots[i] || !gtk_widget_get_visible(fixed_slots[i])) continue;
         int cmin, cnat;
-        gtk_widget_measure(slots[i], orientation, -1, &cmin, &cnat, NULL, NULL);
+        gtk_widget_measure(fixed_slots[i], orientation, -1, &cmin, &cnat, NULL, NULL);
         if (orientation == GTK_ORIENTATION_HORIZONTAL) {
             min_acc += cmin;
+            nat_acc += cnat;
+            n_visible++;
+        } else {
+            min_acc = MAX(min_acc, cmin);
+            nat_acc = MAX(nat_acc, cnat);
+        }
+    }
+
+    for (int i = 0; i < 2; i++) {
+        if (!flexible_slots[i] || !gtk_widget_get_visible(flexible_slots[i])) continue;
+        int cmin, cnat;
+        gtk_widget_measure(flexible_slots[i], orientation, -1, &cmin, &cnat, NULL, NULL);
+        if (orientation == GTK_ORIENTATION_HORIZONTAL) {
+            /* Flexible columns: minimum is 0, natural is full request */
             nat_acc += cnat;
             n_visible++;
         } else {

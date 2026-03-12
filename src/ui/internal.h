@@ -56,35 +56,47 @@ static inline void ui_box_clear(GtkBox *box) {
         gtk_box_remove(box, child);
 }
 
-/* Populate a GtkBox with genre pill labels. Splits on semicolon,
- * shows at most max_show pills. Hides the box if no genres. */
-static inline void ui_populate_genre_pills(GtkBox *box, const char *genres, guint max_show) {
-    ui_box_clear(box);
-
-    if (!genres || !genres[0]) {
-        gtk_widget_set_visible(GTK_WIDGET(box), FALSE);
-        return;
-    }
-
-    gchar **parts = g_strsplit(genres, ";", 0);
-    guint n = g_strv_length(parts);
-    guint shown = 0;
-
-    for (guint i = 0; i < n && shown < max_show; i++) {
-        g_strstrip(parts[i]);
-        if (!parts[i][0]) continue;
-
-        GtkWidget *pill = gtk_label_new(parts[i]);
-        gtk_label_set_ellipsize(GTK_LABEL(pill), PANGO_ELLIPSIZE_END);
-        gtk_label_set_max_width_chars(GTK_LABEL(pill), 18);
-        gtk_widget_add_css_class(pill, "genre-pill");
-        gtk_box_append(box, pill);
-        shown++;
-    }
-
-    g_strfreev(parts);
-    gtk_widget_set_visible(GTK_WIDGET(box), shown > 0);
+/**
+ * Load a widget tree from a GResource .ui template.
+ * Returns the root widget (ref'd) and the builder (caller must g_object_unref).
+ * Typical usage:
+ *   GtkBuilder *b;
+ *   GtkWidget *row = ui_builder_load("/org/quadrature/ui/foo.ui", "row", &b);
+ *   GtkWidget *title = GTK_WIDGET(gtk_builder_get_object(b, "title"));
+ *   g_object_unref(b);
+ */
+static inline GtkWidget *ui_builder_load(const char *resource_path,
+                                          const char *root_id,
+                                          GtkBuilder **builder_out) {
+    GtkBuilder *builder = gtk_builder_new_from_resource(resource_path);
+    GtkWidget *root = GTK_WIDGET(gtk_builder_get_object(builder, root_id));
+    g_object_ref(root);
+    *builder_out = builder;
+    return root;
 }
+
+/** Format a year into a label. No-op if year is 0. */
+static inline void ui_set_year_label(GtkWidget *label, uint16_t year) {
+    if (!label) return;
+    if (year > 0) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%u", year);
+        gtk_label_set_text(GTK_LABEL(label), buf);
+    } else {
+        gtk_label_set_text(GTK_LABEL(label), "");
+    }
+}
+
+/** Format a track count (1 → "Single", N → "NN Tracks"). (ui_math.c) */
+void ui_format_track_count(char *buf, size_t len, uint32_t count);
+
+/** Populate a GtkBox with width-aware genre pills.
+ *  Splits genres on semicolons, shows as many as fit within the constraint
+ *  width, collapsing the rest into a "…" popover showing all genres.
+ *  Hides the box if no genres. Pass NULL constraint for default width. */
+void ui_populate_genre_pills(GtkWidget *box, const char *genres,
+                              GtkWidget *constraint_widget,
+                              double constraint_fraction);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Popover Shortcut Passthrough
@@ -166,6 +178,8 @@ ChannelMode ui_channel_strip_get_mode(UiChannelStrip *strip);
 void ui_channel_strip_set_focused(UiChannelStrip *strip, gboolean focused);
 gboolean ui_channel_strip_get_focused(UiChannelStrip *strip);
 gboolean ui_channel_strip_is_active(UiChannelStrip *strip);
+
+gboolean ui_channel_strip_has_track(UiChannelStrip *strip);
 
 /* Track context query - uses LibraryCache for album context */
 int64_t ui_channel_strip_get_current_track_id(UiChannelStrip *strip);
@@ -277,7 +291,25 @@ void indexer_controller_cancel_library(IndexerController* self, const char* libr
 gboolean indexer_controller_is_running(IndexerController* self);
 void indexer_controller_set_musicbrainz_resolve(IndexerController* self, gboolean enable);
 void indexer_controller_set_pg_conninfo(IndexerController* self, const char* conninfo);
+void indexer_controller_set_mb_solr_url(IndexerController* self, const char* url);
+void indexer_controller_set_acoustid_pg_conninfo(IndexerController* self, const char* conninfo);
+void indexer_controller_set_acoustid_index_url(IndexerController* self, const char* url);
 void indexer_controller_set_fanart_api_key(IndexerController* self, const char* api_key);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * LibraryMonitor — detects mount/unmount of library paths
+ *
+ * Signals:
+ *   availability-changed(lib_idx: int, available: gboolean)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define LIBRARY_TYPE_MONITOR (library_monitor_get_type())
+G_DECLARE_FINAL_TYPE(LibraryMonitor, library_monitor, LIBRARY, MONITOR, GObject)
+
+LibraryMonitor *library_monitor_new(library_cache_t *cache, app_settings_t *settings);
+void            library_monitor_start(LibraryMonitor *self);
+void            library_monitor_stop(LibraryMonitor *self);
+void            library_monitor_check_now(LibraryMonitor *self);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * ProportionalBox Widget
@@ -307,20 +339,6 @@ G_DECLARE_FINAL_TYPE(ProportionalBox, proportional_box,
  * Clickable artist/album buttons with overflow popover support.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Data for resize-aware artist button layout. Stored on artist GtkBox via
- * g_object_set_data("artist-box-data"). */
-typedef struct {
-    library_cache_t *cache;
-    int64_t          track_id;
-    library_artist_role_t role;
-    RowCallbacks *callbacks;          /* Owned copy */
-    gboolean add_feat_prefix;
-    GtkWidget *constraint_widget;
-    double constraint_fraction;
-    gboolean combined;
-    gboolean show_primary;
-} ArtistBoxData;
-
 GtkWidget* create_artist_button(int64_t artist_id, const char* name, RowCallbacks* callbacks);
 GtkWidget* create_artist_overflow_button(const GPtrArray* artists, RowCallbacks* callbacks);
 
@@ -345,6 +363,19 @@ void populate_artist_buttons_combined(GtkWidget *box,
                                        RowCallbacks *callbacks,
                                        gboolean show_primary);
 
+/* Width-aware credit role pill layout.
+ * Fills credit_annotation box with pills that fit the available width,
+ * collapsing excess pills into a static "+N more" overflow indicator.
+ * Roles are deep-copied; constraint_widget drives re-layout on resize.
+ * first_child_width is the pre-measured width of the artist button already
+ * in the box (pills are appended after it). */
+void populate_credit_pills(GtkWidget *credit_annotation,
+                            GtkWidget *constraint_widget,
+                            double constraint_fraction,
+                            const char *const *roles,
+                            guint role_count,
+                            int first_child_width);
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * SelectionGroup (row_helpers.c)
  *
@@ -361,6 +392,63 @@ void ui_selection_group_remove(SelectionGroup *group, GtkListBox *list);
 void ui_selection_group_free(SelectionGroup *group);
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Overflow Box — Generic Width-Aware Pill/Badge Layout (row_helpers.c)
+ *
+ * Populates a GtkBox with as many widgets as fit within a width budget,
+ * collapsing the rest into a caller-provided overflow indicator.
+ * Re-lays out automatically when the constraint widget resizes.
+ *
+ * create_item(index, user_data)  → floating GtkWidget for item #index
+ * create_overflow(first_hidden_index, total_count, user_data)
+ *                                → overflow indicator widget (or NULL to just stop)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef GtkWidget* (*UiOverflowCreateItem)(guint index, gpointer user_data);
+typedef GtkWidget* (*UiOverflowCreateOverflow)(guint first_hidden_index,
+                                                guint total_count,
+                                                gpointer user_data);
+
+typedef struct {
+    GtkWidget  *box;                  /* Target horizontal GtkBox */
+    GtkWidget  *constraint_widget;    /* Widget whose width constrains layout (or NULL) */
+    double      constraint_fraction;  /* Fraction of constraint width to use */
+    int         default_max_width;    /* Fallback when no constraint (default: 300) */
+    int         pinned_children;      /* Leading children to preserve (0 = clear all) */
+
+    UiOverflowCreateItem     create_item;
+    UiOverflowCreateOverflow create_overflow;  /* NULL = just stop adding */
+    guint       item_count;
+
+    gpointer       user_data;
+    GDestroyNotify user_data_destroy;  /* Frees user_data when box is destroyed */
+} UiOverflowBoxParams;
+
+/** Set up width-aware overflow layout. Wires map + notify::width signals.
+ *  Stores lifecycle data as GObject data on the box. */
+void ui_overflow_box_setup(const UiOverflowBoxParams *params);
+
+/** Pure layout planner — no GTK dependency (overflow_plan.c).
+ *  Returns how many items to show. Sets *needs_overflow if not all fit. */
+guint ui_overflow_box_plan_layout(int budget,
+                                  const int *item_widths,
+                                  guint item_count,
+                                  int overflow_width,
+                                  gboolean *needs_overflow);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Pure Math Helpers (ui_math.c) — no GTK dependency, unit-testable.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Quadratic shuttle slider → playback speed mapping. */
+float ui_shuttle_value_to_speed(double slider_value, shuttle_mode_t mode);
+
+/** Piecewise linear log-scale normalization (0–100% → 0–1). */
+double ui_log_pct_norm(double pct);
+
+/** Fill LUT with bell-curve weights: lut[i] = exp(-(d²)/(2σ²)). */
+void ui_bell_curve_lut(float *lut, int n, double sigma);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Row Helpers (row_helpers.c)
  *
  * Functions for creating consistent list rows from LibraryCache data.
@@ -368,6 +456,16 @@ void ui_selection_group_free(SelectionGroup *group);
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 GtkWidget *ui_create_library_badge(library_cache_t *cache, int library_index);
+
+/** Populate a badges box with one label per library this entity belongs to.
+ *  Handles both single-library and merged (cross-library) entities.
+ *  Hides the box if ≤1 library or no badges. */
+void ui_populate_library_badges(GtkWidget *badges_box,
+                                 library_cache_t *cache,
+                                 int library_index,
+                                 int64_t entity_global_id,
+                                 const int64_t *merged_source_ids,
+                                 int merged_source_count);
 
 /* Size groups for column alignment across multiple rows in a list.
  * Pass NULL for any group to skip alignment for that column.
@@ -487,12 +585,14 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
 /* Create album detail track item (compact row for album detail view).
  * Shows track number, title, featuring artists, info button, duration.
  * artist_cbs: callbacks for featuring artist button clicks
- * show_primary_artists: if TRUE, shows primary artist column (for compilations)
+ * album_artist_id: the album's primary artist — when a track's primary artist
+ *   matches this, the primary pill is suppressed (only "ft" shown if present).
+ *   Pass 0 to always show primary artists.
  * Stores: "track-id" */
 GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
                                                library_cache_t *cache,
                                                RowCallbacks *artist_cbs,
-                                               gboolean show_primary_artists);
+                                               int64_t album_artist_id);
 
 /* Create disc separator header for multi-disc albums.
  * Shows "DISC N" label with subtle styling. */
@@ -557,7 +657,7 @@ typedef struct {
 
 /* Library entry */
 typedef struct {
-    int64_t id;              /* Index into settings->library_paths[] */
+    int64_t id;              /* Index into settings->libraries[] */
     char *path;
     char *data_path;         /* Where DB + artwork live (NULL = same as path) */
     char *name;
@@ -582,6 +682,8 @@ typedef struct {
     guint pulse_timer;  /* 100ms scan pulse */
     guint hide_timer;   /* 5s delay before crossfading back to stats */
     gboolean shown_initial_load_toast;  /* TRUE after first library-updated toast */
+    gboolean pending_load_toast;        /* Deferred toast — shown when async stats arrive */
+    gboolean available;                 /* Mirrors library_cache availability flag */
 } LibEntry;
 
 struct _UiWindow {
@@ -591,6 +693,7 @@ struct _UiWindow {
     app_settings_t *settings;
     quadrature_db_t *errors_lib_db;
     IndexerController *indexer;
+    LibraryMonitor *lib_monitor;
     library_cache_t *library_cache;
     ArtworkManager *artwork_mgr;
 
@@ -600,6 +703,15 @@ struct _UiWindow {
     GtkWidget *channel_strips_box;
     GtkWidget *toast_overlay;
     GtkWidget *toast_label;
+
+    GtkWidget *library_bar;
+    GtkWidget *content_column;
+
+    /* Library filter (global, persists across view switches) */
+    uint32_t library_mask;
+    GtkToggleButton **library_toggles;  /* Array of toggle buttons (one per library) */
+    int library_toggle_count;
+    gboolean library_toggle_updating;   /* Prevents re-entrancy during programmatic updates */
 
     /* Runtime layout */
     GtkWidget *nav_bar;

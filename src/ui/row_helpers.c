@@ -81,43 +81,435 @@ GtkWidget *find_widget_by_name(GtkWidget *parent, const char *name) {
 /* ═══════════════════════════════════════════════════════════════════════════
  * Library Badge Helper
  *
- * Creates a small pill label showing the library's display name.
- * Returns NULL when only one library is configured (badge is redundant).
+ * Creates pill labels showing library display names. Uses overflow box
+ * for consistent infrastructure with other badge types.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-GtkWidget *ui_create_library_badge(library_cache_t *cache, int library_index) {
-    if (!cache || library_index < 0) return NULL;
-    if (library_cache_get_library_count(cache) <= 1) return NULL;
-    if (library_index == -1) return NULL;  /* Merged entity spans libraries — no badge */
-
-    const char *name = library_cache_get_library_name(cache, library_index);
+static GtkWidget *make_library_badge_label(library_cache_t *cache, int lib_idx,
+                                            int max_chars) {
+    const char *name = library_cache_get_library_name(cache, lib_idx);
     if (!name) return NULL;
 
-    /* Truncate to ≤ 8 visible characters */
-    char truncated[32];
+    char truncated[48];
     glong char_count = g_utf8_strlen(name, -1);
-    if (char_count > 8) {
-        gchar *end = g_utf8_offset_to_pointer(name, 8);
+    if (char_count > max_chars) {
+        gchar *end = g_utf8_offset_to_pointer(name, max_chars);
         gsize byte_len = (gsize)(end - name);
         memcpy(truncated, name, byte_len);
-        /* Append ellipsis */
-        g_strlcat(truncated + byte_len, "\xe2\x80\xa6", sizeof(truncated) - byte_len);
+        truncated[byte_len] = '\0';
+        g_strlcat(truncated, "\xe2\x80\xa6", sizeof(truncated));
     } else {
         g_strlcpy(truncated, name, sizeof(truncated));
     }
 
     GtkWidget *badge = gtk_label_new(truncated);
     gtk_widget_add_css_class(badge, "library-badge");
-    gtk_label_set_xalign(GTK_LABEL(badge), 0.0f);
     return badge;
 }
 
-void ui_format_duration(uint32_t ms, char *buf, size_t len) {
-    uint32_t sec = ms / 1000, min = sec / 60, hr = min / 60;
-    if (hr > 0)
-        snprintf(buf, len, "%uh %02um", hr, min % 60);
-    else
-        snprintf(buf, len, "%u:%02u", min, sec % 60);
+GtkWidget *ui_create_library_badge(library_cache_t *cache, int library_index) {
+    if (!cache || library_index < 0) return NULL;
+    if (library_cache_get_library_count(cache) <= 1) return NULL;
+
+    GtkWidget *badge = make_library_badge_label(cache, library_index, 8);
+    if (badge)
+        gtk_label_set_xalign(GTK_LABEL(badge), 0.0f);
+    return badge;
+}
+
+typedef struct {
+    library_cache_t *cache;
+    int             *lib_indices;   /* Owned deduplicated array */
+    guint            count;
+} LibBadgeData;
+
+static void lib_badge_data_free(gpointer data) {
+    LibBadgeData *d = data;
+    g_free(d->lib_indices);
+    g_free(d);
+}
+
+static GtkWidget *lib_badge_create_item(guint index, gpointer user_data) {
+    LibBadgeData *d = user_data;
+    return make_library_badge_label(d->cache, d->lib_indices[index], 12);
+}
+
+/* Max libraries for stack-based dedup (matches PERF_MAX_LIBRARIES) */
+#define BADGE_MAX_LIBS 8
+
+void ui_populate_library_badges(GtkWidget *badges_box,
+                                 library_cache_t *cache,
+                                 int library_index,
+                                 int64_t entity_global_id,
+                                 const int64_t *merged_source_ids,
+                                 int merged_source_count) {
+    ui_box_clear(GTK_BOX(badges_box));
+
+    if (!cache || library_cache_get_library_count(cache) <= 1) {
+        gtk_widget_set_visible(badges_box, FALSE);
+        return;
+    }
+
+    /* Stack-based dedup — no heap allocation for typical library counts */
+    int deduped[BADGE_MAX_LIBS];
+    guint count = 0;
+
+    int primary_lib = (library_index >= 0)
+        ? library_index
+        : LIBRARY_GLOBAL_ID_LIB(entity_global_id);
+    if (primary_lib >= 0 && primary_lib < library_cache_get_library_count(cache)
+        && count < BADGE_MAX_LIBS) {
+        if (library_cache_get_library_name(cache, primary_lib)) {
+            deduped[count++] = primary_lib;
+        }
+    }
+
+    for (int i = 0; i < merged_source_count && count < BADGE_MAX_LIBS; i++) {
+        int src_lib = LIBRARY_GLOBAL_ID_LIB(merged_source_ids[i]);
+        /* Linear scan dedup — fine for N ≤ 8 */
+        gboolean seen = FALSE;
+        for (guint j = 0; j < count; j++) {
+            if (deduped[j] == src_lib) { seen = TRUE; break; }
+        }
+        if (seen) continue;
+        if (library_cache_get_library_name(cache, src_lib))
+            deduped[count++] = src_lib;
+    }
+
+    if (count == 0) {
+        gtk_widget_set_visible(badges_box, FALSE);
+        return;
+    }
+
+    gtk_widget_set_visible(badges_box, TRUE);
+
+    LibBadgeData *d = g_new0(LibBadgeData, 1);
+    d->cache = cache;
+    d->count = count;
+    d->lib_indices = g_memdup2(deduped, count * sizeof(int));
+
+    ui_overflow_box_setup(&(UiOverflowBoxParams){
+        .box               = badges_box,
+        .default_max_width = 300,
+        .pinned_children   = 0,
+        .create_item       = lib_badge_create_item,
+        .create_overflow   = NULL,   /* Just stop — badges are small */
+        .item_count        = count,
+        .user_data         = d,
+        .user_data_destroy = lib_badge_data_free,
+    });
+}
+
+/* ui_format_duration → ui_math.c */
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Overflow Box — Generic Width-Aware Pill/Badge Layout
+ *
+ * Populates a horizontal GtkBox with as many items as fit within a width
+ * budget, collapsing the rest into a caller-provided overflow indicator.
+ * Automatically re-lays out when the constraint widget resizes (10px
+ * hysteresis to avoid jitter).
+ *
+ * Callers provide two callbacks:
+ *   create_item(index, user_data) → a floating GtkWidget for item #index
+ *   create_overflow(first_hidden, total, user_data) → overflow indicator widget
+ *
+ * The first `pinned_children` widgets already in the box are preserved
+ * (their width counts toward the budget but they are never removed).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static int measure_natural_width(GtkWidget *w) {
+    int min_w = 0, nat_w = 0;
+    gtk_widget_measure(w, GTK_ORIENTATION_HORIZONTAL, -1, &min_w, &nat_w, NULL, NULL);
+    return nat_w;
+}
+
+typedef struct {
+    GtkWidget  *box;
+    GtkWidget  *constraint_widget;
+    double      constraint_fraction;
+    int         default_max_width;
+    int         pinned_children;
+
+    UiOverflowCreateItem     create_item;
+    UiOverflowCreateOverflow create_overflow;
+    guint       item_count;
+    gpointer    user_data;
+    GDestroyNotify user_data_destroy;
+
+    gulong      width_signal_id;
+    gulong      map_signal_id;
+    int         last_width;
+} OverflowBoxData;
+
+static void overflow_box_data_free(gpointer data) {
+    OverflowBoxData *obd = data;
+    if (obd->map_signal_id && obd->box)
+        g_signal_handler_disconnect(obd->box, obd->map_signal_id);
+    if (obd->width_signal_id && obd->constraint_widget)
+        g_signal_handler_disconnect(obd->constraint_widget, obd->width_signal_id);
+    if (obd->user_data_destroy && obd->user_data)
+        obd->user_data_destroy(obd->user_data);
+    g_free(obd);
+}
+
+static void overflow_box_relayout(OverflowBoxData *obd) {
+    GtkBox *box = GTK_BOX(obd->box);
+
+    /* Remove all children after the pinned ones */
+    int skip = obd->pinned_children;
+    GtkWidget *child = gtk_widget_get_first_child(obd->box);
+    for (int i = 0; i < skip && child; i++)
+        child = gtk_widget_get_next_sibling(child);
+    while (child) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_box_remove(box, child);
+        child = next;
+    }
+
+    if (obd->item_count == 0) return;
+
+    /* Calculate width budget */
+    int raw_width = obd->constraint_widget
+        ? gtk_widget_get_width(obd->constraint_widget) : 0;
+    int max_width = (raw_width > 0)
+        ? (int)(raw_width * obd->constraint_fraction)
+        : obd->default_max_width;
+
+    /* Measure pinned children's accumulated width */
+    int pinned_width = 0;
+    child = gtk_widget_get_first_child(obd->box);
+    for (int i = 0; i < skip && child; i++) {
+        pinned_width += measure_natural_width(child);
+        child = gtk_widget_get_next_sibling(child);
+    }
+
+    /* ── Measure everything upfront ── */
+    GtkWidget **items = g_newa(GtkWidget *, obd->item_count);
+    int *item_widths  = g_newa(int, obd->item_count);
+    for (guint i = 0; i < obd->item_count; i++) {
+        items[i] = obd->create_item(i, obd->user_data);
+        item_widths[i] = measure_natural_width(items[i]);
+    }
+
+    GtkWidget *overflow = obd->create_overflow
+        ? obd->create_overflow(0, obd->item_count, obd->user_data)
+        : NULL;
+    int overflow_w = overflow ? measure_natural_width(overflow) : 0;
+
+    /* ── Plan with pure integer math ── */
+    gboolean needs_overflow = FALSE;
+    guint show_count = ui_overflow_box_plan_layout(
+        max_width - pinned_width, item_widths, obd->item_count,
+        overflow_w, &needs_overflow);
+
+    /* ── Execute: append only what the plan selected ── */
+    for (guint i = 0; i < show_count; i++)
+        gtk_box_append(box, items[i]);
+
+    /* Discard items that didn't make the cut */
+    for (guint i = show_count; i < obd->item_count; i++) {
+        g_object_ref_sink(items[i]);
+        g_object_unref(items[i]);
+    }
+
+    if (needs_overflow && overflow) {
+        /* Recreate with correct first_hidden index if it differs */
+        if (show_count > 0) {
+            g_object_ref_sink(overflow);
+            g_object_unref(overflow);
+            overflow = obd->create_overflow(show_count, obd->item_count,
+                                            obd->user_data);
+        }
+        if (overflow)
+            gtk_box_append(box, overflow);
+    } else if (overflow) {
+        g_object_ref_sink(overflow);
+        g_object_unref(overflow);
+    }
+}
+
+static void on_overflow_box_map(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    overflow_box_relayout(user_data);
+}
+
+static void on_overflow_box_width_changed(GObject *object, GParamSpec *pspec,
+                                           gpointer user_data) {
+    (void)pspec;
+    OverflowBoxData *obd = user_data;
+
+    int raw_width = gtk_widget_get_width(GTK_WIDGET(object));
+    int box_width = (int)(raw_width * obd->constraint_fraction);
+    if (box_width <= 0) return;
+
+    if (abs(box_width - obd->last_width) < 10) return;
+    obd->last_width = box_width;
+
+    overflow_box_relayout(obd);
+}
+
+void ui_overflow_box_setup(const UiOverflowBoxParams *p) {
+    g_assert(p->box != NULL);
+    g_assert(p->create_item != NULL);
+
+    OverflowBoxData *obd = g_new0(OverflowBoxData, 1);
+    obd->box                = p->box;
+    obd->constraint_widget  = p->constraint_widget;
+    obd->constraint_fraction = p->constraint_fraction;
+    obd->default_max_width  = p->default_max_width > 0 ? p->default_max_width : 300;
+    obd->pinned_children    = p->pinned_children;
+    obd->create_item        = p->create_item;
+    obd->create_overflow    = p->create_overflow;
+    obd->item_count         = p->item_count;
+    obd->user_data          = p->user_data;
+    obd->user_data_destroy  = p->user_data_destroy;
+
+    g_object_set_data_full(G_OBJECT(p->box), "overflow-box-data",
+                           obd, overflow_box_data_free);
+    obd->map_signal_id = g_signal_connect(p->box, "map",
+                                           G_CALLBACK(on_overflow_box_map), obd);
+
+    if (p->constraint_widget)
+        obd->width_signal_id = g_signal_connect(
+            p->constraint_widget, "notify::width",
+            G_CALLBACK(on_overflow_box_width_changed), obd);
+
+    /* Immediate layout if already mapped */
+    overflow_box_relayout(obd);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Genre Pills — Width-Aware via Overflow Box
+ *
+ * Splits genre string on semicolons. Each genre becomes an ellipsized pill.
+ * Overflow collapses into a "…" button with a popover listing all genres.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char  **genres;       /* Owned, null-terminated */
+    guint   count;
+} GenrePillData;
+
+static void genre_pill_data_free(gpointer data) {
+    GenrePillData *d = data;
+    g_strfreev(d->genres);
+    g_free(d);
+}
+
+static GtkWidget *genre_create_item(guint index, gpointer user_data) {
+    GenrePillData *d = user_data;
+    GtkWidget *pill = gtk_label_new(d->genres[index]);
+    gtk_label_set_ellipsize(GTK_LABEL(pill), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(pill), 18);
+    gtk_widget_add_css_class(pill, "genre-pill");
+    return pill;
+}
+
+/* Unparent popover when overflow button leaves the widget tree */
+static void on_genre_overflow_unroot(GObject *obj, GParamSpec *pspec, gpointer popover) {
+    (void)pspec;
+    if (gtk_widget_get_root(GTK_WIDGET(obj)) == NULL)
+        gtk_widget_unparent(GTK_WIDGET(popover));
+}
+
+static void on_genre_overflow_clicked(GtkButton *button, gpointer popover) {
+    (void)button;
+    gtk_popover_popup(GTK_POPOVER(popover));
+}
+
+static GtkWidget *genre_create_overflow(guint first_hidden, guint total,
+                                         gpointer user_data) {
+    (void)first_hidden;
+    GenrePillData *d = user_data;
+
+    /* Overflow button styled like a genre pill */
+    GtkWidget *btn = gtk_button_new_with_label("…");
+    gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
+    gtk_widget_add_css_class(btn, "genre-pill");
+    gtk_widget_add_css_class(btn, "genre-overflow-btn");
+
+    /* Popover with all genres */
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_margin_start(vbox, 4);
+    gtk_widget_set_margin_end(vbox, 4);
+    gtk_widget_set_margin_top(vbox, 4);
+    gtk_widget_set_margin_bottom(vbox, 4);
+
+    for (guint i = 0; i < total; i++) {
+        GtkWidget *label = gtk_label_new(d->genres[i]);
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+        gtk_label_set_max_width_chars(GTK_LABEL(label), 30);
+        gtk_widget_add_css_class(label, "genre-pill");
+        gtk_widget_set_halign(label, GTK_ALIGN_START);
+        gtk_box_append(GTK_BOX(vbox), label);
+    }
+
+    GtkWidget *popover = gtk_popover_new();
+    gtk_popover_set_child(GTK_POPOVER(popover), vbox);
+    gtk_widget_set_parent(popover, btn);
+
+    g_signal_connect(btn, "notify::root",
+                     G_CALLBACK(on_genre_overflow_unroot), popover);
+    g_signal_connect(btn, "clicked",
+                     G_CALLBACK(on_genre_overflow_clicked), popover);
+
+    return btn;
+}
+
+void ui_populate_genre_pills(GtkWidget *box, const char *genres,
+                              GtkWidget *constraint_widget,
+                              double constraint_fraction) {
+    ui_box_clear(GTK_BOX(box));
+
+    if (!genres || !genres[0]) {
+        gtk_widget_set_visible(box, FALSE);
+        return;
+    }
+
+    /* Parse genres, skip empty entries */
+    gchar **raw = g_strsplit(genres, ";", 0);
+    GPtrArray *clean = g_ptr_array_new();
+    for (guint i = 0; raw[i]; i++) {
+        g_strstrip(raw[i]);
+        if (raw[i][0])
+            g_ptr_array_add(clean, g_strdup(raw[i]));
+    }
+    g_strfreev(raw);
+
+    if (clean->len == 0) {
+        g_ptr_array_free(clean, TRUE);
+        gtk_widget_set_visible(box, FALSE);
+        return;
+    }
+
+    gtk_widget_set_visible(box, TRUE);
+
+    /* Build null-terminated strv for GenrePillData */
+    g_ptr_array_add(clean, NULL);
+    char **genre_strv = (char **)g_ptr_array_free(clean, FALSE);
+
+    guint count = 0;
+    for (char **p = genre_strv; *p; p++) count++;
+
+    GenrePillData *d = g_new0(GenrePillData, 1);
+    d->genres = genre_strv;
+    d->count  = count;
+
+    ui_overflow_box_setup(&(UiOverflowBoxParams){
+        .box                = box,
+        .constraint_widget  = constraint_widget,
+        .constraint_fraction = constraint_fraction,
+        .default_max_width  = 250,
+        .pinned_children    = 0,
+        .create_item        = genre_create_item,
+        .create_overflow    = genre_create_overflow,
+        .item_count         = count,
+        .user_data          = d,
+        .user_data_destroy  = genre_pill_data_free,
+    });
 }
 
 

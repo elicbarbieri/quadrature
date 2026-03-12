@@ -32,6 +32,9 @@ struct _IndexerController {
     int art_size;
     gboolean musicbrainz_resolve;
     char* pg_conninfo;
+    char* mb_solr_url;
+    char* acoustid_pg_conninfo;
+    char* acoustid_index_url;
     char* fanart_api_key;
     int max_concurrent;   /* default: 2 */
 
@@ -203,6 +206,9 @@ static indexer_t* create_indexer_for_scan(IndexerController* self, ScanCallbackD
         .user_data = cb_data,
         .mb_resolve = self->musicbrainz_resolve,
         .pg_conninfo = self->pg_conninfo,
+        .mb_solr_url = self->mb_solr_url,
+        .acoustid_pg_conninfo = self->acoustid_pg_conninfo,
+        .acoustid_index_url = self->acoustid_index_url,
         .fanart_api_key = self->fanart_api_key,
         .other_library_roots = (const char* const*)others->pdata,
         .other_library_roots_count = others->len,
@@ -309,6 +315,15 @@ static void indexer_controller_dispose(GObject* object) {
 
     g_free(self->pg_conninfo);
     self->pg_conninfo = NULL;
+
+    g_free(self->mb_solr_url);
+    self->mb_solr_url = NULL;
+
+    g_free(self->acoustid_pg_conninfo);
+    self->acoustid_pg_conninfo = NULL;
+
+    g_free(self->acoustid_index_url);
+    self->acoustid_index_url = NULL;
 
     g_free(self->fanart_api_key);
     self->fanart_api_key = NULL;
@@ -551,6 +566,24 @@ void indexer_controller_set_pg_conninfo(IndexerController* self, const char* con
     g_return_if_fail(INDEXER_IS_CONTROLLER(self));
     g_free(self->pg_conninfo);
     self->pg_conninfo = conninfo ? g_strdup(conninfo) : NULL;
+}
+
+void indexer_controller_set_mb_solr_url(IndexerController* self, const char* url) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    g_free(self->mb_solr_url);
+    self->mb_solr_url = (url && url[0]) ? g_strdup(url) : NULL;
+}
+
+void indexer_controller_set_acoustid_pg_conninfo(IndexerController* self, const char* conninfo) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    g_free(self->acoustid_pg_conninfo);
+    self->acoustid_pg_conninfo = conninfo ? g_strdup(conninfo) : NULL;
+}
+
+void indexer_controller_set_acoustid_index_url(IndexerController* self, const char* url) {
+    g_return_if_fail(INDEXER_IS_CONTROLLER(self));
+    g_free(self->acoustid_index_url);
+    self->acoustid_index_url = (url && url[0]) ? g_strdup(url) : NULL;
 }
 
 void indexer_controller_set_fanart_api_key(IndexerController* self, const char* api_key) {

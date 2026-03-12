@@ -21,10 +21,9 @@
 
 #include <gtk/gtk.h>
 #include <pango/pango.h>
-#include <pango/pangocairo.h>
 #include <math.h>
 
-#include "internal.h"
+#include "../internal.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Constants
@@ -44,10 +43,6 @@
 /* Bell-curve: which ticks grow near the current scroll position */
 #define BELL_SIGMA          0.18    /* list-fraction units (~4–5 buckets at A-Z scale) */
 
-/* Scroll wheel acceleration — step is 1 bucket/notch, accel multiplies it */
-#define WHEEL_ACCEL_WINDOW  0.25    /* sec; events within this window build acceleration */
-#define WHEEL_MAX_ACCEL     10.0    /* max step multiplier for rapid wheel spinning */
-#define WHEEL_ACCEL_POWER   1.5     /* exponent — 1.5 builds accel smoothly, not abruptly */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Private State
@@ -69,8 +64,6 @@ struct _QuadScrubber {
     gboolean       dragging;
     double         scroll_fraction;   /* continuous 0–1; bell-curve centre + scroll target */
 
-    gint64         last_scroll_event_us; /* for wheel acceleration timing */
-
     GtkListView   *list_view;         /* weak ref */
     GtkAdjustment *vadj;              /* weak ref */
     gulong         vadj_signal;
@@ -78,6 +71,13 @@ struct _QuadScrubber {
     GtkWidget     *badge;             /* sibling GtkLabel in parent overlay, weak ref */
 
     ScrubAnimation anim;
+
+    /* Cached font descriptors — avoid parsing "Bold 9" / "9" every frame */
+    PangoFontDescription *fd_normal;
+    PangoFontDescription *fd_bold;
+
+    /* Bell-curve LUT — avoid exp() per bucket per frame */
+    float bell_lut[256];
 };
 
 struct _QuadScrubberClass { GtkWidgetClass parent_class; };
@@ -147,12 +147,6 @@ static double y_to_fraction(QuadScrubber *self, double y) {
     int height = gtk_widget_get_height(GTK_WIDGET(self));
     double usable = MAX(1.0, (double)height - 2.0 * SCRUB_PADDING);
     return CLAMP((y - SCRUB_PADDING) / usable, 0.0, 1.0);
-}
-
-/* Gaussian bell: 1.0 at distance 0, tailing off with BELL_SIGMA */
-static double bell_weight(double bucket_frac, double scroll_frac) {
-    double dist = fabs(bucket_frac - scroll_frac);
-    return exp(-(dist * dist) / (2.0 * BELL_SIGMA * BELL_SIGMA));
 }
 
 /* Push scroll_fraction to the GtkAdjustment */
@@ -284,60 +278,6 @@ static void on_click_pressed(GtkGestureClick *gesture, int n_press, double x, do
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Scroll Wheel — acceleration from inter-event timing
- *
- * One base step = one bucket width in list-fraction space. Rapid events
- * (< WHEEL_ACCEL_WINDOW apart) multiply up to WHEEL_MAX_ACCEL×, so fast
- * spinning covers large distances quickly while a single slow click is precise.
- *
- * Returns TRUE to consume the event (prevents GtkScrolledWindow double-scroll).
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-static gboolean on_scroll(GtkEventControllerScroll *ctrl, double dx, double dy,
-                           gpointer data) {
-    (void)ctrl; (void)dx;
-    QuadScrubber *self = QUAD_SCRUBBER(data);
-    if (!self->buckets || self->buckets->len == 0 || !self->vadj) return FALSE;
-
-    cancel_animation(self);
-
-    /* One natural step = one bucket. Floor at 3%, ceiling at 8% of list to
-     * keep very small or very large bucket counts feeling reasonable. */
-    double base_step = CLAMP(1.0 / (double)self->buckets->len, 0.03, 0.08);
-    double accel     = 1.0;
-
-    if (fabs(dy) >= 0.5) {
-        /* Discrete mouse wheel notch — accelerate from event frequency */
-        gint64 now = g_get_monotonic_time();
-        if (self->last_scroll_event_us > 0) {
-            double dt = (double)(now - self->last_scroll_event_us) * 1e-6;
-            if (dt > 0.0 && dt < WHEEL_ACCEL_WINDOW) {
-                /* speed: 1.0 when dt→0, 0.0 when dt=WINDOW */
-                double speed = 1.0 - (dt / WHEEL_ACCEL_WINDOW);
-                accel = 1.0 + (WHEEL_MAX_ACCEL - 1.0) * pow(speed, WHEEL_ACCEL_POWER);
-            }
-        }
-        self->last_scroll_event_us = now;
-    } else {
-        /* Trackpad — dy is already velocity-proportional.
-         * Halve the base step so slow swipes don't overshoot sections. */
-        base_step *= 0.5;
-    }
-
-    self->scroll_fraction = CLAMP(self->scroll_fraction + dy * base_step * accel,
-                                  0.0, 1.0);
-    apply_scroll(self);
-
-    int idx = bucket_from_fraction(self, self->scroll_fraction);
-    if (idx >= 0 && idx != self->active_idx) {
-        self->active_idx = idx;
-        gtk_widget_queue_draw(GTK_WIDGET(self));
-    }
-
-    return TRUE; /* consumed — GtkScrolledWindow must not also scroll */
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
  * Scroll Tracking — keep state in sync with external scroll
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -376,71 +316,73 @@ static void quad_scrubber_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     int height = gtk_widget_get_height(widget);
     if (height <= 0 || width <= 0) return;
 
-    float lext = (float)LABEL_OVERFLOW;
-    graphene_rect_t bounds = GRAPHENE_RECT_INIT(-lext, 0.0f,
-                                                 (float)width + lext, (float)height);
-    cairo_t *cr = gtk_snapshot_append_cairo(snapshot, &bounds);
-    cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+    /* All rendering uses native GtkSnapshot ops (GPU render nodes).
+     * No cairo fallback — eliminates per-frame CPU surface allocation. */
 
-    double usable_h = MAX(1.0, (double)height - 2.0 * SCRUB_PADDING);
-    double rail_x   = floor((double)(width - RAIL_MARGIN_END)) + 0.5;
+    float usable_h = (float)MAX(1.0, (double)height - 2.0 * SCRUB_PADDING);
+    float rail_x   = floorf((float)(width - RAIL_MARGIN_END)) + 0.5f;
 
     /* Subtle vertical rail, inset by padding at both ends */
-    cairo_set_source_rgba(cr, 0.55, 0.55, 0.55, 0.22);
-    cairo_set_line_width(cr, 1.0);
-    cairo_move_to(cr, rail_x, SCRUB_PADDING);
-    cairo_line_to(cr, rail_x, (double)height - SCRUB_PADDING);
-    cairo_stroke(cr);
+    GdkRGBA rail_color = { 0.55f, 0.55f, 0.55f, 0.22f };
+    graphene_rect_t rail_rect = GRAPHENE_RECT_INIT(
+        rail_x - 0.5f, (float)SCRUB_PADDING, 1.0f, usable_h);
+    gtk_snapshot_append_color(snapshot, &rail_color, &rail_rect);
 
     PangoLayout *layout = gtk_widget_create_pango_layout(widget, NULL);
-    double prev_y = -999.0;
+    float prev_y = -999.0f;
 
     for (guint i = 0; i < self->buckets->len; i++) {
         ScrubberBucket *b = g_ptr_array_index(self->buckets, i);
 
-        double bucket_frac = (double)b->position / MAX(1.0, (double)self->total_items);
-        double y           = SCRUB_PADDING + bucket_frac * usable_h;
+        float bucket_frac = (float)b->position / fmaxf(1.0f, (float)self->total_items);
+        float y           = (float)SCRUB_PADDING + bucket_frac * usable_h;
 
         if (y < prev_y + MIN_LABEL_SPACING && (int)i != self->active_idx) continue;
         prev_y = y;
 
         gboolean active = ((int)i == self->active_idx);
-        double   bell   = bell_weight(bucket_frac, self->scroll_fraction);
 
-        double tick_len    = TICK_LENGTH_MIN + (TICK_LENGTH_MAX - TICK_LENGTH_MIN) * bell;
-        double label_alpha = active ? 1.0  : (0.18 + 0.62 * bell);
-        double tick_alpha  = active ? 0.90 : (0.15 + 0.50 * bell);
+        /* Bell-curve weight via LUT — no exp() call */
+        float dist = fabsf(bucket_frac - (float)self->scroll_fraction);
+        int lut_idx = (int)(dist * 255.0f);
+        if (lut_idx > 255) lut_idx = 255;
+        float bell = self->bell_lut[lut_idx];
 
-        PangoFontDescription *fd = active
-            ? pango_font_description_from_string("Bold 9")
-            : pango_font_description_from_string("9");
-        pango_layout_set_font_description(layout, fd);
-        pango_font_description_free(fd);
+        float tick_len    = (float)TICK_LENGTH_MIN + ((float)TICK_LENGTH_MAX - (float)TICK_LENGTH_MIN) * bell;
+        float label_alpha = active ? 1.0f : (0.18f + 0.62f * bell);
+        float tick_alpha  = active ? 0.90f : (0.15f + 0.50f * bell);
+
+        /* Use cached font descriptors — no string parsing per frame */
+        pango_layout_set_font_description(layout, active ? self->fd_bold : self->fd_normal);
         pango_layout_set_text(layout, b->label, -1);
 
         int lw, lh;
         pango_layout_get_pixel_size(layout, &lw, &lh);
 
-        double tick_start_x = rail_x - tick_len;
-        double label_x      = rail_x - TICK_LENGTH_MAX - LABEL_MARGIN - (double)lw;
-        double tick_y       = floor(y) + 0.5;
+        float tick_start_x = rail_x - tick_len;
+        float label_x      = rail_x - (float)TICK_LENGTH_MAX - (float)LABEL_MARGIN - (float)lw;
+        float tick_y       = floorf(y) + 0.5f;
 
-        /* Label */
-        double r = active ? 0.93 : 0.70;
-        cairo_set_source_rgba(cr, r, r, r, label_alpha);
-        cairo_move_to(cr, label_x, floor(y - (double)lh / 2.0));
-        pango_cairo_show_layout(cr, layout);
+        /* Label — native GtkSnapshot render node (no Cairo surface) */
+        float r = active ? 0.93f : 0.70f;
+        GdkRGBA label_color = { r, r, r, label_alpha };
+        gtk_snapshot_save(snapshot);
+        graphene_point_t label_pt = GRAPHENE_POINT_INIT(
+            label_x, floorf(y - (float)lh / 2.0f));
+        gtk_snapshot_translate(snapshot, &label_pt);
+        gtk_snapshot_append_layout(snapshot, layout, &label_color);
+        gtk_snapshot_restore(snapshot);
 
         /* Tick — grows leftward from rail based on bell weight */
-        cairo_set_source_rgba(cr, 0.70, 0.70, 0.70, tick_alpha);
-        cairo_set_line_width(cr, active ? 1.5 : 0.9);
-        cairo_move_to(cr, floor(tick_start_x) + 0.5, tick_y);
-        cairo_line_to(cr, rail_x, tick_y);
-        cairo_stroke(cr);
+        float tick_h = active ? 1.5f : 0.9f;
+        GdkRGBA tick_color = { 0.70f, 0.70f, 0.70f, tick_alpha };
+        graphene_rect_t tick_rect = GRAPHENE_RECT_INIT(
+            floorf(tick_start_x) + 0.5f, tick_y - tick_h * 0.5f,
+            rail_x - floorf(tick_start_x) - 0.5f, tick_h);
+        gtk_snapshot_append_color(snapshot, &tick_color, &tick_rect);
     }
 
     g_object_unref(layout);
-    cairo_destroy(cr);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -460,6 +402,8 @@ static void quad_scrubber_dispose(GObject *object) {
         g_ptr_array_unref(self->buckets);
         self->buckets = NULL;
     }
+    g_clear_pointer(&self->fd_normal, pango_font_description_free);
+    g_clear_pointer(&self->fd_bold, pango_font_description_free);
 
     G_OBJECT_CLASS(quad_scrubber_parent_class)->dispose(object);
 }
@@ -477,6 +421,12 @@ static void quad_scrubber_class_init(QuadScrubberClass *klass) {
 static void quad_scrubber_init(QuadScrubber *self) {
     self->active_idx = -1;
     gtk_widget_set_overflow(GTK_WIDGET(self), GTK_OVERFLOW_VISIBLE);
+
+    /* Cache font descriptors — avoid parsing string per bucket per frame */
+    self->fd_normal = pango_font_description_from_string("9");
+    self->fd_bold   = pango_font_description_from_string("Bold 9");
+
+    ui_bell_curve_lut(self->bell_lut, 256, BELL_SIGMA);
 
     GtkEventControllerMotion *motion = GTK_EVENT_CONTROLLER_MOTION(
         gtk_event_controller_motion_new());
@@ -497,11 +447,6 @@ static void quad_scrubber_init(QuadScrubber *self) {
     gtk_widget_add_controller(GTK_WIDGET(self), GTK_EVENT_CONTROLLER(click));
 
     gtk_gesture_group(GTK_GESTURE(drag), GTK_GESTURE(click));
-
-    GtkEventControllerScroll *scroll = GTK_EVENT_CONTROLLER_SCROLL(
-        gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL));
-    g_signal_connect(scroll, "scroll", G_CALLBACK(on_scroll), self);
-    gtk_widget_add_controller(GTK_WIDGET(self), GTK_EVENT_CONTROLLER(scroll));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

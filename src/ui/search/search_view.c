@@ -71,7 +71,7 @@ static GtkWidget *make_section_header_label(const char *title) {
  * Using the header_func API ensures GTK manages header widget clip/layout correctly. */
 static void search_section_header_func(GtkListBoxRow *row,
                                         GtkListBoxRow *before,
-                                        gpointer       data) {
+                                        gpointer       data G_GNUC_UNUSED) {
     /* Use gtk_list_box_row_get_child() — NOT get_first_child() — because
      * set_header() inserts the header before the child in the widget tree,
      * making get_first_child() return the header widget on re-invocation. */
@@ -85,10 +85,20 @@ static void search_section_header_func(GtkListBoxRow *row,
         prev_section = prev_child ? g_object_get_data(G_OBJECT(prev_child), "quad-section") : NULL;
     }
 
-    if (g_strcmp0(section, prev_section) != 0)
-        gtk_list_box_row_set_header(row, make_section_header_label(section));
-    else
+    if (g_strcmp0(section, prev_section) != 0) {
+        /* Reuse existing header if it already matches this section */
+        GtkWidget *existing = gtk_list_box_row_get_header(row);
+        if (existing) {
+            const char *existing_section = g_object_get_data(G_OBJECT(existing), "quad-header-section");
+            if (g_strcmp0(section, existing_section) == 0) return;
+        }
+        GtkWidget *header = make_section_header_label(section);
+        g_object_set_data_full(G_OBJECT(header), "quad-header-section",
+                               g_strdup(section), g_free);
+        gtk_list_box_row_set_header(row, header);
+    } else {
         gtk_list_box_row_set_header(row, NULL);
+    }
 }
 
 
@@ -176,12 +186,11 @@ static GHashTable *build_credit_track_set(UiWindow *w,
     GHashTable *seen_mbids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     GPtrArray *meta_artists = g_ptr_array_new_with_free_func(g_free);
 
-    for (int li = 0; li < w->settings->library_path_count; li++) {
-        const char *library_root = app_settings_get_library_data_path(w->settings, li);
-
-        quadrature_meta_db_t *meta_db = NULL;
-        if (db_meta_open_readonly(library_root, &meta_db) != QUADRATURE_OK || !meta_db)
-            continue;
+    int lib_count = library_cache_get_library_count(w->library_cache);
+    for (int li = 0; li < lib_count; li++) {
+        if (!library_cache_get_available(w->library_cache, li)) continue;
+        quadrature_meta_db_t *meta_db = library_cache_get_meta_db(w->library_cache, li);
+        if (!meta_db) continue;
 
         /* Find matching artists in this library's metadata DB */
         GPtrArray *artist_mbids_to_query = g_ptr_array_new_with_free_func(g_free);
@@ -216,24 +225,20 @@ static GHashTable *build_credit_track_set(UiWindow *w,
         } else {
             /* Role filter only (no credit text) — we can't enumerate all artists.
              * Role-only filtering without a credit name is a no-op for track matching. */
-            db_meta_close(meta_db);
             g_ptr_array_unref(artist_mbids_to_query);
             g_hash_table_unref(mbid_to_name);
             continue;
         }
 
         if (artist_mbids_to_query->len == 0) {
-            db_meta_close(meta_db);
             g_ptr_array_unref(artist_mbids_to_query);
             g_hash_table_unref(mbid_to_name);
             continue;
         }
 
         /* For each matched artist, get their credits and resolve to track_ids */
-        char *db_path = g_build_filename(library_root, "quadrature.sqlite", NULL);
-        quadrature_db_t *lib_db = NULL;
-        gboolean have_lib_db = (db_open_readonly(db_path, &lib_db) == QUADRATURE_OK && lib_db);
-        g_free(db_path);
+        quadrature_db_t *lib_db = library_cache_get_db(w->library_cache, li);
+        gboolean have_lib_db = (lib_db != NULL);
 
         for (guint ai = 0; ai < artist_mbids_to_query->len; ai++) {
             const char *artist_mbid = g_ptr_array_index(artist_mbids_to_query, ai);
@@ -291,8 +296,6 @@ static GHashTable *build_credit_track_set(UiWindow *w,
             db_meta_artist_credits_free(credits, credit_count);
         }
 
-        if (have_lib_db) db_close(lib_db);
-        db_meta_close(meta_db);
         g_ptr_array_unref(artist_mbids_to_query);
         g_hash_table_unref(mbid_to_name);
     }
@@ -471,7 +474,8 @@ void do_search(UiWindow *w) {
         const db_search_opts_t *opts_ptr = (genre_count > 0 || search_opts.year_mask) ? &search_opts : NULL;
 
         library_search_results_t *results = library_cache_search(
-            w->library_cache, query, filter, limit, opts_ptr);
+            w->library_cache, query, filter, limit, opts_ptr,
+            w->library_mask);
         g_free(genre_arr);
 
         if (!results) {

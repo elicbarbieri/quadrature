@@ -40,6 +40,7 @@
 #define GROUP_MUSICBRAINZ "MusicBrainz"
 #define KEY_MB_RESOLVE "musicbrainz_resolve"
 #define KEY_MB_PG_CONNINFO "pg_conninfo"
+#define KEY_MB_SOLR_URL "solr_url"
 
 #define KEY_FANART_RESOLVE "fanart_resolve"
 #define KEY_ACOUSTID_FINGERPRINT "acoustid_fingerprint"
@@ -51,13 +52,8 @@
 #define KEY_ACOUSTID_PG_CONNINFO "pg_conninfo"
 #define KEY_ACOUSTID_INDEX_URL "index_url"
 
-#define KEY_LIBRARY_PATHS "library_paths"
-#define KEY_LIBRARY_NAMES "library_names"
-#define KEY_LIBRARY_DATA_PATHS "library_data_paths"
-#define KEY_LIBRARY_MB_RESOLVE "library_mb_resolve"
-#define KEY_LIBRARY_ACOUSTID "library_acoustid"
-#define KEY_LIBRARY_FANART "library_fanart"
-#define KEY_LIBRARY_WIKIPEDIA "library_wikipedia"
+/* Per-library settings now use [Library.N] groups with key names
+ * matching library_config_t field names (path, name, data_path, etc.) */
 
 #define GROUP_WIKIPEDIA "Wikipedia"
 #define KEY_WIKIPEDIA_BIOS "wikipedia_bios"
@@ -109,16 +105,13 @@ static void init_defaults(app_settings_t *settings) {
 
     // Integration connection defaults
     settings->musicbrainz_pg_conninfo = g_strdup("host=localhost dbname=musicbrainz_db user=musicbrainz");
+    settings->mb_solr_url = NULL;
     settings->acoustid_pg_conninfo = NULL;
     settings->acoustid_index_url = NULL;
 
-    // Library paths, names, and data paths
-    settings->library_paths = NULL;
-    settings->library_path_count = 0;
-    settings->library_names = NULL;
-    settings->library_name_count = 0;
-    settings->library_data_paths = NULL;
-    settings->library_data_path_count = 0;
+    // Libraries
+    settings->libraries = NULL;
+    settings->library_count = 0;
 }
 
 app_settings_t *app_settings_load(void) {
@@ -250,6 +243,13 @@ app_settings_t *app_settings_load(void) {
         g_free(pg_conninfo);
     }
 
+    char *solr_url = g_key_file_get_string(keyfile, GROUP_MUSICBRAINZ, KEY_MB_SOLR_URL, NULL);
+    if (solr_url && solr_url[0] != '\0') {
+        settings->mb_solr_url = solr_url;
+    } else {
+        g_free(solr_url);
+    }
+
     // Load fanart.tv settings
     gboolean fanart_resolve = g_key_file_get_boolean(keyfile, GROUP_FANART, KEY_FANART_RESOLVE, &error);
     if (!error) {
@@ -289,72 +289,107 @@ app_settings_t *app_settings_load(void) {
         g_free(acoustid_url);
     }
 
-    // Load library paths
-    gsize path_count = 0;
-    char **lib_paths = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
-                                                   KEY_LIBRARY_PATHS, &path_count, NULL);
-    if (lib_paths && path_count > 0) {
-        settings->library_paths = g_malloc((path_count + 1) * sizeof(char *));
-        for (gsize i = 0; i < path_count; i++) {
-            settings->library_paths[i] = g_strdup(lib_paths[i]);
-        }
-        settings->library_paths[path_count] = NULL;
-        settings->library_path_count = (int)path_count;
-        g_strfreev(lib_paths);
-    }
-
-    // Load library names (parallel to library_paths; may be absent or shorter)
-    gsize name_count = 0;
-    char **lib_names = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
-                                                   KEY_LIBRARY_NAMES, &name_count, NULL);
-    if (lib_names && name_count > 0) {
-        settings->library_names = g_malloc((name_count + 1) * sizeof(char *));
-        for (gsize i = 0; i < name_count; i++) {
-            /* Store NULL for empty strings so basename fallback kicks in */
-            settings->library_names[i] = (lib_names[i] && lib_names[i][0])
-                                         ? g_strdup(lib_names[i]) : NULL;
-        }
-        settings->library_names[name_count] = NULL;
-        settings->library_name_count = (int)name_count;
-        g_strfreev(lib_names);
-    }
-
-    // Load library data paths (parallel to library_paths; may be absent or shorter)
-    gsize data_path_count = 0;
-    char **lib_data_paths = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
-                                                        KEY_LIBRARY_DATA_PATHS, &data_path_count, NULL);
-    if (lib_data_paths && data_path_count > 0) {
-        settings->library_data_paths = g_malloc((data_path_count + 1) * sizeof(char *));
-        for (gsize i = 0; i < data_path_count; i++) {
-            settings->library_data_paths[i] = (lib_data_paths[i] && lib_data_paths[i][0])
-                                               ? g_strdup(lib_data_paths[i]) : NULL;
-        }
-        settings->library_data_paths[data_path_count] = NULL;
-        settings->library_data_path_count = (int)data_path_count;
-        g_strfreev(lib_data_paths);
-    }
-
     // Load Wikipedia bios global toggle
     if (g_key_file_has_key(keyfile, GROUP_WIKIPEDIA, KEY_WIKIPEDIA_BIOS, NULL))
         settings->wikipedia_bios = g_key_file_get_boolean(keyfile, GROUP_WIKIPEDIA, KEY_WIKIPEDIA_BIOS, NULL);
 
-    // Load per-library integration overrides (integer lists, -1 = inherit global)
+    // Load libraries from [Library.N] groups
     {
-        struct { const char *key; int **arr; int *count; } overrides[] = {
-            { KEY_LIBRARY_MB_RESOLVE, &settings->library_mb_resolve, &settings->library_mb_resolve_count },
-            { KEY_LIBRARY_ACOUSTID,   &settings->library_acoustid,   &settings->library_acoustid_count },
-            { KEY_LIBRARY_FANART,     &settings->library_fanart,     &settings->library_fanart_count },
-            { KEY_LIBRARY_WIKIPEDIA,  &settings->library_wikipedia,  &settings->library_wikipedia_count },
-        };
-        for (size_t oi = 0; oi < G_N_ELEMENTS(overrides); oi++) {
-            gsize cnt = 0;
-            int *vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY,
-                                                     overrides[oi].key, &cnt, NULL);
-            if (vals && cnt > 0) {
-                *overrides[oi].arr = g_memdup2(vals, cnt * sizeof(int));
-                *overrides[oi].count = (int)cnt;
+        /* First pass: count library groups */
+        gsize group_count = 0;
+        char **groups = g_key_file_get_groups(keyfile, &group_count);
+        int lib_count = 0;
+        for (gsize i = 0; i < group_count; i++) {
+            if (g_str_has_prefix(groups[i], "Library."))
+                lib_count++;
+        }
+
+        if (lib_count > 0) {
+            settings->libraries = g_new0(library_config_t, lib_count);
+            settings->library_count = lib_count;
+
+            int idx = 0;
+            for (gsize i = 0; i < group_count && idx < lib_count; i++) {
+                if (!g_str_has_prefix(groups[i], "Library."))
+                    continue;
+                library_config_t *lib = &settings->libraries[idx];
+
+                char *p = g_key_file_get_string(keyfile, groups[i], "path", NULL);
+                lib->path = (p && p[0]) ? p : (g_free(p), NULL);
+                if (!lib->path) { idx++; continue; } /* skip entries without a path */
+
+                char *n = g_key_file_get_string(keyfile, groups[i], "name", NULL);
+                lib->name = (n && n[0]) ? n : (g_free(n), NULL);
+
+                char *dp = g_key_file_get_string(keyfile, groups[i], "data_path", NULL);
+                lib->data_path = (dp && dp[0]) ? dp : (g_free(dp), NULL);
+
+                lib->mb_resolve = g_key_file_get_integer(keyfile, groups[i], "mb_resolve", NULL);
+                lib->acoustid   = g_key_file_get_integer(keyfile, groups[i], "acoustid", NULL);
+                lib->fanart     = g_key_file_get_integer(keyfile, groups[i], "fanart", NULL);
+                lib->wikipedia  = g_key_file_get_integer(keyfile, groups[i], "wikipedia", NULL);
+                lib->locked     = g_key_file_get_integer(keyfile, groups[i], "locked", NULL);
+
+                GError *idx_err = NULL;
+                lib->library_index = g_key_file_get_integer(keyfile, groups[i], "library_index", &idx_err);
+                if (idx_err) {
+                    lib->library_index = idx; /* fallback: position = index */
+                    g_error_free(idx_err);
+                }
+                idx++;
             }
-            g_free(vals);
+
+            /* Sort by library_index so array order matches persisted order */
+            for (int a = 0; a < settings->library_count - 1; a++) {
+                for (int b = a + 1; b < settings->library_count; b++) {
+                    if (settings->libraries[b].library_index < settings->libraries[a].library_index) {
+                        library_config_t tmp = settings->libraries[a];
+                        settings->libraries[a] = settings->libraries[b];
+                        settings->libraries[b] = tmp;
+                    }
+                }
+            }
+        }
+        g_strfreev(groups);
+    }
+
+    // Migration: load old parallel-array format if no Library.N groups found
+    if (settings->library_count == 0) {
+        gsize path_count = 0;
+        char **lib_paths = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
+                                                       "library_paths", &path_count, NULL);
+        if (lib_paths && path_count > 0) {
+            settings->libraries = g_new0(library_config_t, (int)path_count);
+            settings->library_count = (int)path_count;
+
+            gsize name_count = 0, dp_count = 0;
+            char **lib_names = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
+                                                           "library_names", &name_count, NULL);
+            char **lib_dps   = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
+                                                           "library_data_paths", &dp_count, NULL);
+            gsize mb_cnt = 0, ac_cnt = 0, fa_cnt = 0, wp_cnt = 0;
+            int *mb_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_mb_resolve", &mb_cnt, NULL);
+            int *ac_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_acoustid", &ac_cnt, NULL);
+            int *fa_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_fanart", &fa_cnt, NULL);
+            int *wp_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_wikipedia", &wp_cnt, NULL);
+
+            for (gsize i = 0; i < path_count; i++) {
+                library_config_t *lib = &settings->libraries[i];
+                lib->path = g_strdup(lib_paths[i]);
+                lib->library_index = (int)i;
+                if (i < name_count && lib_names && lib_names[i] && lib_names[i][0])
+                    lib->name = g_strdup(lib_names[i]);
+                if (i < dp_count && lib_dps && lib_dps[i] && lib_dps[i][0])
+                    lib->data_path = g_strdup(lib_dps[i]);
+                if (i < mb_cnt && mb_vals) lib->mb_resolve = mb_vals[i]; else lib->mb_resolve = -1;
+                if (i < ac_cnt && ac_vals) lib->acoustid   = ac_vals[i]; else lib->acoustid   = -1;
+                if (i < fa_cnt && fa_vals) lib->fanart     = fa_vals[i]; else lib->fanart     = -1;
+                if (i < wp_cnt && wp_vals) lib->wikipedia  = wp_vals[i]; else lib->wikipedia  = -1;
+            }
+            g_strfreev(lib_paths);
+            g_strfreev(lib_names);
+            g_strfreev(lib_dps);
+            g_free(mb_vals); g_free(ac_vals); g_free(fa_vals); g_free(wp_vals);
         }
     }
 
@@ -405,57 +440,29 @@ gboolean app_settings_save(const app_settings_t *settings) {
     g_key_file_set_integer(keyfile, GROUP_LIBRARY, KEY_ART_THUMB_SIZE, settings->art_thumb_size);
     g_key_file_set_integer(keyfile, GROUP_LIBRARY, KEY_MAX_CONCURRENT_SCANS, settings->max_concurrent_library_scans);
 
-    // Save library paths
-    if (settings->library_paths && settings->library_path_count > 0) {
-        g_key_file_set_string_list(keyfile, GROUP_LIBRARY, KEY_LIBRARY_PATHS,
-                                   (const char * const *)settings->library_paths,
-                                   (gsize)settings->library_path_count);
-    }
+    // Save libraries as [Library.N] groups
+    for (int i = 0; i < settings->library_count; i++) {
+        const library_config_t *lib = &settings->libraries[i];
+        char group[32];
+        snprintf(group, sizeof(group), "Library.%d", i);
 
-    // Save library names (write empty string for NULL entries)
-    if (settings->library_name_count > 0) {
-        const char **name_list = g_new0(const char *, settings->library_name_count);
-        for (int i = 0; i < settings->library_name_count; i++) {
-            name_list[i] = (settings->library_names && settings->library_names[i])
-                           ? settings->library_names[i] : "";
-        }
-        g_key_file_set_string_list(keyfile, GROUP_LIBRARY, KEY_LIBRARY_NAMES,
-                                   name_list, (gsize)settings->library_name_count);
-        g_free(name_list);
-    }
-
-    // Save library data paths (write empty string for NULL entries)
-    if (settings->library_data_path_count > 0) {
-        const char **dp_list = g_new0(const char *, settings->library_data_path_count);
-        for (int i = 0; i < settings->library_data_path_count; i++) {
-            dp_list[i] = (settings->library_data_paths && settings->library_data_paths[i])
-                         ? settings->library_data_paths[i] : "";
-        }
-        g_key_file_set_string_list(keyfile, GROUP_LIBRARY, KEY_LIBRARY_DATA_PATHS,
-                                   dp_list, (gsize)settings->library_data_path_count);
-        g_free(dp_list);
-    }
-
-    // Save per-library integration overrides
-    {
-        struct { const char *key; const int *arr; int count; } overrides[] = {
-            { KEY_LIBRARY_MB_RESOLVE, settings->library_mb_resolve, settings->library_mb_resolve_count },
-            { KEY_LIBRARY_ACOUSTID,   settings->library_acoustid,   settings->library_acoustid_count },
-            { KEY_LIBRARY_FANART,     settings->library_fanart,     settings->library_fanart_count },
-            { KEY_LIBRARY_WIKIPEDIA,  settings->library_wikipedia,  settings->library_wikipedia_count },
-        };
-        for (size_t oi = 0; oi < G_N_ELEMENTS(overrides); oi++) {
-            if (overrides[oi].count > 0 && overrides[oi].arr) {
-                g_key_file_set_integer_list(keyfile, GROUP_LIBRARY, overrides[oi].key,
-                                            (int *)overrides[oi].arr, (gsize)overrides[oi].count);
-            }
-        }
+        g_key_file_set_string(keyfile, group, "path", lib->path ? lib->path : "");
+        g_key_file_set_string(keyfile, group, "name", lib->name ? lib->name : "");
+        g_key_file_set_string(keyfile, group, "data_path", lib->data_path ? lib->data_path : "");
+        g_key_file_set_integer(keyfile, group, "mb_resolve", lib->mb_resolve);
+        g_key_file_set_integer(keyfile, group, "acoustid", lib->acoustid);
+        g_key_file_set_integer(keyfile, group, "fanart", lib->fanart);
+        g_key_file_set_integer(keyfile, group, "wikipedia", lib->wikipedia);
+        g_key_file_set_integer(keyfile, group, "locked", lib->locked);
+        g_key_file_set_integer(keyfile, group, "library_index", lib->library_index);
     }
 
     // Save MusicBrainz settings
     g_key_file_set_boolean(keyfile, GROUP_MUSICBRAINZ, KEY_MB_RESOLVE, settings->musicbrainz_resolve);
     g_key_file_set_string(keyfile, GROUP_MUSICBRAINZ, KEY_MB_PG_CONNINFO,
                           settings->musicbrainz_pg_conninfo ? settings->musicbrainz_pg_conninfo : "");
+    g_key_file_set_string(keyfile, GROUP_MUSICBRAINZ, KEY_MB_SOLR_URL,
+                          settings->mb_solr_url ? settings->mb_solr_url : "");
 
     // Save fanart.tv settings
     g_key_file_set_boolean(keyfile, GROUP_FANART, KEY_FANART_RESOLVE, settings->fanart_resolve);
@@ -504,128 +511,105 @@ void app_settings_destroy(app_settings_t *settings) {
         g_free(settings->channels[i].livewire_gpio_address);
     }
     g_free(settings->musicbrainz_pg_conninfo);
+    g_free(settings->mb_solr_url);
     g_free(settings->acoustid_pg_conninfo);
     g_free(settings->acoustid_index_url);
     g_free(settings->fanart_api_key);
     g_free(settings->axia_username);
     g_free(settings->axia_password);
-    if (settings->library_paths) {
-        for (int i = 0; i < settings->library_path_count; i++)
-            g_free(settings->library_paths[i]);
-        g_free(settings->library_paths);
+    if (settings->libraries) {
+        for (int i = 0; i < settings->library_count; i++) {
+            g_free(settings->libraries[i].path);
+            g_free(settings->libraries[i].name);
+            g_free(settings->libraries[i].data_path);
+        }
+        g_free(settings->libraries);
     }
-    if (settings->library_names) {
-        for (int i = 0; i < settings->library_name_count; i++)
-            g_free(settings->library_names[i]);
-        g_free(settings->library_names);
-    }
-    if (settings->library_data_paths) {
-        for (int i = 0; i < settings->library_data_path_count; i++)
-            g_free(settings->library_data_paths[i]);
-        g_free(settings->library_data_paths);
-    }
-    g_free(settings->library_mb_resolve);
-    g_free(settings->library_acoustid);
-    g_free(settings->library_fanart);
-    g_free(settings->library_wikipedia);
     g_free(settings);
 }
 
-char *app_settings_get_effective_library_name(const app_settings_t *settings, int idx) {
+char *app_settings_get_library_name(const app_settings_t *settings, int idx) {
     g_assert(settings != NULL);
-    g_assert(idx >= 0 && idx < settings->library_path_count);
+    g_assert(idx >= 0 && idx < settings->library_count);
 
-    if (idx < settings->library_name_count
-        && settings->library_names
-        && settings->library_names[idx]
-        && settings->library_names[idx][0]) {
-        return g_strdup(settings->library_names[idx]);
-    }
-    return g_path_get_basename(settings->library_paths[idx]);
+    const library_config_t *lib = &settings->libraries[idx];
+    if (lib->name && lib->name[0])
+        return g_strdup(lib->name);
+    return g_path_get_basename(lib->path);
 }
 
-void app_settings_set_library_name(app_settings_t *settings, int idx, const char *name) {
-    if (!settings || idx < 0 || idx >= settings->library_path_count) return;
+const char *app_settings_get_library_data_path(const app_settings_t *settings, int idx) {
+    g_assert(settings != NULL);
+    g_assert(idx >= 0 && idx < settings->library_count);
 
-    /* Grow names array to cover all paths if needed */
-    if (idx >= settings->library_name_count) {
-        int new_count = settings->library_path_count;
-        settings->library_names = g_realloc(settings->library_names,
-                                             (new_count + 1) * sizeof(char *));
-        for (int i = settings->library_name_count; i < new_count; i++)
-            settings->library_names[i] = NULL;
-        settings->library_names[new_count] = NULL;
-        settings->library_name_count = new_count;
-    }
-
-    g_free(settings->library_names[idx]);
-    settings->library_names[idx] = (name && name[0]) ? g_strdup(name) : NULL;
+    const library_config_t *lib = &settings->libraries[idx];
+    return (lib->data_path && lib->data_path[0]) ? lib->data_path : lib->path;
 }
 
-void app_settings_add_library_path(app_settings_t *settings, const char *path) {
+void app_settings_add_library(app_settings_t *settings, const char *path) {
     if (!settings || !path) return;
+    if (app_settings_find_library(settings, path) >= 0) return;
 
-    // No-op if already present
-    for (int i = 0; i < settings->library_path_count; i++) {
-        if (strcmp(settings->library_paths[i], path) == 0) return;
+    /* Find next available library_index */
+    int max_idx = -1;
+    for (int i = 0; i < settings->library_count; i++) {
+        if (settings->libraries[i].library_index > max_idx)
+            max_idx = settings->libraries[i].library_index;
     }
 
-    int new_count = settings->library_path_count + 1;
-    settings->library_paths = g_realloc(settings->library_paths,
-                                         (new_count + 1) * sizeof(char *));
-    settings->library_paths[new_count - 1] = g_strdup(path);
-    settings->library_paths[new_count] = NULL;
-    settings->library_path_count = new_count;
+    int new_count = settings->library_count + 1;
+    settings->libraries = g_realloc(settings->libraries,
+                                     new_count * sizeof(library_config_t));
+    library_config_t *lib = &settings->libraries[new_count - 1];
+    memset(lib, 0, sizeof(*lib));
+    lib->path          = g_strdup(path);
+    lib->mb_resolve    = -1;
+    lib->acoustid      = -1;
+    lib->fanart        = -1;
+    lib->wikipedia     = -1;
+    lib->library_index = max_idx + 1;
+    settings->library_count = new_count;
 }
 
-void app_settings_remove_library_path(app_settings_t *settings, const char *path) {
-    if (!settings || !path) return;
+void app_settings_remove_library(app_settings_t *settings, const char *path) {
+    int idx = app_settings_find_library(settings, path);
+    if (idx < 0) return;
 
-    for (int i = 0; i < settings->library_path_count; i++) {
-        if (strcmp(settings->library_paths[i], path) == 0) {
-            g_free(settings->library_paths[i]);
-            for (int j = i; j < settings->library_path_count - 1; j++)
-                settings->library_paths[j] = settings->library_paths[j + 1];
-            settings->library_path_count--;
-            settings->library_paths[settings->library_path_count] = NULL;
+    g_free(settings->libraries[idx].path);
+    g_free(settings->libraries[idx].name);
+    g_free(settings->libraries[idx].data_path);
 
-            // Shift parallel names array
-            if (i < settings->library_name_count) {
-                g_free(settings->library_names[i]);
-                for (int j = i; j < settings->library_name_count - 1; j++)
-                    settings->library_names[j] = settings->library_names[j + 1];
-                settings->library_name_count--;
-                settings->library_names[settings->library_name_count] = NULL;
-            }
+    for (int j = idx; j < settings->library_count - 1; j++)
+        settings->libraries[j] = settings->libraries[j + 1];
+    settings->library_count--;
+}
 
-            // Shift parallel data paths array
-            if (i < settings->library_data_path_count) {
-                g_free(settings->library_data_paths[i]);
-                for (int j = i; j < settings->library_data_path_count - 1; j++)
-                    settings->library_data_paths[j] = settings->library_data_paths[j + 1];
-                settings->library_data_path_count--;
-                settings->library_data_paths[settings->library_data_path_count] = NULL;
-            }
+void app_settings_swap_libraries(app_settings_t *settings, int pos_a, int pos_b) {
+    if (!settings || pos_a < 0 || pos_b < 0
+        || pos_a >= settings->library_count || pos_b >= settings->library_count
+        || pos_a == pos_b) return;
 
-            // Shift parallel integration override arrays
-            {
-                struct { int **arr; int *count; } int_arrs[] = {
-                    { &settings->library_mb_resolve, &settings->library_mb_resolve_count },
-                    { &settings->library_acoustid,   &settings->library_acoustid_count },
-                    { &settings->library_fanart,     &settings->library_fanart_count },
-                    { &settings->library_wikipedia,  &settings->library_wikipedia_count },
-                };
-                for (size_t oi = 0; oi < G_N_ELEMENTS(int_arrs); oi++) {
-                    if (i < *int_arrs[oi].count) {
-                        for (int j = i; j < *int_arrs[oi].count - 1; j++)
-                            (*int_arrs[oi].arr)[j] = (*int_arrs[oi].arr)[j + 1];
-                        (*int_arrs[oi].count)--;
-                    }
-                }
-            }
-            return;
-        }
+    library_config_t tmp = settings->libraries[pos_a];
+    settings->libraries[pos_a] = settings->libraries[pos_b];
+    settings->libraries[pos_b] = tmp;
+}
+
+int app_settings_find_library(const app_settings_t *settings, const char *path) {
+    if (!settings || !path) return -1;
+    for (int i = 0; i < settings->library_count; i++) {
+        if (settings->libraries[i].path && strcmp(settings->libraries[i].path, path) == 0)
+            return i;
     }
+    return -1;
+}
+
+int app_settings_find_library_by_index(const app_settings_t *settings, int library_index) {
+    if (!settings) return -1;
+    for (int i = 0; i < settings->library_count; i++) {
+        if (settings->libraries[i].library_index == library_index)
+            return i;
+    }
+    return -1;
 }
 
 void app_settings_set_channel_device(app_settings_t *settings, int channel, const char *device_name) {
@@ -730,36 +714,10 @@ uint32_t app_settings_get_channel_quantum(const app_settings_t *settings, int ch
     return settings->channels[channel].quantum_frames;
 }
 
-const char *app_settings_get_library_data_path(const app_settings_t *settings, int idx) {
-    g_assert(settings != NULL);
-    g_assert(idx >= 0 && idx < settings->library_path_count);
-
-    if (idx < settings->library_data_path_count
-        && settings->library_data_paths
-        && settings->library_data_paths[idx]
-        && settings->library_data_paths[idx][0]) {
-        return settings->library_data_paths[idx];
-    }
-    return settings->library_paths[idx];
-}
-
-void app_settings_set_library_data_path(app_settings_t *settings, int idx, const char *path) {
-    if (!settings || idx < 0 || idx >= settings->library_path_count) return;
-
-    /* Grow data paths array to cover all paths if needed */
-    if (idx >= settings->library_data_path_count) {
-        int new_count = settings->library_path_count;
-        settings->library_data_paths = g_realloc(settings->library_data_paths,
-                                                  (new_count + 1) * sizeof(char *));
-        for (int i = settings->library_data_path_count; i < new_count; i++)
-            settings->library_data_paths[i] = NULL;
-        settings->library_data_paths[new_count] = NULL;
-        settings->library_data_path_count = new_count;
-    }
-
-    g_free(settings->library_data_paths[idx]);
-    settings->library_data_paths[idx] = (path && path[0]) ? g_strdup(path) : NULL;
-}
+/* Old getter/setter functions removed — callers now access
+ * settings->libraries[i].field directly.
+ * Kept: app_settings_get_library_name() and app_settings_get_library_data_path()
+ * as convenience functions with fallback logic. */
 
 const char *app_settings_format_name(output_format_t format) {
     if (format < 0 || format >= OUTPUT_FORMAT_COUNT) return "Unknown";

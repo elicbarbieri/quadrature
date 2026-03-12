@@ -400,6 +400,16 @@ static void ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap) 
     if (w->spotlight_t > 0.001f && w->cursor_x >= 0.0)
         cursor_bar = (int)(w->cursor_x / step);
 
+    /* ── Pre-compute played color (constant across all bars this frame) ── */
+    const GdkRGBA *bright = sensitive ? &WAVEFORM_PLAYED : &WAVEFORM_PLAYED_DIM;
+    float dim_t = w->bar_dim_t;
+    GdkRGBA played_color = {
+        bright->red   + dim_t * (WAVEFORM_PLAYED_DIM.red   - bright->red),
+        bright->green + dim_t * (WAVEFORM_PLAYED_DIM.green - bright->green),
+        bright->blue  + dim_t * (WAVEFORM_PLAYED_DIM.blue  - bright->blue),
+        bright->alpha + dim_t * (WAVEFORM_PLAYED_DIM.alpha - bright->alpha),
+    };
+
     /* ── Waveform bars ───────────────────────────────────────────────── */
     for (int i = 0; i < bar_count; i++) {
         float x = i * step;
@@ -408,29 +418,18 @@ static void ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap) 
         float val = fmaxf(w->loudness[bin], WAVEFORM_MIN_BAR_H);
         float bar_h = fmaxf(max_h * val * w->anim_progress, 0.5f);
 
-        /* Base color: three-zone during drag, two-zone otherwise.
-         * Drag: bright cyan up to drag pos, dim cyan up to playback pos, gray beyond.
-         * Normal: bright/dim cyan up to playhead, gray beyond.
-         * Played bars dim when playhead is hovered or dragged. */
+        /* Base color: only the drag_fill/play_fill lerp varies per bar.
+         * The played→dim color is pre-computed above (constant this frame). */
         float drag_fill = CLAMP((split_x - x) / WAVEFORM_BAR_WIDTH, 0.0f, 1.0f);
         GdkRGBA color;
         if (drag_fill > 0.0f) {
-            const GdkRGBA *bright = sensitive ? &WAVEFORM_PLAYED : &WAVEFORM_PLAYED_DIM;
-            float dim_t = w->bar_dim_t;  /* 0→1 on any hover/drag/disabled */
-            GdkRGBA played = {
-                bright->red   + dim_t * (WAVEFORM_PLAYED_DIM.red   - bright->red),
-                bright->green + dim_t * (WAVEFORM_PLAYED_DIM.green - bright->green),
-                bright->blue  + dim_t * (WAVEFORM_PLAYED_DIM.blue  - bright->blue),
-                bright->alpha + dim_t * (WAVEFORM_PLAYED_DIM.alpha - bright->alpha),
-            };
             color = (GdkRGBA){
-                WAVEFORM_UNPLAYED.red   + drag_fill * (played.red   - WAVEFORM_UNPLAYED.red),
-                WAVEFORM_UNPLAYED.green + drag_fill * (played.green - WAVEFORM_UNPLAYED.green),
-                WAVEFORM_UNPLAYED.blue  + drag_fill * (played.blue  - WAVEFORM_UNPLAYED.blue),
-                WAVEFORM_UNPLAYED.alpha + drag_fill * (played.alpha - WAVEFORM_UNPLAYED.alpha),
+                WAVEFORM_UNPLAYED.red   + drag_fill * (played_color.red   - WAVEFORM_UNPLAYED.red),
+                WAVEFORM_UNPLAYED.green + drag_fill * (played_color.green - WAVEFORM_UNPLAYED.green),
+                WAVEFORM_UNPLAYED.blue  + drag_fill * (played_color.blue  - WAVEFORM_UNPLAYED.blue),
+                WAVEFORM_UNPLAYED.alpha + drag_fill * (played_color.alpha - WAVEFORM_UNPLAYED.alpha),
             };
         } else if (w->dragging) {
-            /* During drag: bar is past drag position — check if before playback */
             float play_fill = CLAMP((play_x - x) / WAVEFORM_BAR_WIDTH, 0.0f, 1.0f);
             color = (GdkRGBA){
                 WAVEFORM_UNPLAYED.red   + play_fill * (WAVEFORM_PLAYED_DIM.red   - WAVEFORM_UNPLAYED.red),

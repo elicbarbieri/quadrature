@@ -96,17 +96,42 @@ int main(int argc, char *argv[]) {
     /* Load settings first to get library paths */
     data.settings = app_settings_load();
 
-    /* Create library cache for track_id -> path resolution.
-     * Use the first configured library's SQLite (per-library DB architecture).
-     * If no library is configured, the cache starts empty. */
-    if (data.settings && data.settings->library_path_count > 0) {
-        const char *data_root = app_settings_get_library_data_path(data.settings, 0);
-        char *dbpath = g_build_filename(data_root, "quadrature.sqlite", NULL);
-        if (library_cache_create(dbpath, data.settings->library_paths[0], &data.library_cache) != QUADRATURE_OK) {
+    /* Create library cache for ALL configured libraries.
+     * Each library gets its own slot (indexed 0..N-1) in the cache.
+     * If no libraries are configured, the cache starts empty but non-NULL
+     * so slots can be added dynamically when the user adds libraries. */
+    {
+        int lib_count = data.settings ? data.settings->library_count : 0;
+        library_cache_source_t *sources = NULL;
+        char **dbpaths = NULL;
+        char **names   = NULL;
+
+        if (lib_count > 0) {
+            sources = g_new0(library_cache_source_t, lib_count);
+            dbpaths = g_new0(char *, lib_count);
+            names   = g_new0(char *, lib_count);
+            for (int i = 0; i < lib_count; i++) {
+                const char *data_root = app_settings_get_library_data_path(data.settings, i);
+                dbpaths[i] = g_build_filename(data_root, "quadrature.sqlite", NULL);
+                names[i]   = app_settings_get_library_name(data.settings, i);
+                sources[i].db_path      = dbpaths[i];
+                sources[i].music_base   = data.settings->libraries[i].path;
+                sources[i].display_name = names[i];
+            }
+        }
+
+        if (library_cache_create_multi(sources, lib_count, &data.library_cache) != QUADRATURE_OK) {
             g_warning("Failed to create library cache - audio will not resolve track IDs");
             data.library_cache = NULL;
         }
-        g_free(dbpath);
+
+        for (int i = 0; i < lib_count; i++) {
+            g_free(dbpaths[i]);
+            g_free(names[i]);
+        }
+        g_free(dbpaths);
+        g_free(names);
+        g_free(sources);
     }
 
     /* Create audio pipeline with library cache */

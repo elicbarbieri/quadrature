@@ -136,56 +136,52 @@
           </object>
         </child>
 
-        <!-- Index storage row (USB: info-only, Network: editable) -->
+        <!-- Index storage row (always visible, content changes per type) -->
         <child>
-          <object class="GtkRevealer" id="index_section_revealer">
-            <property name="reveal-child">false</property>
-            <property name="transition-type">slide-down</property>
+          <object class="GtkBox" id="index_section_box">
+            <property name="orientation">vertical</property>
+            <property name="spacing">4</property>
+            <child>
+              <object class="GtkLabel" id="index_section_title">
+                <property name="label">Index Location</property>
+                <property name="xalign">0</property>
+                <style>
+                  <class name="dim-label"/>
+                </style>
+              </object>
+            </child>
             <child>
               <object class="GtkBox">
-                <property name="orientation">vertical</property>
-                <property name="spacing">4</property>
+                <property name="orientation">horizontal</property>
+                <property name="spacing">8</property>
                 <child>
-                  <object class="GtkLabel">
-                    <property name="label">Index Location</property>
+                  <object class="GtkLabel" id="data_path_label">
+                    <property name="label">Alongside your music files</property>
                     <property name="xalign">0</property>
-                    <style>
-                      <class name="dim-label"/>
-                    </style>
+                    <property name="hexpand">true</property>
+                    <property name="ellipsize">middle</property>
+                    <property name="width-chars">30</property>
+                    <property name="opacity">0.5</property>
                   </object>
                 </child>
                 <child>
-                  <object class="GtkBox">
-                    <property name="orientation">horizontal</property>
-                    <property name="spacing">8</property>
-                    <child>
-                      <object class="GtkLabel" id="data_path_label">
-                        <property name="label">Select a music folder first</property>
-                        <property name="xalign">0</property>
-                        <property name="hexpand">true</property>
-                        <property name="ellipsize">middle</property>
-                        <property name="width-chars">30</property>
-                        <property name="opacity">0.5</property>
-                      </object>
-                    </child>
-                    <child>
-                      <object class="GtkButton" id="data_browse_btn">
-                        <property name="label">Browse...</property>
-                      </object>
-                    </child>
+                  <object class="GtkButton" id="data_browse_btn">
+                    <property name="label">Browse...</property>
+                    <property name="sensitive">false</property>
+                    <property name="opacity">0</property>
                   </object>
                 </child>
-                <child>
-                  <object class="GtkLabel" id="index_hint_label">
-                    <property name="label">Stored locally so data persists when the drive is disconnected.</property>
-                    <property name="xalign">0</property>
-                    <property name="wrap">true</property>
-                    <property name="opacity">0.4</property>
-                    <style>
-                      <class name="caption"/>
-                    </style>
-                  </object>
-                </child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel" id="index_hint_label">
+                <property name="label">Index stored alongside your music files.</property>
+                <property name="xalign">0</property>
+                <property name="wrap">true</property>
+                <property name="opacity">0.4</property>
+                <style>
+                  <class name="caption"/>
+                </style>
               </object>
             </child>
           </object>

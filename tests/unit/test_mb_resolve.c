@@ -90,7 +90,7 @@ Test(mb_resolve, acoustid_http_post) {
 
     // Generate fingerprint from a synthetic WAV (no real match expected)
     mb_fingerprint_t fp;
-    quadrature_result_t res = mb_fingerprint_generate("tests/assets/tone_440hz.wav", &fp);
+    quadrature_result_t res = mb_fingerprint_generate(SOURCE_DIR "/tests/assets/tone_440hz.wav", &fp);
     cr_assert_eq(res, QUADRATURE_OK, "fingerprint generation failed");
 
     const char* index_url = acoustid_index_url();
@@ -101,8 +101,13 @@ Test(mb_resolve, acoustid_http_post) {
         cr_skip("ACOUSTID_INDEX_URL not set");
     }
 
+    // Prepare statements and create HTTP connection for the test
+    mb_acoustid_prepare_stmts(mb_client, ac_client);
+    mb_http_conn_t* http_conn = mb_http_conn_create(index_url);
+    cr_assert_not_null(http_conn, "failed to create HTTP connection");
+
     mb_acoustid_response_t response;
-    res = mb_acoustid_lookup(mb_client, ac_client, index_url, &fp, &response);
+    res = mb_acoustid_lookup(mb_client, ac_client, http_conn, &fp, &response);
 
     // Empty response (0 matches) is perfectly valid — just no crash
     cr_assert_eq(res, QUADRATURE_OK,
@@ -110,6 +115,7 @@ Test(mb_resolve, acoustid_http_post) {
     cr_assert_geq((int)response.count, 0);
 
     mb_acoustid_response_free(&response);
+    mb_http_conn_destroy(http_conn);
     mb_fingerprint_free(&fp);
     mb_pg_client_destroy(mb_client);
     mb_pg_client_destroy(ac_client);
@@ -150,10 +156,11 @@ Test(mb_resolve, acoustid_pg_lookup) {
     // Step 2: query recording MBIDs for that track_id (same query as mb_acoustid.c)
     const char* params[1] = { tid_str };
     res = (PGresult*)mb_pg_exec(client,
-        "SELECT DISTINCT tm.mbid::text "
+        "SELECT tm.mbid::text, MAX(tm.submission_count) AS sc "
         "FROM track_mbid tm "
         "WHERE tm.track_id = ANY($1::int[]) "
-        "ORDER BY tm.submission_count DESC "
+        "GROUP BY tm.mbid "
+        "ORDER BY sc DESC "
         "LIMIT 5",
         1, params);
     cr_assert_not_null(res, "NULL result");
@@ -283,7 +290,7 @@ Test(mb_resolve, full_resolve) {
     int64_t album_id = 0;
     cr_assert_eq(
         db_upsert_folder_album(db, "/fake/test", "Test Album",
-                               artist_id, false, 2020, &album_id),
+                               artist_id, 2020, &album_id),
         QUADRATURE_OK, "failed to create test album");
     cr_assert_gt(album_id, 0LL);
 
@@ -312,7 +319,7 @@ Test(mb_resolve, full_resolve) {
     // Verify album is initially unresolved
     int64_t* unresolved = NULL;
     size_t unresolved_count = 0;
-    cr_assert_eq(db_get_unresolved_albums(db, &unresolved, &unresolved_count),
+    cr_assert_eq(db_get_unresolved_albums(db, 0, &unresolved, &unresolved_count),
                  QUADRATURE_OK);
     cr_assert_eq(unresolved_count, 1U, "expected 1 unresolved album before resolve");
     g_free(unresolved);
@@ -333,7 +340,7 @@ Test(mb_resolve, full_resolve) {
     mb_resolver_destroy(resolver);
 
     // After resolution the album must no longer appear as unresolved
-    cr_assert_eq(db_get_unresolved_albums(db, &unresolved, &unresolved_count),
+    cr_assert_eq(db_get_unresolved_albums(db, 0, &unresolved, &unresolved_count),
                  QUADRATURE_OK);
     cr_assert_eq(unresolved_count, 0U,
                  "album not resolved: still in unresolved list");

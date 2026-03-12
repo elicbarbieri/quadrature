@@ -30,7 +30,7 @@
       </object>
     </child>
 
-    <!-- left slot: name + subtitle -->
+    <!-- left slot: name + library badges + subtitle -->
     <child type="left">
       <object class="GtkBox" id="col_left">
         <property name="orientation">vertical</property>
@@ -43,6 +43,13 @@
             <style>
               <class name="library-row-title"/>
             </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkBox" id="library_badges">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">4</property>
+            <property name="visible">false</property>
           </object>
         </child>
         <child>

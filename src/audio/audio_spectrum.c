@@ -44,24 +44,23 @@ void spectrum_cleanup(spectrum_state_t* s) {
 }
 
 void spectrum_process(spectrum_state_t* s, const float* in, uint32_t frames,
-                      _Atomic float* bars) {
+                      _Atomic float* bars, _Atomic uint32_t* generation) {
     if (!s->plan || !in || frames == 0) return;
 
     size_t to_read = (size_t)frames * 2;  /* stereo interleaved */
 
-    /* Prevent overflow: keep most recent half if buffer would overfill */
-    if (s->input_buffer_fill + to_read > s->input_buffer_size) {
-        size_t keep = s->input_buffer_size / 2;
-        memmove(s->input_buffer,
-                s->input_buffer + s->input_buffer_fill - keep,
-                keep * sizeof(double));
-        s->input_buffer_fill = keep;
-    }
+    /* Prevent overflow: discard stale samples rather than memmove on the RT thread.
+     * This path fires only if we somehow accumulate >4096 samples without hitting
+     * the 512-sample FFT threshold — practically never in normal operation. */
+    if (s->input_buffer_fill + to_read > s->input_buffer_size)
+        s->input_buffer_fill = 0;
 
-    /* Convert float → double and accumulate */
-    for (size_t i = 0; i < to_read; i++) {
-        s->input_buffer[s->input_buffer_fill++] = (double)in[i];
-    }
+    /* Convert float → double.  Start offset is decoupled from the loop
+     * so the compiler can auto-vectorize (no loop-carried dependency). */
+    double *dst = s->input_buffer + s->input_buffer_fill;
+    for (size_t i = 0; i < to_read; i++)
+        dst[i] = (double)in[i];
+    s->input_buffer_fill += to_read;
 
     /* Run FFT when enough samples accumulated */
     if (s->input_buffer_fill >= 512) {
@@ -80,5 +79,7 @@ void spectrum_process(spectrum_state_t* s, const float* in, uint32_t frames,
             atomic_store(&bars[b], left);
             atomic_store(&bars[SPECTRUM_BARS + b], right);
         }
+        if (generation)
+            atomic_fetch_add(generation, 1);
     }
 }

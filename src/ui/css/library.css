@@ -35,7 +35,8 @@
 
 .search-entry:focus {
     border-color: #34d399;
-    box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.2);
+    outline: 2px solid rgba(52, 211, 153, 0.2);
+    outline-offset: -1px;
 }
 
 /* Search-type selector chips (All / Artists / Albums / Songs)
@@ -316,9 +317,20 @@
 .library-card:hover { border-color: #555555; }
 
 .library-card-name {
-    font-size: 16px;
+    font-size: 24px;
     font-weight: 600;
     color: #e0e0e0;
+}
+
+.library-card-edit-btn {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 2px;
+    opacity: 0.4;
+}
+
+.library-card-edit-btn:hover {
+    opacity: 1.0;
 }
 
 .library-card-path {
@@ -384,21 +396,21 @@
     font-size: 16px;
     font-weight: 500;
     transition: color 150ms ease-out, background-color 150ms ease-out,
-                border-color 150ms ease-out, box-shadow 150ms ease-out;
+                border-color 150ms ease-out;
 }
 
 .album-btn:hover {
     color: #edb85c;
     background-color: #1e1a0d;
     border-color: rgba(229, 166, 64, 0.5);
-    box-shadow: 0 0 8px rgba(229, 166, 64, 0.3);
 }
 
 .album-btn:focus-visible {
     color: #00cc44;
     border-color: #00cc44;
-    box-shadow: 0 0 8px rgba(0, 204, 68, 0.5);
     background-color: rgba(0, 204, 68, 0.12);
+    outline: 2px solid rgba(0, 204, 68, 0.5);
+    outline-offset: 1px;
 }
 
 .artist-btn {
@@ -412,21 +424,21 @@
     font-size: 16px;
     font-weight: 500;
     transition: color 150ms ease-out, background-color 150ms ease-out,
-                border-color 150ms ease-out, box-shadow 150ms ease-out;
+                border-color 150ms ease-out;
 }
 
 .artist-btn:hover {
     color: #33ddff;
     background-color: #0d2a30;
     border-color: rgba(0, 212, 255, 0.5);
-    box-shadow: 0 0 8px rgba(0, 212, 255, 0.3);
 }
 
 .artist-btn:focus-visible {
     color: #00cc44;
     border-color: #00cc44;
-    box-shadow: 0 0 8px rgba(0, 204, 68, 0.5);
     background-color: rgba(0, 204, 68, 0.12);
+    outline: 2px solid rgba(0, 204, 68, 0.5);
+    outline-offset: 1px;
 }
 
 
@@ -452,29 +464,30 @@
 .library-list > row:focus-visible { outline: none; }
 
 .library-list > row > :first-child {
-    padding: 4px 8px;
+    padding: 3px 7px;
     background: #1e1e1e;
     border-radius: 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
-    transition: box-shadow 150ms ease-out, border-radius 150ms ease-out;
+    border: 1px solid transparent;
+    border-top-color: rgba(255, 255, 255, 0.04);
+    transition: border-radius 150ms ease-out;
 }
 
-.library-list > row > .library-row-first { border-radius: 8px 8px 0 0; border-top: none; }
+.library-list > row > .library-row-first { border-radius: 8px 8px 0 0; border-top-color: transparent; }
 .library-list > row > .library-row-last  { border-radius: 0 0 8px 8px; }
 .library-list > row > .library-row-first.library-row-last { border-radius: 8px; }
 
 .library-list > row:hover > :first-child {
     border-radius: 8px;
-    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.22);
+    border-color: rgba(52, 211, 153, 0.22);
 }
 
 .library-list > row:selected > :first-child {
     border-radius: 8px;
-    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.35);
+    border-color: rgba(52, 211, 153, 0.35);
 }
 
 .library-list:focus-within > row:selected > :first-child {
-    box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 1.0);
+    border-color: rgba(52, 211, 153, 1.0);
 }
 
 .library-list > row:hover .library-row-title { color: #ffffff; }
@@ -510,4 +523,9 @@ scrubber.scrubber-expanded {
     padding: 6px 14px;
     min-width: 52px;
     margin-right: 44px;
+}
+
+/* Library card — disconnected (drive removed) */
+.library-disconnected {
+    opacity: 0.45;
 }

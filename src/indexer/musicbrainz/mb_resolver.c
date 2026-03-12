@@ -21,12 +21,26 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <libavformat/avformat.h>
 
 // Various Artists MB ID
 #define VA_MUSICBRAINZ_ID "89ad4ac3-39f7-470e-963a-56509c546377"
 
 // Queue drain timeout (microseconds) — how long batch consumer waits for more items
 #define QUEUE_DRAIN_TIMEOUT_US (200 * 1000)  // 200ms
+
+// =============================================================================
+// Resolution tier tracking
+// =============================================================================
+
+typedef enum {
+    RESOLVE_TIER_TAGGED,    // Had MUSICBRAINZ_ALBUMID tag in file metadata
+    RESOLVE_TIER_ISRC,      // Resolved via ISRC lookup against MB PG
+    RESOLVE_TIER_SOLR,      // Resolved via Solr text search
+    RESOLVE_TIER_ACOUSTID,  // Resolved via AcoustID fingerprinting
+    RESOLVE_TIER_NONE,      // No match found
+    RESOLVE_TIER_COUNT
+} resolve_tier_t;
 
 // =============================================================================
 // Resolver Context
@@ -37,6 +51,7 @@ struct mb_resolver {
     mb_pg_client_t* pg_client;          /* MusicBrainz PostgreSQL client (batch consumer) */
     mb_pg_client_t* pg_client_prefetch; /* Second PG client for prefetch overlap (may be NULL) */
     char* acoustid_index_url;           /* acoustid-index HTTP URL (may be NULL) */
+    char* solr_url;                     /* MusicBrainz Solr URL (may be NULL) */
     mb_resolver_options_t options;
     mb_resolver_progress_cb callback;
     void* user_data;
@@ -50,6 +65,10 @@ struct mb_resolver {
     /* Fingerprint worker PG pool (one connection per worker thread) */
     mb_pg_pool_t* pg_pool;
 
+    /* Per-tier resolution stats (updated from worker threads via __atomic builtins) */
+    volatile size_t tier_count[RESOLVE_TIER_COUNT];
+    volatile int64_t tier_ns[RESOLVE_TIER_COUNT];
+
     volatile bool cancelled;
 };
 
@@ -60,6 +79,7 @@ struct mb_resolver {
 typedef struct {
     int64_t album_id;
     char* release_id;  /* owned, may be NULL if fingerprint found no match */
+    bool service_error; /* true if lookup failed due to service unavailability */
 } resolve_queue_item_t;
 
 // =============================================================================
@@ -207,22 +227,125 @@ static double title_similarity(const char* a, const char* b) {
 }
 
 // =============================================================================
-// Release Matching (fingerprint → AcoustID → consensus vote)
+// Lightweight Tag Reading (no audio decode, ~1ms per file)
 // =============================================================================
 
 /**
- * Fingerprint an album's tracks and find the best-matching MusicBrainz release.
- * Uses per-thread PG connections from the pool.
+ * Tags read from an audio file for resolution purposes.
+ * All fields are owned strings (caller frees with resolve_tags_free).
+ */
+typedef struct {
+    char* isrc;            // ISRC code (may be NULL)
+    char* album;           // Album title from metadata tag (may be NULL)
+    char* artist;          // Artist name from metadata tag (may be NULL)
+    char* album_artist;    // Album artist from metadata tag (may be NULL)
+} resolve_tags_t;
+
+static void resolve_tags_free(resolve_tags_t* tags) {
+    if (!tags) return;
+    g_free(tags->isrc);
+    g_free(tags->album);
+    g_free(tags->artist);
+    g_free(tags->album_artist);
+}
+
+/**
+ * Read resolution-relevant tags from an audio file.
+ * Uses FFmpeg format context only — no codec open, no audio decode.
+ */
+static void read_resolve_tags(const char* audio_path, resolve_tags_t* out) {
+    memset(out, 0, sizeof(*out));
+
+    // Tags live in container headers — available after avformat_open_input()
+    // without the expensive avformat_find_stream_info() media probing.
+    AVFormatContext* fmt = NULL;
+    if (avformat_open_input(&fmt, audio_path, NULL, NULL) != 0)
+        return;
+
+    AVDictionaryEntry* tag = NULL;
+    while ((tag = av_dict_get(fmt->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
+        if ((strcasecmp(tag->key, "isrc") == 0 ||
+             strcasecmp(tag->key, "TSRC") == 0) && !out->isrc) {
+            out->isrc = g_strdup(tag->value);
+        } else if (strcasecmp(tag->key, "album") == 0 && !out->album) {
+            out->album = g_strdup(tag->value);
+        } else if (strcasecmp(tag->key, "artist") == 0 && !out->artist) {
+            out->artist = g_strdup(tag->value);
+        } else if ((strcasecmp(tag->key, "album_artist") == 0 ||
+                    strcasecmp(tag->key, "albumartist") == 0) && !out->album_artist) {
+            out->album_artist = g_strdup(tag->value);
+        }
+    }
+
+    avformat_close_input(&fmt);
+}
+
+// =============================================================================
+// Release Matching (ISRC → Solr text search → AcoustID fingerprint)
+// =============================================================================
+
+/**
+ * Find the best-matching MusicBrainz release for an album.
+ * Fallback chain: ISRC → Solr text search → AcoustID fingerprint.
+ * Uses per-thread PG connections and persistent HTTP connection from the pool.
  *
- * @param ctx       Resolver context (for library_root, acoustid_index_url, cancel)
- * @param album_id  Album to fingerprint
- * @param mb_pg     Per-thread MusicBrainz PG client
+ * @param ctx        Resolver context (for library_root, cancel)
+ * @param album_id   Album to fingerprint
+ * @param mb_pg      Per-thread MusicBrainz PG client
  * @param acoustid_pg Per-thread AcoustID PG client (may be NULL)
+ * @param http_conn      Per-thread persistent HTTP connection to acoustid-index (may be NULL)
+ * @param service_error  Out: set to true if lookup failed due to service unavailability
  * @return release_id string (caller owns) or NULL if no match
  */
+/**
+ * Tally a set of (release_id, release_group_id) results into voting tables.
+ * One vote per release_group per call (de-duplicated).
+ * Updates best_rg / best_rg_count if a group takes the lead.
+ */
+static void tally_votes(const mb_acoustid_response_t* response,
+                         GHashTable* rg_counts,
+                         GHashTable* rg_best_release,
+                         GHashTable* release_counts,
+                         char** best_rg, int* best_rg_count) {
+    GHashTable* seen_rgs = g_hash_table_new(g_str_hash, g_str_equal);
+    for (size_t j = 0; j < response->count; j++) {
+        const char* rg_id = response->results[j].release_group_id;
+        const char* rel_id = response->results[j].release_id;
+        if (!rg_id || !rel_id) continue;
+
+        if (!g_hash_table_contains(seen_rgs, rg_id)) {
+            g_hash_table_add(seen_rgs, (gpointer)rg_id);
+            gpointer cnt = g_hash_table_lookup(rg_counts, rg_id);
+            int new_count = GPOINTER_TO_INT(cnt) + 1;
+            g_hash_table_insert(rg_counts, g_strdup(rg_id),
+                                GINT_TO_POINTER(new_count));
+            if (new_count > *best_rg_count) {
+                *best_rg_count = new_count;
+                g_free(*best_rg);
+                *best_rg = g_strdup(rg_id);
+            }
+        }
+
+        gpointer rcnt = g_hash_table_lookup(release_counts, rel_id);
+        int new_rcnt = GPOINTER_TO_INT(rcnt) + 1;
+        g_hash_table_insert(release_counts, g_strdup(rel_id),
+                            GINT_TO_POINTER(new_rcnt));
+
+        const char* cur_best = g_hash_table_lookup(rg_best_release, rg_id);
+        if (!cur_best || new_rcnt > GPOINTER_TO_INT(
+                g_hash_table_lookup(release_counts, cur_best))) {
+            g_hash_table_insert(rg_best_release, g_strdup(rg_id),
+                                g_strdup(rel_id));
+        }
+    }
+    g_hash_table_destroy(seen_rgs);
+}
+
 static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
                                           mb_pg_client_t* mb_pg,
-                                          mb_pg_client_t* acoustid_pg) {
+                                          mb_pg_client_t* acoustid_pg,
+                                          mb_http_conn_t* http_conn,
+                                          bool* service_error) {
     db_track_t* tracks = NULL;
     size_t track_count = 0;
     if (db_get_tracks_by_album(ctx->db, album_id, &tracks, &track_count) != QUADRATURE_OK
@@ -230,74 +353,212 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
         return NULL;
     }
 
-    size_t tracks_to_check = track_count < (size_t)MB_FINGERPRINT_TRACKS
-        ? track_count : (size_t)MB_FINGERPRINT_TRACKS;
+    // Pre-compute total duration for text search validation
+    int64_t total_duration_ms = 0;
+    for (size_t i = 0; i < track_count; i++)
+        total_duration_ms += tracks[i].duration_ms;
 
+    // Vote on release_group_id (not release_id) to handle multiple editions
+    GHashTable* rg_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    GHashTable* rg_best_release = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     GHashTable* release_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    char* best_rg = NULL;
+    int best_rg_count = 0;
+    bool isrc_resolved = false;
     size_t fingerprinted = 0;
+
+    // Album/artist from metadata tags (for text search — NOT from folder name)
+    char* tag_album = NULL;
+    char* tag_artist = NULL;
+
+    // =========================================================================
+    // Stage 1: Read tags + ISRC lookup
+    // Read ISRCs from all tracks in one pass. Also capture album/artist tags
+    // from the first file for the text search fallback (Stage 3).
+    // =========================================================================
+
+    int64_t stage_t0 = profile_now_ns();
+
+    if (!ctx->cancelled && ctx->library_root) {
+        const char** isrcs = g_new0(const char*, track_count);
+        resolve_tags_t* all_tags = g_new0(resolve_tags_t, track_count);
+        size_t isrc_count = 0;
+
+        for (size_t i = 0; i < track_count && !ctx->cancelled; i++) {
+            if (!tracks[i].path || !tracks[i].album_path) continue;
+            char* audio_path = g_build_filename(ctx->library_root,
+                                                 tracks[i].album_path,
+                                                 tracks[i].path, NULL);
+            read_resolve_tags(audio_path, &all_tags[i]);
+            g_free(audio_path);
+
+            if (all_tags[i].isrc) {
+                isrcs[isrc_count] = all_tags[i].isrc;
+                isrc_count++;
+            }
+
+            // Capture album/artist from first file that has them
+            if (!tag_album && all_tags[i].album)
+                tag_album = g_strdup(all_tags[i].album);
+            if (!tag_artist) {
+                if (all_tags[i].album_artist)
+                    tag_artist = g_strdup(all_tags[i].album_artist);
+                else if (all_tags[i].artist)
+                    tag_artist = g_strdup(all_tags[i].artist);
+            }
+        }
+
+        if (isrc_count >= 2) {
+            mb_acoustid_response_t isrc_response;
+            quadrature_result_t isrc_res = mb_isrc_lookup(mb_pg, isrcs, isrc_count,
+                                                           &isrc_response);
+            if (isrc_res == QUADRATURE_OK && isrc_response.count > 0) {
+                tally_votes(&isrc_response, rg_counts, rg_best_release,
+                            release_counts, &best_rg, &best_rg_count);
+                mb_acoustid_response_free(&isrc_response);
+
+                double confidence = (double)best_rg_count / (double)isrc_count;
+                if (confidence >= MB_MATCH_CONFIDENCE) {
+                    g_debug("ISRC lookup resolved album %" G_GINT64_FORMAT
+                            " → %s (%.0f%% confidence, %zu ISRCs)",
+                            album_id, best_rg, confidence * 100, isrc_count);
+                    isrc_resolved = true;
+                }
+            } else if (isrc_res == QUADRATURE_OK) {
+                mb_acoustid_response_free(&isrc_response);
+            }
+        }
+
+        for (size_t i = 0; i < track_count; i++)
+            resolve_tags_free(&all_tags[i]);
+        g_free(all_tags);
+        g_free(isrcs);
+    }
+
+    int64_t isrc_ns = profile_now_ns() - stage_t0;
+
+    // =========================================================================
+    // Stage 2: Solr text search (skip if ISRC already resolved)
+    // Runs BEFORE fingerprinting — ~5-10ms vs ~10-20s per album.
+    // Uses metadata tags, NOT folder name — folder names often contain year
+    // suffixes like "Solace (2018)" that don't match MusicBrainz.
+    // =========================================================================
+
     char* best_release = NULL;
-    int best_count = 0;
+    resolve_tier_t tier = RESOLVE_TIER_NONE;
 
-    for (size_t i = 0; i < tracks_to_check && !ctx->cancelled; i++) {
-        if (!tracks[i].path) continue;
+    if (isrc_resolved && best_rg) {
+        const char* rel = g_hash_table_lookup(rg_best_release, best_rg);
+        if (rel) {
+            best_release = g_strdup(rel);
+            tier = RESOLVE_TIER_ISRC;
+        }
+    }
 
-        // Construct absolute path: library_root / album_path / track_path
-        if (!ctx->library_root || !tracks[i].album_path || !tracks[i].path) continue;
-        char* audio_path = g_build_filename(ctx->library_root,
-                                             tracks[i].album_path,
-                                             tracks[i].path, NULL);
+    stage_t0 = profile_now_ns();
 
-        mb_fingerprint_t fp = {0};
-        quadrature_result_t fp_res = mb_fingerprint_generate(audio_path, &fp);
-        g_free(audio_path);
-        if (fp_res != QUADRATURE_OK) continue;
-        fingerprinted++;
+    if (!best_release && !ctx->cancelled && ctx->solr_url
+        && tag_album && tag_artist) {
+        best_release = mb_solr_search_release(mb_pg, ctx->solr_url,
+            tag_album, tag_artist, track_count, total_duration_ms);
+        if (best_release) {
+            tier = RESOLVE_TIER_SOLR;
+            g_debug("Solr search resolved album %" G_GINT64_FORMAT
+                    " '%s' by '%s' → %s",
+                    album_id, tag_album, tag_artist, best_release);
+        }
+    }
 
-        mb_acoustid_response_t response;
-        if (mb_acoustid_lookup(mb_pg, acoustid_pg,
-                                ctx->acoustid_index_url, &fp, &response) == QUADRATURE_OK) {
-            for (size_t j = 0; j < response.count; j++) {
-                if (response.results[j].release_id) {
-                    gpointer cnt = g_hash_table_lookup(release_counts,
-                                                        response.results[j].release_id);
-                    int new_count = GPOINTER_TO_INT(cnt) + 1;
-                    g_hash_table_insert(release_counts,
-                                        g_strdup(response.results[j].release_id),
-                                        GINT_TO_POINTER(new_count));
-                    if (new_count > best_count) {
-                        best_count = new_count;
-                        g_free(best_release);
-                        best_release = g_strdup(response.results[j].release_id);
+    int64_t solr_ns = profile_now_ns() - stage_t0;
+
+    // =========================================================================
+    // Stage 3: Fingerprint + AcoustID (last resort — only if ISRC + Solr missed)
+    // =========================================================================
+
+    stage_t0 = profile_now_ns();
+
+    if (!best_release && !isrc_resolved && !ctx->cancelled && acoustid_pg && http_conn) {
+        size_t tracks_to_check = track_count < (size_t)MB_FINGERPRINT_TRACKS
+            ? track_count : (size_t)MB_FINGERPRINT_TRACKS;
+
+        for (size_t i = 0; i < tracks_to_check && !ctx->cancelled; i++) {
+            if (!tracks[i].path) continue;
+            if (!ctx->library_root || !tracks[i].album_path) continue;
+            char* audio_path = g_build_filename(ctx->library_root,
+                                                 tracks[i].album_path,
+                                                 tracks[i].path, NULL);
+
+            mb_fingerprint_t fp = {0};
+            quadrature_result_t fp_res = mb_fingerprint_generate(audio_path, &fp);
+            g_free(audio_path);
+            if (fp_res != QUADRATURE_OK) continue;
+            fingerprinted++;
+
+            mb_acoustid_response_t response;
+            quadrature_result_t lookup_res = mb_acoustid_lookup(mb_pg, acoustid_pg,
+                                                                 http_conn, &fp, &response);
+            if (lookup_res == QUADRATURE_ERROR_SERVICE_UNAVAILABLE) {
+                if (service_error) *service_error = true;
+                mb_fingerprint_free(&fp);
+                break;
+            }
+            if (lookup_res == QUADRATURE_OK) {
+                tally_votes(&response, rg_counts, rg_best_release,
+                            release_counts, &best_rg, &best_rg_count);
+                mb_acoustid_response_free(&response);
+            }
+            mb_fingerprint_free(&fp);
+
+            // Early exit: if first 2+ fingerprints all agree on same release group
+            if (fingerprinted >= 2 && best_rg_count > 0) {
+                double confidence = (double)best_rg_count / (double)fingerprinted;
+                if (confidence >= 1.0) break;
+            }
+        }
+
+        // Pick release from fingerprint voting results
+        if (fingerprinted > 0 && best_rg_count > 0) {
+            double confidence = (double)best_rg_count / (double)fingerprinted;
+
+            if (fingerprinted == 1) {
+                // Single-track: require Solr cross-validation
+                if (ctx->solr_url && tag_album && tag_artist) {
+                    char* solr_rel = mb_solr_search_release(mb_pg, ctx->solr_url,
+                        tag_album, tag_artist, track_count, total_duration_ms);
+                    if (solr_rel) {
+                        g_free(solr_rel);
+                        const char* rel = g_hash_table_lookup(rg_best_release, best_rg);
+                        if (rel) best_release = g_strdup(rel);
+                    } else {
+                        g_debug("Single-track album %" G_GINT64_FORMAT
+                                " — fingerprint match not confirmed by Solr",
+                                album_id);
                     }
                 }
+            } else if (confidence >= MB_MATCH_CONFIDENCE) {
+                const char* rel = g_hash_table_lookup(rg_best_release, best_rg);
+                if (rel) best_release = g_strdup(rel);
             }
-            mb_acoustid_response_free(&response);
-        }
-        mb_fingerprint_free(&fp);
-
-        // Early exit: if first 2+ fingerprints all agree on same release, done
-        if (fingerprinted >= 2 && best_count > 0) {
-            double confidence = (double)best_count / (double)fingerprinted;
-            if (confidence >= 1.0) break;
+            if (best_release) tier = RESOLVE_TIER_ACOUSTID;
         }
     }
+
+    int64_t acoustid_ns = profile_now_ns() - stage_t0;
+
+    // Update per-tier stats (GCC atomics — safe from worker threads)
+    __atomic_fetch_add(&ctx->tier_count[tier], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&ctx->tier_ns[RESOLVE_TIER_ISRC], isrc_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&ctx->tier_ns[RESOLVE_TIER_SOLR], solr_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&ctx->tier_ns[RESOLVE_TIER_ACOUSTID], acoustid_ns, __ATOMIC_RELAXED);
 
     db_tracks_free(tracks, track_count);
+
+    g_free(tag_album);
+    g_free(tag_artist);
+    g_free(best_rg);
+    g_hash_table_destroy(rg_counts);
+    g_hash_table_destroy(rg_best_release);
     g_hash_table_destroy(release_counts);
-
-    // Enforce confidence threshold
-    if (fingerprinted > 0 && best_count > 0) {
-        double confidence = (double)best_count / (double)fingerprinted;
-        if (confidence < MB_MATCH_CONFIDENCE && fingerprinted > 1) {
-            g_debug("Release %s confidence %.0f%% below threshold", best_release, confidence * 100);
-            g_free(best_release);
-            return NULL;
-        }
-    } else {
-        g_free(best_release);
-        return NULL;
-    }
-
     return best_release;
 }
 
@@ -594,8 +855,22 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
 typedef struct {
     int64_t album_id;
     GAsyncQueue* resolve_queue;
-    int pool_slot;  /* index into pg_pool connections */
 } fp_work_t;
+
+/**
+ * Claim a pool slot for this thread. Workers may outnumber PG connections
+ * (fingerprinting is CPU-bound; PG is <1% of wall time). Multiple workers
+ * sharing a slot use the per-slot mutex to serialize PG access.
+ */
+static GPrivate fp_slot_key = G_PRIVATE_INIT(NULL);
+
+static int fp_claim_slot(mb_pg_pool_t* pool) {
+    gpointer stored = g_private_get(&fp_slot_key);
+    if (stored) return GPOINTER_TO_INT(stored) - 1;
+    int slot = g_atomic_int_add(&pool->next_slot, 1) % (int)pool->count;
+    g_private_set(&fp_slot_key, GINT_TO_POINTER(slot + 1));
+    return slot;
+}
 
 static void fp_worker(gpointer data, gpointer user_data) {
     fp_work_t* work = data;
@@ -605,18 +880,26 @@ static void fp_worker(gpointer data, gpointer user_data) {
         return;
     }
 
-    mb_pg_client_t* mb_pg = ctx->pg_pool->mb_conns[work->pool_slot];
-    mb_pg_client_t* acoustid_pg = ctx->pg_pool->acoustid_conns[work->pool_slot];
+    int slot = fp_claim_slot(ctx->pg_pool);
+    mb_pg_client_t* mb_pg = ctx->pg_pool->mb_conns[slot];
+    mb_pg_client_t* acoustid_pg = ctx->pg_pool->acoustid_conns[slot];
+    mb_http_conn_t* http_conn = ctx->pg_pool->http_conns[slot];
 
-    char* release_id = find_release_by_fingerprint(ctx, work->album_id, mb_pg, acoustid_pg);
+    bool svc_error = false;
+    char* release_id = find_release_by_fingerprint(ctx, work->album_id,
+                                                    mb_pg, acoustid_pg, http_conn,
+                                                    &svc_error);
 
     resolve_queue_item_t* item = g_new0(resolve_queue_item_t, 1);
     item->album_id = work->album_id;
     item->release_id = release_id;
+    item->service_error = svc_error;
     g_async_queue_push(work->resolve_queue, item);
 
     g_mutex_lock(&ctx->progress_mutex);
     ctx->progress.fingerprint_processed++;
+    if (svc_error)
+        ctx->progress.acoustid_error = true;
     g_mutex_unlock(&ctx->progress_mutex);
     resolver_update_progress(ctx);
 
@@ -667,6 +950,13 @@ static size_t triage_batch(mb_resolver_t* ctx,
             release_ids[release_count] = g_strdup(batch[i]->release_id);
             album_ids[release_count] = batch[i]->album_id;
             release_count++;
+        } else if (batch[i]->service_error) {
+            db_set_album_mb_status(ctx->db, batch[i]->album_id,
+                                    MB_STATUS_FAILED, (int64_t)time(NULL));
+            g_mutex_lock(&ctx->progress_mutex);
+            ctx->progress.albums_failed++;
+            ctx->progress.albums_processed++;
+            g_mutex_unlock(&ctx->progress_mutex);
         } else {
             db_set_album_mb_status(ctx->db, batch[i]->album_id,
                                     MB_STATUS_NO_MATCH, (int64_t)time(NULL));
@@ -718,8 +1008,6 @@ static void write_resolve_batch(mb_resolver_t* ctx,
             ? g_hash_table_lookup(releases, release_ids[i]) : NULL;
 
         if (!release) {
-            g_warning("Batch fetch missing release %s for album %" G_GINT64_FORMAT,
-                      release_ids[i], album_ids[i]);
             db_set_album_mb_status(ctx->db, album_ids[i],
                                     MB_STATUS_FAILED, (int64_t)time(NULL));
             g_mutex_lock(&ctx->progress_mutex);
@@ -831,6 +1119,8 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
     ctx->library_root = options->library_root ? g_strdup(options->library_root) : NULL;
     ctx->acoustid_index_url = options->acoustid_index_url
         ? g_strdup(options->acoustid_index_url) : NULL;
+    ctx->solr_url = options->mb_solr_url
+        ? g_strdup(options->mb_solr_url) : NULL;
     g_mutex_init(&ctx->progress_mutex);
 
     // MusicBrainz PostgreSQL client (for batch consumer)
@@ -839,6 +1129,7 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
         g_mutex_clear(&ctx->progress_mutex);
         g_free(ctx->library_root);
         g_free(ctx->acoustid_index_url);
+        g_free(ctx->solr_url);
         g_free(ctx);
         return res;
     }
@@ -890,7 +1181,9 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
     int64_t* album_ids = NULL;
     size_t album_count = 0;
-    quadrature_result_t res = db_get_unresolved_albums(ctx->db, &album_ids, &album_count);
+    int64_t retry_before = (int64_t)time(NULL) - MB_NO_MATCH_RETRY_SECONDS;
+    quadrature_result_t res = db_get_unresolved_albums(ctx->db, retry_before,
+                                                        &album_ids, &album_count);
     if (res != QUADRATURE_OK) return res;
 
     if (album_count == 0) {
@@ -899,7 +1192,6 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
         return QUADRATURE_OK;
     }
 
-    g_debug("MB resolver: %zu unresolved albums", album_count);
 
     // Classify: tagged (have musicbrainz_release_id) vs untagged (need fingerprinting)
     GPtrArray* tagged_items = g_ptr_array_new();      // resolve_queue_item_t*
@@ -920,8 +1212,9 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
     }
     g_free(album_ids);
 
-    g_debug("MB resolver: %u tagged, %u untagged",
-            tagged_items->len, untagged_ids->len);
+
+    // Tagged albums are resolved by their embedded MUSICBRAINZ_ALBUMID tag
+    __atomic_store_n(&ctx->tier_count[RESOLVE_TIER_TAGGED], tagged_items->len, __ATOMIC_RELAXED);
 
     // Set progress totals
     g_mutex_lock(&ctx->progress_mutex);
@@ -953,45 +1246,68 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
     if (untagged_ids->len > 0 && has_fingerprint_support && !ctx->cancelled) {
         resolver_set_phase(ctx, MB_RESOLVE_FINGERPRINTING);
 
-        // Determine worker count
+        // Determine worker count (1:1 with PG connections since libpq is not thread-safe).
+        // Capped at 8 to avoid overloading PG with connections.
         int parallelism = ctx->options.parallelism > 0
             ? ctx->options.parallelism : (int)g_get_num_processors();
-        if (parallelism > 8) parallelism = 8;  // Cap PG connections
+        if (parallelism > 8) parallelism = 8;
         if (parallelism > (int)untagged_ids->len) parallelism = (int)untagged_ids->len;
 
         // Create PG pool for fingerprint workers
         res = mb_pg_pool_create(ctx->options.pg_conninfo,
             ctx->options.acoustid_pg_conninfo,
+            ctx->acoustid_index_url,
             (size_t)parallelism, &ctx->pg_pool);
 
         if (res == QUADRATURE_OK) {
-            fp_pool = g_thread_pool_new(fp_worker, ctx, parallelism, FALSE, NULL);
+            fp_pool = g_thread_pool_new(fp_worker, ctx, parallelism, TRUE, NULL);
             if (fp_pool) {
                 for (guint i = 0; i < untagged_ids->len && !ctx->cancelled; i++) {
                     fp_work_t* work = g_new0(fp_work_t, 1);
                     work->album_id = *(int64_t*)g_ptr_array_index(untagged_ids, i);
                     work->resolve_queue = resolve_queue;
-                    work->pool_slot = (int)(i % (guint)parallelism);
                     g_thread_pool_push(fp_pool, work, NULL);
                 }
             }
         } else {
             g_warning("MB resolver: failed to create PG pool, fingerprinting disabled");
+            // Push all untagged as service_error so they get MB_STATUS_FAILED, not NO_MATCH
+            for (guint i = 0; i < untagged_ids->len; i++) {
+                resolve_queue_item_t* item = g_new0(resolve_queue_item_t, 1);
+                item->album_id = *(int64_t*)g_ptr_array_index(untagged_ids, i);
+                item->release_id = NULL;
+                item->service_error = true;
+                g_async_queue_push(resolve_queue, item);
+            }
             g_mutex_lock(&ctx->progress_mutex);
             ctx->progress.acoustid_error = true;
+            ctx->progress.fingerprint_processed = untagged_ids->len;
             g_mutex_unlock(&ctx->progress_mutex);
         }
     } else if (untagged_ids->len > 0 && !has_fingerprint_support) {
-        // No acoustid support — mark all untagged as no-match immediately
-        for (guint i = 0; i < untagged_ids->len; i++) {
+        // No AcoustID — try ISRC + Solr text search (no fingerprinting).
+        // Runs sequentially on the resolver thread using ctx->pg_client
+        // (no fp workers exist, so no contention).
+        resolver_set_phase(ctx, MB_RESOLVE_FINGERPRINTING);
+
+        for (guint i = 0; i < untagged_ids->len && !ctx->cancelled; i++) {
+            int64_t album_id = *(int64_t*)g_ptr_array_index(untagged_ids, i);
+
+            // acoustid_pg=NULL, http_conn=NULL → Stage 3 (fingerprinting) skipped,
+            // but Stages 1 (ISRC) and 2 (Solr) run normally.
+            char* release_id = find_release_by_fingerprint(ctx, album_id,
+                ctx->pg_client, NULL, NULL, NULL);
+
             resolve_queue_item_t* item = g_new0(resolve_queue_item_t, 1);
-            item->album_id = *(int64_t*)g_ptr_array_index(untagged_ids, i);
-            item->release_id = NULL;
+            item->album_id = album_id;
+            item->release_id = release_id;
             g_async_queue_push(resolve_queue, item);
+
+            g_mutex_lock(&ctx->progress_mutex);
+            ctx->progress.fingerprint_processed++;
+            g_mutex_unlock(&ctx->progress_mutex);
+            resolver_update_progress(ctx);
         }
-        g_mutex_lock(&ctx->progress_mutex);
-        ctx->progress.fingerprint_processed = untagged_ids->len;
-        g_mutex_unlock(&ctx->progress_mutex);
     }
 
     // Free untagged_ids (album_id copies)
@@ -1141,14 +1457,6 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             triage_free(release_ids, album_ids, release_count);
         }
 
-        // Per-batch debug log
-        g_debug("MB batch %zu: %zu albums, queue=%.1fms triage=%.1fms pg=%.1fms sqlite=%.1fms",
-                prof.batch_count, prof.albums_written,
-                (double)prof.queue_wait_ns / 1e6,
-                (double)prof.triage_ns / 1e6,
-                (double)prof.pg_fetch_ns / 1e6,
-                (double)prof.sqlite_write_ns / 1e6);
-
         // Free batch items
         for (size_t i = 0; i < batch_count; i++) {
             resolve_queue_item_free(batch[i]);
@@ -1240,6 +1548,40 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
                wall_ms > 0.0 ? n / (wall_ms / 1000.0) : 0.0);
     }
 
+    // =========================================================================
+    // 8. Resolution tier summary
+    // =========================================================================
+
+    {
+        size_t n_tagged  = __atomic_load_n(&ctx->tier_count[RESOLVE_TIER_TAGGED], __ATOMIC_RELAXED);
+        size_t n_isrc    = __atomic_load_n(&ctx->tier_count[RESOLVE_TIER_ISRC], __ATOMIC_RELAXED);
+        size_t n_solr    = __atomic_load_n(&ctx->tier_count[RESOLVE_TIER_SOLR], __ATOMIC_RELAXED);
+        size_t n_acoust  = __atomic_load_n(&ctx->tier_count[RESOLVE_TIER_ACOUSTID], __ATOMIC_RELAXED);
+        size_t n_none    = __atomic_load_n(&ctx->tier_count[RESOLVE_TIER_NONE], __ATOMIC_RELAXED);
+        size_t n_total   = n_tagged + n_isrc + n_solr + n_acoust + n_none;
+
+        double isrc_ms    = (double)__atomic_load_n(&ctx->tier_ns[RESOLVE_TIER_ISRC], __ATOMIC_RELAXED) / 1e6;
+        double solr_ms    = (double)__atomic_load_n(&ctx->tier_ns[RESOLVE_TIER_SOLR], __ATOMIC_RELAXED) / 1e6;
+        double acoust_ms  = (double)__atomic_load_n(&ctx->tier_ns[RESOLVE_TIER_ACOUSTID], __ATOMIC_RELAXED) / 1e6;
+
+        // Number of untagged albums that attempted each tier
+        size_t untagged = n_isrc + n_solr + n_acoust + n_none;
+
+        g_message("=== Resolution Summary — %s (%zu albums) ===",
+                  ctx->library_root ? ctx->library_root : "(unknown)", n_total);
+        g_message("  Tagged (MUSICBRAINZ_ALBUMID): %zu", n_tagged);
+        g_message("  ISRC lookup:    %zu resolved    (%.1f albums/sec)",
+                  n_isrc,
+                  isrc_ms > 0.0 ? (double)untagged / (isrc_ms / 1000.0) : 0.0);
+        g_message("  Solr search:    %zu resolved    (%.1f albums/sec)",
+                  n_solr,
+                  solr_ms > 0.0 ? (double)(untagged - n_isrc) / (solr_ms / 1000.0) : 0.0);
+        g_message("  AcoustID:       %zu resolved    (%.1f albums/sec)",
+                  n_acoust,
+                  acoust_ms > 0.0 ? (double)(untagged - n_isrc - n_solr) / (acoust_ms / 1000.0) : 0.0);
+        g_message("  Unresolved:     %zu", n_none);
+    }
+
     // Cleanup
     g_async_queue_unref(resolve_queue);
     if (ctx->pg_pool) {
@@ -1268,5 +1610,6 @@ void mb_resolver_destroy(mb_resolver_t* ctx) {
     g_mutex_clear(&ctx->progress_mutex);
     g_free(ctx->library_root);
     g_free(ctx->acoustid_index_url);
+    g_free(ctx->solr_url);
     g_free(ctx);
 }

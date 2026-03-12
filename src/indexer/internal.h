@@ -99,6 +99,30 @@ size_t parse_artist_tag(const char* tag, artist_credit_t** out);
 /** Free credits returned by parse_artist_tag. */
 void artist_credits_free(artist_credit_t* credits, size_t count);
 
+/**
+ * Extract featuring artists from a title string.
+ * Matches (feat. ...), [feat. ...], (ft. ...), [ft. ...], (featuring ...) patterns.
+ * Case-insensitive.
+ *
+ * @param title      Input title (not modified)
+ * @param clean_out  Output: title with featuring group removed (g_free when done)
+ * @param feat_out   Output: featuring artist string (g_free when done)
+ * @return true if a featuring group was found and extracted
+ */
+bool title_extract_featuring(const char* title, char** clean_out, char** feat_out);
+
+/**
+ * Detect which artist delimiter (if any) is used across album tracks.
+ * Checks ';' first (fewer false positives), then '/'.
+ * A delimiter is confirmed when 2+ tags have different suffixes after it
+ * (e.g., "A/B" and "A/C" → '/' is a delimiter; all "AC/DC" → not).
+ *
+ * @param artist_tags  Array of raw ARTIST tag strings (may contain NULLs)
+ * @param count        Number of elements
+ * @return Delimiter character (';' or '/'), or '\0' if none detected
+ */
+char detect_artist_delimiter(const char* const* artist_tags, size_t count);
+
 // =============================================================================
 // Utils: Audio File Detection & Metadata Extraction
 // =============================================================================
@@ -174,6 +198,37 @@ typedef struct {
 
 void extracted_track_free(extracted_track_t* track);
 void metadata_result_free(metadata_result_t* result);
+
+// =============================================================================
+// Library Validation
+// =============================================================================
+
+/* Forward declaration from indexer.c */
+typedef struct indexer indexer_t;
+
+/**
+ * Log an indexer error to the database.
+ * Called from validation and indexer functions to record errors.
+ *
+ * @param idx Indexer context
+ * @param path File or directory path where error occurred
+ * @param fmt Printf-style format string
+ */
+void log_indexer_error(indexer_t* idx, const char* path, const char* fmt, ...);
+
+/**
+ * Validate track numbering for an album.
+ *
+ * Automatically detects continuous vs per-disc numbering patterns:
+ *   - Per-disc:    Each disc resets to track 1 (e.g., Disc 1=[1-12], Disc 2=[1-10])
+ *   - Continuous:  Track numbers increment globally (e.g., Disc 1=[1-12], Disc 2=[13-22])
+ *
+ * Logs errors via log_indexer_error() if gaps are found in the track sequence.
+ *
+ * @param idx Indexer context (for error logging)
+ * @param mr Album metadata with extracted tracks
+ */
+void validate_album_track_numbering(indexer_t* idx, const metadata_result_t* mr);
 
 // =============================================================================
 // Artwork

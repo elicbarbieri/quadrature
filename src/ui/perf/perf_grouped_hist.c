@@ -10,6 +10,9 @@
 #include <math.h>
 #include <stdio.h>
 
+/* ui_math.c */
+double ui_log_pct_norm(double pct);
+
 #define GROUPED_HIST_MAX_GROUPS  4
 #define GROUPED_HIST_MAX_BUCKETS 16
 
@@ -41,16 +44,7 @@ struct _PerfGroupedHist {
 
 G_DEFINE_FINAL_TYPE(PerfGroupedHist, perf_grouped_hist, GTK_TYPE_DRAWING_AREA)
 
-/* Piecewise linear mapping for log-scale Y axis.
- * 5 anchor points at exact ¼ intervals: 0%→0, 0.1%→¼, 1%→½, 10%→¾, 100%→1 */
-static double log_pct_norm(double pct) {
-    if (pct <= 0.0)   return 0.0;
-    if (pct <= 0.1)   return (pct / 0.1) / 4.0;
-    if (pct <= 1.0)   return (1.0 + (pct - 0.1) / 0.9) / 4.0;
-    if (pct <= 10.0)  return (2.0 + (pct - 1.0) / 9.0) / 4.0;
-    if (pct <= 100.0) return (3.0 + (pct - 10.0) / 90.0) / 4.0;
-    return 1.0;
-}
+/* log_pct_norm → ui_ui_log_pct_norm() in ui_math.c */
 
 /* ── Draw function ────────────────────────────────────────────────────────── */
 
@@ -104,7 +98,7 @@ static void draw_fn(GtkDrawingArea* da, cairo_t* cr,
         static const double grid_pcts[] = { 0.0, 0.1, 1.0, 10.0, 100.0 };
         static const char*  grid_labels[] = { "0%", "0.1%", "1%", "10%", "100%" };
         for (int d = 0; d < 5; d++) {
-            double norm = log_pct_norm(grid_pcts[d]);
+            double norm = ui_log_pct_norm(grid_pcts[d]);
             double y = PAD_T + chart_h - (chart_h * norm);
             cairo_set_source_rgba(cr, 0.25, 0.25, 0.25, 1.0);
             cairo_set_line_width(cr, 0.5);
@@ -149,7 +143,7 @@ static void draw_fn(GtkDrawingArea* da, cairo_t* cr,
                 : 0.0;
             double bar_h;
             if (self->use_log_scale) {
-                double norm = log_pct_norm(pct_of_samples);
+                double norm = ui_log_pct_norm(pct_of_samples);
                 if (norm > 1.0) norm = 1.0;
                 bar_h = chart_h * norm;
             } else {

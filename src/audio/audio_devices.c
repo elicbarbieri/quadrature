@@ -242,8 +242,11 @@ static void monitor_core_done(void *data, uint32_t id, int seq) {
     audio_pipeline_t *pipeline = data;
     if (id == PW_ID_CORE && seq == pipeline->device_monitor_sync_seq) {
         pipeline->device_monitor_settled = true;
-        /* One-shot: remove the core listener now that we're settled */
-        spa_hook_remove(&pipeline->device_monitor_core_listener);
+        /* Do NOT remove the core listener from inside its own callback —
+         * modifying the hook list mid-dispatch corrupts PipeWire's internal
+         * iteration state and causes crashes in core_event_demarshal_*.
+         * The listener stays registered (harmless no-op for future done events)
+         * and is properly removed in audio_devices_monitor_stop(). */
     }
 }
 
@@ -306,8 +309,15 @@ void audio_devices_monitor_stop(audio_pipeline_t *pipeline) {
     pipeline->device_changed_cb        = NULL;
     pipeline->device_changed_user_data = NULL;
 
-    spa_hook_remove(&pipeline->device_monitor_core_listener);
+    /* Remove listeners FIRST — stops all callback dispatch.
+     * spa_hook_remove is safe even if the hook was never fully initialized
+     * or was already removed (idempotent self-unlink). */
     spa_hook_remove(&pipeline->device_monitor_registry_listener);
+    spa_hook_remove(&pipeline->device_monitor_core_listener);
+
+    /* Destroy the registry proxy.  PipeWire may have in-flight events queued
+     * for this proxy; destroying it marks the proxy ID as dead in the client
+     * map so any stale events are silently discarded by PipeWire's core. */
     pw_proxy_destroy((struct pw_proxy *)pipeline->device_monitor_registry);
     pipeline->device_monitor_registry = NULL;
     pipeline->device_monitor_settled  = false;

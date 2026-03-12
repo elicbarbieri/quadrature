@@ -141,6 +141,7 @@ struct _UiChannelStrip {
      * Reset to SPECTRUM_DECAY_FRAMES when playing; counts down when stopped/paused
      * so the bars animate to zero before we go fully idle. */
     int spectrum_decay_frames;
+    uint32_t last_spectrum_gen;  /* Cached generation counter — skip redundant copies */
 };
 
 /* Signal IDs */
@@ -589,43 +590,7 @@ static void on_seek(UiWaveformSeekBar *waveform, double value, gpointer data) {
  * is entirely in the speed mapping curve: KEYLOCK covers a wide range
  * (0.5x-4.0x) while PITCHED is more conservative (0.5x-1.5x, symmetric)
  * with a much flatter quadratic curve spread across the same slider travel. */
-#define KEYLOCK_SPEED_MAX  4.0f    /* Pitch-preserved mode: 0.5x-4.0x */
-#define KEYLOCK_SPEED_MIN  0.5f    /* Pitch-preserved mode min */
-#define PITCHED_SPEED_MAX  1.5f    /* Pitched mode: symmetric ±0.5x */
-#define PITCHED_SPEED_MIN  0.5f    /* Pitched mode min */
-#define SHUTTLE_SLIDER_MAX 3.0f    /* Slider upper bound (shared by both modes) */
-#define SHUTTLE_SLIDER_MIN -2.0f   /* Slider lower bound (shared by both modes) */
-
-/**
- * Convert shuttle slider value to speed using quadratic curves.
- *
- * Both modes share the same slider range (-2 to +3).  The speed mapping
- * differs:
- *   KEYLOCK:  slider -2..+3 → speed 0.5x..4.0x  (wide, pitch-preserved)
- *   PITCHED:  slider -2..+3 → speed 0.5x..1.5x  (conservative, vinyl-style)
- *
- * Quadratic curves give zero derivative at center for fine control near 1.0x.
- */
-static float shuttle_value_to_speed(double slider_value, shuttle_mode_t mode) {
-    /* In OFF mode, always return 1.0x */
-    if (mode == SHUTTLE_MODE_OFF) return 1.0f;
-
-    gboolean pitched = (mode == SHUTTLE_MODE_PITCHED);
-
-    if (slider_value >= 0.0) {
-        /* Forward: 1.0x to max with quadratic curve */
-        float speed_max = pitched ? PITCHED_SPEED_MAX : KEYLOCK_SPEED_MAX;
-        float range = speed_max - 1.0f;
-        float normalized = (float)slider_value / SHUTTLE_SLIDER_MAX;
-        return 1.0f + range * normalized * normalized;
-    } else {
-        /* Backward: 1.0x down to min with quadratic curve */
-        float speed_min = pitched ? PITCHED_SPEED_MIN : KEYLOCK_SPEED_MIN;
-        float range = 1.0f - speed_min;
-        float normalized = (float)slider_value / SHUTTLE_SLIDER_MIN;  /* Both negative, result positive */
-        return 1.0f - range * normalized * normalized;
-    }
-}
+/* shuttle_value_to_speed → ui_ui_shuttle_value_to_speed() in ui_math.c */
 
 static void do_skip(UiChannelStrip *s, int seconds) {
     if (!s->pipeline) return;
@@ -654,7 +619,7 @@ static void on_skip_clicked(GtkButton *btn, gpointer data) {
 
 static void update_shuttle_label(UiChannelStrip *s, double slider_value) {
     char buf[16];
-    float speed = shuttle_value_to_speed(slider_value, s->shuttle_mode);
+    float speed = ui_shuttle_value_to_speed(slider_value, s->shuttle_mode);
 
     /* Show 2 decimal places between 0.5x and 1.5x for fine control visibility */
     if (speed >= 0.5f && speed <= 1.5f) {
@@ -676,7 +641,7 @@ static void on_shuttle_value_changed(GtkRange *r, gpointer data) {
 
     /* Convert slider value to mapped speed and set playback speed */
     if (s->pipeline) {
-        float speed = shuttle_value_to_speed(slider_value, s->shuttle_mode);
+        float speed = ui_shuttle_value_to_speed(slider_value, s->shuttle_mode);
         audio_pipeline_player_set_speed(s->pipeline, s->channel_id, speed);
     }
 }
@@ -760,7 +725,7 @@ static void on_shuttle_mode_clicked(GtkButton *btn, gpointer data) {
     double current = gtk_range_get_value(GTK_RANGE(s->shuttle_scale));
     update_shuttle_label(s, current);
     if (s->pipeline) {
-        float speed = shuttle_value_to_speed(current, s->shuttle_mode);
+        float speed = ui_shuttle_value_to_speed(current, s->shuttle_mode);
         audio_pipeline_player_set_speed(s->pipeline, s->channel_id, speed);
     }
 }
@@ -1103,7 +1068,7 @@ static void on_artist_clicked(GtkGestureClick *g, int n, double x, double y, gpo
     /* Multiple artists — show popover so the user can choose */
     if (track_artists && track_artists->len > 1) {
         GtkWidget *popover = gtk_popover_new();
-        gtk_widget_set_parent(popover, s->artist_label);
+        gtk_widget_set_parent(popover, s->artist_scroll);
 
         GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
         gtk_popover_set_child(GTK_POPOVER(popover), box);
@@ -1197,10 +1162,11 @@ static void ui_channel_strip_dispose(GObject *obj) {
     UiChannelStrip *s = UI_CHANNEL_STRIP(obj);
 
     /* Remove marquee tick callbacks */
-    remove_marquee_tick_callback(s->title_scroll);
-    remove_marquee_tick_callback(s->artist_scroll);
-    remove_marquee_tick_callback(s->album_scroll);
-    remove_marquee_tick_callback(s->next_track_scroll);
+    GtkWidget *marquee_scrolls[] = {
+        s->title_scroll, s->artist_scroll, s->album_scroll, s->next_track_scroll
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(marquee_scrolls); i++)
+        remove_marquee_tick_callback(marquee_scrolls[i]);
 
     /* Disconnect gesture signal handlers before widget destruction */
     if (s->channel_click_gesture) {
@@ -1340,6 +1306,16 @@ static void ui_channel_strip_class_init(UiChannelStripClass *klass) {
     gtk_widget_class_bind_template_callback(wc, on_shuttle_mode_clicked);
 }
 
+/** Create a click gesture on a label and store the gesture pointer. */
+static void setup_label_click(GtkWidget *label, GtkGesture **out_gesture,
+                               GCallback callback, gpointer data) {
+    if (!label) return;
+    *out_gesture = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(*out_gesture), GDK_BUTTON_PRIMARY);
+    g_signal_connect(*out_gesture, "released", callback, data);
+    gtk_widget_add_controller(label, GTK_EVENT_CONTROLLER(*out_gesture));
+}
+
 static void ui_channel_strip_init(UiChannelStrip *s) {
     s->channel_id = 0;
     s->pipeline = NULL;
@@ -1426,26 +1402,9 @@ static void ui_channel_strip_init(UiChannelStrip *s) {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(s->status_scroll), s->status_label);
 
     /* Album/Artist/Next track label click gestures */
-    if (s->album_label) {
-        s->album_click_gesture = gtk_gesture_click_new();
-        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(s->album_click_gesture), GDK_BUTTON_PRIMARY);
-        g_signal_connect(s->album_click_gesture, "released", G_CALLBACK(on_album_clicked), s);
-        gtk_widget_add_controller(s->album_label, GTK_EVENT_CONTROLLER(s->album_click_gesture));
-    }
-
-    if (s->artist_label) {
-        s->artist_click_gesture = gtk_gesture_click_new();
-        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(s->artist_click_gesture), GDK_BUTTON_PRIMARY);
-        g_signal_connect(s->artist_click_gesture, "released", G_CALLBACK(on_artist_clicked), s);
-        gtk_widget_add_controller(s->artist_label, GTK_EVENT_CONTROLLER(s->artist_click_gesture));
-    }
-
-    if (s->next_track_label) {
-        s->next_track_click_gesture = gtk_gesture_click_new();
-        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(s->next_track_click_gesture), GDK_BUTTON_PRIMARY);
-        g_signal_connect(s->next_track_click_gesture, "released", G_CALLBACK(on_next_track_label_clicked), s);
-        gtk_widget_add_controller(s->next_track_label, GTK_EVENT_CONTROLLER(s->next_track_click_gesture));
-    }
+    setup_label_click(s->album_label, &s->album_click_gesture, G_CALLBACK(on_album_clicked), s);
+    setup_label_click(s->artist_label, &s->artist_click_gesture, G_CALLBACK(on_artist_clicked), s);
+    setup_label_click(s->next_track_label, &s->next_track_click_gesture, G_CALLBACK(on_next_track_label_clicked), s);
 }
 
 /* ===============================================================================
@@ -1477,10 +1436,9 @@ GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, libr
         g_signal_connect(s->next_track_btn, "clicked", G_CALLBACK(on_next_track_btn_clicked), s);
     }
 
-    /* Add status scroll (containing status_label) to display inner (sibling of info_box) */
-    GtkWidget *display_inner = gtk_frame_get_child(GTK_FRAME(s->display_panel));
-    if (display_inner && s->status_scroll) {
-        gtk_box_prepend(GTK_BOX(display_inner), s->status_scroll);
+    /* Add status scroll (containing status_label) to display panel (sibling of info_box) */
+    if (s->display_panel && s->status_scroll) {
+        gtk_box_prepend(GTK_BOX(s->display_panel), s->status_scroll);
     }
 
     /* Add spectrum if enabled (full height) */
@@ -1497,11 +1455,31 @@ GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, libr
     return GTK_WIDGET(s);
 }
 
+/** Update a label only if the text changed. Avoids Pango relayout per frame. */
+static inline void update_cached_label(GtkWidget *label, char *cache, size_t cache_size,
+                                        const char *text) {
+    if (!label) return;
+    if (strcmp(text, cache) != 0) {
+        memcpy(cache, text, MIN(strlen(text) + 1, cache_size));
+        gtk_label_set_text(GTK_LABEL(label), text);
+    }
+}
+
 void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
     g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
     g_assert(pipeline != NULL);  /* Caller must provide valid pipeline */
 
     channel_state_t st = audio_pipeline_get_player_state(pipeline, s->channel_id);
+
+    /* Fast path: no track loaded and stopped — skip per-frame work for idle channels */
+    if (!s->filepath && st == CHANNEL_STOPPED && !s->has_deferred_seek) {
+        if (st != s->prev_player_state) {
+            update_button_sensitivity(s, st);
+            s->prev_player_state = st;
+        }
+        return;
+    }
+
     uint64_t len = audio_pipeline_get_player_length(pipeline, s->channel_id);
     uint64_t effective_len = (len > 0) ? len : s->ui_length_samples;
 
@@ -1551,10 +1529,8 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
 
         char buf[20];
         snprintf(buf, sizeof(buf), "-%lu:%02lu.%02lu", total_rem_min, rem_sec, rem_cs);
-        if (strcmp(buf, s->cached_time_remaining) != 0) {
-            memcpy(s->cached_time_remaining, buf, sizeof(s->cached_time_remaining));
-            gtk_label_set_text(GTK_LABEL(s->time_label), buf);
-        }
+        update_cached_label(s->time_label, s->cached_time_remaining,
+                            sizeof(s->cached_time_remaining), buf);
 
         /* Time color state (using floating-point seconds for thresholds) */
         time_state_t new_state = TIME_STATE_NONE;
@@ -1596,23 +1572,15 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
         unsigned long elapsed_sec = (unsigned long)fmod(elapsed_sec_d, 60.0);
         unsigned long elapsed_cs = (unsigned long)(fmod(elapsed_sec_d, 1.0) * 100.0);
 
-        if (s->time_elapsed_label) {
-            snprintf(buf, sizeof(buf), "%lu:%02lu.%02lu", total_elapsed_min, elapsed_sec, elapsed_cs);
-            if (strcmp(buf, s->cached_time_elapsed) != 0) {
-                memcpy(s->cached_time_elapsed, buf, sizeof(s->cached_time_elapsed));
-                gtk_label_set_text(GTK_LABEL(s->time_elapsed_label), buf);
-            }
-        }
+        snprintf(buf, sizeof(buf), "%lu:%02lu.%02lu", total_elapsed_min, elapsed_sec, elapsed_cs);
+        update_cached_label(s->time_elapsed_label, s->cached_time_elapsed,
+                            sizeof(s->cached_time_elapsed), buf);
 
     } else {
-        if (strcmp(s->cached_time_remaining, "-0:00.00") != 0) {
-            memcpy(s->cached_time_remaining, "-0:00.00", 9);
-            gtk_label_set_text(GTK_LABEL(s->time_label), "-0:00.00");
-        }
-        if (s->time_elapsed_label && strcmp(s->cached_time_elapsed, "0:00.00") != 0) {
-            memcpy(s->cached_time_elapsed, "0:00.00", 8);
-            gtk_label_set_text(GTK_LABEL(s->time_elapsed_label), "0:00.00");
-        }
+        update_cached_label(s->time_label, s->cached_time_remaining,
+                            sizeof(s->cached_time_remaining), "-0:00.00");
+        update_cached_label(s->time_elapsed_label, s->cached_time_elapsed,
+                            sizeof(s->cached_time_elapsed), "0:00.00");
     }
 
     /* Seek bar - use interpolated position when not dragging */
@@ -1669,15 +1637,20 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
 
     /* Spectrum (stereo: left channel on left, right channel on right).
      * While playing, keep the decay counter pegged at max. When stopped/paused,
-     * count down so bars animate to zero via cava's release curve, then go idle. */
+     * count down so bars animate to zero via cava's release curve, then go idle.
+     * Generation counter skips redundant copies when display runs faster than cavacore. */
     if (s->spectrum) {
         if (playing) {
             s->spectrum_decay_frames = SPECTRUM_DECAY_FRAMES;
         }
         if (s->spectrum_decay_frames > 0) {
-            float left[SPECTRUM_BARS], right[SPECTRUM_BARS];
-            audio_pipeline_get_player_spectrum(pipeline, s->channel_id, left, right, SPECTRUM_BARS);
-            ui_spectrum_set_bars(UI_SPECTRUM(s->spectrum), left, right, SPECTRUM_BARS);
+            uint32_t gen = atomic_load(&pipeline->players[s->channel_id].spectrum_generation);
+            if (gen != s->last_spectrum_gen || !playing) {
+                float left[SPECTRUM_BARS], right[SPECTRUM_BARS];
+                audio_pipeline_get_player_spectrum(pipeline, s->channel_id, left, right, SPECTRUM_BARS);
+                ui_spectrum_set_bars(UI_SPECTRUM(s->spectrum), left, right, SPECTRUM_BARS);
+                s->last_spectrum_gen = gen;
+            }
             if (!playing) {
                 s->spectrum_decay_frames--;
             }
@@ -1786,6 +1759,11 @@ int ui_channel_strip_get_channel_id(UiChannelStrip *s) {
     return s->channel_id;
 }
 
+gboolean ui_channel_strip_has_track(UiChannelStrip *s) {
+    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), FALSE);
+    return s->filepath != NULL;
+}
+
 /* ===============================================================================
  * New Layered State API
  * =============================================================================== */
@@ -1806,7 +1784,6 @@ void ui_channel_strip_set_mode(UiChannelStrip *s, ChannelMode mode) {
     g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
     if (s->mode == mode) return;
 
-    ChannelMode old_mode = s->mode;
     s->mode = mode;
 
     /* Handle mode entry actions */

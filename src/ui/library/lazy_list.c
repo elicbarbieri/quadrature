@@ -1,8 +1,12 @@
 /**
- * Quadrature LazyList — Virtualized list with scroll monitoring
+ * Quadrature LazyList — Virtualized list with composable model pipeline
  *
- * Wraps GtkListView + GListStore + factory + scroll velocity tracking.
- * Provides reusable infrastructure for virtualized artist/album lists.
+ * Wraps GtkListView with a composable model chain:
+ *   GListStore → GtkSortListModel → GtkFilterListModel → GtkSingleSelection
+ *
+ * Filter and sort changes invalidate their respective models without
+ * rebuilding the store — GTK diffs the old vs new results and emits
+ * minimal items-changed signals, allowing efficient row recycling.
  */
 
 #define G_LOG_DOMAIN "quadrature"
@@ -40,15 +44,14 @@ QuadAlbumItem *quad_album_item_new(const library_album_info_t *info) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 struct _LazyList {
-    GListStore *store;
-    GtkSingleSelection *selection;
+    GListStore *store;                  /* Base data (all items, unfiltered) */
+    GtkSortListModel *sorted;          /* Sorts store contents */
+    GtkFilterListModel *filtered;      /* Filters sorted contents */
+    GtkSingleSelection *selection;     /* Selection over filtered view */
     GtkWidget *list_view;
 
     /* Scroll monitoring */
     GtkAdjustment *vadj;
-    gulong vadj_signal_id;
-    double last_scroll_value;
-    int64_t last_scroll_time_us;
 
     /* Callbacks */
     LazyListCallbacks cbs;
@@ -63,9 +66,13 @@ LazyList *lazy_list_new(GType item_type, const LazyListCallbacks *cbs) {
     LazyList *ll = g_new0(LazyList, 1);
     ll->cbs = *cbs;
 
-    /* GListStore → GtkSingleSelection → GtkListView */
+    /* Model pipeline: GListStore → Sort → Filter → Selection → ListView */
     ll->store = g_list_store_new(item_type);
-    ll->selection = gtk_single_selection_new(G_LIST_MODEL(ll->store));
+
+    ll->sorted = gtk_sort_list_model_new(G_LIST_MODEL(ll->store), NULL);
+    ll->filtered = gtk_filter_list_model_new(G_LIST_MODEL(ll->sorted), NULL);
+
+    ll->selection = gtk_single_selection_new(G_LIST_MODEL(ll->filtered));
     gtk_single_selection_set_autoselect(ll->selection, FALSE);
     gtk_single_selection_set_can_unselect(ll->selection, TRUE);
 
@@ -90,13 +97,7 @@ LazyList *lazy_list_new(GType item_type, const LazyListCallbacks *cbs) {
 
 void lazy_list_free(LazyList *ll) {
     if (!ll) return;
-
-    if (ll->vadj && ll->vadj_signal_id) {
-        g_signal_handler_disconnect(ll->vadj, ll->vadj_signal_id);
-        ll->vadj_signal_id = 0;
-    }
-
-    /* store and selection are owned by the list view */
+    /* store, sorted, filtered, selection are owned by the list view */
     g_free(ll);
 }
 
@@ -110,23 +111,19 @@ GListStore *lazy_list_get_store(LazyList *ll) {
     return ll->store;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Scroll Velocity Monitoring
- * ═══════════════════════════════════════════════════════════════════════════ */
+GListModel *lazy_list_get_filtered_model(LazyList *ll) {
+    g_assert(ll != NULL);
+    return G_LIST_MODEL(ll->filtered);
+}
 
-static void on_vadj_value_changed(GtkAdjustment *adj, gpointer data) {
-    LazyList *ll = data;
-    double value = gtk_adjustment_get_value(adj);
-    int64_t now = g_get_monotonic_time();
+void lazy_list_set_filter(LazyList *ll, GtkFilter *filter) {
+    g_assert(ll != NULL);
+    gtk_filter_list_model_set_filter(ll->filtered, filter);
+}
 
-    if (ll->last_scroll_time_us > 0) {
-        /* Track velocity for future adaptive prefetch */
-        (void)(value - ll->last_scroll_value);
-        (void)(now - ll->last_scroll_time_us);
-    }
-
-    ll->last_scroll_value = value;
-    ll->last_scroll_time_us = now;
+void lazy_list_set_sorter(LazyList *ll, GtkSorter *sorter) {
+    g_assert(ll != NULL);
+    gtk_sort_list_model_set_sorter(ll->sorted, sorter);
 }
 
 void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll) {
@@ -134,8 +131,6 @@ void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll) {
     g_assert(scroll != NULL);
 
     ll->vadj = gtk_scrolled_window_get_vadjustment(scroll);
-    ll->vadj_signal_id = g_signal_connect(ll->vadj, "value-changed",
-                                           G_CALLBACK(on_vadj_value_changed), ll);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

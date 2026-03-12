@@ -139,11 +139,13 @@ static quadrature_result_t apply_pragmas(sqlite3* db) {
 // =============================================================================
 
 void db_lock(quadrature_db_t* db) {
-    pthread_mutex_lock(&db->lock);
+    if (!db->readonly)
+        pthread_mutex_lock(&db->lock);
 }
 
 void db_unlock(quadrature_db_t* db) {
-    pthread_mutex_unlock(&db->lock);
+    if (!db->readonly)
+        pthread_mutex_unlock(&db->lock);
 }
 
 // =============================================================================
@@ -393,6 +395,7 @@ quadrature_result_t db_open_readonly(const char* path, quadrature_db_t** out) {
     }
 
     db->db_path = strdup(path);
+    db->readonly = true;  /* Single-threaded read-only: skip app-level mutex, WAL handles isolation */
 
     /* Prevent writes while allowing full WAL read visibility.
      * journal_mode is inherited from the database file (already WAL from writer),

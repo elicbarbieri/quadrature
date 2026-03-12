@@ -19,6 +19,7 @@ struct quadrature_db {
     sqlite3* db;
     char* db_path;
     pthread_mutex_t lock;
+    bool readonly;          /* true = skip app-level mutex (WAL handles reader isolation) */
     atomic_int cancel_flag;
 
     // Prepared statements for writes
