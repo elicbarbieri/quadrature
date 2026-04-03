@@ -259,11 +259,6 @@ void app_settings_swap_libraries(app_settings_t *settings, int pos_a, int pos_b)
 int app_settings_find_library(const app_settings_t *settings, const char *path);
 
 /**
- * Find library array index by library_index (stable slot ID). Returns -1 if not found.
- */
-int app_settings_find_library_by_index(const app_settings_t *settings, int library_index);
-
-/**
  * Set a channel's PipeWire quantum (buffer size in frames).
  *
  * @param settings Settings to modify

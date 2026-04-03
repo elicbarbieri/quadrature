@@ -95,7 +95,7 @@ static void init_defaults(app_settings_t *settings) {
     settings->auto_scan_on_startup = TRUE;
     settings->process_artwork = TRUE;
     settings->indexer_thread_count = 0;  // Auto
-    settings->art_thumb_size = 48;
+    settings->art_thumb_size = 96;
     settings->max_concurrent_library_scans = 2;
 
     // Integration toggle defaults
@@ -353,46 +353,6 @@ app_settings_t *app_settings_load(void) {
         g_strfreev(groups);
     }
 
-    // Migration: load old parallel-array format if no Library.N groups found
-    if (settings->library_count == 0) {
-        gsize path_count = 0;
-        char **lib_paths = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
-                                                       "library_paths", &path_count, NULL);
-        if (lib_paths && path_count > 0) {
-            settings->libraries = g_new0(library_config_t, (int)path_count);
-            settings->library_count = (int)path_count;
-
-            gsize name_count = 0, dp_count = 0;
-            char **lib_names = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
-                                                           "library_names", &name_count, NULL);
-            char **lib_dps   = g_key_file_get_string_list(keyfile, GROUP_LIBRARY,
-                                                           "library_data_paths", &dp_count, NULL);
-            gsize mb_cnt = 0, ac_cnt = 0, fa_cnt = 0, wp_cnt = 0;
-            int *mb_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_mb_resolve", &mb_cnt, NULL);
-            int *ac_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_acoustid", &ac_cnt, NULL);
-            int *fa_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_fanart", &fa_cnt, NULL);
-            int *wp_vals = g_key_file_get_integer_list(keyfile, GROUP_LIBRARY, "library_wikipedia", &wp_cnt, NULL);
-
-            for (gsize i = 0; i < path_count; i++) {
-                library_config_t *lib = &settings->libraries[i];
-                lib->path = g_strdup(lib_paths[i]);
-                lib->library_index = (int)i;
-                if (i < name_count && lib_names && lib_names[i] && lib_names[i][0])
-                    lib->name = g_strdup(lib_names[i]);
-                if (i < dp_count && lib_dps && lib_dps[i] && lib_dps[i][0])
-                    lib->data_path = g_strdup(lib_dps[i]);
-                if (i < mb_cnt && mb_vals) lib->mb_resolve = mb_vals[i]; else lib->mb_resolve = -1;
-                if (i < ac_cnt && ac_vals) lib->acoustid   = ac_vals[i]; else lib->acoustid   = -1;
-                if (i < fa_cnt && fa_vals) lib->fanart     = fa_vals[i]; else lib->fanart     = -1;
-                if (i < wp_cnt && wp_vals) lib->wikipedia  = wp_vals[i]; else lib->wikipedia  = -1;
-            }
-            g_strfreev(lib_paths);
-            g_strfreev(lib_names);
-            g_strfreev(lib_dps);
-            g_free(mb_vals); g_free(ac_vals); g_free(fa_vals); g_free(wp_vals);
-        }
-    }
-
     g_key_file_free(keyfile);
     g_free(path);
 
@@ -603,14 +563,7 @@ int app_settings_find_library(const app_settings_t *settings, const char *path) 
     return -1;
 }
 
-int app_settings_find_library_by_index(const app_settings_t *settings, int library_index) {
-    if (!settings) return -1;
-    for (int i = 0; i < settings->library_count; i++) {
-        if (settings->libraries[i].library_index == library_index)
-            return i;
-    }
-    return -1;
-}
+
 
 void app_settings_set_channel_device(app_settings_t *settings, int channel, const char *device_name) {
     if (!settings || channel < 0 || channel >= APP_SETTINGS_MAX_CHANNELS) return;

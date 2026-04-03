@@ -1,34 +1,44 @@
 # Library System
 
-Five-phase indexer with MusicBrainz resolution. Each library root gets its own `quadrature.sqlite` and `artwork/` directory. PostgreSQL is used for MusicBrainz + AcoustID lookups only — all results are written to the local SQLite. Audio files are never modified.
+Eight-phase indexer with MusicBrainz resolution and artist enrichment. Each library gets its own `quadrature.sqlite`, `quadrature-metadata.sqlite`, `quadrature-bios.sqlite`, and `artwork/` directory. PostgreSQL is used for MusicBrainz + AcoustID lookups only — all results are written to local SQLite. Audio files are never modified.
 
----
+______________________________________________________________________
 
 ## ⚠ Minimal Storage Principle — CRITICAL
 
 **The SQLite schema must stay as lean as possible. Every column must earn its place.**
 
 Rules:
+
 1. **No redundant identifiers.** If a piece of data is derivable from `(album_id + disc_num + track_num)` or from the MB release already stored on the album, do NOT add a column for it. This is why `tracks` has no `musicbrainz_recording_id` — it is always addressable via `albums.musicbrainz_release_id` + position.
-2. **No convenience caches.** If you can compute a value at query time in < 1ms, don't persist it.
-3. **Before adding any new column**, ask: *what breaks if this column does not exist?* If the answer is "nothing, it's just faster/easier", reject it.
-4. **Phase-level data flows one way.** File tags → Phase 2. MusicBrainz → Phase 4. Phase 4 data is cached in the album row, not duplicated into track rows.
+1. **No convenience caches.** If you can compute a value at query time in < 1ms, don't persist it.
+1. **Before adding any new column**, ask: *what breaks if this column does not exist?* If the answer is "nothing, it's just faster/easier", reject it.
+1. **Phase-level data flows one way.** File tags → Phase 2. MusicBrainz → Phase 4. Phase 4 data is cached in the album row, not duplicated into track rows.
 
 Violating this principle creates schema debt that compounds on every re-index and every migration.
 
----
+______________________________________________________________________
 
 ## Read-Only Library
 
 **Quadrature never modifies files in the library directory.**
 
-All enrichment is stored exclusively in locations at the library root:
+Each library has a `library_root` (music files, always read-only) and a `data_root`
+(databases + artwork). `data_root` defaults to `library_root` but can be overridden
+in settings (e.g. for read-only network drives).
+
+All enrichment is stored at the data root:
 
 ```
-{library_root}/
+{data_root}/
   quadrature.sqlite           ← all track/album/artist metadata (RAM-heavy: 64MB cache, 256MB mmap)
-  quadrature-metadata.sqlite  ← MusicBrainz recording relations (created only after Phase 4 runs)
-  artwork/                    ← thumbnail atlas files (96px-{unix_time}.atlas)
+  quadrature-metadata.sqlite  ← MusicBrainz recording relations + release info (created after Phase 6)
+  quadrature-bios.sqlite      ← Artist biographies from Wikipedia (created after Phase 8)
+  artwork/                    ← thumbnail atlas files (48px-artwork-{unix_time}.atlas)
+
+~/.local/share/quadrature/atlas/
+  artists.atlas               ← global UUID-keyed artist thumbnail atlas (shared across all libraries)
+  artists.atlas.lock          ← flock() write serialization
 ```
 
 The library's audio files and folder structure are a read-only source of truth.
@@ -36,22 +46,33 @@ Quadrature will never rename a folder, rewrite a tag, or touch any file it did
 not create.
 
 `quadrature-metadata.sqlite` is optional — if it doesn't exist, the UI simply shows
-no relation data. It is created and written by Phase 4 after a successful MB resolution.
-See `quadrature_metadata.h` for the public API and `METADATA.md` → "Metadata DB" for the schema.
+no relation data. Created and written by Phase 6 after a successful MB resolution.
+`quadrature-bios.sqlite` is optional — created by Phase 8 after Wikipedia lookups.
+See `quadrature/metadata.h` for the public API and `METADATA.md` for the schemas.
 
----
+______________________________________________________________________
 
 ## Multi-Library Architecture
 
-Each library root is an independent unit with its own `quadrature.sqlite` and
-`artwork/` directory. No shared state between libraries. A library is fully
-portable: move the directory tree (including `quadrature.sqlite`) and all
-metadata moves with it.
+Each library is an independent unit with its own `quadrature.sqlite`, metadata DBs,
+and `artwork/` directory. The only shared state is the global artist atlas.
 
-The client holds the list of registered library root paths. The database does
-not store its own absolute path.
+Libraries are configured in `settings.ini` as `library_config_t` entries with:
 
----
+- `path` — music folder root (required)
+- `data_path` — database/artwork location (optional, defaults to `path`)
+- `name` — display name (optional, defaults to basename)
+- `library_index` — stable slot ID persisted across sessions (used in global entity IDs)
+- Per-library toggles: `mb_resolve`, `acoustid`, `fanart`, `wikipedia` (each -1/0/1: inherit/off/on)
+
+A library is fully portable: move the data directory (including `quadrature.sqlite`)
+and all metadata moves with it. The database does not store its own absolute path.
+
+The library cache uses **global IDs** encoded as `LIBRARY_MAKE_GLOBAL_ID(bitmap_index, local_id)`
+to address entities across libraries (upper 16 bits = library index, lower 48 bits = local SQLite ID).
+See [Library Cache](LIBRARY_CACHE.md) and [Deduplication](DEDUPLICATION.md).
+
+______________________________________________________________________
 
 ## Indexer Architecture
 
@@ -60,10 +81,18 @@ not store its own absolute path.
 │                              INDEXER                                      │
 │                                                                          │
 │  Phase 1 ─ SCAN          stat() + hashmap → work queue of changed dirs  │
-│  Phase 2 ─ METADATA      GThreadPool: FFmpeg extract + fingerprint      │
-│  Phase 3 ─ ARTWORK       GThreadPool: image resize → atlas              │
-│  Phase 4 ─ RESOLVE       MusicBrainz: tags or fingerprint → PG lookup  │
-│  Phase 5 ─ FINALIZE      Batch mtime update, error flags, checkpoint    │
+│  Phase 2 ─ METADATA      GThreadPool: FFmpeg tag extract (no decode)    │
+│  Phase 3 ─ FINALIZE      Batch mtime flush + WAL checkpoint             │
+│         ── INDEXER_LIBRARY_UPDATED ── library-cache reload → views refresh│
+│  Phase 4 ─ ARTWORK       GThreadPool: image resize → atlas              │
+│         ── INDEXER_ARTWORK_UPDATED ── atlas reload → views refresh        │
+│  Phase 5 ─ FINGERPRINT   Chromaprint fingerprinting (on-demand)         │
+│  Phase 6 ─ RESOLVE       MusicBrainz PG lookup + metadata write         │
+│         ── INDEXER_LIBRARY_UPDATED ── library-cache reload → views refresh│
+│  Phase 7 ─ ARTIST_ART    Fetch artist images from fanart.tv → atlas     │
+│         ── INDEXER_ARTWORK_UPDATED ── artist atlas reload → views refresh │
+│  Phase 8 ─ ARTIST_BIO    Fetch artist bios from Wikipedia via Wikidata  │
+│         ── INDEXER_COMPLETED ──                                           │
 │                                                                          │
 │              │                              │                            │
 │              v                              v                            │
@@ -80,14 +109,14 @@ not store its own absolute path.
 Fast, single-threaded. Builds a work queue of changed album directories.
 
 1. `db_get_album_mtimes_page()` → build `GHashTable` of `path → (album_id, last_updated_at)`
-2. Walk library root recursively
-3. `stat(dir)` to get current mtime
-4. Lookup in hashmap: mtime matches → skip; differs or missing → queue for processing
-5. Sibling disc detection: subdirectories sharing a common prefix differing only by a disc
+1. Walk library root recursively
+1. `stat(dir)` to get current mtime
+1. Lookup in hashmap: mtime matches → skip; differs or missing → queue for processing
+1. Sibling disc detection: subdirectories sharing a common prefix differing only by a disc
    suffix (`Disc N`, `CD N`, `(Disc N)`) are grouped into one multi-disc work item with a
    synthetic canonical path equal to the common prefix. Requires ≥2 matching siblings.
 
-Completes in <1 second for unchanged libraries.
+Completes in \<1 second for unchanged libraries.
 
 If `force_resolve = true`: also queue albums where `mb_status = 0` for Phase 4
 re-resolution. These skip Phase 2 metadata re-extraction if mtime is unchanged —
@@ -98,62 +127,105 @@ fingerprints are re-generated from file in Phase 4 as needed.
 Parallel via `GThreadPool`. For each queued directory:
 
 1. Open each audio file via FFmpeg; extract tags + stream duration
-2. Tags read: `title`, `artist`, `album_artist`, `album`, `track`, `disc`, `date/year`, `genre`
-3. Title fallback: filename (minus extension) if TITLE tag absent
-4. Write `artists`, `albums`, `tracks`, `track_artists` to SQLite
+1. Tags read: `title`, `artist`, `album_artist`, `album`, `track`, `disc`, `date/year`, `genre`
+1. Title fallback: filename (minus extension) if TITLE tag absent
+1. Write `artists`, `albums`, `tracks`, `track_artists` to SQLite
 
 For existing tracks (path already in DB):
+
 - ALWAYS update: `duration_ms`, `mtime`, `track_num`, `disc_num`, `year`, `genre`, `path`
 - PRESERVE if `albums.mb_status = RESOLVED`: `tracks.title`, `tracks.artist_display`, `track_artists` rows
 - PRESERVE if `albums.mb_status = RESOLVED`: `albums.artist_id`, `albums.is_compilation`, `albums.year`, and all `albums.musicbrainz_*` columns
 
-If fingerprinting enabled (`options.fingerprint_tracks = true`):
-- Generate chromaprint: decode first 120s → mono 11025Hz via libchromaprint
-- Hold **in memory** on the indexer context; passed to Phase 4 within the same run
-- NOT stored in the database
+**No fingerprinting in Phase 2.** Chromaprint fingerprinting is done on-demand in
+Phase 5/6 — only for albums that need it and only if MB resolution is enabled.
 
-**Pre-tagged files:** Files carrying `MUSICBRAINZ_ALBUMID` / `MUSICBRAINZ_TRACKID` tags
-(e.g. from MusicBrainz Picard) are indexed normally in Phase 2. The MB IDs are read
-directly from the file in Phase 4 Tier 1, which skips fingerprinting. These albums
-resolve instantly with zero chromaprint cost.
+**Pre-tagged files:** Files carrying `MUSICBRAINZ_ALBUMID` tags (e.g. from MusicBrainz
+Picard) have the release ID stored directly in Phase 2 (`mb_status = HAS_RELEASE_ID`).
+Phase 6 uses this directly — no fingerprinting needed. These albums resolve instantly.
 
-### Phase 3 — ARTWORK
+### Phase 3 — FINALIZE (Metadata)
+
+Single-threaded. Runs immediately after Phase 2, before `INDEXER_LIBRARY_UPDATED`:
+
+- `db_set_album_mtimes_batch()` for all successfully processed albums
+- Prune orphan errors for directories that no longer exist
+- WAL checkpoint for durability
+
+Running the mtime batch before the library-updated signal ensures Phase 1 correctly
+skips unchanged albums on the next run, even if the process is killed before Phase 6.
+
+### Phase 4 — ARTWORK
 
 Parallel via `GThreadPool`. For each album in work queue:
 
 1. Discover artwork: `cover.*` → `folder.*` → `front.*` → `albumart.*` → embedded
-2. Resize to 96px thumbnail via libvips
-3. Write PNG entry to `{library_root}/artwork/96px-{unix_time}.atlas`
+1. Resize to thumbnail via libvips (default 48px)
+1. Write entry to `{data_root}/artwork/48px-artwork-{unix_time}.atlas`
 
-### Phase 4 — RESOLVE
+Pure image processing — no DB metadata writes.
 
-Optional. Runs when `mb_resolve = true` and PostgreSQL is configured.
-Processes albums where `mb_status = 0`.
+### Phase 5 — FINGERPRINT
 
-**Tier 1 — File tag fast-path:**
-- Read first track's file for `MUSICBRAINZ_ALBUMID`
-  (tries: `MUSICBRAINZ_ALBUMID`, `"MusicBrainz Album Id"`, space variants)
-- If found → use release UUID directly; skip fingerprinting entirely
+Parallel Chromaprint generation for albums needing acoustic identification.
+Only runs when `mb_resolve = true` and PostgreSQL is configured.
 
-**Tier 2 — Fingerprint consensus** (only if Tier 1 found nothing):
-- Read in-memory chromaprints from Phase 2 of this run
-  (or re-generate from file if this is a `force_resolve` retry run)
-- Query local AcoustID PostgreSQL via `acoustid_compare2()` + GIN index
-- Consensus vote across up to 3 tracks per album
-- ≥80% must agree on same release; below threshold → `mb_status = NO_MATCH`
+- Decode first 30 seconds of up to 4 tracks per album → mono 11025Hz via libchromaprint
+- Fingerprints held in memory, passed to Phase 6
+- NOT stored in the database
 
-**On match (either tier):**
-- Fetch full release from local MusicBrainz PostgreSQL (no HTTP)
-- Two-pass track matching:
-    Pass 1: exact `(disc_num, position)`
-    Pass 2: score = `duration_sim×0.6 + title_jaccard×0.4`; threshold 0.5
-- Write enriched metadata to SQLite (see METADATA.md — Field Provenance)
-- `mb_status = RESOLVED`, `mb_resolved_at = now()`
-- Fetch all artist–recording links for this release from PG (`l_artist_recording`)
-- Write links to `quadrature-metadata.sqlite` (producers, remixers, vocalists, engineers, etc.)
-  See METADATA.md → "Metadata DB" for schema details.
+### Phase 6 — RESOLVE
+
+MusicBrainz resolution. Processes albums where `mb_status IN (NOT_ATTEMPTED, HAS_RELEASE_ID)`.
+
+**Resolution strategy (per album):**
+
+1. Check `albums.musicbrainz_release_id` — if set (from Phase 2 tag extraction or prior run),
+   use directly → skip to step 3
+
+1. `find_release_by_fingerprint()` — fallback chain for untagged albums:
+
+   - **ISRC lookup:** batch query ISRCs from file tags against MusicBrainz PG
+   - **Solr text search:** album title + artist name query with duration validation
+   - **AcoustID fingerprint:** query local AcoustID PG via `acoustid_compare2()` + GIN index,
+     consensus vote across up to 4 tracks per album (≥80% must agree on same release)
+
+1. `mb_fetch_all_batch()` — single PG call fetches release metadata, artist credits,
+   recordings, and artist–recording links for up to 50 albums per round-trip
+
+1. Match MB tracks to local tracks:
+
+   - Pass 1: exact `(disc_num, position)`
+   - Pass 2: score = `duration_sim×0.6 + title_jaccard×0.4`; threshold 0.5
+
+1. Write enriched metadata to SQLite (see METADATA.md — Field Provenance)
+
+   - `mb_status = RESOLVED`, `mb_resolved_at = now()`
+   - Write recording relations and release info to `quadrature-metadata.sqlite`
+     (producers, remixers, vocalists, engineers, release type, label, catalog number, etc.)
 
 **On failure:** `mb_status = NO_MATCH` or `FAILED`
+
+After all albums are processed, orphan artists (from Phase 2 that were replaced by
+corrected MusicBrainz entries) are pruned.
+
+### Phase 7 — ARTIST_ART
+
+Fetches artist images from fanart.tv for all artists with MusicBrainz IDs.
+
+- Downloads artist thumbnails via HTTP (rate-limited, 500ms between requests)
+- Builds/updates the global artist atlas at `~/.local/share/quadrature/atlas/artists.atlas`
+- Uses `flock()` on `artists.atlas.lock` for write serialization across concurrent indexer runs
+- Atlas is UUID-keyed (binary MusicBrainz UUIDs) — shared across all libraries
+
+### Phase 8 — ARTIST_BIO
+
+Fetches artist biographies from Wikipedia via Wikidata for all artists with MusicBrainz IDs.
+
+- Looks up Wikidata entity via MBID → fetches Wikipedia summary
+- Writes to `{data_root}/quadrature-bios.sqlite` (separate DB so deleting metadata DB
+  for re-resolve doesn't destroy expensive-to-refetch bios)
+- Rate-limited (250ms between requests)
 
 ### MB Staleness Sync
 
@@ -163,13 +235,13 @@ Separate operation (not part of normal indexing). Uses MusicBrainz PostgreSQL
 Checkpoint derived from existing data — no new table needed:
 
 ```sql
-SELECT MAX(mb_resolved_at) FROM albums WHERE mb_status = 1
+SELECT MAX(mb_resolved_at) FROM albums WHERE mb_status = 2
 ```
 
 Sync flow:
 
 ```
-checkpoint = MAX(albums.mb_resolved_at) WHERE mb_status = 1
+checkpoint = MAX(albums.mb_resolved_at) WHERE mb_status = 2
 
 -- Find stale releases/groups in PG
 SELECT gid::text FROM release       WHERE last_updated > to_timestamp(checkpoint)
@@ -185,7 +257,7 @@ SELECT gid::text FROM artist WHERE last_updated > to_timestamp(checkpoint)
 
 -- Cross-reference against artists.musicbrainz_id in SQLite
 
-For each stale album:   re-run Phase 4 fetch + write (release ID already known, no fingerprinting)
+For each stale album:   re-run Phase 6 fetch + write (release ID already known, no fingerprinting)
 For each stale track:   re-fetch recording + artist credits; update tracks/track_artists/artist_display
 For each stale artist:  update artists.name, artists.sort_name in-place
 ```
@@ -193,44 +265,36 @@ For each stale artist:  update artists.name, artists.sort_name in-place
 Cost is proportional to the number of MB edits since the last sync — typically a small
 fraction of total albums for a stable library.
 
-### Phase 5 — FINALIZE
-
-Single-threaded cleanup:
-
-- `db_set_album_mtimes_batch()` for all successfully processed albums
-- Clear `indexer_errors` for successfully rescanned directories
-- WAL checkpoint for durability
-
----
+______________________________________________________________________
 
 ## Database Schema
 
-SQLite with WAL mode. MusicBrainz columns populated by Phase 4 resolver.
+SQLite with WAL mode. MusicBrainz columns populated by Phase 6 resolver.
+
+Note: `release_type`, `label`, `catalog_number`, `barcode` are stored in the
+metadata DB (`quadrature-metadata.sqlite` → `releases` table), NOT in the main DB.
+See [Metadata Architecture](METADATA.md) for the metadata DB schema.
 
 ```sql
 CREATE TABLE artists (
     id             INTEGER PRIMARY KEY,
     name           TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    sort_name      TEXT,               -- NULL until Phase 4 (MB resolution)
-    musicbrainz_id TEXT
+    musicbrainz_id TEXT,
+    sort_name      TEXT               -- NULL until Phase 6 (MB resolution)
 );
 
 CREATE TABLE albums (
     id              INTEGER PRIMARY KEY,
-    title           TEXT NOT NULL,     -- folder name until Phase 4 writes MB title
+    title           TEXT NOT NULL,     -- folder name until Phase 6 writes MB title
     artist_id       INTEGER REFERENCES artists(id),
-    path            TEXT NOT NULL UNIQUE,  -- relative to library root; delta detection key
+    path            TEXT NOT NULL DEFAULT '',  -- relative to library root; delta detection key
     year            INTEGER,
     is_compilation  INTEGER DEFAULT 0,
-    last_updated_at INTEGER,           -- directory mtime written in Phase 5; Phase 1 delta key
-    -- MB fields (all NULL until Phase 4)
+    last_updated_at INTEGER,           -- directory mtime written in Phase 3; Phase 1 delta key
+    -- MB fields (all NULL until Phase 6)
     musicbrainz_release_id       TEXT,
     musicbrainz_release_group_id TEXT,
-    release_type    TEXT,              -- Album, EP, Single, Broadcast, ...
-    label           TEXT,
-    catalog_number  TEXT,
-    barcode         TEXT,
-    mb_status       INTEGER DEFAULT 0, -- 0=not_attempted 1=resolved 2=no_match 3=failed
+    mb_status       INTEGER DEFAULT 0, -- see mb_status values below
     mb_resolved_at  INTEGER
 );
 
@@ -247,34 +311,48 @@ CREATE TABLE tracks (
     genre        TEXT,
     artist_display TEXT,               -- denormalized "Artist A feat. B"; rebuilt atomically
     -- NOTE: no per-track MBID stored. Tracks are addressed via (disc_num, track_num)
-    -- within albums.musicbrainz_release_id. See "Minimal Storage Principle" below.
+    -- within albums.musicbrainz_release_id. See "Minimal Storage Principle" above.
     UNIQUE(album_id, path)
 );
 
+-- Multi-artist junction table (WITHOUT ROWID: composite PK, small rows)
 CREATE TABLE track_artists (
     track_id      INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     artist_id     INTEGER NOT NULL REFERENCES artists(id),
     position      INTEGER NOT NULL DEFAULT 0,
     join_phrase   TEXT NOT NULL DEFAULT '',  -- " feat. ", " & ", "" for last artist
-    credited_name TEXT,                      -- non-NULL only when alias ≠ artists.name
     PRIMARY KEY (track_id, artist_id)
-);
+) WITHOUT ROWID;
 
-CREATE VIRTUAL TABLE tracks_fts USING fts5(
-    title, content='tracks', content_rowid='id'
-);
+-- Full-text search (standalone FTS5, not content-sync)
+CREATE VIRTUAL TABLE tracks_fts USING fts5(title, artist, album);
+CREATE VIRTUAL TABLE artists_fts USING fts5(name);
+CREATE VIRTUAL TABLE albums_fts USING fts5(title, artist);
 
 CREATE TABLE indexer_errors (
-    id         INTEGER PRIMARY KEY,
-    path       TEXT NOT NULL,
-    message    TEXT NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+    id              INTEGER PRIMARY KEY,
+    path            TEXT NOT NULL,
+    message         TEXT NOT NULL,
+    created_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    scan_generation INTEGER NOT NULL DEFAULT 0
 );
 ```
 
-**Storage:** ~400 bytes/track with MB columns. 100k tracks ~ 40MB.
+### mb_status Values
 
----
+| Value | Constant         | Meaning                                                      |
+| ----- | ---------------- | ------------------------------------------------------------ |
+| `0`   | `NOT_ATTEMPTED`  | No MB work done; no release ID in DB                         |
+| `1`   | `HAS_RELEASE_ID` | Release UUID found in Picard tags (Phase 2); not yet fetched |
+| `2`   | `RESOLVED`       | Fully resolved: MB PG data fetched and written to SQLite     |
+| `3`   | `NO_MATCH`       | Resolution attempted but no confident match found            |
+| `4`   | `FAILED`         | Resolution attempted but errored                             |
+
+Phase 6 queries `WHERE mb_status IN (0, 1)`. Albums with status 2/3/4 are skipped.
+
+**Storage:** ~300 bytes/track. 100k tracks ~ 30MB.
+
+______________________________________________________________________
 
 ## Directory Format
 
@@ -327,26 +405,26 @@ library.
 
 ### Validation Rules
 
-| Error | Condition | Fix |
-|-------|-----------|-----|
-| Mixed content | Album has both loose tracks and disc folders | Move tracks into disc folders |
-| Orphan disc folder | Only one disc subdirectory exists | Remove folder level or add more discs |
-| Non-sequential discs | Disc numbers skip a value | Rename to be sequential |
-| Artwork in disc folder | Artwork found inside disc subdir | Move to album root |
-| Too deep nesting | Tracks >1 level below album dir | Flatten structure |
-| Empty disc folder | Disc subdirectory has no audio files | Add tracks or remove folder |
+| Error                  | Condition                                    | Fix                                   |
+| ---------------------- | -------------------------------------------- | ------------------------------------- |
+| Mixed content          | Album has both loose tracks and disc folders | Move tracks into disc folders         |
+| Orphan disc folder     | Only one disc subdirectory exists            | Remove folder level or add more discs |
+| Non-sequential discs   | Disc numbers skip a value                    | Rename to be sequential               |
+| Artwork in disc folder | Artwork found inside disc subdir             | Move to album root                    |
+| Too deep nesting       | Tracks >1 level below album dir              | Flatten structure                     |
+| Empty disc folder      | Disc subdirectory has no audio files         | Add tracks or remove folder           |
 
 ### Artwork Discovery
 
 Priority order per album directory:
 
 1. `cover.{jpg,png,webp}`
-2. `folder.{jpg,png,webp}`
-3. `front.{jpg,png,webp}`
-4. `albumart.{jpg,png,webp}`
-5. Embedded artwork from first audio file (FFmpeg extraction)
+1. `folder.{jpg,png,webp}`
+1. `front.{jpg,png,webp}`
+1. `albumart.{jpg,png,webp}`
+1. Embedded artwork from first audio file (FFmpeg extraction)
 
----
+______________________________________________________________________
 
 ## Path Layout
 
@@ -373,7 +451,7 @@ char* full = g_canonicalize_filename(
 // g_canonicalize_filename resolves any "../" components cleanly
 ```
 
----
+______________________________________________________________________
 
 ## MusicBrainz Infrastructure
 
@@ -390,12 +468,12 @@ Standard MusicBrainz replication keeps the data current. The AcoustID dataset is
 
 All MB data comes via libpq — no HTTP calls during resolution.
 
-| Data                                  | PostgreSQL tables                                                               |
-| ------------------------------------- | ------------------------------------------------------------------------------- |
+| Data                                  | PostgreSQL tables                                                              |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
 | Release metadata (title, date, type)  | `release` + `release_group` + `release_status` + `release_country`             |
-| Label + catalog number                | `release_label` + `label`                                                       |
+| Label + catalog number                | `release_label` + `label`                                                      |
 | Album artist credits                  | `release.artist_credit` → `artist_credit_name` → `artist`                      |
-| Track list (position, disc, duration) | `medium` → `track` → `recording`                                                |
+| Track list (position, disc, duration) | `medium` → `track` → `recording`                                               |
 | Recording artist credits              | Batch join: `medium` → `track` → `recording` → `artist_credit_name` → `artist` |
 
 AcoustID fingerprint lookup uses the same PostgreSQL instance (`acoustid` schema alongside `musicbrainz`).
@@ -406,3 +484,6 @@ If MB resolution is disabled or no match is found, the library still works — i
 whatever metadata was in the file tags. The indexer's tag parsing (artist splitting on
 `feat.`/`;`, album artist detection, compilation heuristics) provides a reasonable baseline.
 MB resolution upgrades that baseline to canonical data.
+
+Phases 7 and 8 (artist art + bios) also depend on MusicBrainz IDs — artists without
+MBIDs will not have thumbnails or biographies.

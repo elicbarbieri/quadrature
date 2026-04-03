@@ -669,6 +669,20 @@ typedef struct {
     size_t errors;
     /* Card root widget */
     GtkWidget *card;
+    /* Reorder / lock controls */
+    GtkWidget *move_up_btn;
+    GtkWidget *move_down_btn;
+    GtkWidget *lock_btn;
+    /* Edit revealer + settings */
+    GtkWidget *edit_btn;
+    GtkWidget *edit_revealer;
+    GtkWidget *edit_name_entry;
+    GtkWidget *card_name_label;
+    /* 3-state toggle buttons (Default / On / Off) per integration */
+    GtkWidget *mb_toggles[3];       /* [0]=Default [1]=On [2]=Off */
+    GtkWidget *acoustid_toggles[3];
+    GtkWidget *fanart_toggles[3];
+    GtkWidget *wikipedia_toggles[3];
     /* Progress revealer — slides down below stats during scan */
     GtkWidget *progress_revealer;
     /* Stats panel labels (updated in-place after indexing) */
@@ -684,6 +698,7 @@ typedef struct {
     gboolean shown_initial_load_toast;  /* TRUE after first library-updated toast */
     gboolean pending_load_toast;        /* Deferred toast — shown when async stats arrive */
     gboolean available;                 /* Mirrors library_cache availability flag */
+    gboolean locked;                    /* Mirrors settings->libraries[id].locked */
 } LibEntry;
 
 struct _UiWindow {

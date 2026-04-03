@@ -824,11 +824,12 @@ static void build_library_bar(UiWindow *w) {
     w->library_toggles = g_new0(GtkToggleButton*, lib_count);
 
     for (int i = 0; i < lib_count; i++) {
-        const char *name = library_cache_get_library_name(w->library_cache, i);
+        int bi = library_cache_get_bitmap_index(w->library_cache, i);
+        const char *name = library_cache_get_library_name(w->library_cache, bi);
         GtkWidget *btn = gtk_toggle_button_new_with_label(name ? name : "Library");
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
         gtk_widget_add_css_class(btn, "library-toggle");
-        g_object_set_data(G_OBJECT(btn), "lib-idx", GINT_TO_POINTER(i));
+        g_object_set_data(G_OBJECT(btn), "lib-idx", GINT_TO_POINTER(bi));
         g_signal_connect(btn, "toggled", G_CALLBACK(on_library_toggle), w);
 
         /* Right-click → select all libraries */
@@ -1224,7 +1225,9 @@ static gboolean auto_scan_idle(gpointer data) {
         const char **dpaths = g_new(const char *, total);
         gsize count = 0;
         for (int i = 0; i < total; i++) {
-            if (!library_cache_get_available(w->library_cache, i)) continue;
+            if (!library_cache_get_available(w->library_cache,
+                                             w->settings->libraries[i].library_index))
+                continue;
             paths[count]  = w->settings->libraries[i].path;
             dpaths[count] = app_settings_get_library_data_path(w->settings, i);
             count++;
@@ -1263,7 +1266,7 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
 
     /* Create artwork manager — library_roots order must match library_cache source indices.
      * Use data paths (where artwork/ lives) instead of library paths. */
-    int thumb_size = settings ? settings->art_thumb_size : 48;
+    int thumb_size = settings ? settings->art_thumb_size : 96;
     const char **art_roots = NULL;
     int art_root_count = 0;
     const char **lib_roots = NULL;

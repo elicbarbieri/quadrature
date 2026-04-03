@@ -17,6 +17,18 @@
 #include <stdio.h>
 #include <sys/types.h>
 
+/* Single-library cache helper for tests */
+static quadrature_result_t test_cache_create(const char *db_path,
+                                              const char *music_base,
+                                              library_cache_t **out) {
+    if (!db_path || !out) return QUADRATURE_ERROR_INVALID_PARAM;
+    library_cache_source_t src = {
+        .db_path = db_path, .music_base = music_base,
+        .display_name = NULL, .bitmap_index = 0,
+    };
+    return library_cache_create_multi(&src, 1, out);
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -101,8 +113,9 @@ static char *resolve_one(const char *album_path,
     db_close(db);
 
     library_cache_t *cache = NULL;
-    cr_assert_eq(library_cache_create(test_db_path, MUSIC_BASE, &cache),
+    cr_assert_eq(test_cache_create(test_db_path, MUSIC_BASE, &cache),
                  QUADRATURE_OK);
+    library_cache_warm_slot_blocking(cache, 0);
 
     char *resolved = library_cache_resolve_track_path(cache, track_id);
 
@@ -173,8 +186,9 @@ Test(path_resolution, nonexistent_track_returns_null) {
     db_close(db);
 
     library_cache_t *cache = NULL;
-    cr_assert_eq(library_cache_create(test_db_path, MUSIC_BASE, &cache),
+    cr_assert_eq(test_cache_create(test_db_path, MUSIC_BASE, &cache),
                  QUADRATURE_OK);
+    library_cache_warm_slot_blocking(cache, 0);
 
     char *path = library_cache_resolve_track_path(cache, 99999);
     cr_assert_null(path);

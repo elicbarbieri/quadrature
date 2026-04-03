@@ -32,7 +32,7 @@ pactl load-module module-rtp-send \
 
 **Sources → New Profile:** Name=`Quadrature_Studio_A_0`, Source ID=`101`, IP=`239.192.0.101`, GPIO=Enabled
 
----
+______________________________________________________________________
 
 ## LWRP Protocol
 
@@ -41,26 +41,27 @@ pactl load-module module-rtp-send \
 LWRP (Livewire Routing Protocol) is the TCP control plane for all Axia Livewire+ devices.
 Specification: Maciej Szlapka, Telos Systems Corp., version 2.0.1 (2003-12-11, revised 2004-08+).
 
-| Property         | Value                                                  |
-| ---------------- | ------------------------------------------------------ |
-| Transport        | TCP, port **93** (hardcoded, not configurable)         |
-| Encoding         | 7-bit ASCII, human-readable                            |
-| Line termination | `\r\n` (CRLF); server also accepts bare `\n`           |
-| Command case     | UPPERCASE                                              |
-| Framing          | None — no binary framing, no length prefix, no CRC     |
-| Multi-line resp  | Wrapped in `BEGIN` / `END` delimiters                  |
-| Telnet-testable  | Yes — any raw TCP/telnet client works                  |
+| Property         | Value                                              |
+| ---------------- | -------------------------------------------------- |
+| Transport        | TCP, port **93** (hardcoded, not configurable)     |
+| Encoding         | 7-bit ASCII, human-readable                        |
+| Line termination | `\r\n` (CRLF); server also accepts bare `\n`       |
+| Command case     | UPPERCASE                                          |
+| Framing          | None — no binary framing, no length prefix, no CRC |
+| Multi-line resp  | Wrapped in `BEGIN` / `END` delimiters              |
+| Telnet-testable  | Yes — any raw TCP/telnet client works              |
 
 ### Connection Lifecycle
 
 **On connect:** The server sends **no banner**. The TCP handshake completes silently. The client must speak first.
 
 **Session sequence:**
+
 1. TCP connect
-2. Optionally authenticate: `LOGIN <password>` (see [Authentication](#authentication))
-3. Query device capabilities: `VER`
-4. Subscribe to GPIO events: `ADD GPI` / `ADD GPO`
-5. Receive asynchronous push notifications until disconnect
+1. Optionally authenticate: `LOGIN <password>` (see [Authentication](#authentication))
+1. Query device capabilities: `VER`
+1. Subscribe to GPIO events: `ADD GPI` / `ADD GPO`
+1. Receive asynchronous push notifications until disconnect
 
 **On disconnect:** All subscriptions are torn down automatically. There is no graceful QUIT command — simply close the TCP socket. On reconnect, all subscriptions must be re-issued from scratch. `ADD GPI` / `ADD GPO` will immediately push the current state of all ports, providing re-sync.
 
@@ -69,6 +70,7 @@ Specification: Maciej Szlapka, Telos Systems Corp., version 2.0.1 (2003-12-11, r
 ### Keep-Alive
 
 LWRP has **no application-level keepalive or heartbeat**. Dead links must be detected via:
+
 - OS-level `SO_KEEPALIVE` on the socket
 - Failed `send()` returning `EPIPE` / `ECONNRESET`
 - Periodic polling with `VER` (device responds immediately if alive)
@@ -94,9 +96,11 @@ LOGIN <password>\r\n
 ```
 VER
 ```
+
 Returns device capabilities. Issue this after connecting to discover port counts.
 
 Example response:
+
 ```
 VER LWRP:2.0.2 DEVN:"xNode" NSRC:8 NDST:8 NGPI:8 NGPO:8
 ```
@@ -123,15 +127,16 @@ Port numbers start at 1. Maximum port count comes from `VER` (`NGPI`, `NGPO`).
 
 LWRP represents the full state of a port as a **5-character ASCII string** (one character per pin, position 1–5 left to right):
 
-| Character | Logic level | Stability                      |
-| --------- | ----------- | ------------------------------ |
-| `H`       | High (off)  | **Transitioning** (momentary)  |
-| `h`       | High (off)  | Stable                         |
-| `L`       | Low (on)    | **Transitioning** (momentary)  |
-| `l`       | Low (on)    | Stable                         |
-| `x`/`X`   | No change   | Used in set commands only      |
+| Character | Logic level | Stability                     |
+| --------- | ----------- | ----------------------------- |
+| `H`       | High (off)  | **Transitioning** (momentary) |
+| `h`       | High (off)  | Stable                        |
+| `L`       | Low (on)    | **Transitioning** (momentary) |
+| `l`       | Low (on)    | Stable                        |
+| `x`/`X`   | No change   | Used in set commands only     |
 
 Uppercase = pin is mid-transition. Lowercase = pin has settled. A state change typically produces two sequential messages:
+
 ```
 GPI 1 hhhhL     ← pin 5 going low, mid-transition
 GPI 1 hhhhl     ← pin 5 now stable low
@@ -142,19 +147,24 @@ Quadrature's parser (`src/gpio/axia_protocol.c`) accepts both uppercase and lowe
 ### GPIO Commands
 
 **Subscribe to port state changes:**
+
 ```
 ADD GPI             ← subscribe to all GPI ports
 ADD GPO             ← subscribe to all GPO ports
 ADD GPI <n>         ← subscribe to specific port n
 ADD GPI <n>-<m>     ← subscribe to port range n through m
 ```
+
 On subscribe, the server immediately pushes the current state of all matching ports.
 
 **Set GPO pin states (app → console):**
+
 ```
 GPO <port> <5-char-state>
 ```
+
 Examples:
+
 ```
 GPO 1 lllll        ← all 5 pins on port 1 to low (active/LED on)
 GPO 1 hhhhh        ← all 5 pins to high (inactive/LED off)
@@ -171,6 +181,7 @@ GPO 1 xxlxx        ← set pin 3 to low, leave others unchanged
 ```
 
 Multi-line bulk queries use `BEGIN`/`END`:
+
 ```
 BEGIN
 DST 1 ADDR:239.192.8.52 NAME:"Studio A"
@@ -188,7 +199,7 @@ ERROR <code> <description>
 
 | Code   | Meaning                                        |
 | ------ | ---------------------------------------------- |
-| `1000` | Bad command (unrecognised command, blank line)  |
+| `1000` | Bad command (unrecognised command, blank line) |
 
 ### Latency
 
@@ -228,30 +239,30 @@ GPO 1 lxxxx\r\n   ← set port 1 pin 1 low (ON-AIR LED on)
 → ERROR 1000 bad command
 ```
 
----
+______________________________________________________________________
 
 ## Quadrature Implementation
 
 ### Source Layout
 
-| File                              | Purpose                                               |
-| --------------------------------- | ----------------------------------------------------- |
-| `include/quadrature/gpio.h`       | Public API — types, enums, lifecycle functions        |
-| `src/gpio/axia_gpio.c`            | TCP connection, listener thread, reconnect loop       |
-| `src/gpio/axia_protocol.c`        | LWRP message parse/format helpers                     |
-| `src/gpio/internal.h`             | Private struct, protocol constants                    |
-| `src/ui/settings/gpio_bridge.c`   | UI ↔ GPIO bridge (engine play/stop, LED feedback)     |
-| `tests/unit/test_axia_gpio.c`     | Unit tests with mock TCP server                       |
+| File                            | Purpose                                           |
+| ------------------------------- | ------------------------------------------------- |
+| `include/quadrature/gpio.h`     | Public API — types, enums, lifecycle functions    |
+| `src/gpio/axia_gpio.c`          | TCP connection, listener thread, reconnect loop   |
+| `src/gpio/axia_protocol.c`      | LWRP message parse/format helpers                 |
+| `src/gpio/internal.h`           | Private struct, protocol constants                |
+| `src/ui/settings/gpio_bridge.c` | UI ↔ GPIO bridge (engine play/stop, LED feedback) |
+| `tests/unit/test_axia_gpio.c`   | Unit tests with mock TCP server                   |
 
 ### Protocol Constants (`src/gpio/internal.h`)
 
-| Constant                     | Value  | Description                      |
-| ---------------------------- | ------ | -------------------------------- |
-| `LWRP_PORT`                  | `93`   | Default TCP port                 |
-| `LWRP_MAX_LINE`              | `512`  | Max bytes per protocol line      |
-| `RECONNECT_INITIAL_DELAY_MS` | `100`  | First reconnect wait (100ms)     |
-| `RECONNECT_MAX_DELAY_MS`     | `5000` | Max reconnect wait (5s)          |
-| `RECONNECT_BACKOFF_FACTOR`   | `2`    | Exponential backoff multiplier   |
+| Constant                     | Value  | Description                    |
+| ---------------------------- | ------ | ------------------------------ |
+| `LWRP_PORT`                  | `93`   | Default TCP port               |
+| `LWRP_MAX_LINE`              | `512`  | Max bytes per protocol line    |
+| `RECONNECT_INITIAL_DELAY_MS` | `100`  | First reconnect wait (100ms)   |
+| `RECONNECT_MAX_DELAY_MS`     | `5000` | Max reconnect wait (5s)        |
+| `RECONNECT_BACKOFF_FACTOR`   | `2`    | Exponential backoff multiplier |
 
 ### Channel ID Mapping
 
@@ -344,19 +355,19 @@ bool axia_gpio_is_connected(const axia_gpio_t *gpio);
 quadrature_result_t axia_gpio_set(axia_gpio_t *gpio, axia_pin_t pin, axia_state_t state);
 ```
 
----
+______________________________________________________________________
 
 ## Operations
 
-| Operation    | Direction     | Trigger                                                        |
-| ------------ | ------------- | -------------------------------------------------------------- |
-| Fader ON     | Console → App | Fader raised → `GPI <ch> lxxxx` → `engine_play()`             |
-| Fader OFF    | Console → App | Fader lowered → `GPI <ch> hxxxx` → `engine_stop()`            |
-| Queue Play   | App → Console | Play in queue mode → `GPO <ch> lxxxx` (pin 1 HIGH)            |
-| Preview On   | Bidirectional | Toggle preview → `GPO <ch> xlxxx` (pin 2 HIGH)                |
+| Operation    | Direction     | Trigger                                                         |
+| ------------ | ------------- | --------------------------------------------------------------- |
+| Fader ON     | Console → App | Fader raised → `GPI <ch> lxxxx` → `engine_play()`               |
+| Fader OFF    | Console → App | Fader lowered → `GPI <ch> hxxxx` → `engine_stop()`              |
+| Queue Play   | App → Console | Play in queue mode → `GPO <ch> lxxxx` (pin 1 HIGH)              |
+| Preview On   | Bidirectional | Toggle preview → `GPO <ch> xlxxx` (pin 2 HIGH)                  |
 | LED Feedback | App → Console | Channel mode change → `gpio_bridge.c:on_channel_mode_changed()` |
 
----
+______________________________________________________________________
 
 ## Multi-Studio
 

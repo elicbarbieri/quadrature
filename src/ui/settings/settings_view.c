@@ -167,7 +167,7 @@ GtkWidget *make_settings_view(UiWindow *w) {
 
     GtkWidget *art_size_dropdown = GTK_WIDGET(gtk_builder_get_object(builder, "art_size_dropdown"));
     if (art_size_dropdown) {
-        int current = w->settings ? w->settings->art_thumb_size : 48;
+        int current = w->settings ? w->settings->art_thumb_size : 96;
         gtk_drop_down_set_selected(GTK_DROP_DOWN(art_size_dropdown), art_size_to_index(current));
         g_signal_connect(art_size_dropdown, "notify::selected", G_CALLBACK(on_art_size_changed), w);
     }

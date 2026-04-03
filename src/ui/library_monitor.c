@@ -79,9 +79,10 @@ static void check_all_libraries(LibraryMonitor *self) {
 
         if (accessible != self->prev_available[i]) {
             self->prev_available[i] = accessible;
-            library_cache_set_available(self->cache, i, accessible);
+            int bitmap_idx = self->settings->libraries[i].library_index;
+            library_cache_set_available(self->cache, bitmap_idx, accessible);
             g_signal_emit(self, monitor_signals[SIG_AVAILABILITY_CHANGED], 0,
-                          i, accessible);
+                          bitmap_idx, accessible);
         }
     }
 }

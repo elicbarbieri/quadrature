@@ -1,8 +1,8 @@
 # Library Cache
 
-**Foundation layer** for all library data access. Uses flat arrays indexed by entity ID for O(1) lookups, with a background warming thread that pages all data into cache after startup. Two DB connections (`db_ui` for the main thread, `db_warm` for the warming thread) provide zero contention via SQLite WAL.
+**Foundation layer** for all library data access. Multi-library architecture with per-library **slots**, each containing flat arrays indexed by local entity ID for O(1) lookups. Each slot has its own background warming thread and two DB connections (`db` for the main thread, `db_warm` for warming). Global IDs encode `(bitmap_index, local_id)` so entities are addressable across libraries.
 
-Cross-library deduplication (merged artists, album MBID dedup, library filtering) is documented in DEDUPLICATION.md.
+Cross-library deduplication (merged artists, album MBID dedup, library filtering) is documented in [DEDUPLICATION.md](DEDUPLICATION.md).
 
 ## Architecture
 
@@ -59,49 +59,74 @@ Cross-library deduplication (merged artists, album MBID dedup, library filtering
 
 ## Data Structures
 
-### Flat Array Storage
+### Multi-Library Slot Architecture
 
-Entities are stored in pointer arrays indexed directly by SQLite auto-increment ID. Since IDs are dense sequential integers (1, 2, 3, ...), this gives O(1) lookup with minimal memory overhead.
+Each library occupies a `LibrarySlot` with its own flat arrays, DB connections, and warming thread. The top-level `library_cache` manages slots and cross-library merge state.
 
 ```c
+typedef struct {
+    int    lib_idx;         // Position in slots[] array (internal, mutable)
+    int    bitmap_index;    // Stable library ID encoded in global entity IDs
+
+    // Entity arrays (indexed by LOCAL id — O(1) lookup)
+    library_artist_info_t **artists;
+    size_t                  artists_capacity;
+    library_album_info_t  **albums;
+    size_t                  albums_capacity;
+    library_track_info_t  **tracks;
+    size_t                  tracks_capacity;
+
+    // Relationship arrays (indexed by LOCAL id)
+    GArray    **album_tracks;
+    GPtrArray **track_artists;
+    GPtrArray **artist_albums;
+    GPtrArray **artist_appearances;
+    GPtrArray **artist_appearance_tracks;
+    GPtrArray **album_tracks_ptrs;
+
+    // DB connections (per-slot, per-library)
+    quadrature_db_t      *db;        // UI readonly — main thread only
+    quadrature_db_t      *db_warm;   // warming thread only
+    quadrature_meta_db_t *meta_db;   // MusicBrainz recording relations (lazy)
+    quadrature_bios_db_t *bios_db;   // Artist bios (lazy)
+
+    // Per-slot warming state
+    GThread    *warm_thread;
+    atomic_int  warm_cancel;
+    atomic_int  warm_state;     // IDLE / WARMING / READY / REFRESHING
+    atomic_bool available;      // FALSE when music_base path is inaccessible
+} LibrarySlot;
+
 struct library_cache {
-    // Entity arrays (indexed by ID — O(1) lookup)
-    library_artist_info_t** artists;    // artists[artist_id] → info or NULL
-    size_t artists_capacity;            // max_artist_id + 1
-    library_album_info_t**  albums;     // albums[album_id] → info or NULL
-    size_t albums_capacity;
-    library_track_info_t**  tracks;     // tracks[track_id] → info or NULL
-    size_t tracks_capacity;
+    LibrarySlot  *slots;
+    int           slot_count;
 
-    // Relationship arrays (indexed by entity ID)
-    GArray**    album_tracks;           // album_tracks[album_id] → GArray<int64_t>
-    GPtrArray** track_artists;          // track_artists[track_id] → GPtrArray<library_track_artist_t*>
-    GPtrArray** artist_albums;          // artist_albums[artist_id] → GPtrArray<library_album_info_t*>
-    GPtrArray** artist_appearances;     // artist_appearances[artist_id] → GPtrArray<library_album_info_t*>
-    GPtrArray** artist_appearance_tracks; // indexed by artist_id
+    // Bitmap index → slot mapping (lock-free reads via g_atomic_pointer_get)
+    LibrarySlot **bitmap_map;
+    int           bitmap_capacity;
 
-    // Sorted list caches (NULL until warming or sync fallback populates them)
-    GPtrArray* all_artists;
-    GPtrArray* all_albums;
+    // Cross-library merge state (built during warming)
+    GHashTable *merged_source_set;    // Global artist IDs that are merge sources
+    GHashTable *merged_album_sources; // Global album IDs that are merge sources
 
-    // Warming thread state
-    quadrature_db_t* db_warm;           // Second readonly connection for warming
-    GThread*         warm_thread;
-    atomic_int       warm_cancel;
-    atomic_int       warm_state;        // IDLE / WARMING / READY
-
+    library_cache_ready_cb ready_cb;
+    void                  *ready_cb_data;
     GMutex lock;
-    quadrature_db_t* db;                // UI readonly connection (main thread only)
+
+    // Background prefetch thread (posix_fadvise hints)
+    GAsyncQueue *prefetch_queue;
+    GThread     *prefetch_thread;
+    atomic_int   prefetch_shutdown;
 };
 ```
 
-Arrays are sized at creation via `SELECT MAX(id) FROM table`. Gaps from deleted rows are just NULL slots.
+Entity arrays within each slot are sized via `SELECT MAX(id) FROM table`. Gaps from deleted rows are just NULL slots. Global IDs are encoded as `LIBRARY_MAKE_GLOBAL_ID(bitmap_index, local_id)` — upper 16 bits = stable library index, lower 48 bits = local SQLite ID.
 
 ### Entity Info Types
 
 ```c
 typedef struct {
-    int64_t artist_id;           // Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_idx, local_id)
+    int64_t artist_id;           // Global ID: LIBRARY_MAKE_GLOBAL_ID(bitmap_index, local_id)
     char* name;
     char* musicbrainz_id;        // MBID for cross-library merging; NULL if unknown
     uint32_t album_count;        // Accumulated across merged sources if merged
@@ -114,38 +139,40 @@ typedef struct {
 typedef struct {
     int64_t album_id;            // Global ID
     int64_t artist_id;           // Global ID of album artist
+    int64_t first_track_id;      // Global ID of first track (disc 1, track 1); 0 if unknown
     char* title;
     char* artist_name;
     char* path;                  // Relative path to album directory
-    char* genres;                // Semicolon-separated distinct genres, or NULL
-    char* musicbrainz_release_id; // For cross-library album dedup; NULL if unresolved
+    char* genres;                // Comma-separated distinct genres, or NULL
+    char* musicbrainz_release_id; // Album MBID; NULL if unresolved
     uint16_t year;
     uint16_t track_count;
-    uint16_t disc_count;
-    uint32_t total_duration_ms;
-    int library_index;           // Source library (0-based)
+    int library_index;           // Source library (0-based); -1 if merged across libraries
+    int64_t *merged_source_ids;  // NULL if single-library; global album IDs from each source
+    int merged_source_count;
 } library_album_info_t;
 
 typedef struct {
-    int64_t track_id;
-    int64_t album_id;
-    int64_t artist_id;       // Primary artist ID (position 0)
-    char* path;              // Full file path for decoding
+    int64_t track_id;            // Global ID
+    int64_t album_id;            // Global ID
+    int64_t artist_id;           // Global ID of primary artist (position 0)
+    char* path;                  // Relative path within album dir (resolve via library_cache_resolve_track_path)
     char* title;
-    char* artist_name;       // Primary artist name
-    char* artist_display;    // Formatted: "Artist A feat. Artist B" (or NULL)
+    char* artist_display;        // Formatted: "Artist A feat. Artist B". Always non-NULL.
     char* album_title;
     char* genre;
     uint32_t duration_ms;
     uint16_t track_num;
     uint16_t disc_num;
     uint16_t year;
+    int library_index;           // Source library (0-based)
 } library_track_info_t;
 
 typedef struct {
     int64_t artist_id;
-    char* name;
-    library_artist_role_t role;  // PRIMARY or FEATURING
+    char* name;                  // Canonical artist name
+    char* join_phrase;           // Connector to next artist: " feat. ", " & ", "" for last
+    library_artist_role_t role;  // PRIMARY (position 0) or FEATURING (position > 0)
     int position;                // Display order
 } library_track_artist_t;
 ```
@@ -170,58 +197,62 @@ Search results contain pointers into the cache — the arrays are caller-owned b
 ### Startup Sequence
 
 ```
-library_cache_create()
-  → opens db_ui and db_warm (two readonly connections)
-  → SELECT MAX(id) for artists/albums/tracks → sizes flat arrays
+library_cache_create_multi(sources, source_count)
+  → creates one LibrarySlot per source
+  → opens per-slot db + db_warm (two readonly connections per slot)
+  → SELECT MAX(id) per table → sizes flat arrays per slot
 
 build_ui()
   → library_view_new() calls get_artists() / get_albums()
-  → all_artists == NULL → sync fallback loads via db_ui
+  → slot arrays empty → sync fallback loads via slot->db
   → views populate immediately
 
 library_cache_start_warming()
-  → spawns background thread using db_warm
-  → Phase 1: Page artists (1000/page)    → cache->artists[]
-  → Phase 2: Page albums  (1000/page)    → cache->albums[]
-  → Phase 3: Load tracks per album       → cache->tracks[] + album_tracks[]
+  → spawns per-slot background thread using slot->db_warm
+  → Phase 1: Page artists (1000/page)    → slot->artists[]
+  → Phase 2: Page albums  (1000/page)    → slot->albums[]
+  → Phase 3: Load tracks per album       → slot->tracks[] + album_tracks[]
   → Phase 4: Populate artist_display + cache track_artists
   → Phase 5: Compute aggregates (duration, counts, "appears on")
+  → Phase 6: rebuild_merged_artists() (cross-library MBID dedup)
   → g_idle_add(ready_cb) → UI refreshes with complete data
 ```
 
 ### Threading Model
 
 ```
-Main Thread (GTK)                     Warming Thread (db_warm)
-═══════════════                       ═══════════════════════
+Main Thread (GTK)                     Per-Slot Warming Thread (slot->db_warm)
+═══════════════                       ══════════════════════════════════════
 
-library_cache_create()
-  → opens db_ui, db_warm
+library_cache_create_multi()
+  → creates slots, opens DBs
 build_ui()
   → get_artists() sync fallback        (not started yet)
   → views populated
 library_cache_start_warming()
-  → spawns thread ─────────────────→  warming_thread_func()
+  → spawns N threads ──────────────→  warming_thread_func() × N slots
                                         │
 UI: get_artists_filtered()              │ page artists via db_warm
-  → ID query via db_ui                  │   mutex_lock → insert → unlock
+  → ID query via slot->db               │   mutex_lock → insert → unlock
   → resolve IDs from cache              │ ...
                                         │ page albums via db_warm
                                         │ load tracks per album
                                         │ compute aggregates
+                                        │ rebuild_merged_artists()
                                         │ atomic_store(state, READY)
                                         │ g_idle_add(ready_cb)
                                         ▼
 on_cache_ready() ◄── idle fires       [thread exits]
-  → library_view_refresh()
+  → refresh_library_views()
   → views re-populate with full data
 ```
 
 **Key invariants:**
-- `db_ui` is only used from the main thread. `db_warm` is only used from the warming thread. SQLite WAL allows concurrent readers — zero DB contention.
+
+- Each slot's `db` is only used from the main thread. `db_warm` is only used from that slot's warming thread. SQLite WAL allows concurrent readers — zero DB contention.
 - The cache `GMutex` is held briefly (pointer insertions only, no I/O). Neither thread blocks the other meaningfully.
-- Warming thread only *adds* entries, never removes/replaces. Only `library_cache_clear()` removes entries, and it joins the warming thread first.
-- If the sync fallback has already built `all_artists`/`all_albums`, the warming thread skips replacing them — prevents use-after-free races.
+- Warming threads only *add* entries, never remove/replace. Only `library_cache_clear()` removes entries, and it joins all warming threads first.
+- `refresh_slot()` rebuilds shadow arrays in background; old arrays stay live. Swap is atomic on the main thread.
 
 ### Filtered Query Path
 
@@ -242,15 +273,22 @@ This is ~10x faster than the old path which executed full multi-JOIN GROUP BY qu
 ### Lifecycle
 
 ```c
-quadrature_result_t library_cache_create(
-    const char* db_path,
-    const char* music_base,
-    library_cache_t** out
+typedef struct {
+    const char *db_path;       // Path to quadrature.sqlite for this library
+    const char *music_base;    // Root directory for resolving relative file paths
+    const char *display_name;  // Human-readable name; NULL = use basename(music_base)
+    int bitmap_index;          // Stable library ID encoded in global entity IDs (must be unique, >= 0)
+} library_cache_source_t;
+
+quadrature_result_t library_cache_create_multi(
+    const library_cache_source_t *sources,
+    int source_count,           // 0 = empty cache, slots added later
+    library_cache_t **out
 );
 void library_cache_destroy(library_cache_t* cache);
 ```
 
-Creates two readonly DB connections internally (`db_ui` + `db_warm`). Allocates flat arrays sized by `MAX(id)`.
+Creates per-slot readonly DB connections internally (`db` + `db_warm`). Allocates flat arrays per slot sized by `MAX(id)`. Slots can be added/removed dynamically via `library_cache_add_slot()` / `library_cache_remove_slot()`.
 
 ### Cache Warming
 
@@ -259,6 +297,7 @@ typedef enum {
     LIBRARY_CACHE_IDLE = 0,
     LIBRARY_CACHE_WARMING = 1,
     LIBRARY_CACHE_READY = 2,
+    LIBRARY_CACHE_REFRESHING = 3,  // COW refresh in progress (old data still live)
 } library_cache_state_t;
 
 typedef void (*library_cache_ready_cb)(void* user_data);
@@ -267,9 +306,13 @@ void library_cache_set_ready_callback(library_cache_t* cache,
                                        library_cache_ready_cb cb, void* user_data);
 void library_cache_start_warming(library_cache_t* cache);
 library_cache_state_t library_cache_get_state(library_cache_t* cache);
+
+// Refresh a single library slot after indexing (old data stays live during rebuild)
+void library_cache_refresh_slot(library_cache_t* cache, int bitmap_index,
+                                 const char* new_db_path, int flags);
 ```
 
-`start_warming()` spawns a background thread. `ready_cb` fires on the main thread via `g_idle_add` when warming completes. Safe to call multiple times (no-op if already warming or ready).
+`start_warming()` spawns a per-slot background thread. `ready_cb` fires on the main thread via `g_idle_add` when all slots finish warming. `refresh_slot()` triggers a background rebuild for one slot — old data stays live until the new data is ready, then swaps atomically.
 
 ### Entity Getters (Single Item)
 
@@ -347,9 +390,16 @@ Resolves IDs → paths from the cache, then calls `posix_fadvise(WILLNEED)` to h
 
 ```c
 void library_cache_clear(library_cache_t* cache);
+
+// Dynamic slot management
+quadrature_result_t library_cache_add_slot(library_cache_t* cache,
+                                            const library_cache_source_t* source);
+void library_cache_remove_slot(library_cache_t* cache, int bitmap_index);
+int library_cache_get_library_count(library_cache_t* cache);
+int library_cache_get_bitmap_index(library_cache_t* cache, int slot_position);
 ```
 
-Joins the warming thread, frees all entity arrays, re-allocates fresh arrays, resets state to IDLE. Called after re-indexing, followed by `start_warming()`.
+`clear()` joins all warming threads, frees all slot entity arrays, re-allocates fresh arrays, resets state to IDLE. `remove_slot()` triggers `rebuild_merged_artists()` to rebuild cross-library merge state from scratch.
 
 ## Pointer Lifetimes & UI Safety
 
@@ -363,17 +413,17 @@ cache->slots[lib_idx]->track_artists[local_id]  ← the actual GPtrArray on the 
 library_cache_get_track_artists() ────────┘  returns a raw pointer to this
 ```
 
-`library_cache_clear()` calls `free_slot_arrays()`, which calls `g_ptr_array_unref()` on every entry.  Any code still holding a pointer into those arrays is now reading freed memory.
+`library_cache_clear()` calls `free_slot_arrays()`, which calls `g_ptr_array_unref()` on every entry. Any code still holding a pointer into those arrays is now reading freed memory.
 
 ### The Safety Rule
 
 > **Never store a raw cache pointer in widget data that outlives the row-creation call.**
 
-| Safe | Unsafe |
-|---|---|
-| Use a cache pointer to set a label's text, then discard it | Store a cache pointer in a tick-callback struct |
-| Use a cache pointer for artwork lookup and then discard it | Store a cache pointer in a GObject data key for async access |
-| Store `(cache, entity_id)` in long-lived widget data | Store `const GPtrArray *track_artists` in long-lived widget data |
+| Safe                                                       | Unsafe                                                           |
+| ---------------------------------------------------------- | ---------------------------------------------------------------- |
+| Use a cache pointer to set a label's text, then discard it | Store a cache pointer in a tick-callback struct                  |
+| Use a cache pointer for artwork lookup and then discard it | Store a cache pointer in a GObject data key for async access     |
+| Store `(cache, entity_id)` in long-lived widget data       | Store `const GPtrArray *track_artists` in long-lived widget data |
 
 The rule exists because `library_cache_clear()` is called from the main thread after re-indexing, and GTK tick callbacks, `"map"` signal handlers, and other long-lived widget callbacks also run on the main thread. They are interleaved, not concurrent — but they are not scoped to the same call. A tick callback created during row setup at time T may run after `library_cache_clear()` runs at time T+N.
 
@@ -424,17 +474,20 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track, ...) {
 ### List View Data Lifecycle
 
 **GtkListBox rows** (`GtkListBox` + `gtk_list_box_append`):
+
 - Full widget trees created by `ui_create_track_row` / `ui_create_album_row` etc.
 - When a view refreshes, all rows are removed (`gtk_list_box_remove`) and a fresh batch is created.
 - Each row's tick callbacks are removed when the row widget is destroyed. Rows are destroyed synchronously when removed from the list.
 - Between row removal and `library_cache_clear()`, no dangling pointers exist — the widgets are gone.
 
 **GtkListItemFactory rows** (`lazy_list.c`, virtualized lists):
+
 - Item widgets are recycled. `bind` runs to populate the widget for a specific model item; `unbind` runs to clear it before recycling.
 - Cache pointers used during `bind` for immediate widget setup (setting labels, requesting artwork) are used and discarded within `bind`. They are not stored in the item widget for later re-use.
 - Because the list can be displaying rows while `library_cache_clear()` fires, widget setup code in `bind` callbacks follows the same rule: use and discard cache pointers immediately, never store them.
 
 **ArtworkManager thumbnails** (async, cross-invalidation safe):
+
 - `artwork_manager_get_thumbnail(mgr, album_id, gtk_image)` registers an async callback.
 - The callback uses `g_object_add_weak_pointer` on the `GtkImage`. If the row is destroyed before the callback fires, the weak pointer is nulled and the callback silently skips the update.
 - This design is safe across both widget destruction and cache invalidation (artwork IDs are stable).
@@ -442,55 +495,59 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track, ...) {
 ### Post-Reindex Lifecycle
 
 ```
-Indexer thread: completes scan + artwork write
-  → g_idle_add or GLib signal → fires on main thread
+Indexer thread: completes phase → fires INDEXER_LIBRARY_UPDATED
 
-Main thread:
-  library_cache_clear(cache)         ← joins warm thread, frees all slot arrays
-                                        ALL interior pointers are now invalid
-  artwork_manager_reload_library_atlas(...)  ← remaps atlas file
-  library_cache_start_warming(cache) ← spawns fresh warm thread
-  [views refresh to show loading state]
+Main thread (on_indexer_library_updated):
+  library_cache_refresh_slot(cache, bitmap_index)
+    → spawns background warm thread for that slot
+    → OLD slot data stays live (no invalidation yet)
 
-Warming thread: repopulates slot arrays under cache->lock (brief, no I/O)
+Warming thread: rebuilds shadow arrays for that slot under cache->lock
+  → rebuild_merged_artists() if multi-library
+  → atomic swap: old arrays freed, new arrays installed
+  → g_idle_add(ready_cb)
 
-Main thread (warm complete, g_idle_add from warm thread):
-  on_cache_ready() → views refresh with new data
+Main thread (on_cache_ready):
+  refresh_library_views() → views re-populate with new data
 ```
 
-Between `clear()` and `on_cache_ready()`, `library_cache_get_*` calls fall back to `db_ui` for on-demand queries — views continue to function, they just don't have the full warmed dataset yet.
+During refresh, old slot data stays live — `library_cache_get_*` calls continue to work against stale but valid data. After the swap, all new queries use the refreshed arrays.
+
+For full cache rebuild (e.g. library added/removed), `library_cache_clear()` joins all warming threads and frees all slot arrays, followed by `start_warming()` to rebuild from scratch.
 
 ## Thread Safety
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│ Operation                    │ Thread       │ DB Conn   │ Notes            │
+│ Operation                    │ Thread       │ DB Conn     │ Notes          │
 ├────────────────────────────────────────────────────────────────────────────┤
-│ warming_thread_func()        │ Warming      │ db_warm   │ Holds lock brief │
-│ search()                     │ UI           │ db_ui     │ ID query + cache │
-│ get_artists()                │ UI           │ db_ui*    │ *sync fallback   │
-│ get_albums()                 │ UI           │ db_ui*    │ *sync fallback   │
-│ get_artists_filtered()       │ UI           │ db_ui     │ ID query + cache │
-│ get_albums_filtered()        │ UI           │ db_ui     │ ID query + cache │
-│ get_tracks_by_album()        │ UI           │ db_ui*    │ *on cache miss   │
-│ get_artist()                 │ UI/Engine    │ —         │ Array lookup     │
-│ get_album()                  │ UI/Engine    │ —         │ Array lookup     │
-│ get_track()                  │ UI/Engine    │ db_ui*    │ *on cache miss   │
-│ get_next_track_id()          │ Engine       │ —         │ Array lookup     │
-│ get_prev_track_id()          │ Engine       │ —         │ Array lookup     │
-│ prefetch_fullsize_artwork()  │ ArtworkMgr   │ —         │ Cache + fadvise  │
-│ prefetch_audio_files()       │ AudioCache   │ —         │ Cache + fadvise  │
-│ clear()                      │ UI           │ —         │ Joins warm thread│
+│ warming_thread_func()        │ Per-slot     │ slot->db_warm│ Holds lock brief│
+│ search()                     │ UI           │ slot->db    │ ID query + cache│
+│ get_artists()                │ UI           │ slot->db*   │ *sync fallback │
+│ get_albums()                 │ UI           │ slot->db*   │ *sync fallback │
+│ get_artists_filtered()       │ UI           │ slot->db    │ ID query + cache│
+│ get_albums_filtered()        │ UI           │ slot->db    │ ID query + cache│
+│ get_tracks_by_album()        │ UI           │ slot->db*   │ *on cache miss │
+│ get_artist()                 │ UI/Engine    │ —           │ Array lookup   │
+│ get_album()                  │ UI/Engine    │ —           │ Array lookup   │
+│ get_track()                  │ UI/Engine    │ slot->db*   │ *on cache miss │
+│ get_next_track_id()          │ Engine       │ —           │ Array lookup   │
+│ get_prev_track_id()          │ Engine       │ —           │ Array lookup   │
+│ prefetch_fullsize_artwork()  │ Prefetch thr │ —           │ Cache + fadvise│
+│ prefetch_audio_files()       │ Prefetch thr │ —           │ Cache + fadvise│
+│ clear()                      │ UI           │ —           │ Joins all warm │
+│ refresh_slot()               │ UI           │ —           │ Spawns warm thr│
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Design for low contention:**
 
 - Most lookups are direct array index — no DB, no hash
-- `db_ui` and `db_warm` are separate connections — SQLite WAL allows concurrent readers
+- Each slot's `db` and `db_warm` are separate connections — SQLite WAL allows concurrent readers
 - Cache mutex held briefly (pointer writes only, no I/O under lock)
 - Engine accesses (next/prev track) are pure array lookups — no lock needed after warming
-- Warming thread only adds, never removes — no ABA races
+- Warming threads only add, never remove — no ABA races
+- Prefetch runs on a dedicated background thread via `GAsyncQueue`
 
 ## Memory Usage
 
@@ -528,7 +585,24 @@ static void on_cache_ready(void *data) {
 // - detail_view (if open — reloads current album/artist/meta-artist)
 // - search results (if VIEW_SEARCH active)
 //
-// Called from: on_cache_ready (after warm), on_indexer_artwork_ready (after atlas reload)
+// Called from:
+//   on_cache_ready (after warm or slot refresh)
+//   on_indexer_artwork_updated (after atlas reload)
 ```
 
 **Important:** Warming must start *after* `build_ui()` to ensure views exist before the ready callback can fire, and to let the sync fallback complete before the warming thread can race with it.
+
+### Indexer Signal Handling
+
+```
+on_indexer_library_updated():
+  → library_cache_refresh_slot(bitmap_index)  ← background rebuild, old data stays live
+
+on_indexer_artwork_updated():
+  → artwork_manager_reload_library_atlas()     ← per-library album atlas
+  → artwork_manager_reload_artist_atlas()      ← global artist atlas
+  → refresh_library_views()                    ← immediate (atlas data is mmap'd)
+
+on_indexer_done():
+  → finalize progress UI panels only (cache refreshes driven by LIBRARY_UPDATED)
+```

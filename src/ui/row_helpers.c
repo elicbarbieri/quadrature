@@ -408,16 +408,14 @@ static GtkWidget *genre_create_item(guint index, gpointer user_data) {
     return pill;
 }
 
-/* Unparent popover when overflow button leaves the widget tree */
-static void on_genre_overflow_unroot(GObject *obj, GParamSpec *pspec, gpointer popover) {
-    (void)pspec;
-    if (gtk_widget_get_root(GTK_WIDGET(obj)) == NULL)
-        gtk_widget_unparent(GTK_WIDGET(popover));
+static void on_genre_overflow_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    gtk_popover_popup(GTK_POPOVER(user_data));
 }
 
-static void on_genre_overflow_clicked(GtkButton *button, gpointer popover) {
-    (void)button;
-    gtk_popover_popup(GTK_POPOVER(popover));
+static void on_genre_overflow_destroy(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    gtk_widget_unparent(GTK_WIDGET(user_data));
 }
 
 static GtkWidget *genre_create_overflow(guint first_hidden, guint total,
@@ -425,7 +423,6 @@ static GtkWidget *genre_create_overflow(guint first_hidden, guint total,
     (void)first_hidden;
     GenrePillData *d = user_data;
 
-    /* Overflow button styled like a genre pill */
     GtkWidget *btn = gtk_button_new_with_label("…");
     gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
     gtk_widget_add_css_class(btn, "genre-pill");
@@ -450,11 +447,8 @@ static GtkWidget *genre_create_overflow(guint first_hidden, guint total,
     GtkWidget *popover = gtk_popover_new();
     gtk_popover_set_child(GTK_POPOVER(popover), vbox);
     gtk_widget_set_parent(popover, btn);
-
-    g_signal_connect(btn, "notify::root",
-                     G_CALLBACK(on_genre_overflow_unroot), popover);
-    g_signal_connect(btn, "clicked",
-                     G_CALLBACK(on_genre_overflow_clicked), popover);
+    g_signal_connect(btn, "clicked", G_CALLBACK(on_genre_overflow_clicked), popover);
+    g_signal_connect(btn, "destroy", G_CALLBACK(on_genre_overflow_destroy), popover);
 
     return btn;
 }

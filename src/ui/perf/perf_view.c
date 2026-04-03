@@ -475,7 +475,8 @@ static gboolean update_dashboard(gpointer data) {
             lib_count = library_cache_get_library_count(priv->library_cache);
             if (lib_count > PERF_MAX_LIBRARIES) lib_count = PERF_MAX_LIBRARIES;
             for (int i = 0; i < lib_count; i++) {
-                size_t bytes = library_cache_get_slot_memory_bytes(priv->library_cache, i);
+                int bi = library_cache_get_bitmap_index(priv->library_cache, i);
+                size_t bytes = library_cache_get_slot_memory_bytes(priv->library_cache, bi);
                 lib_cache_mb[i] = (double)bytes / (1024.0 * 1024.0);
             }
         }
@@ -787,8 +788,9 @@ GtkWidget* perf_view_new(perf_dashboard_t* dashboard, audio_cache_t* cache,
 
         /* Series 1..N: Library cache per-lib */
         for (int i = 0; i < lib_count; i++) {
+            int bi = library_cache_get_bitmap_index(library_cache, i);
             char label[64];
-            const char *name = library_cache_get_library_name(library_cache, i);
+            const char *name = library_cache_get_library_name(library_cache, bi);
             snprintf(label, sizeof(label), "Lib: %s", name ? name : "?");
             perf_stacked_area_chart_set_series(priv->mem_stacked_chart, 1 + i, label, NULL);
         }
@@ -799,8 +801,9 @@ GtkWidget* perf_view_new(perf_dashboard_t* dashboard, audio_cache_t* cache,
 
         /* Series N+2..2N+1: Artwork atlas mmap per-lib */
         for (int i = 0; i < lib_count; i++) {
+            int bi = library_cache_get_bitmap_index(library_cache, i);
             char label[64];
-            const char *name = library_cache_get_library_name(library_cache, i);
+            const char *name = library_cache_get_library_name(library_cache, bi);
             snprintf(label, sizeof(label), "Atlas: %s", name ? name : "?");
             perf_stacked_area_chart_set_series(priv->mem_stacked_chart,
                                                 2 + lib_count + i, label, NULL);

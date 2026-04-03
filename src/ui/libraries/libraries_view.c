@@ -83,8 +83,9 @@ static void on_remove(GtkButton *btn, gpointer data) {
          * find_lib_idx uses settings, so must resolve while settings are still intact. */
         int lib_idx = find_lib_idx(w, e->path);
         if (lib_idx >= 0) {
+            int bitmap = w->settings->libraries[lib_idx].library_index;
             if (w->library_cache)
-                library_cache_remove_slot(w->library_cache, lib_idx);
+                library_cache_remove_slot(w->library_cache, bitmap);
             if (w->artwork_mgr)
                 artwork_manager_remove_library(w->artwork_mgr, lib_idx);
         }
@@ -93,10 +94,7 @@ static void on_remove(GtkButton *btn, gpointer data) {
         settings_save_debounced(w);
         libs_load(w);
         libs_rebuild(w);
-
-        /* Rewarm shifted slots (their cached data was cleared during removal) */
-        if (w->library_cache)
-            library_cache_start_warming(w->library_cache);
+        refresh_library_views(w);
     }
 }
 
@@ -171,29 +169,156 @@ static void on_errors(GtkButton *btn, gpointer data) {
     gtk_popover_popup(GTK_POPOVER(popover));
 }
 
-static void on_lib_name_editing_done(GtkEditableLabel *label, GParamSpec *pspec, gpointer data) {
-    (void)pspec;
-    if (gtk_editable_label_get_editing(label)) return; /* still in edit mode */
-    UiWindow *w = UI_WINDOW(data);
-    LibEntry *e = g_object_get_data(G_OBJECT(label), "entry");
-    if (!e || !w->settings) return;
-    const char *new_name = gtk_editable_get_text(GTK_EDITABLE(label));
-    g_free(w->settings->libraries[(int)e->id].name);
-    w->settings->libraries[(int)e->id].name = (new_name && new_name[0]) ? g_strdup(new_name) : NULL;
-    settings_save_debounced(w);
-    g_free(e->name);
-    e->name = app_settings_get_library_name(w->settings, (int)e->id);
+/* ── Reorder callbacks ──────────────────────────────────────────────── */
 
-    /* Push updated name into the library cache so badges reflect the change */
-    if (w->library_cache)
-        library_cache_set_library_name(w->library_cache, (int)e->id, e->name);
+static void update_card_lock_visual(LibEntry *e, int lib_count) {
+    if (!e->lock_btn) return;
+    if (e->locked) {
+        gtk_button_set_icon_name(GTK_BUTTON(e->lock_btn), "changes-prevent-symbolic");
+        gtk_widget_remove_css_class(e->lock_btn, "library-unlocked");
+        gtk_widget_add_css_class(e->lock_btn, "library-locked");
+        gtk_widget_set_tooltip_text(e->lock_btn, "Locked (double-click to unlock)");
+        gtk_widget_add_css_class(e->card, "library-card-locked");
+    } else {
+        gtk_button_set_icon_name(GTK_BUTTON(e->lock_btn), "changes-allow-symbolic");
+        gtk_widget_remove_css_class(e->lock_btn, "library-locked");
+        gtk_widget_add_css_class(e->lock_btn, "library-unlocked");
+        gtk_widget_set_tooltip_text(e->lock_btn, "Click to lock");
+        gtk_widget_remove_css_class(e->card, "library-card-locked");
+    }
+    /* Sensitive = unlocked AND not at boundary */
+    gboolean can_up   = !e->locked && e->id > 0;
+    gboolean can_down = !e->locked && (int)e->id < lib_count - 1;
+    gtk_widget_set_sensitive(e->move_up_btn, can_up);
+    gtk_widget_set_sensitive(e->move_down_btn, can_down);
+    gtk_widget_set_sensitive(e->edit_btn, !e->locked);
+    /* Close edit section when locking */
+    if (e->locked && e->edit_revealer)
+        gtk_revealer_set_reveal_child(GTK_REVEALER(e->edit_revealer), FALSE);
 }
 
-static void on_edit_name(GtkButton *btn, gpointer data) {
+static void on_lock_pressed(GtkGestureClick *gesture, int n_press,
+                            double x, double y, gpointer data) {
+    (void)gesture; (void)x; (void)y;
+    UiWindow *w = UI_WINDOW(data);
+    GtkWidget *btn = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
+    LibEntry *e = g_object_get_data(G_OBJECT(btn), "entry");
+    if (!e || !w->settings) return;
+
+    if (!e->locked && n_press >= 1) {
+        /* Single-click to lock */
+        e->locked = TRUE;
+    } else if (e->locked && n_press >= 2) {
+        /* Double-click to unlock */
+        e->locked = FALSE;
+    } else {
+        return;
+    }
+    w->settings->libraries[(int)e->id].locked = e->locked ? 1 : 0;
+    settings_save_debounced(w);
+    update_card_lock_visual(e, w->settings->library_count);
+}
+
+static void on_move_up(GtkButton *btn, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    LibEntry *e = g_object_get_data(G_OBJECT(btn), "entry");
+    if (!e || !w->settings || e->id <= 0) return;
+
+    app_settings_swap_libraries(w->settings, (int)e->id, (int)e->id - 1);
+    settings_save_debounced(w);
+    libs_load(w);
+    libs_rebuild(w);
+}
+
+static void on_move_down(GtkButton *btn, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    LibEntry *e = g_object_get_data(G_OBJECT(btn), "entry");
+    if (!e || !w->settings || (int)e->id >= w->settings->library_count - 1) return;
+
+    app_settings_swap_libraries(w->settings, (int)e->id, (int)e->id + 1);
+    settings_save_debounced(w);
+    libs_load(w);
+    libs_rebuild(w);
+}
+
+/* ── Edit callbacks ─────────────────────────────────────────────────── */
+
+static void on_edit_toggle(GtkButton *btn, gpointer data) {
     (void)data;
-    GtkWidget *label = g_object_get_data(G_OBJECT(btn), "editable-label");
-    if (label)
-        gtk_editable_label_start_editing(GTK_EDITABLE_LABEL(label));
+    LibEntry *e = g_object_get_data(G_OBJECT(btn), "entry");
+    if (!e || !e->edit_revealer) return;
+    gboolean revealed = gtk_revealer_get_reveal_child(GTK_REVEALER(e->edit_revealer));
+    gtk_revealer_set_reveal_child(GTK_REVEALER(e->edit_revealer), !revealed);
+}
+
+static void on_edit_done(GtkButton *btn, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    LibEntry *e = g_object_get_data(G_OBJECT(btn), "entry");
+    if (!e || !w->settings) return;
+
+    /* Save name from entry */
+    const char *new_name = gtk_editable_get_text(GTK_EDITABLE(e->edit_name_entry));
+    g_free(w->settings->libraries[(int)e->id].name);
+    w->settings->libraries[(int)e->id].name = (new_name && new_name[0]) ? g_strdup(new_name) : NULL;
+    g_free(e->name);
+    e->name = app_settings_get_library_name(w->settings, (int)e->id);
+    gtk_label_set_text(GTK_LABEL(e->card_name_label), e->name);
+
+    if (w->library_cache)
+        library_cache_set_library_name(w->library_cache, w->settings->libraries[(int)e->id].library_index, e->name);
+
+    settings_save_debounced(w);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(e->edit_revealer), FALSE);
+    refresh_library_views(w);
+}
+
+/* Helper: read a 3-state toggle group and return -1/0/1 */
+static int read_toggle_value(GtkWidget *toggles[3]) {
+    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(toggles[1]))) return 1;   /* On */
+    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(toggles[2]))) return 0;   /* Off */
+    return -1;  /* Default */
+}
+
+/* Helper: set a 3-state toggle group from -1/0/1 */
+static void set_toggle_value(GtkWidget *toggles[3], int value) {
+    if (value == 1)       gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toggles[1]), TRUE);
+    else if (value == 0)  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toggles[2]), TRUE);
+    else                  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toggles[0]), TRUE);
+}
+
+static void on_integration_toggled(GtkToggleButton *btn, gpointer data) {
+    if (!gtk_toggle_button_get_active(btn)) return;  /* only handle activation */
+    UiWindow *w = UI_WINDOW(data);
+    LibEntry *e = g_object_get_data(G_OBJECT(btn), "entry");
+    if (!e || !w->settings) return;
+
+    library_config_t *lib = &w->settings->libraries[(int)e->id];
+    lib->mb_resolve = read_toggle_value(e->mb_toggles);
+    lib->acoustid   = read_toggle_value(e->acoustid_toggles);
+    lib->fanart     = read_toggle_value(e->fanart_toggles);
+    lib->wikipedia  = read_toggle_value(e->wikipedia_toggles);
+    settings_save_debounced(w);
+}
+
+/* Wire a 3-state toggle group (Default / On / Off) with mutual exclusion */
+static void setup_toggle_group(GtkBuilder *b, LibEntry *e, UiWindow *w,
+                               const char *prefix, GtkWidget *out[3]) {
+    char id[64];
+    snprintf(id, sizeof(id), "%s_default_btn", prefix);
+    out[0] = GTK_WIDGET(gtk_builder_get_object(b, id));
+    snprintf(id, sizeof(id), "%s_on_btn", prefix);
+    out[1] = GTK_WIDGET(gtk_builder_get_object(b, id));
+    snprintf(id, sizeof(id), "%s_off_btn", prefix);
+    out[2] = GTK_WIDGET(gtk_builder_get_object(b, id));
+
+    /* Mutual exclusion via toggle group */
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(out[1]), GTK_TOGGLE_BUTTON(out[0]));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(out[2]), GTK_TOGGLE_BUTTON(out[0]));
+
+    for (int i = 0; i < 3; i++) {
+        g_object_set_data(G_OBJECT(out[i]), "entry", e);
+        g_signal_connect(out[i], "toggled", G_CALLBACK(on_integration_toggled), w);
+    }
 }
 
 static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
@@ -202,6 +327,17 @@ static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
     GtkWidget *card = GTK_WIDGET(gtk_builder_get_object(builder, "library_card"));
     g_object_ref(card);
     e->card = card;
+
+    /* Reorder / lock controls */
+    e->move_up_btn   = GTK_WIDGET(gtk_builder_get_object(builder, "move_up_btn"));
+    e->move_down_btn = GTK_WIDGET(gtk_builder_get_object(builder, "move_down_btn"));
+    e->lock_btn      = GTK_WIDGET(gtk_builder_get_object(builder, "lock_btn"));
+
+    /* Edit controls */
+    e->edit_btn        = GTK_WIDGET(gtk_builder_get_object(builder, "card_edit_btn"));
+    e->edit_revealer   = GTK_WIDGET(gtk_builder_get_object(builder, "edit_revealer"));
+    e->edit_name_entry = GTK_WIDGET(gtk_builder_get_object(builder, "edit_name_entry"));
+    e->card_name_label = GTK_WIDGET(gtk_builder_get_object(builder, "card_name"));
 
     /* Progress revealer */
     e->progress_revealer = GTK_WIDGET(gtk_builder_get_object(builder, "progress_revealer"));
@@ -223,19 +359,28 @@ static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
         snprintf(id, sizeof(id), "phase_%d_rate",   i); e->phases[i].rate_label = GTK_WIDGET(gtk_builder_get_object(builder, id));
     }
 
-    /* Grab action widgets before releasing builder */
-    GtkWidget *name      = GTK_WIDGET(gtk_builder_get_object(builder, "card_name"));
-    GtkWidget *edit_btn  = GTK_WIDGET(gtk_builder_get_object(builder, "card_edit_name"));
-    GtkWidget *path      = GTK_WIDGET(gtk_builder_get_object(builder, "card_path"));
-    GtkWidget *data_path = GTK_WIDGET(gtk_builder_get_object(builder, "card_data_path"));
-    GtkWidget *rescan    = GTK_WIDGET(gtk_builder_get_object(builder, "card_rescan"));
-    GtkWidget *remove    = GTK_WIDGET(gtk_builder_get_object(builder, "card_remove"));
+    /* Integration toggle groups */
+    setup_toggle_group(builder, e, w, "mb",        e->mb_toggles);
+    setup_toggle_group(builder, e, w, "acoustid",  e->acoustid_toggles);
+    setup_toggle_group(builder, e, w, "fanart",    e->fanart_toggles);
+    setup_toggle_group(builder, e, w, "wikipedia", e->wikipedia_toggles);
+
+    GtkWidget *path_label = GTK_WIDGET(gtk_builder_get_object(builder, "card_path"));
+    GtkWidget *data_path  = GTK_WIDGET(gtk_builder_get_object(builder, "card_data_path"));
+    GtkWidget *rescan     = GTK_WIDGET(gtk_builder_get_object(builder, "card_rescan"));
+    GtkWidget *remove     = GTK_WIDGET(gtk_builder_get_object(builder, "card_remove"));
+    GtkWidget *edit_done  = GTK_WIDGET(gtk_builder_get_object(builder, "card_edit_done"));
 
     g_object_unref(builder);
 
-    /* Set dynamic content */
-    gtk_editable_set_text(GTK_EDITABLE(name), e->name);
-    gtk_label_set_text(GTK_LABEL(path), e->path);
+    /* ── Set dynamic content ── */
+    gtk_label_set_text(GTK_LABEL(e->card_name_label), e->name);
+    gtk_label_set_text(GTK_LABEL(path_label), e->path);
+
+    /* Pre-fill edit name entry */
+    const library_config_t *lib = &w->settings->libraries[(int)e->id];
+    if (lib->name && lib->name[0])
+        gtk_editable_set_text(GTK_EDITABLE(e->edit_name_entry), lib->name);
 
     /* Show data path if different from music path */
     if (e->data_path) {
@@ -245,27 +390,60 @@ static GtkWidget *make_lib_card(UiWindow *w, LibEntry *e) {
         g_free(dp_display);
     }
 
-    /* Wire signals */
-    g_object_set_data(G_OBJECT(name), "entry", e);
-    g_signal_connect(name, "notify::editing", G_CALLBACK(on_lib_name_editing_done), w);
+    /* Set integration toggle state from settings */
+    set_toggle_value(e->mb_toggles,       lib->mb_resolve);
+    set_toggle_value(e->acoustid_toggles, lib->acoustid);
+    set_toggle_value(e->fanart_toggles,   lib->fanart);
+    set_toggle_value(e->wikipedia_toggles, lib->wikipedia);
 
-    g_object_set_data(G_OBJECT(edit_btn), "editable-label", name);
-    g_signal_connect(edit_btn, "clicked", G_CALLBACK(on_edit_name), w);
+    /* ── Wire signals ── */
 
+    /* Reorder buttons */
+    g_object_set_data(G_OBJECT(e->move_up_btn), "entry", e);
+    g_signal_connect(e->move_up_btn, "clicked", G_CALLBACK(on_move_up), w);
+    g_object_set_data(G_OBJECT(e->move_down_btn), "entry", e);
+    g_signal_connect(e->move_down_btn, "clicked", G_CALLBACK(on_move_down), w);
+
+    /* Lock button — uses GtkGestureClick for double-click detection.
+     * CAPTURE phase so our gesture sees events before GtkButton's internal
+     * gesture can claim the sequence (which would deny us n_press=2). */
+    g_object_set_data(G_OBJECT(e->lock_btn), "entry", e);
+    GtkGesture *lock_gesture = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(lock_gesture), GDK_BUTTON_PRIMARY);
+    gtk_event_controller_set_propagation_phase(
+        GTK_EVENT_CONTROLLER(lock_gesture), GTK_PHASE_CAPTURE);
+    g_signal_connect(lock_gesture, "pressed", G_CALLBACK(on_lock_pressed), w);
+    gtk_widget_add_controller(e->lock_btn, GTK_EVENT_CONTROLLER(lock_gesture));
+
+    /* Edit / Done */
+    g_object_set_data(G_OBJECT(e->edit_btn), "entry", e);
+    g_signal_connect(e->edit_btn, "clicked", G_CALLBACK(on_edit_toggle), w);
+    g_object_set_data(G_OBJECT(edit_done), "entry", e);
+    g_signal_connect(edit_done, "clicked", G_CALLBACK(on_edit_done), w);
+
+    /* Rescan */
     g_object_set_data(G_OBJECT(rescan), "entry", e);
     g_signal_connect(rescan, "clicked", G_CALLBACK(on_rescan), w);
     g_object_set_data(G_OBJECT(card), "rescan-btn", rescan);
 
+    /* Remove */
     g_object_set_data(G_OBJECT(remove), "entry", e);
     g_signal_connect(remove, "clicked", G_CALLBACK(on_remove), w);
 
+    /* Errors */
     g_object_set_data(G_OBJECT(e->stat_errors_btn), "entry", e);
     g_signal_connect(e->stat_errors_btn, "clicked", G_CALLBACK(on_errors), w);
 
     update_card_stats_labels(e);
 
-    /* Set initial availability state */
-    e->available = library_cache_get_available(w->library_cache, (int)e->id);
+    /* ── Apply initial state ── */
+
+    /* Lock state from settings — also handles boundary sensitivity (first/last) */
+    e->locked = (lib->locked != 0);
+    update_card_lock_visual(e, w->settings->library_count);
+
+    /* Availability */
+    e->available = library_cache_get_available(w->library_cache, w->settings->libraries[(int)e->id].library_index);
     if (!e->available) {
         gtk_widget_add_css_class(card, "library-disconnected");
         gtk_widget_set_sensitive(rescan, FALSE);
@@ -526,6 +704,7 @@ static void on_add_confirm(GtkButton *btn, gpointer data) {
             .db_path      = dbpath,
             .music_base   = s->music_path,
             .display_name = NULL,
+            .bitmap_index = s->w->settings->libraries[s->w->settings->library_count - 1].library_index,
         };
         library_cache_add_slot(s->w->library_cache, &src);
         g_free(dbpath);

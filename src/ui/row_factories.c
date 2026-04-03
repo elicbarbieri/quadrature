@@ -11,6 +11,230 @@
 #include "internal.h"
 #include <string.h>
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Pre-allocated Genre Pills — setup once, rebind by text + visibility
+ *
+ * Eliminates widget create/destroy/signal churn during GtkListView scroll.
+ * Width-aware overflow recalculates on window resize (notify::width).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define GENRE_PILL_MAX 6
+#define GENRE_BOX_SPACING 4  /* must match genres_box spacing in .ui template */
+#define BADGE_SLOT_MAX 4     /* pre-allocated library badge labels per row */
+#define ART_STRIP_MAX_THUMBS 6  /* max pre-allocated art strip slots */
+#define ART_STRIP_SPACING 4     /* must match art_strip spacing in .ui template */
+
+/** Reflow pre-allocated genre pills using cached constraint width.
+ *  Measures existing labels (cheap — no widget lifecycle), runs integer
+ *  overflow math, toggles visibility. Called from rebind + notify::width. */
+static void genre_pills_reflow(GtkWidget *genres_box, GtkWidget *constraint,
+                                guint genre_count) {
+    if (!genres_box || genre_count == 0) {
+        gtk_widget_set_visible(genres_box, FALSE);
+        return;
+    }
+
+    gtk_widget_set_visible(genres_box, TRUE);
+
+    int raw_width = constraint ? gtk_widget_get_width(constraint) : 0;
+    int budget = raw_width > 0 ? raw_width : 300;
+
+    /* Measure each pill that has text (include inter-item spacing) */
+    int widths[GENRE_PILL_MAX];
+    GtkWidget *child = gtk_widget_get_first_child(genres_box);
+    for (guint i = 0; i < GENRE_PILL_MAX && child; i++) {
+        if (i < genre_count) {
+            int nat_w = 0;
+            gtk_widget_measure(child, GTK_ORIENTATION_HORIZONTAL, -1,
+                               NULL, &nat_w, NULL, NULL);
+            widths[i] = nat_w + (i > 0 ? GENRE_BOX_SPACING : 0);
+        }
+        child = gtk_widget_get_next_sibling(child);
+    }
+    /* child now points to the overflow "…" label */
+    GtkWidget *overflow = child;
+    int overflow_w = 0;
+    if (overflow) {
+        int nat_w = 0;
+        gtk_widget_measure(overflow, GTK_ORIENTATION_HORIZONTAL, -1,
+                           NULL, &nat_w, NULL, NULL);
+        overflow_w = nat_w + GENRE_BOX_SPACING;
+    }
+
+    /* Pure integer overflow planning */
+    gboolean needs_overflow = FALSE;
+    guint show = ui_overflow_box_plan_layout(budget, widths, genre_count,
+                                             overflow_w, &needs_overflow);
+
+    /* Apply visibility to pre-allocated slots */
+    child = gtk_widget_get_first_child(genres_box);
+    for (guint i = 0; i < GENRE_PILL_MAX && child; i++) {
+        gtk_widget_set_visible(child, i < show);
+        child = gtk_widget_get_next_sibling(child);
+    }
+    if (child) /* overflow label */
+        gtk_widget_set_visible(child, needs_overflow);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Pre-allocated Library Badges — setup once, rebind by text + visibility
+ *
+ * Same pattern as genre pills. Dedup logic runs inline (stack arrays),
+ * then sets text on pre-allocated labels. No overflow box, no heap alloc.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Rebind pre-allocated badge labels in a badges box.
+ *  Deduplicates library indices, sets text, toggles visibility.
+ *  Precondition: badges_box has BADGE_SLOT_MAX children (GtkLabels). */
+static void rebind_library_badges(GtkWidget *badges_box,
+                                   library_cache_t *cache,
+                                   int library_index,
+                                   int64_t entity_global_id,
+                                   const int64_t *merged_source_ids,
+                                   int merged_source_count) {
+    if (!badges_box) return;
+    if (!cache || library_cache_get_library_count(cache) <= 1) {
+        /* Single library — hide all badge slots */
+        GtkWidget *child = gtk_widget_get_first_child(badges_box);
+        while (child) {
+            gtk_widget_set_visible(child, FALSE);
+            child = gtk_widget_get_next_sibling(child);
+        }
+        gtk_widget_set_visible(badges_box, FALSE);
+        return;
+    }
+
+    /* Stack-based dedup — same logic as ui_populate_library_badges */
+    int deduped[BADGE_SLOT_MAX];
+    guint count = 0;
+
+    int primary_lib = (library_index >= 0)
+        ? library_index
+        : LIBRARY_GLOBAL_ID_LIB(entity_global_id);
+    if (primary_lib >= 0 && primary_lib < library_cache_get_library_count(cache)
+        && count < BADGE_SLOT_MAX) {
+        if (library_cache_get_library_name(cache, primary_lib))
+            deduped[count++] = primary_lib;
+    }
+
+    for (int i = 0; i < merged_source_count && count < BADGE_SLOT_MAX; i++) {
+        int src_lib = LIBRARY_GLOBAL_ID_LIB(merged_source_ids[i]);
+        gboolean seen = FALSE;
+        for (guint j = 0; j < count; j++) {
+            if (deduped[j] == src_lib) { seen = TRUE; break; }
+        }
+        if (seen) continue;
+        if (library_cache_get_library_name(cache, src_lib))
+            deduped[count++] = src_lib;
+    }
+
+    /* Set text on pre-allocated label slots */
+    GtkWidget *child = gtk_widget_get_first_child(badges_box);
+    for (guint i = 0; i < BADGE_SLOT_MAX && child; i++) {
+        if (i < count) {
+            const char *name = library_cache_get_library_name(cache, deduped[i]);
+            gtk_label_set_text(GTK_LABEL(child), name ? name : "");
+            gtk_widget_set_visible(child, TRUE);
+        } else {
+            gtk_widget_set_visible(child, FALSE);
+        }
+        child = gtk_widget_get_next_sibling(child);
+    }
+    gtk_widget_set_visible(badges_box, count > 0);
+}
+
+/** Pre-allocate BADGE_SLOT_MAX label children in a badges box. */
+static void prealloc_badge_slots(GtkWidget *badges_box) {
+    if (!badges_box) return;
+    for (int i = 0; i < BADGE_SLOT_MAX; i++) {
+        GtkWidget *badge = gtk_label_new("");
+        gtk_label_set_ellipsize(GTK_LABEL(badge), PANGO_ELLIPSIZE_END);
+        gtk_label_set_max_width_chars(GTK_LABEL(badge), 12);
+        gtk_widget_add_css_class(badge, "library-badge");
+        gtk_widget_set_visible(badge, FALSE);
+        gtk_box_append(GTK_BOX(badges_box), badge);
+    }
+}
+
+/** notify::width handler — connected ONCE in setup, not per-bind. */
+static void on_genre_constraint_width(GObject *obj, GParamSpec *pspec,
+                                       gpointer user_data) {
+    (void)pspec;
+    GtkWidget *genres_box = GTK_WIDGET(user_data);
+    guint genre_count = GPOINTER_TO_UINT(
+        g_object_get_data(G_OBJECT(genres_box), "genre-count"));
+    if (genre_count == 0) return;
+
+    /* Hysteresis — skip if width changed by < 10px */
+    int new_width = gtk_widget_get_width(GTK_WIDGET(obj));
+    int last_width = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(genres_box), "genre-last-width"));
+    if (abs(new_width - last_width) < 10) return;
+    g_object_set_data(G_OBJECT(genres_box), "genre-last-width",
+                      GINT_TO_POINTER(new_width));
+
+    genre_pills_reflow(genres_box, GTK_WIDGET(obj), genre_count);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Art Strip Width-Aware Reflow
+ *
+ * Uniform item widths → pure integer division, no per-item measurement.
+ * Shows the N most recent albums that fit the allocated width, capped at
+ * ART_STRIP_MAX_THUMBS pre-allocated slots.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Reflow pre-allocated art strip thumbnails to fit the constraint width.
+ *  Toggles visibility on pre-allocated GtkImage slots — no widget lifecycle.
+ *  Expects art_strip to carry "art-strip-album-count" and "art-strip-thumb-px"
+ *  via g_object_set_data (set during rebind). */
+static void art_strip_reflow(GtkWidget *art_strip, int budget) {
+    guint album_count = GPOINTER_TO_UINT(
+        g_object_get_data(G_OBJECT(art_strip), "art-strip-album-count"));
+    int thumb_px = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(art_strip), "art-strip-thumb-px"));
+
+    if (album_count == 0 || thumb_px <= 0) {
+        gtk_widget_set_visible(art_strip, FALSE);
+        return;
+    }
+
+    /* How many fit? First item has no leading spacing. */
+    guint max_fit = budget >= thumb_px
+        ? 1 + (guint)((budget - thumb_px) / (thumb_px + ART_STRIP_SPACING))
+        : 0;
+    guint show = MIN(album_count, max_fit);
+
+    /* Populated slots are 0..(album_count-1). Show the last `show` of those,
+     * hide everything else (leading populated + trailing empty). */
+    guint start_visible = album_count - show;
+    GtkWidget *img = gtk_widget_get_first_child(art_strip);
+    for (guint i = 0; img; i++, img = gtk_widget_get_next_sibling(img))
+        gtk_widget_set_visible(img, i >= start_visible && i < album_count);
+
+    gtk_widget_set_visible(art_strip, show > 0);
+}
+
+/** notify::width handler — connected ONCE in shell setup. */
+static void on_art_strip_constraint_width(GObject *obj, GParamSpec *pspec,
+                                           gpointer user_data) {
+    (void)pspec;
+    GtkWidget *art_strip = GTK_WIDGET(user_data);
+    int new_width = gtk_widget_get_width(GTK_WIDGET(obj));
+
+    /* Hysteresis — skip reflow if width changed by less than one thumbnail */
+    int last_width = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(art_strip), "art-strip-last-width"));
+    int thumb_px = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(art_strip), "art-strip-thumb-px"));
+    int threshold = thumb_px > 0 ? thumb_px / 2 : 40;
+    if (abs(new_width - last_width) < threshold) return;
+    g_object_set_data(G_OBJECT(art_strip), "art-strip-last-width",
+                      GINT_TO_POINTER(new_width));
+
+    art_strip_reflow(art_strip, new_width);
+}
+
 static void format_artist_subtitle(const library_artist_info_t *artist, char *buf, size_t len) {
     if (artist->album_count > 0 && artist->track_count > 0)
         snprintf(buf, len, "%u album%s \u00b7 Appears on %u track%s",
@@ -59,9 +283,13 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
     if (art_strip) {
         if (show_art_strip && cache && art_mgr) {
             const GPtrArray *albums = library_cache_get_albums_by_artist(cache, artist->artist_id);
+            guint album_count = 0;
+            int thumb_px = 0;
             if (albums && albums->len > 0) {
-                guint start_idx = albums->len > 6 ? albums->len - 6 : 0;
-                int thumb_px = artwork_manager_get_thumb_size(art_mgr);
+                album_count = MIN(albums->len, ART_STRIP_MAX_THUMBS);
+                thumb_px = artwork_manager_get_thumb_size(art_mgr);
+                guint start_idx = albums->len > ART_STRIP_MAX_THUMBS
+                                  ? albums->len - ART_STRIP_MAX_THUMBS : 0;
                 for (guint i = start_idx; i < albums->len; i++) {
                     const library_album_info_t *album = g_ptr_array_index(albums, i);
                     GtkWidget *img = gtk_image_new();
@@ -70,10 +298,14 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
                     artwork_manager_get_thumbnail(art_mgr, album->album_id, img);
                     gtk_box_append(GTK_BOX(art_strip), img);
                 }
-                gtk_widget_set_visible(art_strip, TRUE);
-            } else {
-                gtk_widget_set_visible(art_strip, FALSE);
             }
+            g_object_set_data(G_OBJECT(art_strip), "art-strip-album-count",
+                              GUINT_TO_POINTER(album_count));
+            g_object_set_data(G_OBJECT(art_strip), "art-strip-thumb-px",
+                              GINT_TO_POINTER(thumb_px));
+            g_signal_connect(art_strip, "notify::width",
+                             G_CALLBACK(on_art_strip_constraint_width), art_strip);
+            art_strip_reflow(art_strip, 300); /* initial; reflows on allocation */
         } else {
             gtk_widget_set_visible(art_strip, FALSE);
         }
@@ -99,8 +331,6 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
  * allocating ~15 widgets on every scroll.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#define ART_STRIP_MAX_THUMBS 6
-
 GtkWidget *ui_create_artist_row_shell(void) {
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
 
@@ -112,8 +342,9 @@ GtkWidget *ui_create_artist_row_shell(void) {
                       gtk_builder_get_object(builder, "artist_art"));
     g_object_set_data(G_OBJECT(row), "w-title",
                       gtk_builder_get_object(builder, "title"));
-    g_object_set_data(G_OBJECT(row), "w-library-badges",
-                      gtk_builder_get_object(builder, "library_badges"));
+    GtkWidget *badges_box = GTK_WIDGET(gtk_builder_get_object(builder, "library_badges"));
+    g_object_set_data(G_OBJECT(row), "w-library-badges", badges_box);
+    prealloc_badge_slots(badges_box);
     g_object_set_data(G_OBJECT(row), "w-subtitle",
                       gtk_builder_get_object(builder, "subtitle"));
 
@@ -128,6 +359,9 @@ GtkWidget *ui_create_artist_row_shell(void) {
             gtk_widget_set_visible(img, FALSE);
             gtk_box_append(GTK_BOX(art_strip), img);
         }
+        /* Connect notify::width ONCE — reflows on window resize */
+        g_signal_connect(art_strip, "notify::width",
+                         G_CALLBACK(on_art_strip_constraint_width), art_strip);
     }
 
     g_object_unref(builder);
@@ -151,20 +385,11 @@ void ui_rebind_artist_row(GtkWidget *row,
     if (title)
         gtk_label_set_text(GTK_LABEL(title), artist->name);
 
-    /* Library badges — skip rebuild if same entity */
-    if (badges_box) {
-        int64_t prev_entity = (int64_t)GPOINTER_TO_SIZE(
-            g_object_get_data(G_OBJECT(badges_box), "prev-entity-id"));
-        if (prev_entity != artist->artist_id) {
-            ui_populate_library_badges(badges_box, cache,
-                                        artist->library_index,
-                                        artist->artist_id,
-                                        artist->merged_source_ids,
-                                        artist->merged_source_count);
-            g_object_set_data(G_OBJECT(badges_box), "prev-entity-id",
-                              GSIZE_TO_POINTER((gsize)artist->artist_id));
-        }
-    }
+    /* Library badges — set text on pre-allocated labels */
+    rebind_library_badges(badges_box, cache,
+                          artist->library_index, artist->artist_id,
+                          artist->merged_source_ids,
+                          artist->merged_source_count);
 
     /* Subtitle: album/track counts */
     if (subtitle) {
@@ -173,32 +398,43 @@ void ui_rebind_artist_row(GtkWidget *row,
         gtk_label_set_text(GTK_LABEL(subtitle), buf);
     }
 
-    /* Art strip: reuse pre-allocated image slots (no widget create/destroy) */
+    /* Art strip: populate pre-allocated slots with album data, reflow for width */
     if (art_strip) {
-        guint used = 0;
+        guint album_count = 0;
+        int thumb_px = 0;
         if (cache && art_mgr) {
             const GPtrArray *albums = library_cache_get_albums_by_artist(cache, artist->artist_id);
             if (albums && albums->len > 0) {
+                album_count = MIN(albums->len, ART_STRIP_MAX_THUMBS);
+                thumb_px = artwork_manager_get_thumb_size(art_mgr);
+                /* Fill slots from the end: most recent albums in rightmost slots.
+                 * Reflow will hide leading slots that don't fit the width. */
                 guint start_idx = albums->len > ART_STRIP_MAX_THUMBS
                                   ? albums->len - ART_STRIP_MAX_THUMBS : 0;
-                int thumb_px = artwork_manager_get_thumb_size(art_mgr);
+                guint slot = 0;
                 GtkWidget *img = gtk_widget_get_first_child(art_strip);
-                for (guint i = start_idx; i < albums->len && img; i++, used++) {
+                for (guint i = start_idx; i < albums->len && img; i++, slot++) {
                     const library_album_info_t *album = g_ptr_array_index(albums, i);
                     gtk_image_set_pixel_size(GTK_IMAGE(img), thumb_px);
                     artwork_manager_get_thumbnail(art_mgr, album->album_id, img);
-                    gtk_widget_set_visible(img, TRUE);
                     img = gtk_widget_get_next_sibling(img);
                 }
+                /* Hide any trailing unused slots */
+                for (; img; img = gtk_widget_get_next_sibling(img))
+                    gtk_widget_set_visible(img, FALSE);
             }
         }
-        /* Hide unused slots */
-        GtkWidget *img = gtk_widget_get_first_child(art_strip);
-        for (guint i = 0; img; i++, img = gtk_widget_get_next_sibling(img)) {
-            if (i >= used)
-                gtk_widget_set_visible(img, FALSE);
-        }
-        gtk_widget_set_visible(art_strip, used > 0);
+        /* Store metadata for reflow (used by art_strip_reflow + notify::width) */
+        g_object_set_data(G_OBJECT(art_strip), "art-strip-album-count",
+                          GUINT_TO_POINTER(album_count));
+        g_object_set_data(G_OBJECT(art_strip), "art-strip-thumb-px",
+                          GINT_TO_POINTER(thumb_px));
+        /* Initial reflow with current allocation */
+        int budget = gtk_widget_get_width(art_strip);
+        if (budget > 0)
+            art_strip_reflow(art_strip, budget);
+        else
+            art_strip_reflow(art_strip, 300); /* fallback before first allocation */
     }
 
     /* Update entity ID */
@@ -226,12 +462,35 @@ GtkWidget *ui_create_album_row_shell(void) {
                       gtk_builder_get_object(builder, "year"));
     GtkWidget *primary_artists_box = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
     g_object_set_data(G_OBJECT(row), "w-primary-artists", primary_artists_box);
-    g_object_set_data(G_OBJECT(row), "w-genres",
-                      gtk_builder_get_object(builder, "genres_box"));
-    g_object_set_data(G_OBJECT(row), "w-col-right",
-                      gtk_builder_get_object(builder, "col_right"));
-    g_object_set_data(G_OBJECT(row), "w-bottom-bar",
-                      gtk_builder_get_object(builder, "bottom_bar"));
+    GtkWidget *genres_box = GTK_WIDGET(gtk_builder_get_object(builder, "genres_box"));
+    g_object_set_data(G_OBJECT(row), "w-genres", genres_box);
+    GtkWidget *col_right = GTK_WIDGET(gtk_builder_get_object(builder, "col_right"));
+    g_object_set_data(G_OBJECT(row), "w-col-right", col_right);
+
+    /* Pre-allocate genre pill labels — reused in rebind, never destroyed */
+    if (genres_box) {
+        for (int i = 0; i < GENRE_PILL_MAX; i++) {
+            GtkWidget *pill = gtk_label_new("");
+            gtk_label_set_ellipsize(GTK_LABEL(pill), PANGO_ELLIPSIZE_END);
+            gtk_label_set_max_width_chars(GTK_LABEL(pill), 18);
+            gtk_widget_add_css_class(pill, "genre-pill");
+            gtk_widget_set_visible(pill, FALSE);
+            gtk_box_append(GTK_BOX(genres_box), pill);
+        }
+        GtkWidget *genre_overflow = gtk_label_new("…");
+        gtk_widget_add_css_class(genre_overflow, "genre-pill");
+        gtk_widget_set_visible(genre_overflow, FALSE);
+        gtk_box_append(GTK_BOX(genres_box), genre_overflow);
+
+        /* Connect notify::width ONCE — reflows on window resize only */
+        if (col_right) {
+            g_signal_connect(col_right, "notify::width",
+                             G_CALLBACK(on_genre_constraint_width), genres_box);
+        }
+    }
+    GtkWidget *bottom_bar = GTK_WIDGET(gtk_builder_get_object(builder, "bottom_bar"));
+    g_object_set_data(G_OBJECT(row), "w-bottom-bar", bottom_bar);
+    prealloc_badge_slots(bottom_bar);
     g_object_set_data(G_OBJECT(row), "w-credit-annotation",
                       gtk_builder_get_object(builder, "credit_annotation"));
 
@@ -333,29 +592,34 @@ void ui_rebind_album_row(GtkWidget *row,
         }
     }
 
-    /* Genre pills — skip rebuild if genre string unchanged */
+    /* Genre pills — set text on pre-allocated labels, reflow visibility */
     if (genres_box) {
-        const char *prev_genres = g_object_get_data(G_OBJECT(genres_box), "prev-genres");
-        if (!prev_genres || g_strcmp0(prev_genres, album->genres) != 0) {
-            ui_populate_genre_pills(genres_box, album->genres, col_right, 1.0);
-            g_object_set_data_full(G_OBJECT(genres_box), "prev-genres",
-                                   g_strdup(album->genres ? album->genres : ""), g_free);
+        guint genre_count = 0;
+        if (album->genres && album->genres[0]) {
+            gchar **raw = g_strsplit(album->genres, ";", GENRE_PILL_MAX + 1);
+            GtkWidget *child = gtk_widget_get_first_child(genres_box);
+            for (guint i = 0; raw[i] && genre_count < GENRE_PILL_MAX; i++) {
+                g_strstrip(raw[i]);
+                if (!raw[i][0]) continue;
+                if (child) {
+                    gtk_label_set_text(GTK_LABEL(child), raw[i]);
+                    child = gtk_widget_get_next_sibling(child);
+                }
+                genre_count++;
+            }
+            g_strfreev(raw);
         }
+        g_object_set_data(G_OBJECT(genres_box), "genre-count",
+                          GUINT_TO_POINTER(genre_count));
+        genre_pills_reflow(genres_box, col_right, genre_count);
     }
 
-    /* Library badges — skip rebuild if same library membership */
-    if (bottom_bar && cache) {
-        int64_t prev_entity = (int64_t)GPOINTER_TO_SIZE(
-            g_object_get_data(G_OBJECT(bottom_bar), "prev-entity-id"));
-        if (prev_entity != album->album_id) {
-            ui_populate_library_badges(bottom_bar, cache,
-                                        album->library_index,
-                                        album->album_id,
-                                        album->merged_source_ids,
-                                        album->merged_source_count);
-            g_object_set_data(G_OBJECT(bottom_bar), "prev-entity-id",
-                              GSIZE_TO_POINTER((gsize)album->album_id));
-        }
+    /* Library badges — set text on pre-allocated labels */
+    if (cache) {
+        rebind_library_badges(bottom_bar, cache,
+                              album->library_index, album->album_id,
+                              album->merged_source_ids,
+                              album->merged_source_count);
     }
 
     /* Credit annotation: clear for list rows (credits only used in detail views) */
@@ -367,17 +631,9 @@ void ui_rebind_album_row(GtkWidget *row,
     /* Update entity IDs */
     g_object_set_data(G_OBJECT(row), "album-id", GSIZE_TO_POINTER((gsize)album->album_id));
 
-    /* First track ID for keyboard shortcuts */
-    if (cache) {
-        const GPtrArray *tracks = library_cache_get_tracks_by_album(cache, album->album_id);
-        if (tracks && tracks->len > 0) {
-            const library_track_info_t *first_track = g_ptr_array_index(tracks, 0);
-            g_object_set_data(G_OBJECT(row), "first-track-id",
-                            GSIZE_TO_POINTER((gsize)first_track->track_id));
-        } else {
-            g_object_set_data(G_OBJECT(row), "first-track-id", GSIZE_TO_POINTER((gsize)0));
-        }
-    }
+    /* First track ID for keyboard shortcuts — cached on album info during warming */
+    g_object_set_data(G_OBJECT(row), "first-track-id",
+                      GSIZE_TO_POINTER((gsize)album->first_track_id));
 }
 
 GtkWidget *ui_create_album_row(const library_album_info_t *album,
@@ -489,15 +745,9 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
     /* Store album ID for handler access */
     g_object_set_data(G_OBJECT(row), "album-id", GSIZE_TO_POINTER((gsize)album->album_id));
 
-    /* Store first track ID for keyboard shortcuts */
-    if (cache) {
-        const GPtrArray *tracks = library_cache_get_tracks_by_album(cache, album->album_id);
-        if (tracks && tracks->len > 0) {
-            const library_track_info_t *first_track = g_ptr_array_index(tracks, 0);
-            g_object_set_data(G_OBJECT(row), "first-track-id",
-                            GSIZE_TO_POINTER((gsize)first_track->track_id));
-        }
-    }
+    /* First track ID for keyboard shortcuts — cached on album info */
+    g_object_set_data(G_OBJECT(row), "first-track-id",
+                      GSIZE_TO_POINTER((gsize)album->first_track_id));
 
     return row;
 }
@@ -905,7 +1155,7 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
 
     /* Load full-resolution album art directly from disk (detail views bypass atlas) */
     if (art && art_mgr) {
-        artwork_manager_get_fullsize_album_art(art_mgr, album->library_index, album->album_id, art);
+        artwork_manager_get_fullsize_album_art(art_mgr, album->album_id, art);
     }
 
     /* Populate track list with automatic disc headers */

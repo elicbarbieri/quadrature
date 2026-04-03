@@ -69,7 +69,6 @@ typedef struct {
     ArtworkManager *mgr;
     int64_t id;            /* Global album_id or artist_id */
     LoadTaskType type;     /* LOAD_ALBUM, LOAD_ARTIST, or LOAD_FULLSIZE */
-    int lib_index;         /* Only used for LOAD_FULLSIZE */
 } LoadTask;
 
 struct _ArtworkManager {
@@ -126,6 +125,8 @@ struct _ArtworkManager {
     /* Latency histograms (µs scale, lock-free recording) */
     perf_histogram_us_t texture_hit_hist;   /* cache_lock + lookup + unlock time */
     perf_histogram_us_t atlas_decode_hist;  /* atlas read + texture create time */
+
+    _Atomic uint64_t hit_sample_counter;    /* mod-64 sampling for cache hit timing */
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -496,16 +497,29 @@ static gpointer worker_func(gpointer data) {
         g_mutex_unlock(pending_lock);
         if (cancelled) { load_task_free(task); continue; }
 
-        /* Fullsize loads: read album art from disk (heavy I/O, may invoke FFmpeg) */
+        /* Fullsize loads: read album art from disk (heavy I/O, may invoke FFmpeg).
+         * Derive lib_idx from the global album_id. For merged albums, try the
+         * representative's library first, then each merged source in order. */
         if (task->type == LOAD_FULLSIZE) {
             GdkTexture *tex = NULL;
-            int lib_idx = task->lib_index;
-            if (lib_idx >= 0 && lib_idx < mgr->lib_count) {
-                const library_album_info_t *album =
-                    library_cache_get_album(mgr->library, task->id);
-                if (album && album->path) {
+            const library_album_info_t *album =
+                library_cache_get_album(mgr->library, task->id);
+            if (album && album->path) {
+                /* Build candidate library indices: representative first, then sources */
+                int candidates[16];
+                int n_candidates = 0;
+                int rep_lib = LIBRARY_GLOBAL_ID_LIB(task->id);
+                if (rep_lib >= 0 && rep_lib < mgr->lib_count)
+                    candidates[n_candidates++] = rep_lib;
+                for (int m = 0; m < album->merged_source_count && n_candidates < 16; m++) {
+                    int src_lib = LIBRARY_GLOBAL_ID_LIB(album->merged_source_ids[m]);
+                    if (src_lib >= 0 && src_lib < mgr->lib_count)
+                        candidates[n_candidates++] = src_lib;
+                }
+
+                for (int c = 0; c < n_candidates && !tex; c++) {
                     char *album_dir = g_build_filename(
-                        mgr->music_roots[lib_idx], album->path, NULL);
+                        mgr->music_roots[candidates[c]], album->path, NULL);
                     uint8_t *art_data = NULL;
                     size_t art_size = 0;
                     if (artwork_find_bytes(album_dir, &art_data, &art_size) == QUADRATURE_OK) {
@@ -550,16 +564,44 @@ static gpointer worker_func(gpointer data) {
 
         GdkTexture *tex = NULL;
         ArtistLookupResult artist_result = ARTIST_LOOKUP_UNKNOWN;
+
+        /* Pre-fetch merged source IDs BEFORE acquiring atlas_lock to avoid
+         * nested locking (atlas_lock → cache->lock). Stack-local copy of
+         * source global IDs is safe — they're immutable integers. */
+        int64_t merge_sources[16];
+        int merge_count = 0;
+        if (task->type == LOAD_ALBUM && mgr->library) {
+            const library_album_info_t *album =
+                library_cache_get_album(mgr->library, task->id);
+            if (album) {
+                merge_count = album->merged_source_count < 16
+                            ? album->merged_source_count : 16;
+                for (int m = 0; m < merge_count; m++)
+                    merge_sources[m] = album->merged_source_ids[m];
+            }
+        }
+
         g_mutex_lock(&mgr->atlas_lock);
         if (task->type == LOAD_ARTIST) {
             tex = artist_atlas_lookup(mgr, task->id, &artist_result);
         } else {
+            /* Try representative's atlas first */
             int lib_idx = LIBRARY_GLOBAL_ID_LIB(task->id);
             int64_t local_id = LIBRARY_GLOBAL_ID_LOCAL(task->id);
             if (lib_idx >= 0 && lib_idx < mgr->lib_count) {
                 int32_t idx = lib_atlas_lookup(&mgr->libraries[lib_idx], local_id);
                 if (idx >= 0)
                     tex = lib_atlas_load_texture(&mgr->libraries[lib_idx], idx);
+            }
+            /* Fallback: try merged source libraries' atlases (no lock nesting) */
+            for (int m = 0; m < merge_count && !tex; m++) {
+                int src_lib = LIBRARY_GLOBAL_ID_LIB(merge_sources[m]);
+                int64_t src_local = LIBRARY_GLOBAL_ID_LOCAL(merge_sources[m]);
+                if (src_lib >= 0 && src_lib < mgr->lib_count) {
+                    int32_t idx = lib_atlas_lookup(&mgr->libraries[src_lib], src_local);
+                    if (idx >= 0)
+                        tex = lib_atlas_load_texture(&mgr->libraries[src_lib], idx);
+                }
             }
         }
         g_mutex_unlock(&mgr->atlas_lock);
@@ -606,7 +648,7 @@ ArtworkManager *artwork_manager_new(library_cache_t *library,
                                     int cache_size, size_t cache_count) {
     ArtworkManager *mgr = g_new0(ArtworkManager, 1);
     mgr->library = library;
-    mgr->thumb_size = cache_size > 0 ? cache_size : 48;
+    mgr->thumb_size = cache_size > 0 ? cache_size : 96;
     mgr->max_entries = cache_count > 0 ? cache_count : ARTWORK_CACHE_DEFAULT_MAX_ENTRIES;
     mgr->artist_max_entries = ARTIST_CACHE_DEFAULT_MAX_ENTRIES;
 
@@ -734,12 +776,11 @@ void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWid
     g_assert(mgr != NULL);
     g_assert(image != NULL);
 
-    /* Cache hit? (keyed by global album_id)
-     * Instrumented: time the lock+lookup+unlock span for the perf dashboard.
-     * Overhead: 2× clock_gettime (~40ns) + 1 atomic_fetch_add (~2ns) = ~50ns
-     * relative to a 200-2000ns critical section — acceptable for hot path. */
+    /* Cache hit? Sample 1-in-64 for timing histogram (avoids 80ns clock_gettime
+     * overhead on every hit — at 1000fps × 100 rows that's 8µs/frame saved). */
+    bool do_sample = (atomic_fetch_add(&mgr->hit_sample_counter, 1) & 63) == 0;
     struct timespec _t0, _t1;
-    clock_gettime(CLOCK_MONOTONIC, &_t0);
+    if (do_sample) clock_gettime(CLOCK_MONOTONIC, &_t0);
 
     g_mutex_lock(&mgr->cache_lock);
     CacheEntry *e = g_hash_table_lookup(mgr->cache, &album_id);
@@ -750,10 +791,12 @@ void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWid
         gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(e->texture));
         g_mutex_unlock(&mgr->cache_lock);
 
-        clock_gettime(CLOCK_MONOTONIC, &_t1);
-        uint64_t us = (uint64_t)(_t1.tv_sec - _t0.tv_sec) * 1000000 +
-                      (uint64_t)(_t1.tv_nsec - _t0.tv_nsec) / 1000;
-        perf_histogram_record_us(&mgr->texture_hit_hist, us);
+        if (do_sample) {
+            clock_gettime(CLOCK_MONOTONIC, &_t1);
+            uint64_t us = (uint64_t)(_t1.tv_sec - _t0.tv_sec) * 1000000 +
+                          (uint64_t)(_t1.tv_nsec - _t0.tv_nsec) / 1000;
+            perf_histogram_record_us(&mgr->texture_hit_hist, us);
+        }
         return;
     }
     g_mutex_unlock(&mgr->cache_lock);
@@ -982,12 +1025,10 @@ void artwork_manager_reload_artist_atlas(ArtworkManager *mgr) {
  * Public API - Full-Resolution Album Art (Detail Views)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr, int lib_index,
+void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr,
                                              int64_t album_id, GtkWidget *picture) {
     g_assert(mgr != NULL);
     g_assert(picture != NULL);
-
-    if (lib_index < 0 || lib_index >= mgr->lib_count) return;
 
     /* Add pulsing loading class to the art container (parent of the GtkPicture) */
     GtkWidget *parent = gtk_widget_get_parent(picture);
@@ -1019,7 +1060,6 @@ void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr, int lib_index,
     task->mgr = mgr;
     task->id = album_id;
     task->type = LOAD_FULLSIZE;
-    task->lib_index = lib_index;
     g_async_queue_push(mgr->load_queue, task);
 }
 

@@ -404,6 +404,11 @@ static void marquee_update_loop_point(GtkWidget *scroll, double loop_point) {
     state->pause_time = 0;
     state->last_frame = 0;
 
+    /* Reset scroll position immediately to avoid a single frame where new text
+     * renders at the old scroll offset (causes 1px artifact on track change) */
+    GtkAdjustment *adj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scroll));
+    if (adj) gtk_adjustment_set_value(adj, 0);
+
     guint tick_id = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(scroll), "marquee-tick-id"));
 
     if (loop_point > 0 && tick_id == 0) {
@@ -446,6 +451,26 @@ static void on_play_pause(GtkButton *btn, gpointer data) {
     if (s->mode == CHANNEL_MODE_ON_AIR) {
         g_debug("on_play_pause: ignored, mode is ON_AIR");
         return;
+    }
+
+    /* If the strip has a track but the pipeline player doesn't (e.g. device was
+     * inactive when the track was loaded), retry set_player_track now. */
+    if (s->current_track_id > 0 && s->pipeline->cache) {
+        int64_t pipeline_track = audio_pipeline_get_player_track_id(s->pipeline, s->channel_id);
+        if (pipeline_track <= 0) {
+            gboolean streams = audio_pipeline_player_streams_active(s->pipeline, s->channel_id);
+            g_info("Playback → Channel %d: retrying set_player_track for %" G_GINT64_FORMAT
+                   " (streams_active=%d, device_state=%d)",
+                   s->channel_id + 1, s->current_track_id, streams, s->device_state);
+            audio_cache_load(s->pipeline->cache, s->current_track_id);
+            quadrature_result_t retry = audio_pipeline_set_player_track(
+                s->pipeline, s->channel_id, s->current_track_id);
+            if (retry != QUADRATURE_OK) {
+                g_warning("Playback → Channel %d: retry set_player_track FAILED - result=%d",
+                          s->channel_id + 1, retry);
+                return;
+            }
+        }
     }
 
     /* Toggle play/pause atomically */
@@ -1712,12 +1737,16 @@ quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
         quadrature_result_t res = audio_cache_load(s->pipeline->cache, track_id);
         if (res != QUADRATURE_OK) return res;
 
-        /* Then set player track (will lock, not wait for decode) */
+        /* Set player track — may fail if no active device yet. That's OK:
+         * on_play_pause will retry set_player_track when the user presses play. */
         res = audio_pipeline_set_player_track(s->pipeline, s->channel_id, track_id);
-        if (res != QUADRATURE_OK) return res;
-
-        s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
-        s->sample_rate = audio_pipeline_get_sample_rate(s->pipeline);
+        if (res == QUADRATURE_OK) {
+            s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
+            s->sample_rate = audio_pipeline_get_sample_rate(s->pipeline);
+        } else {
+            g_debug("load_track: set_player_track deferred (channel %d, result=%d)",
+                    s->channel_id, res);
+        }
     }
 
     return QUADRATURE_OK;

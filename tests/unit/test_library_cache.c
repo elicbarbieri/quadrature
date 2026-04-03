@@ -14,6 +14,18 @@
 #include <stdio.h>
 #include <sys/types.h>
 
+/* Single-library cache helper for tests */
+static quadrature_result_t test_cache_create(const char *db_path,
+                                              const char *music_base,
+                                              library_cache_t **out) {
+    if (!db_path || !out) return QUADRATURE_ERROR_INVALID_PARAM;
+    library_cache_source_t src = {
+        .db_path = db_path, .music_base = music_base,
+        .display_name = NULL, .bitmap_index = 0,
+    };
+    return library_cache_create_multi(&src, 1, out);
+}
+
 // =============================================================================
 // Test Fixtures
 // =============================================================================
@@ -191,9 +203,12 @@ static void setup(void) {
     test_db = NULL;
 
     // Create cache with db path
-    quadrature_result_t res = library_cache_create(test_db_path, "/music", &test_cache);
+    quadrature_result_t res = test_cache_create(test_db_path, "/music", &test_cache);
     cr_assert_eq(res, QUADRATURE_OK);
     cr_assert_not_null(test_cache);
+
+    // Warm the cache — all data must be pre-populated before reads
+    library_cache_warm_slot_blocking(test_cache, 0);
 }
 
 static void teardown(void) {
@@ -224,7 +239,7 @@ Test(library_cache, create_destroy) {
     db_close(db);  // Close so cache can open it readonly
 
     library_cache_t* cache = NULL;
-    quadrature_result_t res = library_cache_create(db_path, "/music", &cache);
+    quadrature_result_t res = test_cache_create(db_path, "/music", &cache);
     cr_assert_eq(res, QUADRATURE_OK);
     cr_assert_not_null(cache);
 
@@ -238,11 +253,11 @@ Test(library_cache, create_destroy) {
 
 Test(library_cache, null_safety) {
     // Null parameters should not crash
-    cr_assert_eq(library_cache_create(NULL, "/music", NULL), QUADRATURE_ERROR_INVALID_PARAM);
+    cr_assert_eq(test_cache_create(NULL, "/music", NULL), QUADRATURE_ERROR_INVALID_PARAM);
 
     library_cache_t* cache = NULL;
-    cr_assert_eq(library_cache_create("/nonexistent/path.db", "/music", NULL), QUADRATURE_ERROR_INVALID_PARAM);
-    cr_assert_eq(library_cache_create(NULL, "/music", &cache), QUADRATURE_ERROR_INVALID_PARAM);
+    cr_assert_eq(test_cache_create("/nonexistent/path.db", "/music", NULL), QUADRATURE_ERROR_INVALID_PARAM);
+    cr_assert_eq(test_cache_create(NULL, "/music", &cache), QUADRATURE_ERROR_INVALID_PARAM);
 
     // Destroy accepts NULL
     library_cache_destroy(NULL);
@@ -517,7 +532,10 @@ Test(library_cache, clear_removes_all, .init = setup, .fini = teardown) {
     // Clear everything
     library_cache_clear(test_cache);
 
-    // Data should be fresh after clear
+    // Re-warm — data must be pre-populated before reads
+    library_cache_warm_slot_blocking(test_cache, 0);
+
+    // Data should be fresh after clear + re-warm
     const library_track_info_t* track2 = library_cache_get_track(test_cache, 1);
     GPtrArray* artists2 = library_cache_get_artists_filtered(test_cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(track2);

@@ -327,6 +327,8 @@ if(BUILD_TESTS)
     # Engine tests
     unit_test(test_database         INCLUDES ${S}/database          LIBS quadrature_engine)
     unit_test(test_library_cache                                    LIBS quadrature_engine)
+    unit_test(test_cross_library_merge                              LIBS quadrature_engine)
+    unit_test(test_library_cache_advanced                           LIBS quadrature_engine)
     unit_test(test_path_resolution                                  LIBS quadrature_engine)
 
     # Audio tests

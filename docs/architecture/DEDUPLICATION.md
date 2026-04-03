@@ -2,7 +2,7 @@
 
 **Ensures that the same artist or album appears once in every view**, regardless of how many libraries contain it. Builds on the existing multi-library cache (see LIBRARY_CACHE.md) and MusicBrainz resolution (see LIBRARY_SYSTEM.md).
 
----
+______________________________________________________________________
 
 ## Problem
 
@@ -10,7 +10,7 @@ Each library has its own SQLite database with independent artist/album/track tab
 
 The merge infrastructure (`rebuild_merged_artists()`) detects MBID-matched artists and marks a representative. Dedup correctness depends entirely on MusicBrainz resolution coverage — artists without MBIDs are never merged. The resolver uses a three-stage fallback chain (ISRC → fingerprint → text search) to maximize coverage.
 
----
+______________________________________________________________________
 
 ## Architecture
 
@@ -35,11 +35,15 @@ The merge infrastructure (`rebuild_merged_artists()`) detects MBID-matched artis
                                       ▼
                     ┌────────────────────────────────────────────┐
                     │  merged_source_set (GHashTable<int64_t>)   │
-                    │                                            │
                     │  Set of global artist IDs that are merge   │
                     │  sources (non-representative duplicates).  │
                     │  Built during merge. Used by query funcs   │
                     │  to skip sources — O(1) lookup per artist. │
+                    ├────────────────────────────────────────────┤
+                    │  merged_album_sources (GHashTable<int64_t>)│
+                    │  Set of global album IDs that are merge    │
+                    │  sources. Built alongside artist merge.    │
+                    │  Used to skip duplicate albums by MBID.    │
                     └────────────────────────────────────────────┘
                                       │
                     ┌─────────────────┼─────────────────┐
@@ -51,35 +55,49 @@ The merge infrastructure (`rebuild_merged_artists()`) detects MBID-matched artis
                                 _id via seen_mbids   albums by MBID
 ```
 
----
+______________________________________________________________________
 
 ## Merge State
 
-Merge state lives on `library_artist_info_t` (already exists):
+### Artist Merge
 
-| Field | Single-library artist | Merged representative | Merge source |
-|---|---|---|---|
-| `library_index` | `0..N` (source slot) | `-1` | `0..N` (unchanged) |
-| `merged_source_count` | `0` | `>0` | `0` |
-| `merged_source_ids` | `NULL` | Array of source global IDs | `NULL` |
-| `album_count` | Own count | Accumulated across sources | Own count |
-| `track_count` | Own count | Accumulated across sources | Own count |
+Merge state lives on `library_artist_info_t`:
+
+| Field                 | Single-library artist | Merged representative      | Merge source       |
+| --------------------- | --------------------- | -------------------------- | ------------------ |
+| `library_index`       | `0..N` (source slot)  | `-1`                       | `0..N` (unchanged) |
+| `merged_source_count` | `0`                   | `>0`                       | `0`                |
+| `merged_source_ids`   | `NULL`                | Array of source global IDs | `NULL`             |
+| `album_count`         | Own count             | Accumulated across sources | Own count          |
+| `track_count`         | Own count             | Accumulated across sources | Own count          |
 
 A source artist's fields are not modified (except counts accumulated into the rep). The `merged_source_set` on the cache determines whether an artist is skipped in query results.
 
----
+### Album Merge
+
+Merge state also lives on `library_album_info_t`:
+
+| Field                 | Single-library album | Merged representative      | Merge source       |
+| --------------------- | -------------------- | -------------------------- | ------------------ |
+| `library_index`       | `0..N` (source slot) | `-1`                       | `0..N` (unchanged) |
+| `merged_source_count` | `0`                  | `>0`                       | `0`                |
+| `merged_source_ids`   | `NULL`               | Array of source global IDs | `NULL`             |
+
+Albums are merged by `musicbrainz_release_id` (same release in multiple libraries). The `merged_album_sources` hash table on the cache determines whether an album is skipped in query results.
+
+______________________________________________________________________
 
 ## ⚠ Merge Invariants — CRITICAL
 
 1. **Every source artist ID in `merged_source_set` MUST appear in exactly one representative's `merged_source_ids[]`.** If an ID is in the set but no rep claims it, that artist vanishes from all views.
 
-2. **A representative MUST NOT be in `merged_source_set`.** Self-referential skip would hide the merged artist entirely.
+1. **A representative MUST NOT be in `merged_source_set`.** Self-referential skip would hide the merged artist entirely.
 
-3. **`merged_source_set` MUST be rebuilt from scratch on every `rebuild_merged_artists()` call.** Stale entries from removed libraries would cause invisible artists.
+1. **`merged_source_set` MUST be rebuilt from scratch on every `rebuild_merged_artists()` call.** Stale entries from removed libraries would cause invisible artists.
 
-4. **Artists without MBIDs are never merged.** Dedup correctness depends entirely on MusicBrainz resolution coverage. Unresolved artists appear once per library — this is intentional (no false merges).
+1. **Artists without MBIDs are never merged.** Dedup correctness depends entirely on MusicBrainz resolution coverage. Unresolved artists appear once per library — this is intentional (no false merges).
 
----
+______________________________________________________________________
 
 ## Dedup in Query Functions
 
@@ -121,13 +139,14 @@ Albums without a `musicbrainz_release_id` (unresolved) always pass through — t
 
 No dedup. Tracks are per-library by nature — the same song from different sources (different rips, bitrates, formats) are genuinely separate entities that should remain visible.
 
----
+______________________________________________________________________
 
 ## Library Filtering
 
 ### Concept
 
 Every query function accepts a `library_filter` parameter:
+
 - `-1` = all libraries (default). Dedup is applied.
 - `0..N` = specific library index. Only that slot is queried. Dedup still runs but is effectively a no-op (a single library can't have MBID duplicates with itself).
 
@@ -180,7 +199,7 @@ GtkWidget *filter_library;      // GtkMenuButton (dropdown)
 
 When viewing "All Libraries", each artist/album row shows a small muted label with the library display name (from `library_cache_get_library_name()`). Merged artists (`library_index == -1`) show no badge. Hidden when a specific library is selected (redundant).
 
----
+______________________________________________________________________
 
 ## Data Flow
 
@@ -225,15 +244,15 @@ Given merged artist (library_index == -1):
 
 Each album in the result carries its own `library_index` — the detail view uses this to show library origin.
 
----
+______________________________________________________________________
 
 ## Edge Cases
 
-| Scenario | Behavior |
-|---|---|
-| Same artist, MBID in lib A, no MBID in lib B | A merges normally; B appears as separate unresolved entry. Once B resolves and gets same MBID, next rebuild merges them. |
-| Same name, different MBIDs (different artists) | Two separate reps. No false merge. |
-| Same name, neither has MBID | Two separate entries (one per library). No merge until MBIDs are resolved. |
-| Library becomes unavailable | Filtered queries skip unavailable slots. Merged_source_set is NOT rebuilt (would require re-warming). Source artists from unavailable slot simply won't appear in DB queries → effectively hidden. |
-| Library removed entirely | `library_cache_remove_slot()` → `rebuild_merged_artists()` → rebuilds everything from scratch. |
-| Single library | `merged_source_set` is empty. All skip checks are no-ops. `library_filter` dropdown hidden. Zero overhead. |
+| Scenario                                       | Behavior                                                                                                                                                                                           |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Same artist, MBID in lib A, no MBID in lib B   | A merges normally; B appears as separate unresolved entry. Once B resolves and gets same MBID, next rebuild merges them.                                                                           |
+| Same name, different MBIDs (different artists) | Two separate reps. No false merge.                                                                                                                                                                 |
+| Same name, neither has MBID                    | Two separate entries (one per library). No merge until MBIDs are resolved.                                                                                                                         |
+| Library becomes unavailable                    | Filtered queries skip unavailable slots. Merged_source_set is NOT rebuilt (would require re-warming). Source artists from unavailable slot simply won't appear in DB queries → effectively hidden. |
+| Library removed entirely                       | `library_cache_remove_slot()` → `rebuild_merged_artists()` → rebuilds everything from scratch.                                                                                                     |
+| Single library                                 | `merged_source_set` is empty. All skip checks are no-ops. `library_filter` dropdown hidden. Zero overhead.                                                                                         |

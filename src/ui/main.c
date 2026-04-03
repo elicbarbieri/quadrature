@@ -117,6 +117,7 @@ int main(int argc, char *argv[]) {
                 sources[i].db_path      = dbpaths[i];
                 sources[i].music_base   = data.settings->libraries[i].path;
                 sources[i].display_name = names[i];
+                sources[i].bitmap_index = data.settings->libraries[i].library_index;
             }
         }
 

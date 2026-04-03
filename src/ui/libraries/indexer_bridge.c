@@ -569,6 +569,17 @@ void refresh_library_views(UiWindow *w) {
         library_unified_detail_reload(w->detail_view);
     if (strcmp(w->current_view, "search") == 0)
         do_search(w);
+
+    /* Sync library bar toggle labels with current names from cache */
+    if (w->library_cache && w->library_toggles) {
+        for (int i = 0; i < w->library_toggle_count; i++) {
+            int bi = GPOINTER_TO_INT(g_object_get_data(
+                G_OBJECT(w->library_toggles[i]), "lib-idx"));
+            const char *name = library_cache_get_library_name(w->library_cache, bi);
+            gtk_button_set_label(GTK_BUTTON(w->library_toggles[i]),
+                                 name ? name : "Library");
+        }
+    }
 }
 
 void on_cache_ready(void *data) {
@@ -597,11 +608,12 @@ void on_indexer_library_updated(IndexerController *idx, const char *library_path
     g_message("library-updated: library=%s lib_idx=%d cache=%p",
               library_path, lib_idx, (void*)w->library_cache);
 
-    /* Reload the library cache — on_cache_ready() fires refresh_library_views() */
+    /* COW refresh: old data stays live while new data builds in shadow arrays.
+     * on_cache_ready() fires refresh_library_views() when the swap completes. */
     if (w->library_cache && lib_idx >= 0) {
-        library_cache_clear_slot(w->library_cache, lib_idx);
-        library_cache_warm_slot(w->library_cache, lib_idx);
-        g_message("library-updated: cache rewarm started for slot %d", lib_idx);
+        int bitmap = w->settings->libraries[lib_idx].library_index;
+        library_cache_refresh_slot(w->library_cache, bitmap, NULL, 0);
+        g_message("library-updated: COW refresh started for bitmap_index=%d", bitmap);
     }
 
     LibEntry *e = find_lib_entry(w, library_path);

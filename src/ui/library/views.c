@@ -110,15 +110,16 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
 
     int lib_count = library_cache_get_library_count(vd->cache);
     for (int li = 0; li < lib_count; li++) {
-        if (!library_cache_get_available(vd->cache, li)) continue;
-        quadrature_meta_db_t *meta_db = library_cache_get_meta_db(vd->cache, li);
-        if (!meta_db) continue;
+        int bi = library_cache_get_bitmap_index(vd->cache, li);
+        if (!library_cache_get_available(vd->cache, bi)) continue;
+        library_cache_dbs_t dbs = library_cache_get_dbs(vd->cache, bi);
+        if (!dbs.meta) continue;
 
         /* Search metadata artists matching credit text */
         db_meta_artist_search_result_t *artists = NULL;
         size_t artist_count = 0;
         quadrature_result_t res = db_meta_search_artists(
-            meta_db, credit_text, 50, &artists, &artist_count);
+            dbs.meta, credit_text, 50, &artists, &artist_count);
 
         if (res != QUADRATURE_OK || artist_count == 0) {
             if (artists) db_meta_artist_search_results_free(artists, artist_count);
@@ -126,8 +127,7 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
         }
 
         /* Get main DB for positional bridge */
-        quadrature_db_t *lib_db = library_cache_get_db(vd->cache, li);
-        gboolean have_lib_db = (lib_db != NULL);
+        gboolean have_lib_db = (dbs.db != NULL);
 
         /* For each matched artist, get credits and resolve to entity IDs */
         for (size_t ai = 0; ai < artist_count; ai++) {
@@ -137,7 +137,7 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
             db_meta_artist_credit_t *credits = NULL;
             size_t credit_count = 0;
             res = db_meta_get_credits_by_artist(
-                meta_db, artist_mbid, role_gid, &credits, &credit_count);
+                dbs.meta, artist_mbid, role_gid, &credits, &credit_count);
 
             if (res == QUADRATURE_OK && credit_count > 0 && have_lib_db) {
                 for (size_t ci = 0; ci < credit_count; ci++) {
@@ -145,7 +145,7 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
                     if (!c->release_mbid) continue;
 
                     int64_t local_track_id = 0;
-                    if (db_get_track_by_position(lib_db, c->release_mbid,
+                    if (db_get_track_by_position(dbs.db, c->release_mbid,
                             c->disc_num, c->track_num, &local_track_id) == QUADRATURE_OK) {
                         int64_t global_track_id = LIBRARY_MAKE_GLOBAL_ID(li, local_track_id);
                         const library_track_info_t *track =

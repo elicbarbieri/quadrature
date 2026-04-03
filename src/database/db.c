@@ -52,14 +52,14 @@ static const char* SCHEMA_SQL =
     "  UNIQUE(album_id, path)"
     ");"
 
-    // Multi-artist junction table
+    // Multi-artist junction table (WITHOUT ROWID: composite PK, small rows)
     "CREATE TABLE IF NOT EXISTS track_artists ("
     "  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,"
     "  artist_id INTEGER NOT NULL REFERENCES artists(id),"
     "  position INTEGER NOT NULL DEFAULT 0,"
     "  join_phrase TEXT NOT NULL DEFAULT '',"
     "  PRIMARY KEY (track_id, artist_id)"
-    ");"
+    ") WITHOUT ROWID;"
 
     // Full-text search — multi-column standalone FTS5
     // BM25 weights configured separately via apply_fts_rank_config() after table creation.
@@ -76,19 +76,29 @@ static const char* SCHEMA_SQL =
     "  scan_generation INTEGER NOT NULL DEFAULT 0"
     ");"
 
-    // Indexes
+    // Indexes — albums
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_path ON albums(path) WHERE path != '';"
     "CREATE INDEX IF NOT EXISTS idx_albums_artist_year_title ON albums(artist_id, year, title);"
     "CREATE INDEX IF NOT EXISTS idx_albums_mb_release ON albums(musicbrainz_release_id) WHERE musicbrainz_release_id IS NOT NULL;"
     "CREATE INDEX IF NOT EXISTS idx_albums_mb_status ON albums(mb_status);"
-    "CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id, track_num);"
+    "CREATE INDEX IF NOT EXISTS idx_albums_year_title ON albums(year, title COLLATE NOCASE);"
+
+    // Indexes — tracks (album_id, disc_num, track_num matches warming ORDER BY)
+    "CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id, disc_num, track_num);"
     "CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);"
     "CREATE INDEX IF NOT EXISTS idx_tracks_year ON tracks(year);"
     "CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre);"
     "CREATE INDEX IF NOT EXISTS idx_tracks_album_genre ON tracks(album_id, genre);"
+
+    // Indexes — artists
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_artists_mbid ON artists(musicbrainz_id) WHERE musicbrainz_id IS NOT NULL;"
+    "CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name COLLATE NOCASE);"
+
+    // Indexes — track_artists (covering: position+artist_id avoids table lookup)
     "CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);"
-    "CREATE INDEX IF NOT EXISTS idx_track_artists_track ON track_artists(track_id, position);"
+    "CREATE INDEX IF NOT EXISTS idx_track_artists_track ON track_artists(track_id, position, artist_id);"
+
+    // Indexes — errors
     "CREATE INDEX IF NOT EXISTS idx_errors_path ON indexer_errors(path);"
     "CREATE INDEX IF NOT EXISTS idx_errors_generation ON indexer_errors(scan_generation);";
 
@@ -131,6 +141,7 @@ static quadrature_result_t apply_pragmas(sqlite3* db) {
     sqlite3_exec(db, "PRAGMA mmap_size=268435456", NULL, NULL, NULL);  // 256MB mmap for reads
     sqlite3_exec(db, "PRAGMA wal_autocheckpoint=10000", NULL, NULL, NULL);  // defer checkpoint until ~40MB burst
     sqlite3_busy_timeout(db, 5000);
+    sqlite3_exec(db, "PRAGMA optimize", NULL, NULL, NULL);  // update planner statistics
     return QUADRATURE_OK;
 }
 
@@ -288,6 +299,112 @@ void db_prepare_stmts(quadrature_db_t* db) {
         "SELECT al.id, al.title, COALESCE(ar.name,'') "
         "FROM albums al LEFT JOIN artists ar ON al.artist_id = ar.id WHERE al.id = ?",
         -1, &db->sync_album_fts, NULL);
+
+    /* ── Cached read statements ────────────────────────────────────────── */
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, "
+        "       t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "
+        "       t.artist_display "
+        "FROM tracks t "
+        "LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0 "
+        "LEFT JOIN artists a ON a.id = ta.artist_id "
+        "LEFT JOIN albums al ON t.album_id = al.id "
+        "WHERE t.id = ?",
+        -1, &db->read_track_by_id, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT a.id, a.name, a.musicbrainz_id, "
+        "COUNT(DISTINCT al.id), COUNT(DISTINCT ta.track_id) "
+        "FROM artists a "
+        "LEFT JOIN albums al ON al.artist_id = a.id "
+        "LEFT JOIN track_artists ta ON ta.artist_id = a.id "
+        "WHERE a.id = ? "
+        "GROUP BY a.id",
+        -1, &db->read_artist_by_id, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
+        "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
+        "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g "
+        "   FROM tracks WHERE album_id = al.id AND genre IS NOT NULL AND genre != '')) AS genres, "
+        "  al.path, al.musicbrainz_release_id "
+        "FROM albums al "
+        "LEFT JOIN artists a ON al.artist_id = a.id "
+        "WHERE al.id = ?",
+        -1, &db->read_album_by_id, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT COUNT(*) FROM albums WHERE artist_id = ?",
+        -1, &db->read_albums_by_artist_count, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
+        "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
+        "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g "
+        "   FROM tracks WHERE album_id = al.id AND genre IS NOT NULL AND genre != '')) AS genres, "
+        "  al.path, al.musicbrainz_release_id "
+        "FROM albums al "
+        "LEFT JOIN artists a ON al.artist_id = a.id "
+        "WHERE al.artist_id = ? "
+        "ORDER BY al.year, al.title COLLATE NOCASE",
+        -1, &db->read_albums_by_artist, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM
+        " WHERE t.album_id = ?"
+        " ORDER BY t.disc_num, t.track_num, t.title COLLATE NOCASE",
+        -1, &db->read_tracks_by_album, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT COUNT(*) FROM track_artists WHERE track_id = ?",
+        -1, &db->read_track_artists_count, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT ta.artist_id, a.name, ta.join_phrase, ta.position "
+        "FROM track_artists ta "
+        "LEFT JOIN artists a ON a.id = ta.artist_id "
+        "WHERE ta.track_id = ? "
+        "ORDER BY ta.position",
+        -1, &db->read_track_artists, NULL);
+
+    /* Warming iterators — no JOINs, no aggregates, maximum throughput.
+     * Entities loaded in earlier phases; derived fields computed in C. */
+    /* No WHERE EXISTS — orphan artists pruned by indexer finalize.
+     * ORDER BY rowid = pure sequential B-tree scan. */
+    sqlite3_prepare_v2(db->db,
+        "SELECT a.id, a.name, a.musicbrainz_id "
+        "FROM artists a "
+        "ORDER BY a.id",
+        -1, &db->iter_all_artists, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT al.id, al.title, al.artist_id, al.year, al.path, "
+        "al.musicbrainz_release_id "
+        "FROM albums al "
+        "ORDER BY al.id",
+        -1, &db->iter_all_albums, NULL);
+
+    /* ORDER BY rowid = pure sequential table scan, no index overhead.
+     * Album grouping and disc/track ordering done in C (Phase 4). */
+    sqlite3_prepare_v2(db->db,
+        "SELECT t.id, t.title, t.path, t.duration_ms, t.track_num, "
+        "t.disc_num, t.year, t.album_id, t.genre, t.artist_display "
+        "FROM tracks t "
+        "ORDER BY t.id",
+        -1, &db->iter_all_tracks, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT ta.track_id, ta.artist_id, ta.join_phrase, ta.position "
+        "FROM track_artists ta "
+        "ORDER BY ta.track_id, ta.position",
+        -1, &db->iter_all_track_artists, NULL);
+
+    sqlite3_prepare_v2(db->db,
+        "SELECT (SELECT MAX(id) FROM artists),"
+        "       (SELECT MAX(id) FROM albums),"
+        "       (SELECT MAX(id) FROM tracks)",
+        -1, &db->get_max_ids, NULL);
 }
 
 void db_finalize_stmts(quadrature_db_t* db) {
@@ -310,6 +427,14 @@ void db_finalize_stmts(quadrature_db_t* db) {
         // merge_duplicate_artist cached statements
         &db->select_artist_by_name_and_mbid,
         &db->delete_artist_fts, &db->delete_artist,
+        // cached read statements
+        &db->read_track_by_id, &db->read_artist_by_id, &db->read_album_by_id,
+        &db->read_albums_by_artist_count, &db->read_albums_by_artist,
+        &db->read_tracks_by_album, &db->read_track_artists_count,
+        &db->read_track_artists,
+        &db->iter_all_artists, &db->iter_all_albums,
+        &db->iter_all_tracks, &db->iter_all_track_artists,
+        &db->get_max_ids,
     };
     for (size_t i = 0; i < G_N_ELEMENTS(stmts); i++) {
         if (*stmts[i]) { sqlite3_finalize(*stmts[i]); *stmts[i] = NULL; }
@@ -402,6 +527,15 @@ quadrature_result_t db_open_readonly(const char* path, quadrature_db_t** out) {
      * so no need to set it here. READWRITE + query_only gives us WAL read
      * access without the ability to modify data. */
     sqlite3_exec(db->db, "PRAGMA query_only = ON;", NULL, NULL, NULL);
+
+    /* Performance PRAGMAs for read-heavy warming workload.
+     * journal_mode inherited from DB file (already WAL from writer). */
+    sqlite3_exec(db->db, "PRAGMA temp_store = MEMORY;", NULL, NULL, NULL);
+    sqlite3_exec(db->db, "PRAGMA cache_size = -64000;", NULL, NULL, NULL);  /* 64MB page cache */
+    sqlite3_exec(db->db, "PRAGMA mmap_size = 268435456;", NULL, NULL, NULL);  /* 256MB mmap */
+    sqlite3_busy_timeout(db->db, 5000);
+
+    db_prepare_stmts(db);
 
     *out = db;
     return QUADRATURE_OK;
@@ -544,6 +678,22 @@ quadrature_result_t db_commit_batch(quadrature_db_t* db) {
     db_unlock(db);
 
     return (rc == SQLITE_OK) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+// =============================================================================
+// Read Transaction (snapshot isolation for bulk reads)
+// =============================================================================
+
+quadrature_result_t db_begin_read(quadrature_db_t *db) {
+    if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+    sqlite3_exec(db->db, "BEGIN", NULL, NULL, NULL);
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_end_read(quadrature_db_t *db) {
+    if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+    sqlite3_exec(db->db, "END", NULL, NULL, NULL);
+    return QUADRATURE_OK;
 }
 
 // =============================================================================

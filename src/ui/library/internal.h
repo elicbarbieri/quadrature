@@ -73,7 +73,7 @@ void artwork_manager_prefetch_fullsize(ArtworkManager *mgr, int64_t album_id);
  * Async: queues work to a worker thread; adds "artwork-loading" CSS class to the
  * art container during load, then sets the texture via idle callback.
  * picture: must be a GtkPicture widget. */
-void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr, int lib_index,
+void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr,
                                              int64_t album_id, GtkWidget *picture);
 
 void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id,
@@ -486,6 +486,11 @@ typedef struct UiRowSizeGroups UiRowSizeGroups;
 
 /* credits_view.c — info button wiring and MB credits popover builders */
 void wire_info_buttons(GtkWidget *card, UnifiedDetailData *ud);
+GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
+                                        const char *artist_mbid,
+                                        const char *artist_name,
+                                        int64_t viewed_artist_id,
+                                        GHashTable *skip_track_ids);
 guint append_credit_rows(UnifiedDetailData *ud,
                          const char *artist_mbid,
                          const char *artist_name,

@@ -485,19 +485,19 @@ If buffer is already cached, `get_locked()` returns immediately and player trans
 
 ## Performance Characteristics
 
-| Operation          | Complexity | Lock     | Notes                           |
-| ------------------ | ---------- | -------- | ------------------------------- |
-| load()             | O(1)       | GMutex   | Hash insert + queue push        |
-| lock()             | O(1)       | GMutex   | Hash lookup + atomic incr       |
-| wait_ready()       | Blocking   | GCond    | Blocks until decode complete    |
-| unlock()           | O(1)       | GMutex   | Atomic decrement                |
-| unlock_delayed()   | O(1)       | GMutex   | Schedules g_timeout             |
-| get_locked()       | O(1)       | GMutex   | Hash lookup                     |
-| get_status()       | O(1)       | GMutex   | Hash lookup                     |
-| get_stats()        | O(n)       | GMutex   | Iterates buffers for duration   |
-| get_decode_events()| O(n)       | GMutex   | Copies event ring buffer        |
-| evict_lru()        | O(n)       | GMutex   | Scans queue until freed         |
-| decode (3min song) | ~1-3s      | Internal | Recorded in decode events       |
+| Operation           | Complexity | Lock     | Notes                         |
+| ------------------- | ---------- | -------- | ----------------------------- |
+| load()              | O(1)       | GMutex   | Hash insert + queue push      |
+| lock()              | O(1)       | GMutex   | Hash lookup + atomic incr     |
+| wait_ready()        | Blocking   | GCond    | Blocks until decode complete  |
+| unlock()            | O(1)       | GMutex   | Atomic decrement              |
+| unlock_delayed()    | O(1)       | GMutex   | Schedules g_timeout           |
+| get_locked()        | O(1)       | GMutex   | Hash lookup                   |
+| get_status()        | O(1)       | GMutex   | Hash lookup                   |
+| get_stats()         | O(n)       | GMutex   | Iterates buffers for duration |
+| get_decode_events() | O(n)       | GMutex   | Copies event ring buffer      |
+| evict_lru()         | O(n)       | GMutex   | Scans queue until freed       |
+| decode (3min song)  | ~1-3s      | Internal | Recorded in decode events     |
 
 The cache adds ~100-300 microseconds of latency to track start (cache hit) due to mutex acquisition. Cache misses add decode time (typically 1-3 seconds for a full track). The 200ms delayed unlock adds negligible overhead—buffers remain locked slightly longer but this doesn't impact cache pressure in practice.
 

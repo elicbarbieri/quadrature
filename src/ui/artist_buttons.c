@@ -49,20 +49,6 @@ void on_album_button_clicked(GtkButton *button, gpointer user_data) {
  * Popover Lifecycle
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Unparent popover when the overflow button leaves the widget tree.
- * Fires before dispose/finalize, so both widgets are still alive.
- * Prevents "Finalizing GtkButton with children" and floating-ref warnings. */
-static void on_overflow_btn_unroot(GObject *obj, GParamSpec *pspec, gpointer popover) {
-    (void)pspec;
-    if (gtk_widget_get_root(GTK_WIDGET(obj)) == NULL)
-        gtk_widget_unparent(GTK_WIDGET(popover));
-}
-
-static void on_overflow_btn_clicked(GtkButton *button, gpointer popover) {
-    (void)button;
-    gtk_popover_popup(GTK_POPOVER(popover));
-}
-
 static void on_popover_artist_btn_clicked(GtkButton *button, gpointer popover) {
     RowCallbacks *cbs = g_object_get_data(G_OBJECT(button), "artist-callbacks-ref");
     gpointer artist_id_ptr = g_object_get_data(G_OBJECT(button), "artist-id");
@@ -97,6 +83,16 @@ GtkWidget* create_artist_button(int64_t artist_id, const char* name, RowCallback
     return btn;
 }
 
+static void on_overflow_btn_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    gtk_popover_popup(GTK_POPOVER(user_data));
+}
+
+static void on_overflow_btn_destroy(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    gtk_widget_unparent(GTK_WIDGET(user_data));
+}
+
 GtkWidget* create_artist_overflow_button(const GPtrArray* artists, RowCallbacks* callbacks) {
     GtkWidget *btn = gtk_button_new_with_label("…");
     gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
@@ -108,11 +104,8 @@ GtkWidget* create_artist_overflow_button(const GPtrArray* artists, RowCallbacks*
     GtkWidget *popover = gtk_popover_new();
     gtk_popover_set_child(GTK_POPOVER(popover), vbox);
     gtk_widget_set_parent(popover, btn);
-
-    g_signal_connect(btn, "notify::root",
-                     G_CALLBACK(on_overflow_btn_unroot), popover);
-    g_signal_connect(btn, "clicked",
-                     G_CALLBACK(on_overflow_btn_clicked), popover);
+    g_signal_connect(btn, "clicked", G_CALLBACK(on_overflow_btn_clicked), popover);
+    g_signal_connect(btn, "destroy", G_CALLBACK(on_overflow_btn_destroy), popover);
 
     RowCallbacks *cbs_copy = NULL;
     if (callbacks) {

@@ -8,11 +8,13 @@ Two-tier artwork system: managed thumbnails with full caching infrastructure, fu
 
 For list views. Uses frequency-weighted LRU texture cache, per-library mmapped atlases, worker pool, and latency metrics.
 
-Thumbnails are generated during library scan, resized to Npx, and packed into a per-library atlas file. Any albums without locatable artwork get a grey placeholder thumbnail in the UI.
+Thumbnails are generated during library scan (Phase 4), resized to Npx (default 48), and packed into a per-library atlas file. Any albums without locatable artwork get a grey placeholder thumbnail in the UI.
 
 ```c
 ArtworkManager *artwork_manager_new(library_cache_t *library,
-                                    const char **library_roots, int lib_count,
+                                    const char **data_roots,
+                                    const char **music_roots,
+                                    int lib_count,
                                     int cache_size, size_t cache_count);
 void artwork_manager_free(ArtworkManager *mgr);
 
@@ -23,6 +25,8 @@ void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWid
 void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int lib_idx,
                                           const char *atlas_path);
 ```
+
+`data_roots` are used for atlas file lookups; `music_roots` are used as fallback paths for embedded artwork extraction.
 
 ### Global IDs
 
@@ -46,8 +50,24 @@ The library_cache already returns global IDs from all entity accessors, so calls
 Atlas files live alongside the library database:
 
 ```
-{library_root}/artwork/{N}px-artwork-{unix_timestamp}.atlas
+{data_root}/artwork/{N}px-artwork-{unix_timestamp}.atlas
 ```
+
+Header (32 bytes, packed):
+
+```c
+typedef struct __attribute__((packed)) {
+    char magic[4];          // "QDRA"
+    uint32_t version;       // 2
+    uint32_t count;         // Number of entries
+    uint32_t flags;         // Reserved
+    uint32_t thumb_size;    // Thumbnail size in pixels (default 48)
+    uint8_t channels;       // Color channels (3 = RGB)
+    uint8_t reserved[11];
+} artwork_atlas_header_t;
+```
+
+Body: `[sorted int64 album_ids][pixel_data: count × stride]` where `stride = thumb_size × thumb_size × channels`.
 
 - **One atlas per library root** — no shared global atlas
 - **Timestamped filenames** — each indexer run produces a new file, enabling atomic swap without disturbing live readers
@@ -82,36 +102,60 @@ IndexerController emits "completed" signal on main thread:
 
 ## Artist Thumbnails
 
-For artist list views. Same architecture as album thumbnails (mmap'd atlas, texture cache, shared workers) with MBID-based dedup across libraries.
+For artist list views. Uses a **global** UUID-keyed atlas (shared across all libraries), separate texture cache, and shared workers.
 
 ```c
 // Async load artist thumbnail into widget (cache hit = synchronous, miss = deferred worker)
 void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id, GtkWidget *image);
 
-// Reload a specific library's artist atlas after indexing completes
-void artwork_manager_reload_artist_atlas(ArtworkManager *mgr, int lib_idx,
-                                          const char *artist_atlas_path);
+// Reload the global artist atlas (no lib_idx — single shared atlas)
+void artwork_manager_reload_artist_atlas(ArtworkManager *mgr);
 ```
 
-### Atlas Format
+### Global Artist Atlas
 
-Artist atlases use the same binary format as album atlases (same header, sorted int64 keys, fixed-stride raw RGB pixels). They live alongside album atlases:
+Unlike album atlases (per-library, int64 keys), the artist atlas is **global** and **UUID-keyed**:
 
 ```
-{library_root}/artwork/{N}px-artists.atlas
+~/.local/share/quadrature/atlas/artists.atlas
+~/.local/share/quadrature/atlas/artists.atlas.lock   ← flock() write serialization
 ```
 
-- **One per library root** — built during Phase 7 (fanart.tv artist art fetch)
-- **No timestamp rotation** — single file overwritten each indexer run
-- **Keyed by local artist DB ID** — same binary search as album atlas
+Header (32 bytes, packed):
+
+```c
+typedef struct __attribute__((packed)) {
+    char magic[4];          // "QDAR"
+    uint32_t version;       // 1
+    uint32_t art_count;     // Number of entries with artwork
+    uint32_t no_art_count;  // Number of known-no-artwork entries
+    uint32_t thumb_size;    // Thumbnail size in pixels
+    uint8_t channels;       // Color channels (3 = RGB)
+    uint8_t reserved[11];
+} artist_atlas_header_t;
+```
+
+Body layout:
+
+```
+[uuid_keys: uint8_t[art_count][16]]          sorted binary MusicBrainz UUIDs
+[pixels: uint8_t[art_count][pixel_stride]]   dense RGB pixel data
+[no_art_count: uint32_t]                     trailing count
+[no_art_uuids: uint8_t[no_art_count][16]]   sorted binary UUIDs (skip on future runs)
+```
+
+- **Built during Phase 7** (fanart.tv artist art fetch)
+- **UUID-keyed** — 16-byte binary MusicBrainz UUIDs, sorted for binary search
+- **Write serialization** via `flock()` on lock file — safe across concurrent indexer runs
+- **No timestamp rotation** — single file, atomically rewritten each run
 
 ### MBID Dedup (Multi-Library)
 
 When an artist appears in multiple libraries with the same MusicBrainz ID, the library cache merges them into a single entity with `merged_source_ids[]`. The texture cache keys by the merged artist's global ID, so:
 
-1. First request → tries each source library's artist atlas until found
-2. Subsequent requests → O(1) cache hit on the merged ID
-3. No separate MBID hashmap needed — dedup is implicit via cache merge
+1. First request → resolve artist_id → MBID (via library cache) → binary search in global atlas
+1. Subsequent requests → O(1) cache hit on the merged global ID
+1. No separate MBID hashmap needed — dedup is implicit via cache merge
 
 ### Artist Cache
 

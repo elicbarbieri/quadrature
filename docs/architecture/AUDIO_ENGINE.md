@@ -62,17 +62,18 @@ audio_pipeline_set_player_track(pipeline, player_id, track_id);
 ### Preconditions
 
 `audio_pipeline_set_player_track()` asserts:
+
 - Track is in cache (NOT_FOUND state will crash with assertion)
 - Caller must call `audio_cache_load()` before `set_player_track()`
 
 ### What set_player_track() Does
 
 1. Unlocks old current and next tracks
-2. Resets player position and state
-3. Locks the new track (already in cache)
-4. If decode READY: attaches buffer, fires callback immediately
-5. If decode LOADING: marks pending, 50ms timeout will attach when ready
-6. Preloads NEXT track (async) for instant auto-advance
+1. Resets player position and state
+1. Locks the new track (already in cache)
+1. If decode READY: attaches buffer, fires callback immediately
+1. If decode LOADING: marks pending, 50ms timeout will attach when ready
+1. Preloads NEXT track (async) for instant auto-advance
 
 ### Prefetch for Instant Playback
 
@@ -118,11 +119,13 @@ Shuttle mode determines how variable-speed playback is processed. Mode is set pe
 ```
 
 **State is preserved during track changes.** When `set_player_track()` is called:
+
 - PLAYING stays PLAYING (new track plays immediately)
 - STOPPED stays STOPPED
 - No intermediate LOADING state
 
 **STOPPED only occurs from:**
+
 - Explicit `stop()` call (user presses stop)
 - Last track ends with repeat OFF
 - ERROR state transition
@@ -148,9 +151,9 @@ typedef struct audio_player {
 The engine resolves `next_track_id` via Library Cache - no UI involvement. When `set_player_track()` is called:
 
 1. Unlocks old current and next tracks
-2. Locks and loads new track
-3. Queries `library_cache_get_next_track_id()` for next track
-4. If not in repeat mode and next exists: locks and preloads it
+1. Locks and loads new track
+1. Queries `library_cache_get_next_track_id()` for next track
+1. If not in repeat mode and next exists: locks and preloads it
 
 ## API
 
@@ -270,13 +273,13 @@ void audio_pipeline_get_player_stats(pipeline, player_id, &stats);
 
 **Dashboard panels:**
 
-| Panel | Data Source | Type |
-|-------|-----------|------|
-| Callback Latency Distribution | `perf_get_histogram_stats(&perf->callback_time[id], &hist)` | Histogram (p50/p90/p99/max) |
-| Budget Utilization Trend | `perf_get_timeseries(&perf->budget_pct[id], ...)` | Line chart (%, 1 sample/sec) |
-| Underrun Rate | `stats.underrun_rate_pct` | Gauge |
-| Scheduling Jitter | `stats.jitter_ms` | Gauge |
-| Anomaly Events | `perf_read_logs(perf, ...)` | Event log (timestamped) |
+| Panel                         | Data Source                                                 | Type                         |
+| ----------------------------- | ----------------------------------------------------------- | ---------------------------- |
+| Callback Latency Distribution | `perf_get_histogram_stats(&perf->callback_time[id], &hist)` | Histogram (p50/p90/p99/max)  |
+| Budget Utilization Trend      | `perf_get_timeseries(&perf->budget_pct[id], ...)`           | Line chart (%, 1 sample/sec) |
+| Underrun Rate                 | `stats.underrun_rate_pct`                                   | Gauge                        |
+| Scheduling Jitter             | `stats.jitter_ms`                                           | Gauge                        |
+| Anomaly Events                | `perf_read_logs(perf, ...)`                                 | Event log (timestamped)      |
 
 **Health thresholds:**
 
@@ -342,13 +345,13 @@ The engine handles track transitions autonomously using Library Cache for next-t
 
 **Mechanism:** `get_next_track_id()` is called **immediately** after every track state change:
 
-| Trigger              | Action                                        |
-| -------------------- | --------------------------------------------- |
-| Track loaded         | Resolve and preload next track                |
-| Skip forward         | Play preloaded next, resolve new next         |
-| Skip backward        | Play previous, resolve new next               |
-| Repeat toggled OFF   | Resolve and preload next track                |
-| Repeat toggled ON    | Unlock and clear next track (will loop)       |
+| Trigger            | Action                                  |
+| ------------------ | --------------------------------------- |
+| Track loaded       | Resolve and preload next track          |
+| Skip forward       | Play preloaded next, resolve new next   |
+| Skip backward      | Play previous, resolve new next         |
+| Repeat toggled OFF | Resolve and preload next track          |
+| Repeat toggled ON  | Unlock and clear next track (will loop) |
 
 **Result:** The next track is always preloaded before the user can skip again.
 
@@ -365,9 +368,10 @@ Background:     preload T3    preload T4    preload T5    preload T6
 ```
 
 Each skip is **instant** because:
+
 1. Buffer is already decoded and locked in AudioCache
-2. No database query needed (LibraryCache has album order cached)
-3. No UI round-trip required
+1. No database query needed (LibraryCache has album order cached)
+1. No UI round-trip required
 
 ### Flow: Track Set
 

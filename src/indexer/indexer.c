@@ -914,7 +914,7 @@ static void artist_cache_preload_cb(int64_t id, const char* name, void* user_dat
 static artist_cache_t* artist_cache_new(quadrature_db_t* db) {
     artist_cache_t* c = g_new0(artist_cache_t, 1);
     c->by_name = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-    db_iter_artists(db, artist_cache_preload_cb, c);
+    db_iter_artist_names(db, artist_cache_preload_cb, c);
     return c;
 }
 

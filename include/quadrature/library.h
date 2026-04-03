@@ -84,7 +84,7 @@ static inline uint32_t library_mask_after_toggle(uint32_t current_mask,
     (((int64_t)((lib_idx) & 0xFFFF) << 48) | \
      ((int64_t)(local_id) & INT64_C(0x0000FFFFFFFFFFFF)))
 
-/** Extract the 0-based library index from a global entity ID. */
+/** Extract the bitmap index (stable library ID) from a global entity ID. */
 #define LIBRARY_GLOBAL_ID_LIB(id) \
     ((int)(((int64_t)(id) >> 48) & 0xFFFF))
 
@@ -118,6 +118,7 @@ typedef struct {
 typedef struct {
     int64_t album_id;        /* Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id) */
     int64_t artist_id;       /* Global ID */
+    int64_t first_track_id;  /* Global ID of first track (disc 1, track 1); 0 if unknown */
     char* title;
     char* artist_name;
     char* path;              /* Relative path to album directory */
@@ -211,15 +212,19 @@ typedef struct {
     const char *db_path;       /* Path to quadrature.sqlite for this library */
     const char *music_base;    /* Root directory for resolving relative file paths */
     const char *display_name;  /* Human-readable name; NULL = use basename(music_base) */
+    int bitmap_index;          /* Stable library ID encoded in global entity IDs.
+                                * Must be unique across sources and ≥ 0.
+                                * Typically settings->libraries[i].library_index. */
 } library_cache_source_t;
 
 /**
  * Create a multi-library cache.
  *
- * Each source describes one library slot. Slots are assigned indices 0..N-1.
- * Entity IDs exposed by all accessor functions are GLOBAL IDs encoded with
- * LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id). Library 0 global IDs are
- * identical to their local DB IDs (backward compatible).
+ * Each source describes one library slot. Entity IDs exposed by all accessor
+ * functions are GLOBAL IDs encoded with LIBRARY_MAKE_GLOBAL_ID(bitmap_index,
+ * local_id), where bitmap_index is the stable library ID from the source
+ * descriptor.  Slots are addressed internally by position but looked up
+ * externally via the bitmap_index → slot mapping.
  *
  * @param sources Array of library source descriptors (NULL if source_count == 0)
  * @param source_count Number of sources (0 = empty cache, slots added later)
@@ -229,20 +234,6 @@ typedef struct {
 quadrature_result_t library_cache_create_multi(const library_cache_source_t *sources,
                                                 int source_count,
                                                 library_cache_t **out);
-
-/**
- * Create a new library cache (single-library convenience wrapper).
- *
- * Equivalent to library_cache_create_multi() with source_count=1.
- *
- * @param db_path Path to the SQLite database file
- * @param music_base Base path for resolving full file paths
- * @param out Output pointer for created cache
- * @return QUADRATURE_OK on success
- */
-quadrature_result_t library_cache_create(const char* db_path,
-                                         const char* music_base,
-                                         library_cache_t** out);
 
 /**
  * Destroy a library cache.
@@ -255,31 +246,28 @@ void library_cache_destroy(library_cache_t* cache);
  * Add a new library slot to an existing cache.
  *
  * Cancels all warming threads (realloc may move the slots array), initializes
- * the new slot from the source descriptor, and returns its 0-based index.
+ * the new slot from the source descriptor, and registers it in the bitmap map.
  * Caller should call library_cache_warm_slot() afterward to populate it.
  *
  * @param cache Library cache
- * @param source Source descriptor for the new library
- * @return New slot index on success, -1 on failure
+ * @param source Source descriptor (must include a unique bitmap_index)
+ * @return The bitmap_index on success, -1 on failure
  */
 int library_cache_add_slot(library_cache_t *cache,
                            const library_cache_source_t *source);
 
 /**
- * Remove a library slot and shift remaining slots down.
+ * Remove a library slot by bitmap index.
  *
- * Cancels all warming threads, destroys the target slot, shifts higher slots
- * down by one (clearing their cached entities since baked-in global IDs change),
- * and rebuilds cross-library artist merging.
- *
- * After removal, shifted slots are in IDLE state and must be rewarmed
- * (e.g. via library_cache_start_warming()).
+ * Cancels all warming threads, destroys the target slot, compacts remaining
+ * slots, and rebuilds cross-library artist merging.  Global IDs for
+ * remaining libraries are unchanged (they encode bitmap_index, not position).
  *
  * @param cache Library cache
- * @param lib_idx 0-based slot index to remove
+ * @param bitmap_index Stable library ID to remove
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t library_cache_remove_slot(library_cache_t *cache, int lib_idx);
+quadrature_result_t library_cache_remove_slot(library_cache_t *cache, int bitmap_index);
 
 /* =============================================================================
  * Entity Getters (Single Item)
@@ -518,6 +506,7 @@ typedef enum {
     LIBRARY_CACHE_IDLE = 0,
     LIBRARY_CACHE_WARMING = 1,
     LIBRARY_CACHE_READY = 2,
+    LIBRARY_CACHE_REFRESHING = 3,  /* READY + COW refresh in progress; old data still live */
 } library_cache_state_t;
 
 /**
@@ -539,13 +528,32 @@ void library_cache_set_ready_callback(library_cache_t* cache,
 void library_cache_start_warming(library_cache_t* cache);
 
 /**
+ * Warm a specific slot and block until it is fully populated.
+ * For testing and CLI tools that need synchronous cache population.
+ * Other slots remain unaffected — the UI can display data from any
+ * slot that has reached READY independently.
+ */
+void library_cache_warm_slot_blocking(library_cache_t *cache, int bitmap_index);
+
+/**
  * Warm a specific library slot. No-op if slot is already warming or ready.
  * The ready callback fires on the main thread when this slot's warming
  * completes.
  *
- * @param lib_idx  0-based library slot index
+ * @param bitmap_index  Stable library ID
  */
-void library_cache_warm_slot(library_cache_t *cache, int lib_idx);
+void library_cache_warm_slot(library_cache_t *cache, int bitmap_index);
+
+/**
+ * Block until a slot's active background thread (warming or COW refresh)
+ * completes. No-op if no thread is running. Does NOT cancel the thread —
+ * just waits for natural completion.
+ *
+ * Useful for tests and CLI tools that need synchronous refresh.
+ *
+ * @param bitmap_index  Stable library ID
+ */
+void library_cache_await_slot(library_cache_t *cache, int bitmap_index);
 
 /* =============================================================================
  * Cache Management
@@ -565,9 +573,32 @@ void library_cache_clear(library_cache_t* cache);
  * Cross-library artist merging is rebuilt to remove the cleared slot's
  * stale merge state.
  *
- * @param lib_idx  0-based library slot index
+ * @param bitmap_index  Stable library ID
  */
-void library_cache_clear_slot(library_cache_t *cache, int lib_idx);
+void library_cache_clear_slot(library_cache_t *cache, int bitmap_index);
+
+/**
+ * COW refresh: build a new version of a library slot from its DB, sharing
+ * unchanged entities with the old slot via atomic refcounting.
+ *
+ * Flow:
+ *   1. SEED — new slot copies all entity pointers from old slot (rc bump)
+ *   2. DELTA — re-read changed albums/tracks/artists from DB, replace in new
+ *   3. REBUILD — reconstruct relationship arrays in new slot
+ *   4. SWAP — atomic bitmap_map pointer update
+ *   5. DRAIN — release old slot (shared entities survive, stale ones freed)
+ *
+ * The ready callback fires on the main thread when complete (same as warming).
+ *
+ * @param cache Library cache
+ * @param bitmap_index Stable library ID to refresh
+ * @param changed_album_local_ids Array of local album IDs that changed (from indexer)
+ * @param changed_count Number of changed albums (0 = full re-read from DB)
+ */
+void library_cache_refresh_slot(library_cache_t *cache,
+                                int bitmap_index,
+                                const int64_t *changed_album_local_ids,
+                                int changed_count);
 
 /* =============================================================================
  * Multi-Library Accessors
@@ -580,24 +611,40 @@ void library_cache_clear_slot(library_cache_t *cache, int lib_idx);
 int library_cache_get_library_count(library_cache_t* cache);
 
 /**
+ * Get the bitmap_index (stable library ID) for a slot at a given position.
+ * Useful for iterating: for (int i = 0; i < count; i++) { int bi = ..._get_bitmap_index(cache, i); }
+ *
+ * @param slot_position 0-based position in the internal slots array
+ * @return bitmap_index, or -1 if out of range
+ */
+int library_cache_get_bitmap_index(library_cache_t *cache, int slot_position);
+
+/**
  * Estimate memory bytes used by a single library slot's entity arrays.
  * O(1) computation from pre-tracked capacity × sizeof — suitable for
  * performance dashboard polling at 1-10Hz.
  *
  * @param cache Library cache
- * @param library_index Slot index (0-based)
+ * @param bitmap_index Stable library ID
  * @return Estimated bytes, or 0 if index invalid or slot is IDLE
  */
-size_t library_cache_get_slot_memory_bytes(library_cache_t* cache, int library_index);
+size_t library_cache_get_slot_memory_bytes(library_cache_t* cache, int bitmap_index);
 
 /**
- * Get cached readonly DB handles for a library slot.
- * Returns NULL if index is invalid or the DB file doesn't exist.
- * Caller must NOT close the returned handle.
+ * Readonly DB handles for a library slot. All pointers are cache-owned —
+ * caller must NOT close them. Any field may be NULL if the DB doesn't exist.
  */
-quadrature_meta_db_t *library_cache_get_meta_db(library_cache_t *cache, int lib_idx);
-quadrature_bios_db_t *library_cache_get_bios_db(library_cache_t *cache, int lib_idx);
-quadrature_db_t *library_cache_get_db(library_cache_t *cache, int lib_idx);
+typedef struct {
+    quadrature_db_t      *db;
+    quadrature_meta_db_t *meta;
+    quadrature_bios_db_t *bios;
+} library_cache_dbs_t;
+
+/**
+ * Get all cached readonly DB handles for a library slot in one lookup.
+ * Returns zeroed struct if bitmap_index is invalid.
+ */
+library_cache_dbs_t library_cache_get_dbs(library_cache_t *cache, int bitmap_index);
 
 /**
  * Get the display name for a library slot.
@@ -605,10 +652,10 @@ quadrature_db_t *library_cache_get_db(library_cache_t *cache, int lib_idx);
  * if none was configured.
  *
  * @param cache Library cache
- * @param library_index Slot index (0-based)
+ * @param bitmap_index Stable library ID
  * @return Static string owned by the cache; do not free. NULL if index invalid.
  */
-const char* library_cache_get_library_name(library_cache_t* cache, int library_index);
+const char* library_cache_get_library_name(library_cache_t* cache, int bitmap_index);
 
 /**
  * Update the display name for a library slot.
@@ -617,10 +664,10 @@ const char* library_cache_get_library_name(library_cache_t* cache, int library_i
  * The cache takes ownership of a copy of @p name.
  *
  * @param cache  Library cache
- * @param lib_idx  Slot index (0-based)
+ * @param bitmap_index  Stable library ID
  * @param name  New display name, or NULL
  */
-void library_cache_set_library_name(library_cache_t* cache, int lib_idx, const char* name);
+void library_cache_set_library_name(library_cache_t* cache, int bitmap_index, const char* name);
 
 /**
  * Set availability for a library slot.
@@ -632,13 +679,13 @@ void library_cache_set_library_name(library_cache_t* cache, int lib_idx, const c
  *
  * Thread-safe (atomic store).
  */
-void library_cache_set_available(library_cache_t* cache, int lib_idx, gboolean available);
+void library_cache_set_available(library_cache_t* cache, int bitmap_index, gboolean available);
 
 /**
  * Get availability for a library slot.
  * Thread-safe (atomic load).
  */
-gboolean library_cache_get_available(library_cache_t* cache, int lib_idx);
+gboolean library_cache_get_available(library_cache_t* cache, int bitmap_index);
 
 #ifdef __cplusplus
 }

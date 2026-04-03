@@ -181,14 +181,54 @@ quadrature_result_t db_get_album_by_id(quadrature_db_t* db, int64_t album_id,
 quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_id, db_album_t** out, size_t* count);
 quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id, db_track_t** out, size_t* count);
 
-/**
- * Stream ALL tracks ordered by album_id, disc_num, track_num.
- * Single prepared statement — designed for cache warming to avoid N+1 per-album queries.
- * Callback receives a borrowed db_track_t (string pointers valid only during callback).
- * Return false from callback to stop iteration (e.g. cancellation).
- */
-typedef bool (*db_track_iter_cb)(const db_track_t* track, void* user_data);
-quadrature_result_t db_iter_all_tracks(quadrature_db_t* db, db_track_iter_cb cb, void* user_data);
+/* -----------------------------------------------------------------------------
+ * Warming Iterators — no JOINs, no aggregates, maximum throughput.
+ * Entities loaded in earlier phases; derived fields (counts, genres) computed
+ * in C during Phase 4. Callbacks receive borrowed pointers valid only during
+ * the callback. Return false to stop iteration (e.g. cancellation).
+ * ----------------------------------------------------------------------------- */
+
+/** Stream all artists that have at least one track. */
+typedef bool (*db_artist_iter_cb)(const db_artist_t *artist, void *user_data);
+quadrature_result_t db_iter_all_artists(quadrature_db_t *db,
+                                         db_artist_iter_cb cb, void *user_data);
+
+/** Stream all albums ordered by rowid. */
+typedef bool (*db_album_iter_cb)(const db_album_t *album, void *user_data);
+quadrature_result_t db_iter_all_albums(quadrature_db_t *db,
+                                        db_album_iter_cb cb, void *user_data);
+
+/** Track row from the tracks table only (no JOINs). */
+typedef struct {
+    int64_t id;
+    int64_t album_id;
+    const char *title;
+    const char *path;
+    const char *genre;
+    const char *artist_display;
+    uint32_t duration_ms;
+    uint16_t track_num;
+    uint16_t disc_num;
+    uint16_t year;
+} db_track_lean_t;
+
+/** Stream all tracks ordered by (album_id, disc_num, track_num). */
+typedef bool (*db_track_iter_cb)(const db_track_lean_t *track, void *user_data);
+quadrature_result_t db_iter_all_tracks(quadrature_db_t *db,
+                                        db_track_iter_cb cb, void *user_data);
+
+/** Stream all track-artist associations ordered by (track_id, position). */
+typedef bool (*db_track_artist_iter_cb)(int64_t track_id, int64_t artist_id,
+                                        const char *join_phrase, int position,
+                                        void *user_data);
+quadrature_result_t db_iter_all_track_artists(quadrature_db_t *db,
+                                               db_track_artist_iter_cb cb,
+                                               void *user_data);
+
+/** Fetch max IDs for all three entity tables in a single query. */
+quadrature_result_t db_get_max_ids(quadrature_db_t *db,
+                                    int64_t *max_artist, int64_t *max_album,
+                                    int64_t *max_track);
 
 /* =============================================================================
  * Track Artist Operations (multi-artist via junction table)
@@ -313,11 +353,10 @@ quadrature_result_t db_upsert_track_with_album(quadrature_db_t* db, const db_ind
 int64_t db_get_or_create_artist(quadrature_db_t* db, const char* name);
 
 /**
- * Iterate all artists -- calls cb(id, name, user_data) for each row.
- * Used by the indexer to pre-load the in-memory artist name cache before Phase 2.
+ * Iterate all artist (id, name) pairs — used by indexer to pre-load name cache.
  */
-typedef void (*db_artist_iter_cb)(int64_t id, const char* name, void* user_data);
-quadrature_result_t db_iter_artists(quadrature_db_t* db, db_artist_iter_cb cb, void* user_data);
+typedef void (*db_artist_name_iter_cb)(int64_t id, const char *name, void *user_data);
+quadrature_result_t db_iter_artist_names(quadrature_db_t *db, db_artist_name_iter_cb cb, void *user_data);
 
 /* =============================================================================
  * MusicBrainz Resolution Operations
@@ -411,6 +450,10 @@ quadrature_result_t db_set_album_mb_status(quadrature_db_t* db,
  */
 quadrature_result_t db_update_album_artist(quadrature_db_t* db, int64_t album_id,
     int64_t artist_id, bool is_compilation);
+
+/** Begin/end a deferred read transaction (snapshot isolation for bulk reads). */
+quadrature_result_t db_begin_read(quadrature_db_t *db);
+quadrature_result_t db_end_read(quadrature_db_t *db);
 
 /* WAL checkpoint for durability */
 quadrature_result_t db_checkpoint(quadrature_db_t* db);

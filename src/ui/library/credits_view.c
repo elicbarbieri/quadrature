@@ -121,8 +121,9 @@ static void on_popover_credit_navigate(GtkButton *btn, gpointer data) {
     int64_t found_artist_id = 0;
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int i = 0; i < lib_count && found_artist_id == 0; i++) {
-        if (!library_cache_get_available(ud->cache, i)) continue;
-        quadrature_db_t *lib_db = library_cache_get_db(ud->cache, i);
+        int bi = library_cache_get_bitmap_index(ud->cache, i);
+        if (!library_cache_get_available(ud->cache, bi)) continue;
+        quadrature_db_t *lib_db = library_cache_get_dbs(ud->cache, bi).db;
         if (lib_db)
             db_get_artist_by_mbid(lib_db, artist_mbid, &found_artist_id);
     }
@@ -183,6 +184,137 @@ static char *format_credit_role(const char *link_type_name, const char *attribut
 }
 
 /**
+ * Collect aggregated MB credit roles per album for a given artist.
+ * Returns a GHashTable mapping album_id (GSIZE_TO_POINTER) → GPtrArray<char*>
+ * of unique role strings.  The caller owns the returned table; both keys
+ * (trivial pointers) and values (GPtrArray with g_free element destructor)
+ * are freed when the table is destroyed.  Returns NULL if no credits found.
+ */
+static void _roles_array_free(gpointer p) { g_ptr_array_unref(p); }
+
+GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
+                                       const char *artist_mbid,
+                                       const char *artist_name,
+                                       int64_t viewed_artist_id,
+                                       GHashTable *skip_track_ids) {
+    if (!artist_mbid || !ud->settings) return NULL;
+
+    /* album_id (GSIZE_TO_POINTER) → CreditRoleSet* (internal, freed at end) */
+    GHashTable *album_roles = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                                     g_free, credit_role_set_free);
+
+    int lib_count = library_cache_get_library_count(ud->cache);
+    for (int li = 0; li < lib_count; li++) {
+        int bi = library_cache_get_bitmap_index(ud->cache, li);
+        if (!library_cache_get_available(ud->cache, bi)) continue;
+        library_cache_dbs_t dbs = library_cache_get_dbs(ud->cache, bi);
+        if (!dbs.meta || !dbs.db) continue;
+
+        db_meta_artist_credit_t *credits = NULL;
+        size_t credit_count = 0;
+        quadrature_result_t res = db_meta_get_credits_by_artist(
+            dbs.meta, artist_mbid, NULL, &credits, &credit_count);
+        if (res != QUADRATURE_OK || credit_count == 0) {
+            db_meta_artist_credits_free(credits, credit_count);
+            continue;
+        }
+
+        for (size_t i = 0; i < credit_count; i++) {
+            db_meta_artist_credit_t *c = &credits[i];
+            if (!c->release_mbid) continue;
+
+            char *role = format_credit_role(c->link_type_name, c->attributes);
+            if (!role) continue;
+
+            /* Resolve to local track_id → global */
+            int64_t local_tid = 0;
+            if (db_get_track_by_position(dbs.db, c->release_mbid,
+                    c->disc_num, c->track_num, &local_tid) != QUADRATURE_OK) {
+                g_free(role);
+                continue;
+            }
+            int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(li, local_tid);
+
+            /* Skip tracks from own albums */
+            if (skip_track_ids &&
+                g_hash_table_contains(skip_track_ids,
+                                      GSIZE_TO_POINTER((gsize)track_id))) {
+                g_free(role);
+                continue;
+            }
+
+            /* Skip if viewed artist is already a track artist */
+            {
+                const GPtrArray *track_artists =
+                    library_cache_get_track_artists(ud->cache, track_id);
+                gboolean already_credited = FALSE;
+                if (track_artists && artist_name) {
+                    for (guint j = 0; j < track_artists->len; j++) {
+                        const library_track_artist_t *a =
+                            g_ptr_array_index(track_artists, j);
+                        if (a->artist_id == viewed_artist_id ||
+                            (a->name && g_ascii_strcasecmp(a->name, artist_name) == 0)) {
+                            already_credited = TRUE;
+                            break;
+                        }
+                    }
+                }
+                if (already_credited) { g_free(role); continue; }
+            }
+
+            const library_track_info_t *track = library_cache_get_track(ud->cache, track_id);
+            if (!track || track->album_id <= 0) { g_free(role); continue; }
+
+            /* Skip own-album by artist name match */
+            {
+                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id);
+                if (al && al->artist_name && artist_name &&
+                    g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
+                    g_free(role);
+                    continue;
+                }
+            }
+
+            /* Accumulate per-album roles */
+            int64_t *akey = g_new(int64_t, 1);
+            *akey = track->album_id;
+            CreditRoleSet *ars = g_hash_table_lookup(album_roles, akey);
+            if (!ars) {
+                ars = credit_role_set_new(track->album_id);
+                g_hash_table_insert(album_roles, akey, ars);
+            } else {
+                g_free(akey);
+            }
+            credit_role_set_add(ars, role);  /* ownership transferred */
+        }
+
+        db_meta_artist_credits_free(credits, credit_count);
+    }
+
+    if (g_hash_table_size(album_roles) == 0) {
+        g_hash_table_destroy(album_roles);
+        return NULL;
+    }
+
+    /* Convert CreditRoleSet → GPtrArray<char*> in output table */
+    GHashTable *out = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+                                             NULL, _roles_array_free);
+    GHashTableIter iter;
+    gpointer k, v;
+    g_hash_table_iter_init(&iter, album_roles);
+    while (g_hash_table_iter_next(&iter, &k, &v)) {
+        CreditRoleSet *ars = v;
+        GPtrArray *roles = g_ptr_array_new_with_free_func(g_free);
+        for (guint i = 0; i < ars->roles->len; i++)
+            g_ptr_array_add(roles, g_strdup(g_ptr_array_index(ars->roles, i)));
+        g_hash_table_insert(out, GSIZE_TO_POINTER((gsize)ars->id), roles);
+    }
+
+    g_hash_table_destroy(album_roles);
+    return out;
+}
+
+/**
  * Collect MB credit tracks for an artist and append to appears_on lists.
  * - Track rows go into appears_on_tracks (with per-track credit annotation)
  * - Album rows go into appears_on_albums (with aggregated role pills)
@@ -210,22 +342,22 @@ guint append_credit_rows(UnifiedDetailData *ud,
 
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int li = 0; li < lib_count; li++) {
-        if (!library_cache_get_available(ud->cache, li)) continue;
-        quadrature_meta_db_t *meta_db = library_cache_get_meta_db(ud->cache, li);
-        if (!meta_db) continue;
+        int bi = library_cache_get_bitmap_index(ud->cache, li);
+        if (!library_cache_get_available(ud->cache, bi)) continue;
+        library_cache_dbs_t dbs = library_cache_get_dbs(ud->cache, bi);
+        if (!dbs.meta) continue;
 
         db_meta_artist_credit_t *credits = NULL;
         size_t credit_count = 0;
         quadrature_result_t res = db_meta_get_credits_by_artist(
-            meta_db, artist_mbid, NULL, &credits, &credit_count);
+            dbs.meta, artist_mbid, NULL, &credits, &credit_count);
 
         if (res != QUADRATURE_OK || credit_count == 0) {
             db_meta_artist_credits_free(credits, credit_count);
             continue;
         }
 
-        quadrature_db_t *lib_db = library_cache_get_db(ud->cache, li);
-        if (!lib_db) {
+        if (!dbs.db) {
             db_meta_artist_credits_free(credits, credit_count);
             continue;
         }
@@ -239,7 +371,7 @@ guint append_credit_rows(UnifiedDetailData *ud,
 
             /* Resolve to local track_id, then convert to global */
             int64_t local_tid = 0;
-            if (db_get_track_by_position(lib_db, c->release_mbid,
+            if (db_get_track_by_position(dbs.db, c->release_mbid,
                     c->disc_num, c->track_num, &local_tid) != QUADRATURE_OK) {
                 g_free(role);
                 continue;
@@ -394,7 +526,7 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
     if (!release_mbid || library_index < 0)
         return;
 
-    quadrature_meta_db_t *meta_db = library_cache_get_meta_db(ud->cache, library_index);
+    quadrature_meta_db_t *meta_db = library_cache_get_dbs(ud->cache, library_index).meta;
 
     if (meta_db) {
         char *rec_mbid = NULL;

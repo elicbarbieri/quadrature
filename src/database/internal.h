@@ -63,6 +63,21 @@ struct quadrature_db {
     sqlite3_stmt* update_album_mb;             /* UPDATE albums SET title=?,mb_release_id=?,... WHERE id=? */
     sqlite3_stmt* sync_album_fts;              /* INSERT OR REPLACE INTO albums_fts for single album */
 
+    // Cached read statements (pre-compiled for warming + merged-count hot paths)
+    sqlite3_stmt* read_track_by_id;
+    sqlite3_stmt* read_artist_by_id;
+    sqlite3_stmt* read_album_by_id;
+    sqlite3_stmt* read_albums_by_artist_count;
+    sqlite3_stmt* read_albums_by_artist;
+    sqlite3_stmt* read_tracks_by_album;
+    sqlite3_stmt* read_track_artists_count;
+    sqlite3_stmt* read_track_artists;
+    sqlite3_stmt* iter_all_artists;           /* SELECT id, name, musicbrainz_id FROM artists */
+    sqlite3_stmt* iter_all_albums;            /* SELECT id, title, artist_id, year, path, mb_release_id FROM albums */
+    sqlite3_stmt* iter_all_tracks;            /* SELECT id, title, path, ... FROM tracks (no JOINs) */
+    sqlite3_stmt* iter_all_track_artists;     /* SELECT track_id, artist_id, join_phrase, position (no JOIN) */
+    sqlite3_stmt* get_max_ids;               /* SELECT MAX(id) from each entity table */
+
     // Transaction state
     bool in_transaction;
     int txn_depth;  // 0 = no txn, 1+ = nested depth (for batch transactions)
@@ -72,6 +87,21 @@ struct quadrature_db {
     sqlite3_stmt* delete_artist_fts;              /* DELETE FROM artists_fts WHERE rowid=? */
     sqlite3_stmt* delete_artist;                  /* DELETE FROM artists WHERE id=? */
 };
+
+// =============================================================================
+// Shared SQL fragments for track queries
+// =============================================================================
+
+#define TRACK_SELECT_COLS \
+    "t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, " \
+    "t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "       \
+    "al.musicbrainz_release_id, t.artist_display"
+
+#define TRACK_SELECT_FROM \
+    " FROM tracks t"                                                            \
+    " LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0"    \
+    " LEFT JOIN artists a ON a.id = ta.artist_id"                              \
+    " LEFT JOIN albums al ON t.album_id = al.id"
 
 // =============================================================================
 // Internal Functions (db.c)

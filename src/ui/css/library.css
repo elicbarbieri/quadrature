@@ -256,11 +256,6 @@
 
 /* Library Row Hover Effects */
 
-/* Track row overrides */
-.library-track-row .library-row-title {
-    transition: color 150ms ease-out;
-}
-
 .library-track-row .library-row-subtitle {
     font-size: 16px;
 }
@@ -316,21 +311,14 @@
 
 .library-card:hover { border-color: #555555; }
 
+.library-card.library-card-locked {
+    border-color: #333333;
+}
+
 .library-card-name {
     font-size: 24px;
     font-weight: 600;
     color: #e0e0e0;
-}
-
-.library-card-edit-btn {
-    min-width: 20px;
-    min-height: 20px;
-    padding: 2px;
-    opacity: 0.4;
-}
-
-.library-card-edit-btn:hover {
-    opacity: 1.0;
 }
 
 .library-card-path {
@@ -365,6 +353,71 @@
     min-height: 24px;
 }
 
+/* Reorder controls */
+.library-reorder {
+    min-width: 32px;
+}
+
+.library-reorder-btn {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 2px;
+    opacity: 0.5;
+}
+.library-reorder-btn:hover { opacity: 1.0; }
+.library-reorder-btn:disabled { opacity: 0.15; }
+
+.library-lock-btn {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 2px;
+}
+
+.library-lock-btn.library-locked {
+    opacity: 0.7;
+    color: #e5a640;
+}
+
+.library-lock-btn.library-unlocked {
+    opacity: 0.3;
+    color: #888888;
+}
+.library-lock-btn.library-unlocked:hover {
+    opacity: 0.7;
+}
+
+/* Edit section */
+.library-edit-section {
+    padding-top: 12px;
+    border-top: 1px solid #333333;
+}
+
+.library-edit-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #888888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.library-edit-heading {
+    font-size: 14px;
+    font-weight: 600;
+    color: #cccccc;
+}
+
+/* 3-state toggle buttons (Default / On / Off) */
+.library-toggle {
+    padding: 2px 10px;
+    font-size: 12px;
+    min-height: 24px;
+}
+
+.library-toggle:checked {
+    background-color: #3a3a3a;
+    color: #e0e0e0;
+}
+
 .progress-phase-error .progress-phase-title { color: #f87171; }
 .progress-phase-error .progress-phase-bar progress {
     background-color: transparent;
@@ -395,8 +448,6 @@
     padding: 1px 6px;
     font-size: 16px;
     font-weight: 500;
-    transition: color 150ms ease-out, background-color 150ms ease-out,
-                border-color 150ms ease-out;
 }
 
 .album-btn:hover {
@@ -423,8 +474,6 @@
     margin-right: 2px;
     font-size: 16px;
     font-weight: 500;
-    transition: color 150ms ease-out, background-color 150ms ease-out,
-                border-color 150ms ease-out;
 }
 
 .artist-btn:hover {
@@ -469,7 +518,6 @@
     border-radius: 0;
     border: 1px solid transparent;
     border-top-color: rgba(255, 255, 255, 0.04);
-    transition: border-radius 150ms ease-out;
 }
 
 .library-list > row > .library-row-first { border-radius: 8px 8px 0 0; border-top-color: transparent; }

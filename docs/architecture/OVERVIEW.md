@@ -34,17 +34,25 @@
 
 ## Indexer Pipeline
 
-Five-phase pipeline handles library scanning, metadata extraction, and MusicBrainz resolution:
+Eight-phase pipeline handles library scanning, metadata extraction, MusicBrainz resolution, and artist enrichment:
 
 ```
-Phase 1 — SCAN       Fast directory walk, stat() + hashmap delta detection
-Phase 2 — METADATA   Parallel FFmpeg metadata extraction + Chromaprint fingerprinting
-Phase 3 — ARTWORK    Parallel image processing → thumbnail atlas
-Phase 4 — RESOLVE    MusicBrainz resolution via local PostgreSQL (two-tier)
-Phase 5 — FINALIZE   Batch DB updates (mtimes, error flags, WAL checkpoint)
+Phase 1 — SCAN          Fast directory walk, stat() + hashmap delta detection
+Phase 2 — METADATA      Parallel FFmpeg tag extraction (no fingerprinting)
+Phase 3 — FINALIZE      Batch mtime flush + WAL checkpoint
+         ── INDEXER_LIBRARY_UPDATED ── library-cache reload → views refresh
+Phase 4 — ARTWORK       Parallel image processing → thumbnail atlas
+         ── INDEXER_ARTWORK_UPDATED ── atlas reload → views refresh
+Phase 5 — FINGERPRINT   Parallel Chromaprint + AcoustID fingerprinting
+Phase 6 — RESOLVE       Batched MusicBrainz PostgreSQL resolution
+         ── INDEXER_LIBRARY_UPDATED ── library-cache reload → views refresh
+Phase 7 — ARTIST_ART    Fetch artist images from fanart.tv → global artist atlas
+         ── INDEXER_ARTWORK_UPDATED ── artist atlas reload → views refresh
+Phase 8 — ARTIST_BIO    Fetch artist bios from Wikipedia via Wikidata
+         ── INDEXER_COMPLETED ──
 ```
 
-Phase 4 uses a self-hosted MusicBrainz + AcoustID PostgreSQL database. Two-tier resolution: if the file has MB tags (e.g. from Picard), use them directly; otherwise, match cached fingerprints against local AcoustID via `acoustid_compare2()` + consensus voting. All resolved metadata written to SQLite — never modifies library files.
+Phases 5–6 use a self-hosted MusicBrainz + AcoustID PostgreSQL database. Two-tier resolution: if the file has MB tags (e.g. from Picard), use them directly; otherwise, fingerprint and match against local AcoustID via `acoustid_compare2()` + consensus voting. All resolved metadata written to SQLite — never modifies library files.
 
 See [Library System](LIBRARY_SYSTEM.md) for details.
 
@@ -58,14 +66,16 @@ See [Library System](LIBRARY_SYSTEM.md) for details.
 
 ## Threading
 
-| Thread       | Purpose                                    | Priority  |
-| ------------ | ------------------------------------------ | --------- |
-| Main         | GTK4 UI, user input                        | Normal    |
-| Decode Pool  | FFmpeg decode, resample (Audio Cache)      | Normal    |
-| Audio        | PipeWire callbacks, sample output          | Real-time |
-| Spectrum     | FFT analysis (reads from ring buffer)      | Normal    |
-| Indexer Pool | Metadata extraction, fingerprinting        | Normal    |
-| MB Resolver  | PostgreSQL queries for MusicBrainz data    | Normal    |
+| Thread        | Purpose                                 | Priority  |
+| ------------- | --------------------------------------- | --------- |
+| Main          | GTK4 UI, user input                     | Normal    |
+| Decode Pool   | FFmpeg decode, resample (Audio Cache)   | Normal    |
+| Audio         | PipeWire callbacks, sample output       | Real-time |
+| Spectrum      | FFT analysis (reads from ring buffer)   | Normal    |
+| Indexer Pool  | Metadata extraction, fingerprinting     | Normal    |
+| MB Resolver   | PostgreSQL queries for MusicBrainz data | Normal    |
+| Cache Warming | Per-library background cache population | Normal    |
+| Prefetch      | posix_fadvise kernel page cache hints   | Normal    |
 
 Communication via lock-free ring buffers and atomics. Audio thread reads pre-decoded buffers from cache — no decoding on real-time thread. See [Audio Cache](AUDIO_CACHE.md) and [Audio Engine](AUDIO_ENGINE.md) for details.
 
@@ -96,19 +106,26 @@ auto_resolve = true
 
 ## Library Storage
 
-Each library root is self-contained:
+Each library has a `library_root` (music files, read-only) and a `data_root` (databases + artwork).
+`data_root` defaults to `library_root` but can be overridden (e.g. for read-only network drives).
 
 ```
+{data_root}/
+  quadrature.sqlite           ← all track/album/artist metadata
+  quadrature-metadata.sqlite  ← MusicBrainz recording relations + release info (after Phase 6)
+  quadrature-bios.sqlite      ← Artist biographies from Wikipedia (after Phase 8)
+  artwork/                    ← thumbnail atlas files (48px-artwork-{unix_time}.atlas)
+
 {library_root}/
-  quadrature.sqlite           ← all metadata for tracks under this root
-  quadrature-metadata.sqlite  ← MusicBrainz recording relations (after Phase 4 runs)
-  artwork/                    ← thumbnail atlas files (96px-{unix_time}.atlas)
   Artist/Album/               ← audio files (never modified by quadrature)
+
+~/.local/share/quadrature/atlas/
+  artists.atlas               ← global UUID-keyed artist thumbnail atlas (shared across libraries)
 ```
 
-Multiple libraries can be registered. Each has its own SQLite database and artwork directory — no shared state between libraries.
+Multiple libraries can be registered. Each has its own SQLite databases and artwork directory. The only shared state is the global artist atlas.
 
-`quadrature-metadata.sqlite` is written by Phase 4 on successful MB resolution and read on-demand by the UI. If absent, the UI shows no relation data — no crash. See [Metadata Architecture](METADATA.md) for schema details.
+`quadrature-metadata.sqlite` is written by Phase 6 on successful MB resolution and read on-demand by the UI. `quadrature-bios.sqlite` is written by Phase 8. If either is absent, the UI simply shows no relation/bio data — no crash. See [Metadata Architecture](METADATA.md) for schema details.
 
 ## Platform Requirements
 
@@ -117,3 +134,4 @@ Multiple libraries can be registered. Each has its own SQLite database and artwo
 - Chromaprint (audio fingerprinting)
 - libpq (PostgreSQL client for MusicBrainz + AcoustID)
 - Self-hosted PostgreSQL with MusicBrainz + AcoustID data
+- libcurl (fanart.tv artist art, Wikipedia bios)

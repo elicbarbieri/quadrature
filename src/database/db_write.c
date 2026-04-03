@@ -11,7 +11,7 @@
 // Get or Create Artist
 // =============================================================================
 
-quadrature_result_t db_iter_artists(quadrature_db_t* db, db_artist_iter_cb cb, void* user_data) {
+quadrature_result_t db_iter_artist_names(quadrature_db_t* db, db_artist_name_iter_cb cb, void* user_data) {
     if (!db || !cb) return QUADRATURE_ERROR_INVALID_PARAM;
 
     sqlite3_stmt* stmt;

@@ -142,8 +142,9 @@ static void on_bio_background_loaded(GObject *src, GAsyncResult *res, gpointer d
 
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int i = 0; i < lib_count; i++) {
-        if (!library_cache_get_available(ud->cache, i)) continue;
-        quadrature_bios_db_t *bios_db = library_cache_get_bios_db(ud->cache, i);
+        int bi = library_cache_get_bitmap_index(ud->cache, i);
+        if (!library_cache_get_available(ud->cache, bi)) continue;
+        quadrature_bios_db_t *bios_db = library_cache_get_dbs(ud->cache, bi).bios;
         if (!bios_db) continue;
 
         char *bio_text = NULL;
@@ -484,7 +485,7 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
     /* Query metadata DB for enriched release info (non-fatal) */
     db_meta_release_t *meta_release = NULL;
     if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] && lib_idx >= 0) {
-        quadrature_meta_db_t *meta_db = library_cache_get_meta_db(ud->cache, lib_idx);
+        quadrature_meta_db_t *meta_db = library_cache_get_dbs(ud->cache, lib_idx).meta;
         if (meta_db)
             db_meta_get_release(meta_db, album->musicbrainz_release_id, &meta_release);
     }
@@ -725,15 +726,59 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
         .col1 = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL),
     };
 
-    /* Populate normal appearance album rows */
+    /* Pre-collect MB credit roles per album so cache appearance rows can
+     * be annotated with role pills (Vocal, Producer, etc.) in one pass. */
+    const library_artist_info_t *artist_info = library_cache_get_artist(ud->cache, artist_id);
+    GHashTable *credit_album_roles = NULL;  /* album_id → GPtrArray<char*> */
+    if (artist_info && artist_info->musicbrainz_id && ud->settings) {
+        credit_album_roles = collect_credit_album_roles(
+            ud, artist_info->musicbrainz_id,
+            artist_name ? artist_name : "Unknown Artist",
+            artist_id, skip_track_ids);
+    }
+
+    /* Populate appearance album rows, annotated with credit roles if available */
     if (appearance_albums && appearance_albums->len > 0) {
         for (guint i = 0; i < appearance_albums->len; i++) {
             const library_album_info_t *album = g_ptr_array_index(appearance_albums, i);
+
+            /* Look up credit roles: check rep album_id and merged source IDs */
+            GPtrArray *roles = credit_album_roles
+                ? g_hash_table_lookup(credit_album_roles,
+                                      GSIZE_TO_POINTER((gsize)album->album_id))
+                : NULL;
+            if (!roles && credit_album_roles) {
+                for (int m = 0; m < album->merged_source_count && !roles; m++) {
+                    roles = g_hash_table_lookup(credit_album_roles,
+                        GSIZE_TO_POINTER((gsize)album->merged_source_ids[m]));
+                }
+            }
+
+            /* Build credit annotation if roles found */
+            UiAlbumCreditInfo acredit;
+            const UiAlbumCreditInfo *credit_ptr = NULL;
+            if (roles && roles->len > 0) {
+                g_ptr_array_add(roles, NULL);  /* sentinel for roles array */
+                acredit = (UiAlbumCreditInfo){
+                    .artist_name = artist_name,
+                    .artist_id   = artist_id,
+                    .roles       = (const char *const *)roles->pdata,
+                    .role_count  = roles->len - 1,
+                };
+                credit_ptr = &acredit;
+            }
+
             GtkWidget *row = ui_create_album_row(album, ud->cache, ud->art_mgr, TRUE,
                                                    (RowCallbacks *)&ud->cbs.artist_cbs,
-                                                   &album_groups, NULL);
+                                                   &album_groups, credit_ptr);
             ui_row_attach_handlers(row, (RowCallbacks *)&ud->cbs.album_cbs);
             gtk_list_box_append(GTK_LIST_BOX(ud->appears_on_albums), row);
+
+            /* Add merged source IDs to skip set so append_credit_rows
+             * won't re-create this album from a per-library ID. */
+            for (int m = 0; m < album->merged_source_count; m++)
+                g_hash_table_add(skip_album_ids,
+                    GSIZE_TO_POINTER((gsize)album->merged_source_ids[m]));
         }
     }
 
@@ -750,9 +795,8 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
         }
     }
 
-    /* Append MB credit rows (both tracks and albums) */
+    /* Append MB credit rows for albums/tracks NOT already shown */
     guint credit_count = 0;
-    const library_artist_info_t *artist_info = library_cache_get_artist(ud->cache, artist_id);
     if (artist_info && artist_info->musicbrainz_id && ud->settings) {
         credit_count = append_credit_rows(ud, artist_info->musicbrainz_id,
                                            artist_name ? artist_name : "Unknown Artist",
@@ -760,6 +804,8 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
                                            &track_groups, &album_groups);
     }
 
+    if (credit_album_roles)
+        g_hash_table_destroy(credit_album_roles);
     g_object_unref(track_groups.col1);
     g_object_unref(album_groups.col1);
     g_object_unref(album_groups.col2);

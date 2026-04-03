@@ -1887,11 +1887,15 @@ quadrature_result_t audio_pipeline_set_player_device(audio_pipeline_t* pipeline,
 
     /* Lockless early-out: skip PW lock entirely for no-op device changes.
      * target_device is only written under the PW lock, so worst case of a
-     * torn read is a single extra lock acquisition — not a safety issue. */
+     * torn read is a single extra lock acquisition — not a safety issue.
+     * Exception: if streams were deactivated (PW error recovery), always
+     * re-create even for the same device name. */
     const char* current = p->target_device[0] ? p->target_device : NULL;
     const char* new_dev = (device_name && device_name[0]) ? device_name : NULL;
-    if ((current == NULL && new_dev == NULL) ||
-        (current && new_dev && strcmp(current, new_dev) == 0))
+    bool streams_up = atomic_load(&p->streams_active);
+    if (streams_up &&
+        ((current == NULL && new_dev == NULL) ||
+         (current && new_dev && strcmp(current, new_dev) == 0)))
         return QUADRATURE_OK;
 
     pw_thread_loop_lock(pipeline->loop);

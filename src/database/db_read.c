@@ -15,19 +15,9 @@ static char* build_fts_query(const char* input);
 quadrature_result_t db_get_track(quadrature_db_t* db, int64_t id, db_track_t** out) {
     if (!db || !out) return QUADRATURE_ERROR_INVALID_PARAM;
 
-    const char* sql =
-        "SELECT t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, "
-        "       t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "
-        "       t.artist_display "
-        "FROM tracks t "
-        "LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0 "
-        "LEFT JOIN artists a ON a.id = ta.artist_id "
-        "LEFT JOIN albums al ON t.album_id = al.id "
-        "WHERE t.id = ?";
-
-    sqlite3_stmt* stmt;
+    sqlite3_stmt* stmt = db->read_track_by_id;
     db_lock(db);
-    sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
+    sqlite3_reset(stmt);
     sqlite3_bind_int64(stmt, 1, id);
 
     quadrature_result_t res = QUADRATURE_ERROR_FILE_NOT_FOUND;
@@ -35,7 +25,7 @@ quadrature_result_t db_get_track(quadrature_db_t* db, int64_t id, db_track_t** o
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         db_track_t* track = calloc(1, sizeof(db_track_t));
         if (!track) {
-            sqlite3_finalize(stmt);
+            sqlite3_reset(stmt);
             db_unlock(db);
             return QUADRATURE_ERROR_OUT_OF_MEMORY;
         }
@@ -67,7 +57,7 @@ quadrature_result_t db_get_track(quadrature_db_t* db, int64_t id, db_track_t** o
         res = QUADRATURE_OK;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     db_unlock(db);
     return res;
 }
@@ -95,28 +85,15 @@ quadrature_result_t db_get_artist_by_id(quadrature_db_t* db, int64_t artist_id,
 
     db_lock(db);
 
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db,
-        "SELECT a.id, a.name, a.musicbrainz_id, "
-        "COUNT(DISTINCT al.id), COUNT(DISTINCT ta.track_id) "
-        "FROM artists a "
-        "LEFT JOIN albums al ON al.artist_id = a.id "
-        "LEFT JOIN track_artists ta ON ta.artist_id = a.id "
-        "WHERE a.id = ? "
-        "GROUP BY a.id",
-        -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        db_unlock(db);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
+    sqlite3_stmt* stmt = db->read_artist_by_id;
+    sqlite3_reset(stmt);
     sqlite3_bind_int64(stmt, 1, artist_id);
 
     *out = NULL;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         db_artist_t* a = calloc(1, sizeof(db_artist_t));
         if (!a) {
-            sqlite3_finalize(stmt);
+            sqlite3_reset(stmt);
             db_unlock(db);
             return QUADRATURE_ERROR_OUT_OF_MEMORY;
         }
@@ -130,7 +107,7 @@ quadrature_result_t db_get_artist_by_id(quadrature_db_t* db, int64_t artist_id,
         *out = a;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     db_unlock(db);
     return QUADRATURE_OK;
 }
@@ -141,20 +118,8 @@ quadrature_result_t db_get_album_by_id(quadrature_db_t* db, int64_t album_id, db
 
     db_lock(db);
 
-    const char* sql =
-        "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
-        "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
-        "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g FROM tracks WHERE album_id = al.id AND genre IS NOT NULL AND genre != '')) AS genres, "
-        "  al.path, al.musicbrainz_release_id "
-        "FROM albums al "
-        "LEFT JOIN artists a ON al.artist_id = a.id "
-        "WHERE al.id = ?";
-
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        db_unlock(db);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
+    sqlite3_stmt* stmt = db->read_album_by_id;
+    sqlite3_reset(stmt);
     sqlite3_bind_int64(stmt, 1, album_id);
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -176,7 +141,7 @@ quadrature_result_t db_get_album_by_id(quadrature_db_t* db, int64_t album_id, db
         *out = a;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     db_unlock(db);
     return QUADRATURE_OK;
 }
@@ -189,12 +154,12 @@ quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_
     db_lock(db);
 
     // Get count first
-    sqlite3_stmt* cnt_stmt;
-    sqlite3_prepare_v2(db->db, "SELECT COUNT(*) FROM albums WHERE artist_id = ?", -1, &cnt_stmt, NULL);
+    sqlite3_stmt* cnt_stmt = db->read_albums_by_artist_count;
+    sqlite3_reset(cnt_stmt);
     sqlite3_bind_int64(cnt_stmt, 1, artist_id);
     sqlite3_step(cnt_stmt);
     size_t n = sqlite3_column_int64(cnt_stmt, 0);
-    sqlite3_finalize(cnt_stmt);
+    sqlite3_reset(cnt_stmt);
 
     if (n == 0) {
         db_unlock(db);
@@ -211,18 +176,8 @@ quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
 
-    const char* sql =
-        "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
-        "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
-        "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g FROM tracks WHERE album_id = al.id AND genre IS NOT NULL AND genre != '')) AS genres, "
-        "  al.path, al.musicbrainz_release_id "
-        "FROM albums al "
-        "LEFT JOIN artists a ON al.artist_id = a.id "
-        "WHERE al.artist_id = ? "
-        "ORDER BY al.year, al.title COLLATE NOCASE";
-
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
+    sqlite3_stmt* stmt = db->read_albums_by_artist;
+    sqlite3_reset(stmt);
     sqlite3_bind_int64(stmt, 1, artist_id);
 
     size_t i = 0;
@@ -244,7 +199,7 @@ quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_
         i++;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     db_unlock(db);
 
     gint64 elapsed = g_get_monotonic_time() - start_time;
@@ -254,19 +209,6 @@ quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_
     *count = i;
     return QUADRATURE_OK;
 }
-
-/* Shared SQL for track queries — same column order used by both
- * db_get_tracks_by_album() and db_iter_all_tracks(). */
-#define TRACK_SELECT_COLS \
-    "t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, " \
-    "t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "       \
-    "al.musicbrainz_release_id, t.artist_display"
-
-#define TRACK_SELECT_FROM \
-    " FROM tracks t"                                                            \
-    " LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0"    \
-    " LEFT JOIN artists a ON a.id = ta.artist_id"                              \
-    " LEFT JOIN albums al ON t.album_id = al.id"
 
 /* Fill a db_track_t from the current row of a statement using TRACK_SELECT_COLS order.
  * If `borrow` is true, string pointers alias SQLite memory (valid until next step/finalize).
@@ -320,17 +262,8 @@ quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id
 
     db_lock(db);
 
-    const char* sql = "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM
-        " WHERE t.album_id = ?"
-        " ORDER BY t.disc_num, t.track_num, t.title COLLATE NOCASE";
-
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        g_critical("db_get_tracks_by_album: prepare failed: %s", sqlite3_errmsg(db->db));
-        db_unlock(db);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
+    sqlite3_stmt* stmt = db->read_tracks_by_album;
+    sqlite3_reset(stmt);
     sqlite3_bind_int64(stmt, 1, album_id);
 
     /* Grow dynamically — no COUNT query needed. Most albums have <30 tracks. */
@@ -360,7 +293,7 @@ quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id
         i++;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     db_unlock(db);
 
     gint64 elapsed = g_get_monotonic_time() - start_time;
@@ -376,32 +309,135 @@ quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id
     return QUADRATURE_OK;
 }
 
-quadrature_result_t db_iter_all_tracks(quadrature_db_t* db, db_track_iter_cb cb, void* user_data) {
+/* =============================================================================
+ * Warming Iterators (no JOINs — resolve from already-loaded slot arrays)
+ * ============================================================================= */
+
+quadrature_result_t db_iter_all_artists(quadrature_db_t *db,
+                                         db_artist_iter_cb cb, void *user_data) {
     if (!db || !cb) return QUADRATURE_ERROR_INVALID_PARAM;
 
     db_lock(db);
+    sqlite3_stmt *stmt = db->iter_all_artists;
+    if (!stmt) { db_unlock(db); return QUADRATURE_OK; }
+    sqlite3_reset(stmt);
 
-    const char* sql = "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM
-        " ORDER BY t.album_id, t.disc_num, t.track_num";
-
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        /* Table may not exist yet on first run (before indexer creates schema) */
-        db_unlock(db);
-        return QUADRATURE_OK;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        db_artist_t a = {0};
+        a.id   = sqlite3_column_int64(stmt, 0);
+        a.name = (char *)sqlite3_column_text(stmt, 1);
+        a.musicbrainz_id = (char *)sqlite3_column_text(stmt, 2);
+        if (!a.name) a.name = "Unknown Artist";
+        if (!cb(&a, user_data)) break;
     }
 
-    /* Stream rows at drive speed — zero intermediate allocation.
-     * Callback receives borrowed pointers (valid only during callback). */
+    sqlite3_reset(stmt);
+    db_unlock(db);
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_iter_all_albums(quadrature_db_t *db,
+                                        db_album_iter_cb cb, void *user_data) {
+    if (!db || !cb) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    db_lock(db);
+    sqlite3_stmt *stmt = db->iter_all_albums;
+    if (!stmt) { db_unlock(db); return QUADRATURE_OK; }
+    sqlite3_reset(stmt);
+
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        db_track_t track = {0};
-        fill_track_from_row(stmt, &track, true);
-        if (!cb(&track, user_data))
+        db_album_t a = {0};
+        a.id        = sqlite3_column_int64(stmt, 0);
+        a.title     = (char *)sqlite3_column_text(stmt, 1);
+        a.artist_id = sqlite3_column_int64(stmt, 2);
+        a.year      = sqlite3_column_int(stmt, 3);
+        a.path      = (char *)sqlite3_column_text(stmt, 4);
+        a.musicbrainz_release_id = (char *)sqlite3_column_text(stmt, 5);
+        if (!a.title) a.title = "Unknown Album";
+        if (!cb(&a, user_data)) break;
+    }
+
+    sqlite3_reset(stmt);
+    db_unlock(db);
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_iter_all_tracks(quadrature_db_t *db,
+                                        db_track_iter_cb cb, void *user_data) {
+    if (!db || !cb) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    db_lock(db);
+    sqlite3_stmt *stmt = db->iter_all_tracks;
+    if (!stmt) { db_unlock(db); return QUADRATURE_OK; }
+    sqlite3_reset(stmt);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        db_track_lean_t t = {0};
+        t.id          = sqlite3_column_int64(stmt, 0);
+        t.title       = (const char *)sqlite3_column_text(stmt, 1);
+        t.path        = (const char *)sqlite3_column_text(stmt, 2);
+        t.duration_ms = (uint32_t)sqlite3_column_int(stmt, 3);
+        t.track_num   = (uint16_t)sqlite3_column_int(stmt, 4);
+        t.disc_num    = (uint16_t)sqlite3_column_int(stmt, 5);
+        if (t.disc_num == 0) t.disc_num = 1;
+        t.year        = (uint16_t)sqlite3_column_int(stmt, 6);
+        t.album_id    = sqlite3_column_int64(stmt, 7);
+        t.genre       = (const char *)sqlite3_column_text(stmt, 8);
+        t.artist_display = (const char *)sqlite3_column_text(stmt, 9);
+        if (!t.title) t.title = "Unknown";
+        if (!cb(&t, user_data)) break;
+    }
+
+    sqlite3_reset(stmt);
+    db_unlock(db);
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_iter_all_track_artists(quadrature_db_t *db,
+                                               db_track_artist_iter_cb cb,
+                                               void *user_data) {
+    if (!db || !cb) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    db_lock(db);
+    sqlite3_stmt *stmt = db->iter_all_track_artists;
+    if (!stmt) { db_unlock(db); return QUADRATURE_OK; }
+    sqlite3_reset(stmt);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int64_t track_id  = sqlite3_column_int64(stmt, 0);
+        int64_t artist_id = sqlite3_column_int64(stmt, 1);
+        const char *jp    = (const char *)sqlite3_column_text(stmt, 2);
+        int position      = sqlite3_column_int(stmt, 3);
+        if (!cb(track_id, artist_id, jp ? jp : "", position, user_data))
             break;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
+    db_unlock(db);
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_get_max_ids(quadrature_db_t *db,
+                                    int64_t *max_artist, int64_t *max_album,
+                                    int64_t *max_track) {
+    if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    db_lock(db);
+    sqlite3_stmt *stmt = db->get_max_ids;
+    if (!stmt) { db_unlock(db); return QUADRATURE_OK; }
+    sqlite3_reset(stmt);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (max_artist) *max_artist = sqlite3_column_int64(stmt, 0);
+        if (max_album)  *max_album  = sqlite3_column_int64(stmt, 1);
+        if (max_track)  *max_track  = sqlite3_column_int64(stmt, 2);
+    } else {
+        if (max_artist) *max_artist = 0;
+        if (max_album)  *max_album  = 0;
+        if (max_track)  *max_track  = 0;
+    }
+
+    sqlite3_reset(stmt);
     db_unlock(db);
     return QUADRATURE_OK;
 }
@@ -1202,14 +1238,12 @@ quadrature_result_t db_get_track_artists(quadrature_db_t* db, int64_t track_id,
     }
 
     // Get count first
-    sqlite3_stmt* cnt_stmt;
-    sqlite3_prepare_v2(db->db,
-        "SELECT COUNT(*) FROM track_artists WHERE track_id = ?",
-        -1, &cnt_stmt, NULL);
+    sqlite3_stmt* cnt_stmt = db->read_track_artists_count;
+    sqlite3_reset(cnt_stmt);
     sqlite3_bind_int64(cnt_stmt, 1, track_id);
     sqlite3_step(cnt_stmt);
     size_t n = sqlite3_column_int64(cnt_stmt, 0);
-    sqlite3_finalize(cnt_stmt);
+    sqlite3_reset(cnt_stmt);
 
     if (n == 0) {
         if (need_unlock) db_unlock(db);
@@ -1222,14 +1256,8 @@ quadrature_result_t db_get_track_artists(quadrature_db_t* db, int64_t track_id,
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
 
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db->db,
-        "SELECT ta.artist_id, a.name, ta.join_phrase, ta.position "
-        "FROM track_artists ta "
-        "LEFT JOIN artists a ON a.id = ta.artist_id "
-        "WHERE ta.track_id = ? "
-        "ORDER BY ta.position",
-        -1, &stmt, NULL);
+    sqlite3_stmt* stmt = db->read_track_artists;
+    sqlite3_reset(stmt);
     sqlite3_bind_int64(stmt, 1, track_id);
 
     size_t i = 0;
@@ -1243,7 +1271,7 @@ quadrature_result_t db_get_track_artists(quadrature_db_t* db, int64_t track_id,
         i++;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     if (need_unlock) db_unlock(db);
 
     *out = results;
