@@ -1330,6 +1330,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
     size_t total_processed = 0;
     resolve_queue_item_t** batch = g_new0(resolve_queue_item_t*, MB_BATCH_SIZE);
     bool can_prefetch = (ctx->pg_client_prefetch != NULL);
+    int consecutive_pg_failures = 0;
 
     /* Pending prefetch state — valid only when pf_thread != NULL */
     GThread* pf_thread = NULL;
@@ -1393,6 +1394,43 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             t1 = profile_now_ns();
             prof.pg_fetch_ns += (t1 - t0);
 
+            /* If prefetch failed, attempt reconnect + retry once */
+            if (pf.result != QUADRATURE_OK) {
+                g_warning("Phase 6: PG prefetch batch failed, attempting reconnect");
+                mb_pg_client_reset(ctx->pg_client_prefetch);
+                pf.releases = NULL;
+                pf.links = NULL;
+                pf.result = mb_fetch_all_batch(pf.pg, (const char**)pf.release_ids,
+                                                pf.release_count, &pf.releases, &pf.links);
+                if (pf.result != QUADRATURE_OK) {
+                    g_warning("Phase 6: PG retry failed for prefetched batch");
+                    consecutive_pg_failures++;
+                } else {
+                    consecutive_pg_failures = 0;
+                }
+            } else {
+                consecutive_pg_failures = 0;
+            }
+
+            if (consecutive_pg_failures >= 3) {
+                g_warning("Phase 6: circuit breaker tripped — skipping remaining albums after 3 consecutive PG failures");
+                /* Write whatever we have (NULL releases → albums marked FAILED) */
+                write_resolve_batch(ctx, (const char* const*)pending_ids, pending_album_ids,
+                                     pending_count, pf.releases, pf.links, &prof);
+                prof.batch_count++;
+                if (pf.releases) g_hash_table_destroy(pf.releases);
+                if (pf.links) g_hash_table_destroy(pf.links);
+                triage_free(pending_ids, pending_album_ids, pending_count);
+                pending_ids = NULL;
+                pending_album_ids = NULL;
+                pending_count = 0;
+                triage_free(release_ids, album_ids, release_count);
+                for (size_t i = 0; i < batch_count; i++)
+                    resolve_queue_item_free(batch[i]);
+                total_processed += batch_count;
+                break;
+            }
+
             /* Save previous batch state before overwriting */
             GHashTable* prev_releases = pf.releases;
             GHashTable* prev_links = pf.links;
@@ -1440,10 +1478,31 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             GHashTable* rel = NULL;
             GHashTable* lnk = NULL;
             t0 = profile_now_ns();
-            mb_fetch_all_batch(ctx->pg_client,
+            quadrature_result_t fetch_res = mb_fetch_all_batch(ctx->pg_client,
                 (const char**)release_ids, release_count, &rel, &lnk);
             t1 = profile_now_ns();
             prof.pg_fetch_ns += (t1 - t0);
+
+            /* Retry once on PG failure after reconnect */
+            if (fetch_res != QUADRATURE_OK) {
+                g_warning("Phase 6: PG batch fetch failed, attempting reconnect");
+                mb_pg_client_reset(ctx->pg_client);
+                rel = NULL;
+                lnk = NULL;
+                t0 = profile_now_ns();
+                fetch_res = mb_fetch_all_batch(ctx->pg_client,
+                    (const char**)release_ids, release_count, &rel, &lnk);
+                t1 = profile_now_ns();
+                prof.pg_fetch_ns += (t1 - t0);
+                if (fetch_res != QUADRATURE_OK) {
+                    g_warning("Phase 6: PG retry failed, marking batch as FAILED");
+                    consecutive_pg_failures++;
+                } else {
+                    consecutive_pg_failures = 0;
+                }
+            } else {
+                consecutive_pg_failures = 0;
+            }
 
             t0 = profile_now_ns();
             write_resolve_batch(ctx, (const char* const*)release_ids, album_ids,
@@ -1455,6 +1514,14 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             if (rel) g_hash_table_destroy(rel);
             if (lnk) g_hash_table_destroy(lnk);
             triage_free(release_ids, album_ids, release_count);
+
+            if (consecutive_pg_failures >= 3) {
+                g_warning("Phase 6: circuit breaker tripped — skipping remaining albums after 3 consecutive PG failures");
+                for (size_t i = 0; i < batch_count; i++)
+                    resolve_queue_item_free(batch[i]);
+                total_processed += batch_count;
+                break;
+            }
         }
 
         // Free batch items
@@ -1471,6 +1538,18 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
         pf_thread = NULL;
         int64_t t1 = profile_now_ns();
         prof.pg_fetch_ns += (t1 - t0);
+
+        /* Retry once on PG failure after reconnect */
+        if (pf.result != QUADRATURE_OK) {
+            g_warning("Phase 6: final PG prefetch batch failed, attempting reconnect");
+            mb_pg_client_reset(ctx->pg_client_prefetch);
+            pf.releases = NULL;
+            pf.links = NULL;
+            pf.result = mb_fetch_all_batch(pf.pg, (const char**)pf.release_ids,
+                                            pf.release_count, &pf.releases, &pf.links);
+            if (pf.result != QUADRATURE_OK)
+                g_warning("Phase 6: final PG retry failed, marking batch as FAILED");
+        }
 
         t0 = profile_now_ns();
         write_resolve_batch(ctx, (const char* const*)pending_ids, pending_album_ids,

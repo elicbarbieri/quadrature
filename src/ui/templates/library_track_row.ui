@@ -51,6 +51,39 @@
             </style>
           </object>
         </child>
+        <!-- library badges: populated dynamically by row_helpers.c -->
+        <child>
+          <object class="GtkBox" id="library_badges">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">4</property>
+            <property name="visible">false</property>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <!-- right slot: album button + featuring artists ((1 - left-ratio) of flexible space) -->
+    <child type="right">
+      <object class="GtkBox" id="col_right">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+        <property name="overflow">hidden</property>
+        <property name="valign">center</property>
+        <child>
+          <object class="GtkBox" id="album_box">
+            <property name="orientation">horizontal</property>
+          </object>
+        </child>
+        <!-- Featuring artists -->
+        <child>
+          <object class="GtkBox" id="secondary_artists_box">
+            <property name="orientation">horizontal</property>
+            <property name="hexpand">true</property>
+            <style>
+              <class name="library-row-subtitle"/>
+            </style>
+          </object>
+        </child>
         <!-- credit annotation: hidden unless credit data is set dynamically -->
         <child>
           <object class="GtkBox" id="credit_annotation">
@@ -71,31 +104,6 @@
               </object>
             </child>
             <!-- role pills appended dynamically by row_helpers.c -->
-          </object>
-        </child>
-      </object>
-    </child>
-
-    <!-- right slot: album button + featuring artists ((1 - left-ratio) of flexible space) -->
-    <child type="right">
-      <object class="GtkBox" id="col_right">
-        <property name="orientation">vertical</property>
-        <property name="spacing">4</property>
-        <property name="overflow">hidden</property>
-        <property name="valign">center</property>
-        <child>
-          <object class="GtkBox" id="album_box">
-            <property name="orientation">horizontal</property>
-          </object>
-        </child>
-        <!-- Featuring artists + library badge (badge appended dynamically by row_helpers.c) -->
-        <child>
-          <object class="GtkBox" id="secondary_artists_box">
-            <property name="orientation">horizontal</property>
-            <property name="hexpand">true</property>
-            <style>
-              <class name="library-row-subtitle"/>
-            </style>
           </object>
         </child>
       </object>

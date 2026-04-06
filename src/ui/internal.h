@@ -90,13 +90,15 @@ static inline void ui_set_year_label(GtkWidget *label, uint16_t year) {
 /** Format a track count (1 → "Single", N → "NN Tracks"). (ui_math.c) */
 void ui_format_track_count(char *buf, size_t len, uint32_t count);
 
-/** Populate a GtkBox with width-aware genre pills.
- *  Splits genres on semicolons, shows as many as fit within the constraint
- *  width, collapsing the rest into a "…" popover showing all genres.
- *  Hides the box if no genres. Pass NULL constraint for default width. */
-void ui_populate_genre_pills(GtkWidget *box, const char *genres,
-                              GtkWidget *constraint_widget,
-                              double constraint_fraction);
+/** Create a QuadOverflowBox pre-populated with GENRE_PILL_MAX label slots
+ *  + 1 overflow "…" label.  Overflow planning happens inside the box's
+ *  own size_allocate — no external signals or callbacks needed. */
+GtkWidget *ui_genre_pills_new(int spacing);
+
+/** Bind genre text into pre-allocated pill slots.
+ *  Splits genres on semicolons, sets label text.  The QuadOverflowBox
+ *  handles overflow during its next size_allocate automatically. */
+void ui_genre_pills_bind(GtkWidget *genres_box, const char *genres);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Popover Shortcut Passthrough
@@ -329,9 +331,46 @@ void            library_monitor_check_now(LibraryMonitor *self);
  *   <child type="meta"> ... </child>
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/** Pre-allocate callback — invoked with the exact pixel budget for a
+ *  ProportionalBox slot BEFORE its gtk_widget_size_allocate runs.
+ *  @param child  The slot widget (col_left or col_right)
+ *  @param width  Available width in pixels (integer, final) */
+typedef void (*PBoxPreAllocate)(GtkWidget *child, int width, gpointer user_data);
+
 #define QUADRATURE_TYPE_PROPORTIONAL_BOX (proportional_box_get_type())
 G_DECLARE_FINAL_TYPE(ProportionalBox, proportional_box,
                      QUADRATURE, PROPORTIONAL_BOX, GtkWidget)
+
+/** Register a pre-allocate callback for a flexible slot ("left" or "right").
+ *  The callback fires every size_allocate with the integer pixel budget
+ *  before the child's own vfunc lays out its children. */
+void proportional_box_set_pre_allocate(ProportionalBox *self,
+                                        const char *slot,
+                                        PBoxPreAllocate callback,
+                                        gpointer user_data);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * QuadOverflowBox Widget
+ *
+ * Wrapping container that flows children left→right, wrapping to the next
+ * row when they don't fit.  The LAST child is the overflow indicator ("…"),
+ * shown only when items exceed max-rows.
+ *
+ * Properties:
+ *   spacing      — horizontal gap between items (default 0)
+ *   row-spacing  — vertical gap between rows (default 0)
+ *   max-rows     — maximum visible rows; overflow on last row (default 1)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define QUADRATURE_TYPE_OVERFLOW_BOX (quad_overflow_box_get_type())
+G_DECLARE_FINAL_TYPE(QuadOverflowBox, quad_overflow_box,
+                     QUADRATURE, OVERFLOW_BOX, GtkWidget)
+
+void quad_overflow_box_append(QuadOverflowBox *self, GtkWidget *child);
+
+/** Set the number of populated item children (excludes overflow indicator).
+ *  Unpopulated pre-allocated slots are hidden during layout. */
+void quad_overflow_box_set_item_count(QuadOverflowBox *self, guint count);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Artist Button Helpers (artist_buttons.c)
@@ -457,15 +496,23 @@ void ui_bell_curve_lut(float *lut, int n, double sigma);
 
 GtkWidget *ui_create_library_badge(library_cache_t *cache, int library_index);
 
+typedef enum {
+    BADGE_ENTITY_ARTIST,
+    BADGE_ENTITY_ALBUM,
+    BADGE_ENTITY_TRACK,   /* No MBID cross-library lookup; source library only */
+} badge_entity_type_t;
+
 /** Populate a badges box with one label per library this entity belongs to.
- *  Handles both single-library and merged (cross-library) entities.
- *  Hides the box if ≤1 library or no badges. */
+ *  Uses MBID index lookup for artists/albums to show cross-library presence.
+ *  Hides the box if ≤1 library or no badges.
+ *  @param constraint_widget  Widget whose width constrains badge overflow
+ *                            layout (typically col_right). NULL uses fixed
+ *                            default_max_width. */
 void ui_populate_library_badges(GtkWidget *badges_box,
                                  library_cache_t *cache,
-                                 int library_index,
                                  int64_t entity_global_id,
-                                 const int64_t *merged_source_ids,
-                                 int merged_source_count);
+                                 badge_entity_type_t entity_type,
+                                 GtkWidget *constraint_widget);
 
 /* Size groups for column alignment across multiple rows in a list.
  * Pass NULL for any group to skip alignment for that column.
@@ -509,7 +556,8 @@ GtkWidget *ui_create_artist_row_shell(void);
 void ui_rebind_artist_row(GtkWidget *row,
                            const library_artist_info_t *artist,
                            library_cache_t *cache,
-                           ArtworkManager *art_mgr);
+                           ArtworkManager *art_mgr,
+                           uint32_t library_mask);
 
 GtkWidget *ui_create_album_row_shell(void);
 void ui_rebind_album_row(GtkWidget *row,
@@ -526,7 +574,8 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
                                  library_cache_t *cache,
                                  ArtworkManager *art_mgr,
                                  gboolean show_art_strip,
-                                 UiRowSizeGroups *size_groups);
+                                 UiRowSizeGroups *size_groups,
+                                 uint32_t library_mask);
 
 /* Optional credit annotation for album rows.
  * When non-NULL, displays a third row showing the credited artist name
@@ -594,9 +643,10 @@ GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
                                                RowCallbacks *artist_cbs,
                                                int64_t album_artist_id);
 
-/* Create disc separator header for multi-disc albums.
- * Shows "DISC N" label with subtle styling. */
-GtkWidget *ui_create_disc_header(uint16_t disc_num);
+/* Create a "── TITLE ──────────" section header for use with
+ * gtk_list_box_row_set_header() or standalone. Pango markup + snapshot-based
+ * separator line — bypasses GTK4 CSS cascade issues in header contexts. */
+GtkWidget *ui_make_section_header(const char *title);
 
 /* Create album detail card for artist detail view.
  * Contains: album art, metadata, preview track list with automatic disc headers.
@@ -720,7 +770,6 @@ struct _UiWindow {
     GtkWidget *toast_label;
 
     GtkWidget *library_bar;
-    GtkWidget *content_column;
 
     /* Library filter (global, persists across view switches) */
     uint32_t library_mask;

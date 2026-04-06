@@ -5,9 +5,9 @@
     <property name="default-width">1280</property>
     <property name="default-height">600</property>
 
-    <!-- Root overlay for toast notifications -->
+    <!-- Window-level overlay for toast notifications -->
     <child>
-      <object class="GtkOverlay" id="root_overlay">
+      <object class="GtkOverlay" id="toast_anchor">
 
         <!-- Main horizontal layout -->
         <child>
@@ -16,7 +16,7 @@
 
             <!-- Nav bar placeholder (custom widget created programmatically) -->
 
-            <!-- Content column: library bar + content stack overlay -->
+            <!-- Content column: library bar + content stack -->
             <child>
               <object class="GtkBox" id="content_column">
                 <property name="orientation">vertical</property>
@@ -34,14 +34,10 @@
                   </object>
                 </child>
 
-                <!-- Content stack overlay (for errors panel and toasts) -->
-                <child>
-                  <object class="GtkOverlay" id="content_overlay">
-                    <property name="vexpand">true</property>
-
                 <!-- Content stack -->
                 <child>
                   <object class="GtkStack" id="content_stack">
+                    <property name="vexpand">true</property>
                     <property name="transition-type">crossfade</property>
                     <style>
                       <class name="library-content"/>
@@ -49,31 +45,6 @@
                     <!-- Views added programmatically -->
                   </object>
                 </child>
-
-                <!-- Toast notification (centered over content area, hidden initially) -->
-                <child type="overlay">
-                  <object class="GtkBox" id="toast_overlay">
-                    <property name="orientation">horizontal</property>
-                    <property name="halign">center</property>
-                    <property name="valign">start</property>
-                    <property name="margin-top">20</property>
-                    <property name="visible">false</property>
-                    <style>
-                      <class name="toast-notification"/>
-                    </style>
-                    <child>
-                      <object class="GtkLabel" id="toast_label">
-                        <property name="justify">center</property>
-                        <style>
-                          <class name="toast-label"/>
-                        </style>
-                      </object>
-                    </child>
-                  </object>
-                </child>
-
-              </object>
-            </child>
 
               </object>
             </child>
@@ -87,26 +58,40 @@
 
             <!-- Channels panel - fixed width, does not expand -->
             <child>
-              <object class="GtkBox" id="channels_panel">
+              <object class="GtkBox" id="channel_strips_box">
                 <property name="orientation">vertical</property>
                 <property name="spacing">4</property>
+                <property name="vexpand">true</property>
+                <property name="margin-start">8</property>
+                <property name="margin-end">8</property>
+                <property name="margin-top">8</property>
+                <property name="margin-bottom">8</property>
                 <style>
                   <class name="channels-panel"/>
                 </style>
+                <!-- Channel strips added programmatically -->
+              </object>
+            </child>
+          </object>
+        </child>
 
-                <!-- Channel strips container - margins inside fixed width -->
-                <child>
-                  <object class="GtkBox" id="channel_strips_box">
-                    <property name="orientation">vertical</property>
-                    <property name="spacing">4</property>
-                    <property name="vexpand">true</property>
-                    <property name="margin-start">8</property>
-                    <property name="margin-end">8</property>
-                    <property name="margin-top">8</property>
-                    <property name="margin-bottom">8</property>
-                    <!-- Channel strips added programmatically -->
-                  </object>
-                </child>
+        <!-- Toast notification (centered over entire window, hidden initially) -->
+        <child type="overlay">
+          <object class="GtkBox" id="toast_overlay">
+            <property name="orientation">horizontal</property>
+            <property name="halign">center</property>
+            <property name="valign">start</property>
+            <property name="margin-top">20</property>
+            <property name="visible">false</property>
+            <style>
+              <class name="toast-notification"/>
+            </style>
+            <child>
+              <object class="GtkLabel" id="toast_label">
+                <property name="justify">center</property>
+                <style>
+                  <class name="toast-label"/>
+                </style>
               </object>
             </child>
           </object>

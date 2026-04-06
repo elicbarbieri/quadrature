@@ -108,10 +108,10 @@ ______________________________________________________________________
 
 Fast, single-threaded. Builds a work queue of changed album directories.
 
-1. `db_get_album_mtimes_page()` → build `GHashTable` of `path → (album_id, last_updated_at)`
-1. Walk library root recursively
-1. `stat(dir)` to get current mtime
-1. Lookup in hashmap: mtime matches → skip; differs or missing → queue for processing
+1. `db_get_album_mtimes_page()` → build `GHashTable` of `path → (album_id, last_updated_at, last_updated_size)`
+1. Walk library root with `nftw(FTW_PHYS)` (symlinks not followed — see INDEXER.md)
+1. `stat(dir)` → current mtime + file count + total size
+1. Lookup in hashmap: mtime AND size match → skip; either differs or missing → queue
 1. Sibling disc detection: subdirectories sharing a common prefix differing only by a disc
    suffix (`Disc N`, `CD N`, `(Disc N)`) are grouped into one multi-disc work item with a
    synthetic canonical path equal to the common prefix. Requires ≥2 matching siblings.
@@ -291,6 +291,7 @@ CREATE TABLE albums (
     year            INTEGER,
     is_compilation  INTEGER DEFAULT 0,
     last_updated_at INTEGER,           -- directory mtime written in Phase 3; Phase 1 delta key
+    last_updated_size INTEGER,        -- file count + total bytes; Phase 1 secondary delta signal
     -- MB fields (all NULL until Phase 6)
     musicbrainz_release_id       TEXT,
     musicbrainz_release_group_id TEXT,
@@ -324,7 +325,9 @@ CREATE TABLE track_artists (
     PRIMARY KEY (track_id, artist_id)
 ) WITHOUT ROWID;
 
--- Full-text search (standalone FTS5, not content-sync)
+-- Full-text search (standalone FTS5 — manually synced via db_sync_album_fts)
+-- content-sync is not viable: tracks_fts columns (title, artist, album) are derived
+-- from JOINs (artist_display, album title), not direct column mappings.
 CREATE VIRTUAL TABLE tracks_fts USING fts5(title, artist, album);
 CREATE VIRTUAL TABLE artists_fts USING fts5(name);
 CREATE VIRTUAL TABLE albums_fts USING fts5(title, artist);
@@ -332,10 +335,16 @@ CREATE VIRTUAL TABLE albums_fts USING fts5(title, artist);
 CREATE TABLE indexer_errors (
     id              INTEGER PRIMARY KEY,
     path            TEXT NOT NULL,
+    error_code      INTEGER NOT NULL DEFAULT 0,  -- structured enum (see below)
+    phase           INTEGER NOT NULL DEFAULT 0,  -- which indexer phase produced this error
+    severity        INTEGER NOT NULL DEFAULT 2,  -- 1=warn, 2=error, 3=fatal
     message         TEXT NOT NULL,
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     scan_generation INTEGER NOT NULL DEFAULT 0
 );
+-- Error codes: 100=file_unreadable, 101=permission_denied, 200=ffmpeg_decode,
+-- 201=ffmpeg_no_streams, 300=artwork_missing, 301=artwork_corrupt,
+-- 400=mb_no_match, 401=mb_pg_error, 500=network_error
 ```
 
 ### mb_status Values

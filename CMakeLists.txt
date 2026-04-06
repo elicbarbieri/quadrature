@@ -88,13 +88,14 @@ set(CORE_SOURCES
     third_party/cava/cavacore.c
 )
 
-# Database sources (replaces library)
+# Database sources
 set(DATABASE_SOURCES
     src/database/db.c
     src/database/db_read.c
     src/database/db_write.c
     src/database/db_meta.c
     src/database/db_bios.c
+    src/database/migrations/001_initial.c
 )
 
 # Library sources
@@ -239,7 +240,6 @@ if(BUILD_UI)
         ${CMAKE_SOURCE_DIR}/src/ui/templates/library_track_row.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_track_item.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_track_row_wrapper.ui
-        ${CMAKE_SOURCE_DIR}/src/ui/templates/album_detail_disc_header.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_card.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/album_button.ui
         ${CMAKE_SOURCE_DIR}/src/ui/templates/filter_sort_bar.ui

@@ -87,7 +87,7 @@ static void on_remove(GtkButton *btn, gpointer data) {
             if (w->library_cache)
                 library_cache_remove_slot(w->library_cache, bitmap);
             if (w->artwork_mgr)
-                artwork_manager_remove_library(w->artwork_mgr, lib_idx);
+                artwork_manager_remove_library(w->artwork_mgr, bitmap);
         }
 
         app_settings_remove_library(w->settings, e->path);
@@ -709,8 +709,10 @@ static void on_add_confirm(GtkButton *btn, gpointer data) {
         library_cache_add_slot(s->w->library_cache, &src);
         g_free(dbpath);
     }
-    if (s->w->artwork_mgr)
-        artwork_manager_add_library(s->w->artwork_mgr, dp, s->music_path);
+    if (s->w->artwork_mgr) {
+        int new_bitmap = s->w->settings->libraries[s->w->settings->library_count - 1].library_index;
+        artwork_manager_add_library(s->w->artwork_mgr, new_bitmap, dp, s->music_path);
+    }
 
     libs_load(s->w);
     libs_rebuild(s->w);

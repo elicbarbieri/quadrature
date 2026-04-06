@@ -128,6 +128,7 @@ quadrature_result_t db_upsert_track_with_album(quadrature_db_t* db, const db_ind
 quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
                                                const int64_t* album_ids,
                                                const int64_t* mtimes,
+                                               const int64_t* sizes,
                                                size_t count) {
     if (!db || !album_ids || !mtimes || count == 0) return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -139,12 +140,13 @@ quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
 
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(db->db,
-        "UPDATE albums SET last_updated_at = ? WHERE id = ?",
+        "UPDATE albums SET last_updated_at = ?, last_updated_size = ? WHERE id = ?",
         -1, &stmt, NULL);
 
     for (size_t i = 0; i < count; i++) {
         sqlite3_bind_int64(stmt, 1, mtimes[i]);
-        sqlite3_bind_int64(stmt, 2, album_ids[i]);
+        sqlite3_bind_int64(stmt, 2, sizes ? sizes[i] : 0);
+        sqlite3_bind_int64(stmt, 3, album_ids[i]);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
@@ -746,8 +748,10 @@ quadrature_result_t db_sync_album_fts(quadrature_db_t* db, int64_t album_id) {
 // Indexer Error Operations (simplified path-based)
 // =============================================================================
 
-quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const char* message,
-                                int64_t scan_generation) {
+quadrature_result_t db_log_error_ex(quadrature_db_t* db, const char* path,
+                                    indexer_error_code_t error_code, int phase,
+                                    indexer_error_severity_t severity,
+                                    const char* message, int64_t scan_generation) {
     if (!db || !path || !message) return QUADRATURE_ERROR_INVALID_PARAM;
 
     bool need_unlock = false;
@@ -758,7 +762,8 @@ quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const ch
 
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db->db,
-        "INSERT INTO indexer_errors(path, message, scan_generation) VALUES(?, ?, ?)",
+        "INSERT INTO indexer_errors(path, error_code, phase, severity, message, scan_generation) "
+        "VALUES(?, ?, ?, ?, ?, ?)",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         if (need_unlock) db_unlock(db);
@@ -766,13 +771,22 @@ quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const ch
     }
 
     sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, message, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 3, scan_generation);
+    sqlite3_bind_int(stmt, 2, (int)error_code);
+    sqlite3_bind_int(stmt, 3, phase);
+    sqlite3_bind_int(stmt, 4, (int)severity);
+    sqlite3_bind_text(stmt, 5, message, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 6, scan_generation);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
     if (need_unlock) db_unlock(db);
     return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const char* message,
+                                int64_t scan_generation) {
+    return db_log_error_ex(db, path, INDEXER_ERR_UNKNOWN, 0, INDEXER_SEV_ERROR,
+                           message, scan_generation);
 }
 
 quadrature_result_t db_clear_errors_for_path(quadrature_db_t* db, const char* path_prefix) {

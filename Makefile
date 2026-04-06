@@ -1,4 +1,4 @@
-.PHONY: test test-v debug clean db-clean db-nuke cli production install
+.PHONY: test test-v debug valgrind clean db-clean db-nuke cli production install
 
 BUILD_DIR := build
 INSTALL_PREFIX ?= /usr/local
@@ -15,6 +15,16 @@ debug:
 	@cmake -S . -B $(BUILD_DIR) -GNinja -DBUILD_UI=ON > /dev/null
 	@ninja -C $(BUILD_DIR)
 	@G_MESSAGES_DEBUG=quadrature exec ./$(BUILD_DIR)/quadrature
+
+# Debug build under Valgrind (leak checking + origin tracking)
+valgrind:
+	@cmake -S . -B $(BUILD_DIR) -GNinja -DBUILD_UI=ON -DCMAKE_BUILD_TYPE=Debug > /dev/null
+	@ninja -C $(BUILD_DIR)
+	@G_MESSAGES_DEBUG=quadrature G_SLICE=always-malloc G_DEBUG=gc-friendly \
+		exec valgrind --leak-check=full --track-origins=yes \
+		--suppressions=/usr/share/glib-2.0/valgrind/glib.supp \
+		--suppressions=/usr/share/gtk-4.0/valgrind/gtk.supp \
+		./$(BUILD_DIR)/quadrature
 
 # Build quadrature-cli (indexer, setup-rt, etc.)
 cli:
@@ -50,7 +60,10 @@ db-clean:
 	if [ ! -f "$$settings" ]; then \
 		echo "  No settings found at $$settings"; exit 0; \
 	fi; \
-	paths=$$(awk -F'=' '/^library_paths[[:space:]]*=/{print $$2}' "$$settings" | tr ';' '\n'); \
+	paths=$$(awk '/^\[Library\.[0-9]+\]/{lib_path=""; data_path=""} \
+		/^path[[:space:]]*=/{lib_path=$$0; sub(/^[^=]*=[[:space:]]*/, "", lib_path)} \
+		/^data_path[[:space:]]*=/{data_path=$$0; sub(/^[^=]*=[[:space:]]*/, "", data_path); \
+			if (data_path != "") print data_path; else print lib_path}' "$$settings"); \
 	for p in $$paths; do \
 		p=$$(echo "$$p" | xargs); \
 		[ -z "$$p" ] && continue; \
@@ -85,6 +98,7 @@ help:
 	@echo ""
 	@echo "  make test       - Run unit tests (loads .env for integration test credentials)"
 	@echo "  make debug      - Build UI and run with DEBUG logging"
+	@echo "  make valgrind   - Debug build under Valgrind (leak check + origin tracking)"
 	@echo "  make cli        - Build quadrature-cli (indexer, setup-rt, etc.)"
 	@echo "  make production - Release build with UI, CLI, and install files"
 	@echo "  make clean      - Remove build directory"

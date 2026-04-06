@@ -32,6 +32,8 @@
 #define MAX_BACKOFF_MS 30000
 #define INITIAL_BACKOFF_MS 1000
 #define PROGRESS_THROTTLE_US (100 * 1000)  // 100ms
+#define CONSECUTIVE_ERROR_LIMIT 3
+#define PHASE_TIMEOUT_US ((int64_t)30 * 60 * G_USEC_PER_SEC)  // 30 minutes
 
 // =============================================================================
 // Rate Limiter
@@ -300,6 +302,259 @@ static bool copy_art_from_other_library(const char* const* other_dirs, size_t ot
 }
 
 // =============================================================================
+// Album Cover Art — piggyback on artist API responses
+// =============================================================================
+
+/**
+ * Find the newest timestamped album atlas in artwork_dir for the given thumb size.
+ * Returns heap-allocated path, or NULL if none found. Caller must g_free().
+ */
+static char* find_album_atlas(const char* artwork_dir, int thumb_size) {
+    GDir* dir = g_dir_open(artwork_dir, 0, NULL);
+    if (!dir) return NULL;
+
+    char prefix[32];
+    snprintf(prefix, sizeof(prefix), "%dpx-artwork-", thumb_size);
+
+    char* latest = NULL;
+    const char* name;
+    while ((name = g_dir_read_name(dir))) {
+        if (!g_str_has_prefix(name, prefix) || !g_str_has_suffix(name, ".atlas")) continue;
+        char* full = g_build_filename(artwork_dir, name, NULL);
+        if (!latest || strcmp(full, latest) > 0) { g_free(latest); latest = full; }
+        else g_free(full);
+    }
+    g_dir_close(dir);
+    return latest;
+}
+
+/**
+ * Build a lookup map of release_group_id → album_id for albums that:
+ *   1. Have a musicbrainz_release_group_id in the DB
+ *   2. Are NOT present in the current album atlas (or have fallback placeholder art)
+ *
+ * Also populates artist_mbids_needing_fetch — the set of artist MBIDs whose
+ * albums need cover art. These artists must be API-fetched even if their artist
+ * art is already cached.
+ *
+ * Returns a GHashTable (string → gint64*) or NULL if no albums need covers.
+ */
+static GHashTable* build_missing_album_map(quadrature_db_t* db,
+                                            const char* artwork_dir,
+                                            int thumb_size,
+                                            GHashTable** artist_mbids_needing_fetch) {
+    // Get all albums with release group IDs + their artist MBIDs
+    int64_t* album_ids = NULL;
+    char** rg_ids = NULL;
+    char** a_mbids = NULL;
+    size_t count = 0;
+    quadrature_result_t res = db_get_albums_with_release_group_id(
+        db, &album_ids, &rg_ids, &a_mbids, &count);
+    if (res != QUADRATURE_OK || count == 0) {
+        g_free(album_ids);
+        g_strfreev(rg_ids);
+        g_strfreev(a_mbids);
+        return NULL;
+    }
+
+    // Load existing album atlas — the reader exposes has_no_art() via sorted
+    // no_art_ids section (v3) or memcmp-derived set (v2 backward compat).
+    // Albums with real artwork are in the sorted album_ids array.
+    char* atlas_path = find_album_atlas(artwork_dir, thumb_size);
+    artwork_atlas_reader_t* reader = NULL;
+    if (atlas_path) {
+        reader = artwork_atlas_reader_open(atlas_path);
+        g_free(atlas_path);
+    }
+
+    // Build map of only missing albums: release_group_id → album_id
+    // An album is "missing" if it's not in the atlas art entries (binary search)
+    // AND not in the no_art section AND not already cached on disk.
+    GHashTable* map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    GHashTable* need_fetch = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    char* covers_dir = g_strdup_printf("%s/fanart_album_covers", artwork_dir);
+
+    for (size_t i = 0; i < count; i++) {
+        if (!rg_ids[i] || !a_mbids[i]) continue;
+
+        // Skip albums that already have real art in the atlas (O(log n) lookup)
+        if (reader && artwork_atlas_reader_lookup(reader, album_ids[i]) >= 0)
+            continue;
+        // Albums in no_art are candidates — they have no local/embedded art,
+        // so fanart.tv is their best chance. Don't skip them.
+
+        // Check if we already have a cached fanart cover for this release group
+        char cache_path[INDEXER_PATH_MAX];
+        g_snprintf(cache_path, sizeof(cache_path), "%s/%s.jpg", covers_dir, rg_ids[i]);
+        if (g_file_test(cache_path, G_FILE_TEST_EXISTS)) continue;
+
+        gint64* val = g_new(gint64, 1);
+        *val = album_ids[i];
+        g_hash_table_insert(map, g_strdup(rg_ids[i]), val);
+        g_hash_table_add(need_fetch, g_strdup(a_mbids[i]));
+    }
+    g_free(covers_dir);
+
+    if (reader) artwork_atlas_reader_close(reader);
+    g_free(album_ids);
+    g_strfreev(rg_ids);
+    g_strfreev(a_mbids);
+
+    if (g_hash_table_size(map) == 0) {
+        g_hash_table_destroy(map);
+        g_hash_table_destroy(need_fetch);
+        return NULL;
+    }
+
+    *artist_mbids_needing_fetch = need_fetch;
+    return map;
+}
+
+/**
+ * Parse album cover URLs from a fanart.tv JSON response.
+ *
+ * The actual API format is:
+ *   "albums": [
+ *     { "release_group_id": "uuid", "albumcover": [ {"url": ..., "likes": ...} ] },
+ *     ...
+ *   ]
+ *
+ * For each release_group_id found in missing_map, picks the highest-liked cover URL.
+ * Writes (album_id, url) pairs to out arrays. Caller must g_free each URL.
+ *
+ * Returns number of covers found.
+ */
+static size_t parse_album_covers(const char* json_data, gsize json_len,
+                                  GHashTable* missing_map,
+                                  int64_t* out_album_ids,
+                                  char** out_release_group_ids,
+                                  char** out_urls,
+                                  size_t max_out) {
+    JsonParser* parser = json_parser_new();
+    GError* error = NULL;
+
+    if (!json_parser_load_from_data(parser, json_data, (gssize)json_len, &error)) {
+        g_clear_error(&error);
+        g_object_unref(parser);
+        return 0;
+    }
+
+    JsonNode* root = json_parser_get_root(parser);
+    if (!root || !JSON_NODE_HOLDS_OBJECT(root)) {
+        g_object_unref(parser);
+        return 0;
+    }
+
+    JsonObject* obj = json_node_get_object(root);
+    if (!json_object_has_member(obj, "albums")) {
+        g_object_unref(parser);
+        return 0;
+    }
+
+    // "albums" is an array of objects, each with "release_group_id" and "albumcover"
+    JsonNode* albums_node = json_object_get_member(obj, "albums");
+    if (!albums_node || !JSON_NODE_HOLDS_ARRAY(albums_node)) {
+        g_object_unref(parser);
+        return 0;
+    }
+
+    JsonArray* albums = json_node_get_array(albums_node);
+    guint album_count = json_array_get_length(albums);
+
+    size_t found = 0;
+
+    for (guint a = 0; a < album_count && found < max_out; a++) {
+        JsonObject* album_obj = json_array_get_object_element(albums, a);
+        if (!album_obj) continue;
+
+        const char* rg_id = json_object_get_string_member_with_default(
+            album_obj, "release_group_id", NULL);
+        if (!rg_id) continue;
+
+        // Check if this release group is in our missing-album map
+        gint64* value = g_hash_table_lookup(missing_map, rg_id);
+        if (!value) continue;
+        int64_t album_id = *value;
+
+        if (!json_object_has_member(album_obj, "albumcover")) continue;
+        JsonArray* covers = json_object_get_array_member(album_obj, "albumcover");
+        if (!covers) continue;
+        guint len = json_array_get_length(covers);
+        if (len == 0) continue;
+
+        // Find the highest-liked cover
+        const char* best_url = NULL;
+        int best_likes = -1;
+
+        for (guint i = 0; i < len; i++) {
+            JsonObject* entry = json_array_get_object_element(covers, i);
+            if (!entry) continue;
+            const char* url = json_object_get_string_member_with_default(entry, "url", NULL);
+            if (!url) continue;
+            const char* likes_str = json_object_get_string_member_with_default(entry, "likes", "0");
+            int likes = atoi(likes_str);
+            if (likes > best_likes) {
+                best_likes = likes;
+                best_url = url;
+            }
+        }
+
+        if (best_url) {
+            out_album_ids[found] = album_id;
+            out_release_group_ids[found] = g_strdup(rg_id);
+            out_urls[found] = g_strdup(best_url);
+            found++;
+        }
+    }
+
+    g_object_unref(parser);
+    return found;
+}
+
+/**
+ * Download an album cover image from a URL and save the raw bytes to a
+ * persistent cache file. Returns QUADRATURE_OK on success.
+ */
+static quadrature_result_t download_album_cover(SoupSession* session,
+                                                 const char* url,
+                                                 const char* cache_path,
+                                                 GCancellable* cancellable) {
+    SoupMessage* msg = soup_message_new("GET", url);
+    if (!msg) return QUADRATURE_ERROR_INTERNAL;
+
+    GError* error = NULL;
+    GBytes* body = soup_session_send_and_read(session, msg, cancellable, &error);
+    guint status = soup_message_get_status(msg);
+    g_object_unref(msg);
+
+    if (error) {
+        g_clear_error(&error);
+        if (body) g_bytes_unref(body);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    if (status != 200 || !body) {
+        if (body) g_bytes_unref(body);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    gsize data_size;
+    const char* data = g_bytes_get_data(body, &data_size);
+    gboolean ok = g_file_set_contents(cache_path, data, (gssize)data_size, &error);
+    g_bytes_unref(body);
+
+    if (!ok) {
+        g_debug("artist_art: failed to write album cover %s: %s",
+                cache_path, error->message);
+        g_clear_error(&error);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    return QUADRATURE_OK;
+}
+
+// =============================================================================
 // Main Entry Point
 // =============================================================================
 
@@ -324,8 +579,26 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
     char* artists_dir = g_strdup_printf("%s/artists", config->artwork_dir);
     g_mkdir_with_parents(artists_dir, 0755);
 
+    // Build missing-album lookup map BEFORE pre-filter so we know which
+    // cached artists need re-fetching for album cover extraction
+    GHashTable* missing_album_map = NULL;
+    GHashTable* artist_mbids_needing_fetch = NULL;
+
+    if (config->album_artwork_dir && config->album_thumb_size > 0) {
+        missing_album_map = build_missing_album_map(config->db,
+            config->album_artwork_dir, config->album_thumb_size,
+            &artist_mbids_needing_fetch);
+        if (missing_album_map) {
+            g_message("Phase 7: %u albums missing artwork with release group IDs "
+                      "(%u artists to re-fetch for covers)",
+                      g_hash_table_size(missing_album_map),
+                      g_hash_table_size(artist_mbids_needing_fetch));
+        }
+    }
+
     // Pre-filter: check filesystem cache and cross-library copies upfront
     // so progress.total reflects only artists that need HTTP fetches.
+    // Exception: artists whose albums need cover art are always included.
     char** work_mbids = g_malloc(count * sizeof(char*));
     size_t work_count = 0;
     size_t cached_count = 0;
@@ -333,12 +606,16 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
     for (size_t i = 0; i < count; i++) {
         if (config->cancel_flag && atomic_load(config->cancel_flag)) break;
 
-        if (artist_has_cached_art(config->artwork_dir, mbids[i])) {
+        bool needs_album_covers = artist_mbids_needing_fetch &&
+            g_hash_table_contains(artist_mbids_needing_fetch, mbids[i]);
+
+        if (artist_has_cached_art(config->artwork_dir, mbids[i]) && !needs_album_covers) {
             cached_count++;
             continue;
         }
 
-        if (config->other_artwork_dirs && config->other_artwork_dirs_count > 0) {
+        if (!needs_album_covers &&
+            config->other_artwork_dirs && config->other_artwork_dirs_count > 0) {
             if (copy_art_from_other_library(config->other_artwork_dirs,
                     config->other_artwork_dirs_count, mbids[i], config->artwork_dir)) {
                 cached_count++;
@@ -368,6 +645,8 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
     artist_art_progress_t progress = { .total = work_count };
     int64_t last_progress_us = 0;
     bool abort_phase = false;
+    int consecutive_errors = 0;
+    int64_t phase_start = g_get_monotonic_time();
 
     // Fire initial progress so UI gets the real total immediately
     if (cb) cb(&progress, user_data);
@@ -377,6 +656,13 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
         if (config->cancel_flag && atomic_load(config->cancel_flag)) {
             g_cancellable_cancel(cancellable);
             g_message("Phase 7: cancelled at artist %zu/%zu", i, work_count);
+            break;
+        }
+
+        // Phase timeout
+        if (g_get_monotonic_time() - phase_start > PHASE_TIMEOUT_US) {
+            g_warning("Phase 7: timeout after 30 minutes — %zu/%zu artists processed",
+                      progress.processed, work_count);
             break;
         }
 
@@ -406,6 +692,7 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
         GBytes* body = NULL;
         guint status = 0;
         int retries = 0;
+        bool artist_http_error = false;
 
         while (retries <= MAX_RETRIES) {
             body = soup_session_send_and_read(session, msg, cancellable, &error);
@@ -416,6 +703,7 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
                 g_clear_error(&error);
                 if (body) { g_bytes_unref(body); body = NULL; }
                 progress.errors++;
+                artist_http_error = true;
                 break;
             }
 
@@ -470,6 +758,7 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
                 rate_limiter_backoff(&rl);
                 if (body) { g_bytes_unref(body); body = NULL; }
                 progress.errors++;
+                artist_http_error = true;
                 break;
             }
         }
@@ -480,6 +769,23 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
             if (body) g_bytes_unref(body);
             progress.processed++;
             break;
+        }
+
+        // Consecutive error tracking and telemetry
+        if (artist_http_error) {
+            if (config->http_errors)
+                atomic_fetch_add(config->http_errors, 1);
+            consecutive_errors++;
+            if (consecutive_errors >= CONSECUTIVE_ERROR_LIMIT) {
+                g_warning("Phase 7: aborting after %d consecutive network errors",
+                          CONSECUTIVE_ERROR_LIMIT);
+                abort_phase = true;
+                if (body) { g_bytes_unref(body); body = NULL; }
+                progress.processed++;
+                break;
+            }
+        } else {
+            consecutive_errors = 0;
         }
 
         if (status == 200 && body) {
@@ -539,6 +845,53 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
                 g_file_set_contents(marker, "", 0, NULL);
                 g_free(marker);
                 progress.no_images++;
+            }
+
+            // Extract album cover art from the same response (zero extra API calls)
+            // Save to persistent cache at {artwork_dir}/fanart_album_covers/{album_id}.jpg
+            // Phase 4 will pick these up as a fallback on current and future reindexes.
+            if (missing_album_map && g_hash_table_size(missing_album_map) > 0 &&
+                config->album_artwork_dir) {
+                int64_t cover_album_ids[32];
+                char* cover_rg_ids[32];
+                char* cover_urls[32];
+                size_t cover_count = parse_album_covers(body_data, body_size,
+                    missing_album_map, cover_album_ids, cover_rg_ids, cover_urls, 32);
+
+                if (cover_count > 0) {
+                    char* covers_dir = g_strdup_printf("%s/fanart_album_covers",
+                                                       config->album_artwork_dir);
+                    g_mkdir_with_parents(covers_dir, 0755);
+                    g_message("Phase 7: saving %zu album covers to %s",
+                              cover_count, covers_dir);
+
+                    for (size_t c = 0; c < cover_count; c++) {
+                        if (config->cancel_flag && atomic_load(config->cancel_flag)) {
+                            for (size_t f = c; f < cover_count; f++) {
+                                g_free(cover_urls[f]);
+                                g_free(cover_rg_ids[f]);
+                            }
+                            break;
+                        }
+
+                        char* cache_path = g_strdup_printf(
+                            "%s/%s.jpg", covers_dir, cover_rg_ids[c]);
+
+                        if (download_album_cover(session, cover_urls[c],
+                                cache_path, cancellable) == QUADRATURE_OK) {
+                            progress.album_covers++;
+                            g_debug("artist_art: saved album cover %s → %s",
+                                    cover_rg_ids[c], cache_path);
+
+                            // Remove from map so we don't re-download
+                            g_hash_table_remove(missing_album_map, cover_rg_ids[c]);
+                        }
+                        g_free(cache_path);
+                        g_free(cover_urls[c]);
+                        g_free(cover_rg_ids[c]);
+                    }
+                    g_free(covers_dir);
+                }
             }
 
             g_free(artist_dir);
@@ -666,11 +1019,13 @@ skip_atlas:
     (void)0;
 
     g_message("Phase 7: done — %zu fetched, %zu downloaded, %zu cached (pre-filtered), "
-              "%zu no images, %zu errors",
+              "%zu no images, %zu errors, %zu album covers",
               progress.processed, progress.downloaded, cached_count,
-              progress.no_images, progress.errors);
+              progress.no_images, progress.errors, progress.album_covers);
 
     // Cleanup
+    if (missing_album_map) g_hash_table_destroy(missing_album_map);
+    if (artist_mbids_needing_fetch) g_hash_table_destroy(artist_mbids_needing_fetch);
     g_object_unref(cancellable);
     g_object_unref(session);
     g_free(artists_dir);

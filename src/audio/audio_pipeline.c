@@ -1928,6 +1928,9 @@ quadrature_result_t audio_pipeline_set_player_quantum(audio_pipeline_t* pipeline
 
     p->quantum_frames = quantum_frames;
 
+    /* Update audio cache unlock delay to match new quantum */
+    audio_cache_set_quantum(pipeline->cache, quantum_frames);
+
     quadrature_result_t result = player_recreate_stream(p, pipeline->sample_rate,
                                                          p->target_device[0] ? p->target_device : NULL);
     pw_thread_loop_unlock(pipeline->loop);

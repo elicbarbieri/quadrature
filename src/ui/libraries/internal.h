@@ -35,3 +35,6 @@ void on_indexer_artwork_updated(IndexerController *idx, const char *library_path
                                 indexer_progress_t *p, gpointer data);
 void on_indexer_done(IndexerController *idx, const char *library_path,
                      gboolean ok, indexer_progress_t *p, gpointer data);
+
+/* Cancel all pending debounced cache refreshes (call on window dispose). */
+void indexer_bridge_cancel_pending_refreshes(void);

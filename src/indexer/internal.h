@@ -186,6 +186,7 @@ typedef struct {
     char* album_artist;         // Best album artist name (owned)
     char* album_mb_release_id;  // MUSICBRAINZ_ALBUMID tag (owned, may be NULL)
     int64_t dir_mtime;          // For finalize phase
+    int64_t dir_size;           // Size fingerprint for two-factor delta detection
     bool mb_resolved;           // Cached from scan phase
 
     // Tracks
@@ -263,8 +264,8 @@ quadrature_result_t artwork_find_bytes(const char* album_dir,
 #define ARTWORK_ATLAS_MAGIC "QDRA"
 #define ARTWORK_ATLAS_MAGIC_SIZE 4
 
-/* Current format version */
-#define ARTWORK_ATLAS_VERSION 2
+/* Current format version (v3 adds no_art section) */
+#define ARTWORK_ATLAS_VERSION 3
 
 /* Default thumbnail size and channels */
 #define ARTWORK_ATLAS_THUMB_SIZE 48
@@ -273,15 +274,22 @@ quadrature_result_t artwork_find_bytes(const char* album_dir,
 /**
  * Atlas file header (32 bytes, fixed size)
  *
- * v2 format: fixed-stride raw RGB pixel arrays (no PNG encode/decode).
- * Layout: [Header 32B] [album_ids: int64_t[count]] [pixels: uint8_t[count][pixel_stride]]
+ * v3 layout:
+ *   [Header 32B]
+ *   [album_ids: int64_t[count]]           sorted art-entry IDs
+ *   [pixels: uint8_t[count][pixel_stride]] dense RGB pixel data
+ *   [no_art_count: uint32_t]              number of known-no-artwork entries
+ *   [no_art_ids: int64_t[no_art_count]]   sorted album IDs with no artwork
+ *   [CRC32: uint32_t]
+ *
  * pixel_stride = thumb_size * thumb_size * channels
+ * v2 files (no no_art section) are accepted by the reader.
  */
 typedef struct __attribute__((packed)) {
     char magic[4];          /* "QDRA" */
-    uint32_t version;       /* Format version (2) */
-    uint32_t count;         /* Number of entries */
-    uint32_t flags;         /* Reserved for future use */
+    uint32_t version;       /* Format version (3) */
+    uint32_t count;         /* Number of art entries (with pixel data) */
+    uint32_t no_art_count;  /* Number of known-no-artwork entries (v2: was flags=0) */
     uint32_t thumb_size;    /* Thumbnail size in pixels (48) */
     uint8_t channels;       /* Color channels (3 = RGB) */
     uint8_t reserved[11];   /* Reserved for future use */
@@ -311,6 +319,48 @@ typedef struct artwork_atlas_builder artwork_atlas_builder_t;
 quadrature_result_t artwork_atlas_builder_create(const char* atlas_path,
                                                   int thumb_size,
                                                   artwork_atlas_builder_t** out);
+
+/**
+ * Load all entries from the existing atlas on disk into the builder.
+ * Art entries go into the pixel array; no-art entries go into the no_art list.
+ * Handles both v2 (detects placeholders via memcmp) and v3 (reads no_art section).
+ * Sets dirty=false. Call after create(), before process_album().
+ */
+quadrature_result_t artwork_atlas_builder_load_existing(artwork_atlas_builder_t* builder);
+
+/**
+ * Record an album as having no artwork (known-no-art sentinel).
+ * Thread-safe. Stored in the no_art section of the v3 atlas.
+ */
+quadrature_result_t artwork_atlas_builder_add_no_art(artwork_atlas_builder_t* builder,
+                                                      int64_t album_id);
+
+/**
+ * Sweep the no_art list: remove albums that now have a fanart cover on disk.
+ * Call after load_existing() + set_fanart_covers_dir() + set_album_rg_map().
+ * Returns the number of albums promoted. If promoted_ids is non-NULL, appends
+ * the promoted album IDs to it (caller owns the GArray).
+ */
+size_t artwork_atlas_builder_sweep_no_art(artwork_atlas_builder_t* builder,
+                                          GArray* promoted_ids);
+
+
+/**
+ * Set a directory of fanart.tv-sourced album cover images to use as a
+ * fallback when no local or embedded artwork is found.
+ * Files are named {release_group_id}.jpg (MusicBrainz UUIDs).
+ * Must be called before process_album().
+ */
+void artwork_atlas_builder_set_fanart_covers_dir(artwork_atlas_builder_t* builder,
+                                                  const char* dir);
+
+/**
+ * Register album_id → release_group_id mappings so the fanart cover
+ * fallback can find cached covers keyed by release group UUID.
+ * The builder takes ownership of the hash table.
+ */
+void artwork_atlas_builder_set_album_rg_map(artwork_atlas_builder_t* builder,
+                                             GHashTable* album_id_to_rg_id);
 
 /**
  * Process a single album's artwork (thread-safe).
@@ -395,23 +445,38 @@ void artwork_atlas_builder_get_profile(artwork_atlas_builder_t* builder,
                                         artwork_atlas_profile_t* out);
 
 // =============================================================================
-// Atlas Reader (for loading cached entries from existing atlas)
+// Atlas Reader (mmap-backed, zero-copy)
+//
+// Single authoritative reader for album artwork atlases.
+// Uses mmap(MAP_PRIVATE) for zero-copy binary search + pixel access.
+// All pointers valid until reader is closed.  Thread-safe for concurrent reads
+// when externally serialised against close/reopen (e.g. artwork_manager's atlas_lock).
 // =============================================================================
 
 typedef struct artwork_atlas_reader artwork_atlas_reader_t;
 
 artwork_atlas_reader_t* artwork_atlas_reader_open(const char* path);
 void artwork_atlas_reader_close(artwork_atlas_reader_t* reader);
-size_t artwork_atlas_reader_get_count(artwork_atlas_reader_t* reader);
-uint32_t artwork_atlas_reader_get_pixel_stride(artwork_atlas_reader_t* reader);
-int64_t artwork_atlas_reader_get_album_id_at(artwork_atlas_reader_t* reader, size_t index);
 
-/**
- * Get direct pointer to raw pixel data at index (zero-copy from file buffer).
- * Returns pointer valid until reader is closed. Caller must NOT free.
- * Returns NULL if index is out of range.
- */
-const uint8_t* artwork_atlas_reader_get_pixels_at(artwork_atlas_reader_t* reader, size_t index);
+/** Binary search for album_id.  Returns index (≥0) or -1 if not found.  O(log n). */
+int32_t artwork_atlas_reader_lookup(const artwork_atlas_reader_t* reader, int64_t album_id);
+
+size_t artwork_atlas_reader_get_count(const artwork_atlas_reader_t* reader);
+uint32_t artwork_atlas_reader_get_pixel_stride(const artwork_atlas_reader_t* reader);
+uint32_t artwork_atlas_reader_get_thumb_size(const artwork_atlas_reader_t* reader);
+uint8_t artwork_atlas_reader_get_channels(const artwork_atlas_reader_t* reader);
+int64_t artwork_atlas_reader_get_album_id_at(const artwork_atlas_reader_t* reader, size_t index);
+
+/** Zero-copy pointer to raw pixel data at index (into mmap). Valid until reader is closed. */
+const uint8_t* artwork_atlas_reader_get_pixels_at(const artwork_atlas_reader_t* reader, size_t index);
+
+/** Check if an album is in the known-no-artwork set (O(log n) binary search). */
+bool artwork_atlas_reader_has_no_art(const artwork_atlas_reader_t* reader, int64_t album_id);
+
+uint32_t artwork_atlas_reader_get_no_art_count(const artwork_atlas_reader_t* reader);
+
+/** Total mmap'd file size in bytes (for stats/diagnostics). */
+size_t artwork_atlas_reader_get_file_size(const artwork_atlas_reader_t* reader);
 
 // =============================================================================
 // Global Artist Atlas (UUID-keyed, shared across libraries)
@@ -555,6 +620,45 @@ uint32_t artist_atlas_reader_get_art_count(const artist_atlas_reader_t* reader);
 uint32_t artist_atlas_reader_get_no_art_count(const artist_atlas_reader_t* reader);
 
 // =============================================================================
+// CRC32 (atlas file integrity)
+// =============================================================================
+
+#define ATLAS_CRC32_SIZE 4
+
+/**
+ * Incremental CRC32 (IEEE 802.3 polynomial, same as zlib/gzip).
+ * Usage:
+ *   uint32_t crc = ATLAS_CRC32_INIT;
+ *   crc = atlas_crc32_update(crc, buf1, len1);
+ *   crc = atlas_crc32_update(crc, buf2, len2);
+ *   uint32_t final = atlas_crc32_final(crc);
+ */
+#define ATLAS_CRC32_INIT 0xFFFFFFFF
+#define atlas_crc32_final(crc) ((crc) ^ 0xFFFFFFFF)
+
+static inline uint32_t atlas_crc32_update(uint32_t crc, const uint8_t* data, size_t len) {
+    static uint32_t table[256];
+    static bool table_init = false;
+    if (!table_init) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++)
+                c = (c & 1) ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        table_init = true;
+    }
+    for (size_t i = 0; i < len; i++)
+        crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    return crc;
+}
+
+/** One-shot CRC32 (convenience wrapper around incremental API). */
+static inline uint32_t atlas_crc32(const uint8_t* data, size_t len) {
+    return atlas_crc32_final(atlas_crc32_update(ATLAS_CRC32_INIT, data, len));
+}
+
+// =============================================================================
 // UUID Helpers
 // =============================================================================
 
@@ -590,6 +694,15 @@ typedef struct {
     // before hitting fanart.tv. NULL-terminated or use count.
     const char* const* other_artwork_dirs;
     size_t other_artwork_dirs_count;
+
+    // Telemetry: incremented on each HTTP error (owned by caller, may be NULL)
+    atomic_size_t* http_errors;
+
+    // Album cover art from fanart.tv (piggyback on artist API responses)
+    // When set, albums missing from the album atlas that have a release_group_id
+    // will have their covers fetched from the same fanart.tv response.
+    const char* album_artwork_dir;   // {data_root}/artwork/ (for album atlas files)
+    int album_thumb_size;            // Album thumbnail size (typically 48)
 } artist_art_config_t;
 
 typedef struct {
@@ -599,6 +712,7 @@ typedef struct {
     size_t skipped;
     size_t no_images;
     size_t errors;
+    size_t album_covers;    // Album covers downloaded from fanart.tv responses
 } artist_art_progress_t;
 
 typedef void (*artist_art_progress_cb)(const artist_art_progress_t*, void*);
@@ -615,6 +729,9 @@ typedef struct {
     const char* library_root;      // Library root path (for metadata DB)
     atomic_int* cancel_flag;
     int rate_limit_ms;             // Default: 500ms
+
+    // Telemetry: incremented on each HTTP error (owned by caller, may be NULL)
+    atomic_size_t* http_errors;
 } artist_bio_config_t;
 
 typedef struct {

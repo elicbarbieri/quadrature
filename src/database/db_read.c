@@ -353,6 +353,7 @@ quadrature_result_t db_iter_all_albums(quadrature_db_t *db,
         a.year      = sqlite3_column_int(stmt, 3);
         a.path      = (char *)sqlite3_column_text(stmt, 4);
         a.musicbrainz_release_id = (char *)sqlite3_column_text(stmt, 5);
+        a.musicbrainz_release_group_id = (char *)sqlite3_column_text(stmt, 6);
         if (!a.title) a.title = "Unknown Album";
         if (!cb(&a, user_data)) break;
     }
@@ -1188,7 +1189,7 @@ quadrature_result_t db_get_album_mtimes_page(quadrature_db_t* db,
 
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(db->db,
-        "SELECT id, path, last_updated_at, mb_status FROM albums WHERE path != '' "
+        "SELECT id, path, last_updated_at, last_updated_size, mb_status FROM albums WHERE path != '' "
         "ORDER BY path LIMIT ? OFFSET ?",
         -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, (int64_t)limit);
@@ -1196,12 +1197,14 @@ quadrature_result_t db_get_album_mtimes_page(quadrature_db_t* db,
 
     size_t i = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && i < limit) {
-        results[i].album_id        = sqlite3_column_int64(stmt, 0);
+        results[i].album_id          = sqlite3_column_int64(stmt, 0);
         const char* path = (const char*)sqlite3_column_text(stmt, 1);
-        results[i].path            = path ? strdup(path) : NULL;
-        results[i].last_updated_at = sqlite3_column_type(stmt, 2) != SQLITE_NULL
-                                     ? sqlite3_column_int64(stmt, 2) : 0;
-        results[i].mb_status       = sqlite3_column_int(stmt, 3);
+        results[i].path              = path ? strdup(path) : NULL;
+        results[i].last_updated_at   = sqlite3_column_type(stmt, 2) != SQLITE_NULL
+                                       ? sqlite3_column_int64(stmt, 2) : 0;
+        results[i].last_updated_size = sqlite3_column_type(stmt, 3) != SQLITE_NULL
+                                       ? sqlite3_column_int64(stmt, 3) : 0;
+        results[i].mb_status         = sqlite3_column_int(stmt, 4);
         i++;
     }
     sqlite3_finalize(stmt);
@@ -1787,6 +1790,72 @@ quadrature_result_t db_get_artists_with_mbid(quadrature_db_t* db,
 
     *artist_ids = ids;
     *mbids = mbs;
+    *count = i;
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_get_albums_with_release_group_id(quadrature_db_t* db,
+    int64_t** album_ids, char*** release_group_ids, char*** artist_mbids,
+    size_t* count) {
+    if (!db || !album_ids || !release_group_ids || !artist_mbids || !count)
+        return QUADRATURE_ERROR_INVALID_PARAM;
+    *album_ids = NULL;
+    *release_group_ids = NULL;
+    *artist_mbids = NULL;
+    *count = 0;
+
+    db_lock(db);
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db->db,
+        "SELECT COUNT(*) FROM albums al "
+        "JOIN artists ar ON ar.id = al.artist_id "
+        "WHERE al.musicbrainz_release_group_id IS NOT NULL "
+        "AND ar.musicbrainz_id IS NOT NULL",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        db_unlock(db);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+    size_t total = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        total = (size_t)sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    if (total == 0) {
+        db_unlock(db);
+        return QUADRATURE_OK;
+    }
+
+    rc = sqlite3_prepare_v2(db->db,
+        "SELECT al.id, al.musicbrainz_release_group_id, ar.musicbrainz_id "
+        "FROM albums al "
+        "JOIN artists ar ON ar.id = al.artist_id "
+        "WHERE al.musicbrainz_release_group_id IS NOT NULL "
+        "AND ar.musicbrainz_id IS NOT NULL",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        db_unlock(db);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    int64_t* ids = g_malloc(total * sizeof(int64_t));
+    char** rg_ids = g_malloc0((total + 1) * sizeof(char*));
+    char** a_mbids = g_malloc0((total + 1) * sizeof(char*));
+    size_t i = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW && i < total) {
+        ids[i] = sqlite3_column_int64(stmt, 0);
+        rg_ids[i] = g_strdup((const char*)sqlite3_column_text(stmt, 1));
+        a_mbids[i] = g_strdup((const char*)sqlite3_column_text(stmt, 2));
+        i++;
+    }
+    sqlite3_finalize(stmt);
+    db_unlock(db);
+
+    *album_ids = ids;
+    *release_group_ids = rg_ids;
+    *artist_mbids = a_mbids;
     *count = i;
     return QUADRATURE_OK;
 }

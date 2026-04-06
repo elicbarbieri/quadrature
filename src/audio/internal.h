@@ -558,8 +558,17 @@ void audio_devices_monitor_stop(audio_pipeline_t *pipeline);
 /* Maximum concurrent decode tasks */
 #define AUDIO_CACHE_MAX_DECODE_WORKERS 4
 
-/* Delayed unlock timeout in milliseconds */
-#define AUDIO_CACHE_UNLOCK_DELAY_MS 200
+/* Delayed unlock: derived from audio quantum, not hardcoded.
+ * Formula: 3 × (quantum_frames / sample_rate × 1000).
+ * At 48kHz/256 frames = ~16ms; at 48kHz/512 = ~32ms; at 48kHz/4096 = ~256ms.
+ * The 3× multiplier provides margin for scheduling jitter.
+ * Minimum clamped to 16ms to avoid sub-timer-tick unlocks. */
+#define AUDIO_CACHE_UNLOCK_DELAY_MIN_MS 16
+static inline uint32_t audio_cache_compute_unlock_delay(uint32_t quantum_frames, uint32_t sample_rate) {
+    uint32_t period_ms = (quantum_frames * 1000 + sample_rate - 1) / sample_rate;
+    uint32_t delay = period_ms * 3;
+    return delay < AUDIO_CACHE_UNLOCK_DELAY_MIN_MS ? AUDIO_CACHE_UNLOCK_DELAY_MIN_MS : delay;
+}
 
 /* Cache Status */
 typedef enum {
@@ -604,6 +613,7 @@ typedef enum {
 audio_cache_lock_result_t audio_cache_lock(audio_cache_t* cache, int64_t track_id);
 void audio_cache_unlock(audio_cache_t* cache, int64_t track_id);
 void audio_cache_unlock_delayed(audio_cache_t* cache, int64_t track_id);
+void audio_cache_set_quantum(audio_cache_t* cache, uint32_t quantum_frames);
 
 /* Buffer Access (For Locked Tracks) */
 audio_buffer_t* audio_cache_get_locked(audio_cache_t* cache, int64_t track_id);

@@ -41,14 +41,11 @@
       </object>
     </child>
     <child>
-      <object class="GtkBox">
-        <property name="hexpand">true</property>
-      </object>
-    </child>
-    <child>
       <object class="GtkButton" id="reconnect">
         <property name="label">↺</property>
         <property name="visible">false</property>
+        <property name="hexpand">true</property>
+        <property name="halign">end</property>
         <property name="margin-end">4</property>
         <style><class name="perf-reconnect-btn"/></style>
       </object>

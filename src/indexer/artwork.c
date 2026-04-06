@@ -18,6 +18,9 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <libavformat/avformat.h>
 #include <vips/vips.h>
@@ -170,6 +173,28 @@ quadrature_result_t artwork_find_bytes(const char* album_dir,
         avformat_close_input(&fmt);
     }
     closedir(dir);
+
+    /* Fall back to disc subdirectories (multi-disc albums like "CD1/", "Disc 1/") */
+    dir = opendir(album_dir);
+    if (!dir) return QUADRATURE_ERROR_FILE_NOT_FOUND;
+
+    while ((dent = readdir(dir)) != NULL) {
+        if (dent->d_name[0] == '.') continue;
+#ifdef _DIRENT_HAVE_D_TYPE
+        if (dent->d_type != DT_DIR && dent->d_type != DT_UNKNOWN) continue;
+#endif
+        if (!is_disc_folder(dent->d_name)) continue;
+
+        char subdir[INDEXER_PATH_MAX];
+        snprintf(subdir, sizeof(subdir), "%s/%s", album_dir, dent->d_name);
+
+        /* Recurse once — artwork_find_bytes checks cover files + embedded art */
+        if (artwork_find_bytes(subdir, data_out, size_out) == QUADRATURE_OK) {
+            closedir(dir);
+            return QUADRATURE_OK;
+        }
+    }
+    closedir(dir);
     return QUADRATURE_ERROR_FILE_NOT_FOUND;
 }
 
@@ -281,80 +306,185 @@ static quadrature_result_t vips_resize_buffer(const void* input_data, size_t inp
     return vips_to_raw_rgb(out, thumb_size, output_data, output_size);
 }
 
+static int compare_int64(const void *a, const void *b) {
+    int64_t va = *(const int64_t *)a;
+    int64_t vb = *(const int64_t *)b;
+    return (va > vb) - (va < vb);
+}
+
 // =============================================================================
-// Atlas v2 Reader (fixed-stride raw pixel entries)
+// Atlas Reader (fixed-stride raw pixel entries, v2+v3)
+// =============================================================================
+
+// =============================================================================
+// mmap-backed Atlas Reader (single authoritative read path)
 // =============================================================================
 
 struct artwork_atlas_reader {
+    void *map;                   /* mmap base (MAP_PRIVATE, PROT_READ) */
+    size_t map_size;             /* total file size */
     artwork_atlas_header_t header;
-    int64_t *album_ids;      // Sorted album ID array (heap-allocated from fread)
-    uint8_t *pixel_data;     // All pixel data (heap-allocated from fread)
-    uint32_t pixel_stride;   // thumb_size * thumb_size * channels
+    const int64_t *album_ids;   /* sorted art-entry IDs (into mmap) */
+    const uint8_t *pixel_data;  /* dense pixel blocks (into mmap) */
+    uint32_t pixel_stride;      /* thumb_size * thumb_size * channels */
+    const int64_t *no_art_ids;  /* sorted no-art IDs (v3: into mmap, v2: heap) */
+    uint32_t no_art_count;
+    bool no_art_heap;            /* true if no_art_ids was heap-allocated (v2 compat) */
 };
 
 artwork_atlas_reader_t* artwork_atlas_reader_open(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
 
-    artwork_atlas_header_t header;
-    if (fread(&header, sizeof(header), 1, f) != 1) {
-        fclose(f); return NULL;
+    struct stat st;
+    if (fstat(fd, &st) < 0 ||
+        (size_t)st.st_size < sizeof(artwork_atlas_header_t) + ATLAS_CRC32_SIZE) {
+        close(fd); return NULL;
     }
 
-    if (memcmp(header.magic, ARTWORK_ATLAS_MAGIC, ARTWORK_ATLAS_MAGIC_SIZE) != 0 ||
-        header.version != ARTWORK_ATLAS_VERSION) {
-        fclose(f); return NULL;
+    void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);  /* fd is not needed after mmap */
+    if (map == MAP_FAILED) return NULL;
+
+    const artwork_atlas_header_t *h = map;
+    if (memcmp(h->magic, ARTWORK_ATLAS_MAGIC, ARTWORK_ATLAS_MAGIC_SIZE) != 0 ||
+        h->version < 2 || h->version > ARTWORK_ATLAS_VERSION) {
+        munmap(map, (size_t)st.st_size); return NULL;
     }
+
+    /* CRC32 validation (zero-copy — computed directly over mmap) */
+    size_t body_size = (size_t)st.st_size - ATLAS_CRC32_SIZE;
+    uint32_t expected_crc;
+    memcpy(&expected_crc, (const uint8_t *)map + body_size, sizeof(expected_crc));
+    uint32_t actual_crc = atlas_crc32((const uint8_t *)map, body_size);
+    if (actual_crc != expected_crc) {
+        g_warning("Album atlas CRC32 mismatch in %s (expected 0x%08X, got 0x%08X)",
+                  path, expected_crc, actual_crc);
+        munmap(map, (size_t)st.st_size); return NULL;
+    }
+    g_debug("Album atlas CRC32 verified: %s (0x%08X)", path, actual_crc);
 
     artwork_atlas_reader_t* reader = g_new0(artwork_atlas_reader_t, 1);
-    reader->header = header;
-    reader->pixel_stride = header.thumb_size * header.thumb_size * header.channels;
+    reader->map = map;
+    reader->map_size = (size_t)st.st_size;
+    reader->header = *h;
+    reader->pixel_stride = h->thumb_size * h->thumb_size * h->channels;
 
-    if (header.count > 0) {
-        // Read sorted album_id array
-        reader->album_ids = g_new(int64_t, header.count);
-        if (fread(reader->album_ids, sizeof(int64_t), header.count, f) != header.count) {
-            g_free(reader->album_ids); g_free(reader); fclose(f); return NULL;
+    if (h->count > 0) {
+        reader->album_ids = (const int64_t *)((const uint8_t *)map + sizeof(*h));
+        reader->pixel_data = (const uint8_t *)reader->album_ids +
+                             (size_t)h->count * sizeof(int64_t);
+    }
+
+    /* v3: no_art section follows pixel data (pointers into mmap) */
+    if (h->version >= 3 && h->count > 0) {
+        const uint8_t *after_pixels = reader->pixel_data +
+                                      (size_t)h->count * reader->pixel_stride;
+        uint32_t nac;
+        memcpy(&nac, after_pixels, sizeof(nac));
+        if (nac > 0) {
+            reader->no_art_ids = (const int64_t *)(after_pixels + sizeof(nac));
+            reader->no_art_count = nac;
         }
+    } else if (h->version >= 3) {
+        /* count == 0 but there may still be a no_art section */
+        const uint8_t *after_header = (const uint8_t *)map + sizeof(*h);
+        uint32_t nac;
+        memcpy(&nac, after_header, sizeof(nac));
+        if (nac > 0) {
+            reader->no_art_ids = (const int64_t *)(after_header + sizeof(nac));
+            reader->no_art_count = nac;
+        }
+    } else {
+        /* v2 backward compat: derive no_art from #333333 placeholder pixels */
+        if (h->count > 0) {
+            uint8_t *placeholder = g_malloc(reader->pixel_stride);
+            memset(placeholder, 0x33, reader->pixel_stride);
 
-        // Read all pixel data in one shot
-        size_t total_pixels = (size_t)header.count * reader->pixel_stride;
-        reader->pixel_data = g_malloc(total_pixels);
-        if (fread(reader->pixel_data, 1, total_pixels, f) != total_pixels) {
-            g_free(reader->pixel_data); g_free(reader->album_ids);
-            g_free(reader); fclose(f); return NULL;
+            uint32_t nac = 0;
+            for (uint32_t i = 0; i < h->count; i++) {
+                if (memcmp(reader->pixel_data + (size_t)i * reader->pixel_stride,
+                           placeholder, reader->pixel_stride) == 0)
+                    nac++;
+            }
+            if (nac > 0) {
+                int64_t *ids = g_new(int64_t, nac);
+                uint32_t j = 0;
+                for (uint32_t i = 0; i < h->count && j < nac; i++) {
+                    if (memcmp(reader->pixel_data + (size_t)i * reader->pixel_stride,
+                               placeholder, reader->pixel_stride) == 0)
+                        ids[j++] = reader->album_ids[i];
+                }
+                reader->no_art_ids = ids;
+                reader->no_art_count = j;
+                reader->no_art_heap = true;
+            }
+            g_free(placeholder);
         }
     }
 
-    fclose(f);
     return reader;
 }
 
 void artwork_atlas_reader_close(artwork_atlas_reader_t* reader) {
     if (!reader) return;
-    g_free(reader->album_ids);
-    g_free(reader->pixel_data);
+    if (reader->no_art_heap)
+        g_free((int64_t *)reader->no_art_ids);
+    if (reader->map)
+        munmap(reader->map, reader->map_size);
     g_free(reader);
 }
 
-size_t artwork_atlas_reader_get_count(artwork_atlas_reader_t* reader) {
-    if (!reader) return 0;
-    return reader->header.count;
+int32_t artwork_atlas_reader_lookup(const artwork_atlas_reader_t* reader, int64_t album_id) {
+    if (!reader || !reader->album_ids) return -1;
+    uint32_t lo = 0, hi = reader->header.count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        int64_t mid_id = reader->album_ids[mid];
+        if (mid_id == album_id) return (int32_t)mid;
+        if (mid_id < album_id) lo = mid + 1; else hi = mid;
+    }
+    return -1;
 }
 
-uint32_t artwork_atlas_reader_get_pixel_stride(artwork_atlas_reader_t* reader) {
-    if (!reader) return 0;
-    return reader->pixel_stride;
+bool artwork_atlas_reader_has_no_art(const artwork_atlas_reader_t* reader, int64_t album_id) {
+    if (!reader || !reader->no_art_ids || reader->no_art_count == 0) return false;
+    return bsearch(&album_id, reader->no_art_ids, reader->no_art_count,
+                   sizeof(int64_t), compare_int64) != NULL;
 }
 
-int64_t artwork_atlas_reader_get_album_id_at(artwork_atlas_reader_t* reader, size_t index) {
+uint32_t artwork_atlas_reader_get_no_art_count(const artwork_atlas_reader_t* reader) {
+    return reader ? reader->no_art_count : 0;
+}
+
+size_t artwork_atlas_reader_get_count(const artwork_atlas_reader_t* reader) {
+    return reader ? reader->header.count : 0;
+}
+
+uint32_t artwork_atlas_reader_get_pixel_stride(const artwork_atlas_reader_t* reader) {
+    return reader ? reader->pixel_stride : 0;
+}
+
+uint32_t artwork_atlas_reader_get_thumb_size(const artwork_atlas_reader_t* reader) {
+    return reader ? reader->header.thumb_size : 0;
+}
+
+uint8_t artwork_atlas_reader_get_channels(const artwork_atlas_reader_t* reader) {
+    return reader ? reader->header.channels : 0;
+}
+
+int64_t artwork_atlas_reader_get_album_id_at(const artwork_atlas_reader_t* reader, size_t index) {
     if (!reader || !reader->album_ids || index >= reader->header.count) return -1;
     return reader->album_ids[index];
 }
 
-const uint8_t* artwork_atlas_reader_get_pixels_at(artwork_atlas_reader_t* reader, size_t index) {
+const uint8_t* artwork_atlas_reader_get_pixels_at(const artwork_atlas_reader_t* reader, size_t index) {
     if (!reader || !reader->pixel_data || index >= reader->header.count) return NULL;
     return reader->pixel_data + index * reader->pixel_stride;
+}
+
+size_t artwork_atlas_reader_get_file_size(const artwork_atlas_reader_t* reader) {
+    return reader ? reader->map_size : 0;
 }
 
 // =============================================================================
@@ -404,6 +534,18 @@ struct artwork_atlas_builder {
     atomic_int_fast64_t prof_find_ns;       /* artwork discovery + file load (embedded only) */
     atomic_int_fast64_t prof_resize_ns;     /* vips_resize_file or vips_resize_buffer */
     atomic_size_t prof_fallback_count;      /* albums with no artwork */
+
+    /* Known no-artwork album IDs (v3 no_art section) */
+    int64_t *no_art_ids;
+    size_t no_art_count;
+    size_t no_art_capacity;
+
+    /* Incremental update: only rewrite atlas if entries changed */
+    bool dirty;
+
+    /* Fanart.tv album cover cache directory (optional fallback) */
+    char *fanart_covers_dir;                /* NULL = no fanart fallback */
+    GHashTable *album_rg_map;              /* album_id (gint64*) → release_group_id (char*), owned */
 };
 
 /* Comparison function for sorting entries by album_id */
@@ -465,10 +607,210 @@ quadrature_result_t artwork_atlas_builder_create(const char* atlas_path,
 
     builder->fallback_pixels = generate_fallback_pixels(builder->pixel_stride);
 
+    builder->no_art_capacity = 256;
+    builder->no_art_ids = g_new0(int64_t, builder->no_art_capacity);
+    builder->no_art_count = 0;
+    builder->dirty = false;
+
+    builder->fanart_covers_dir = NULL;
+
     g_info("Atlas builder created: path=%s size=%d", atlas_path, builder->thumb_size);
 
     *out = builder;
     return QUADRATURE_OK;
+}
+
+void artwork_atlas_builder_set_fanart_covers_dir(artwork_atlas_builder_t* builder,
+                                                  const char* dir) {
+    if (!builder) return;
+    g_free(builder->fanart_covers_dir);
+    builder->fanart_covers_dir = dir ? g_strdup(dir) : NULL;
+}
+
+void artwork_atlas_builder_set_album_rg_map(artwork_atlas_builder_t* builder,
+                                             GHashTable* album_id_to_rg_id) {
+    if (!builder) return;
+    if (builder->album_rg_map) g_hash_table_destroy(builder->album_rg_map);
+    builder->album_rg_map = album_id_to_rg_id;  // takes ownership
+}
+
+quadrature_result_t artwork_atlas_builder_load_existing(artwork_atlas_builder_t* builder) {
+    if (!builder) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    FILE* f = fopen(builder->atlas_path, "rb");
+    if (!f) return QUADRATURE_OK;  // No existing atlas — start fresh
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    rewind(f);
+
+    if (file_size < (long)(sizeof(artwork_atlas_header_t) + ATLAS_CRC32_SIZE)) {
+        fclose(f);
+        return QUADRATURE_OK;
+    }
+
+    artwork_atlas_header_t header;
+    if (fread(&header, sizeof(header), 1, f) != 1) { fclose(f); return QUADRATURE_OK; }
+
+    if (memcmp(header.magic, ARTWORK_ATLAS_MAGIC, ARTWORK_ATLAS_MAGIC_SIZE) != 0 ||
+        header.version < 2 || header.version > ARTWORK_ATLAS_VERSION) {
+        fclose(f); return QUADRATURE_OK;  // Incompatible — start fresh
+    }
+
+    // Validate CRC32
+    {
+        size_t body_size = (size_t)file_size - ATLAS_CRC32_SIZE;
+        rewind(f);
+        uint8_t* buf = g_malloc(body_size);
+        if (fread(buf, 1, body_size, f) != body_size) { g_free(buf); fclose(f); return QUADRATURE_OK; }
+        uint32_t expected_crc;
+        if (fread(&expected_crc, sizeof(expected_crc), 1, f) != 1) { g_free(buf); fclose(f); return QUADRATURE_OK; }
+        uint32_t actual_crc = atlas_crc32(buf, body_size);
+        g_free(buf);
+        if (actual_crc != expected_crc) {
+            g_warning("atlas load_existing: CRC32 mismatch, starting fresh");
+            fclose(f);
+            return QUADRATURE_OK;
+        }
+    }
+
+    uint32_t pixel_stride = header.thumb_size * header.thumb_size * header.channels;
+
+    // Read album_id array
+    fseek(f, sizeof(header), SEEK_SET);
+    int64_t* ids = NULL;
+    uint8_t* pixels = NULL;
+
+    if (header.count > 0) {
+        ids = g_new(int64_t, header.count);
+        if (fread(ids, sizeof(int64_t), header.count, f) != header.count) {
+            g_free(ids); fclose(f); return QUADRATURE_OK;
+        }
+
+        size_t total_pixels = (size_t)header.count * pixel_stride;
+        pixels = g_malloc(total_pixels);
+        if (fread(pixels, 1, total_pixels, f) != total_pixels) {
+            g_free(ids); g_free(pixels); fclose(f); return QUADRATURE_OK;
+        }
+    }
+
+    // For v2 files, detect placeholders via SIMD-friendly memcmp and split into art/no_art.
+    // For v3 files, all entries in the main section are real art.
+    bool is_v2 = (header.version == 2);
+
+    for (uint32_t i = 0; i < header.count; i++) {
+        bool is_placeholder = false;
+
+        if (is_v2 && pixel_stride == builder->pixel_stride) {
+            is_placeholder = (memcmp(pixels + (size_t)i * pixel_stride,
+                                     builder->fallback_pixels, pixel_stride) == 0);
+        }
+
+        if (is_placeholder) {
+            // v2 placeholder → add to no_art list
+            if (builder->no_art_count >= builder->no_art_capacity) {
+                builder->no_art_capacity *= 2;
+                builder->no_art_ids = g_realloc(builder->no_art_ids,
+                    builder->no_art_capacity * sizeof(int64_t));
+            }
+            builder->no_art_ids[builder->no_art_count++] = ids[i];
+        } else if (pixel_stride == builder->pixel_stride) {
+            // Real art entry — copy pixels
+            g_mutex_lock(&builder->entries_lock);
+            if (builder->entry_count >= builder->entry_capacity) {
+                builder->entry_capacity *= 2;
+                builder->entries = g_realloc(builder->entries,
+                    builder->entry_capacity * sizeof(atlas_build_entry_t));
+            }
+            atlas_build_entry_t* e = &builder->entries[builder->entry_count++];
+            e->album_id = ids[i];
+            e->pixel_data = g_malloc(pixel_stride);
+            memcpy(e->pixel_data, pixels + (size_t)i * pixel_stride, pixel_stride);
+            g_mutex_unlock(&builder->entries_lock);
+        }
+        // else: thumb size changed — drop entry (will be re-processed)
+    }
+
+    g_free(ids);
+    g_free(pixels);
+
+    // v3: read no_art section after pixel data
+    if (!is_v2) {
+        uint32_t no_art_count = 0;
+        if (fread(&no_art_count, sizeof(no_art_count), 1, f) == 1 && no_art_count > 0) {
+            while (builder->no_art_count + no_art_count > builder->no_art_capacity) {
+                builder->no_art_capacity *= 2;
+                builder->no_art_ids = g_realloc(builder->no_art_ids,
+                    builder->no_art_capacity * sizeof(int64_t));
+            }
+            size_t read = fread(builder->no_art_ids + builder->no_art_count,
+                                sizeof(int64_t), no_art_count, f);
+            builder->no_art_count += read;
+        }
+    }
+
+    fclose(f);
+    builder->dirty = false;  // Just loaded — nothing changed yet
+
+    g_info("Atlas load_existing: %zu art, %zu no-art (v%u source)",
+           builder->entry_count, builder->no_art_count, header.version);
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t artwork_atlas_builder_add_no_art(artwork_atlas_builder_t* builder,
+                                                      int64_t album_id) {
+    if (!builder) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    g_mutex_lock(&builder->entries_lock);
+
+    // Check not already tracked
+    for (size_t i = 0; i < builder->no_art_count; i++) {
+        if (builder->no_art_ids[i] == album_id) {
+            g_mutex_unlock(&builder->entries_lock);
+            return QUADRATURE_OK;
+        }
+    }
+
+    if (builder->no_art_count >= builder->no_art_capacity) {
+        builder->no_art_capacity *= 2;
+        builder->no_art_ids = g_realloc(builder->no_art_ids,
+            builder->no_art_capacity * sizeof(int64_t));
+    }
+    builder->no_art_ids[builder->no_art_count++] = album_id;
+    builder->dirty = true;
+    g_mutex_unlock(&builder->entries_lock);
+    return QUADRATURE_OK;
+}
+
+size_t artwork_atlas_builder_sweep_no_art(artwork_atlas_builder_t* builder,
+                                          GArray* promoted_ids) {
+    if (!builder || !builder->fanart_covers_dir || !builder->album_rg_map)
+        return 0;
+
+    size_t promoted = 0;
+    size_t dst = 0;
+    for (size_t src = 0; src < builder->no_art_count; src++) {
+        const char* rg_id = g_hash_table_lookup(builder->album_rg_map,
+                                                 &builder->no_art_ids[src]);
+        if (rg_id) {
+            char path[INDEXER_PATH_MAX];
+            g_snprintf(path, sizeof(path), "%s/%s.jpg",
+                       builder->fanart_covers_dir, rg_id);
+            if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+                if (promoted_ids)
+                    g_array_append_val(promoted_ids, builder->no_art_ids[src]);
+                promoted++;
+                builder->dirty = true;
+                continue;  // drop from no_art — will be re-processed
+            }
+        }
+        builder->no_art_ids[dst++] = builder->no_art_ids[src];
+    }
+    builder->no_art_count = dst;
+    if (promoted > 0) {
+        g_info("Atlas sweep: promoted %zu albums from no_art (fanart covers found)", promoted);
+    }
+    return promoted;
 }
 
 /**
@@ -531,9 +873,50 @@ quadrature_result_t artwork_atlas_process_album(artwork_atlas_builder_t* builder
     atomic_fetch_add(&builder->prof_resize_ns, resize_ns);
 
     if (res != QUADRATURE_OK) {
-        /* No artwork found — store placeholder so this album isn't re-queued on next scan */
-        artwork_atlas_add_cached_pixels(builder, album_id,
-                                         builder->fallback_pixels, builder->pixel_stride);
+        /* Try fanart.tv-sourced cover cache as a fallback (keyed by release group UUID) */
+        if (builder->fanart_covers_dir && builder->album_rg_map) {
+            const char* rg_id = g_hash_table_lookup(builder->album_rg_map, &album_id);
+            char fanart_path[INDEXER_PATH_MAX];
+            if (rg_id) {
+                g_snprintf(fanart_path, sizeof(fanart_path),
+                           "%s/%s.jpg", builder->fanart_covers_dir, rg_id);
+            } else {
+                fanart_path[0] = '\0';
+            }
+
+            if (g_file_test(fanart_path, G_FILE_TEST_EXISTS)) {
+                gchar* contents = NULL;
+                gsize length = 0;
+                if (g_file_get_contents(fanart_path, &contents, &length, NULL) && length > 0) {
+                    int64_t t1 = profile_now_ns();
+                    res = vips_resize_buffer((const void*)contents, length, builder->thumb_size,
+                                             &pixel_data, &pixel_size);
+                    atomic_fetch_add(&builder->prof_resize_ns, profile_now_ns() - t1);
+                    g_free(contents);
+
+                    if (res == QUADRATURE_OK) {
+                        g_mutex_lock(&builder->entries_lock);
+                        if (builder->entry_count >= builder->entry_capacity) {
+                            builder->entry_capacity *= 2;
+                            builder->entries = g_realloc(builder->entries,
+                                builder->entry_capacity * sizeof(atlas_build_entry_t));
+                        }
+                        atlas_build_entry_t* entry = &builder->entries[builder->entry_count++];
+                        entry->album_id = album_id;
+                        entry->pixel_data = pixel_data;
+                        g_mutex_unlock(&builder->entries_lock);
+
+                        atomic_fetch_add(&builder->processed_count, 1);
+                        return QUADRATURE_OK;
+                    }
+                } else {
+                    g_free(contents);
+                }
+            }
+        }
+
+        /* No artwork found — record in no_art section (v3) */
+        artwork_atlas_builder_add_no_art(builder, album_id);
         atomic_fetch_add(&builder->prof_fallback_count, 1);
         if (used_fallback) *used_fallback = true;
         return QUADRATURE_OK;
@@ -578,6 +961,7 @@ quadrature_result_t artwork_atlas_add_cached_pixels(artwork_atlas_builder_t* bui
     atlas_build_entry_t* entry = &builder->entries[builder->entry_count++];
     entry->album_id = album_id;
     entry->pixel_data = data_copy;
+    builder->dirty = true;
     g_mutex_unlock(&builder->entries_lock);
 
     atomic_fetch_add(&builder->processed_count, 1);
@@ -615,15 +999,22 @@ quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t* builde
         return QUADRATURE_ERROR_INVALID_PARAM;
     }
 
-    g_info("Atlas finish: %zu entries", builder->entry_count);
+    /* Incremental: skip write if nothing changed */
+    if (!builder->dirty) {
+        g_info("Atlas finish: unchanged (%zu art, %zu no-art)",
+               builder->entry_count, builder->no_art_count);
+        return QUADRATURE_OK;
+    }
 
-    if (builder->entry_count == 0) {
+    if (builder->entry_count == 0 && builder->no_art_count == 0) {
         return QUADRATURE_OK;
     }
 
     /* Sort entries by album_id */
     qsort(builder->entries, builder->entry_count,
           sizeof(atlas_build_entry_t), compare_atlas_entries);
+    qsort(builder->no_art_ids, builder->no_art_count,
+          sizeof(int64_t), compare_int64);
 
     FILE *f = fopen(builder->temp_path, "wb");
     if (!f) {
@@ -631,43 +1022,60 @@ quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t* builde
         return QUADRATURE_ERROR_INTERNAL;
     }
 
-    /* Write v2 header */
+    /* Incremental CRC32 — computed during writes, no read-back needed */
+    uint32_t crc = ATLAS_CRC32_INIT;
+    bool write_ok = true;
+
+#define CRC_WRITE(ptr, sz) do { \
+    size_t _sz = (sz); \
+    if (write_ok && fwrite((ptr), 1, _sz, f) == _sz) \
+        crc = atlas_crc32_update(crc, (const uint8_t*)(ptr), _sz); \
+    else write_ok = false; \
+} while (0)
+
+    /* Write v3 header */
     artwork_atlas_header_t header = {0};
     memcpy(header.magic, ARTWORK_ATLAS_MAGIC, ARTWORK_ATLAS_MAGIC_SIZE);
     header.version = ARTWORK_ATLAS_VERSION;
     header.count = (uint32_t)builder->entry_count;
-    header.flags = 0;
+    header.no_art_count = (uint32_t)builder->no_art_count;
     header.thumb_size = (uint32_t)builder->thumb_size;
     header.channels = ARTWORK_ATLAS_CHANNELS;
+    CRC_WRITE(&header, sizeof(header));
 
-    if (fwrite(&header, sizeof(header), 1, f) != 1) {
-        fclose(f); unlink(builder->temp_path);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
-    /* Write sorted album_id array — batch into flat array for single fwrite */
-    {
+    /* Write sorted album_id array */
+    if (builder->entry_count > 0) {
         int64_t *ids = g_malloc(builder->entry_count * sizeof(int64_t));
         for (size_t i = 0; i < builder->entry_count; i++)
             ids[i] = builder->entries[i].album_id;
-        size_t written = fwrite(ids, sizeof(int64_t), builder->entry_count, f);
+        CRC_WRITE(ids, builder->entry_count * sizeof(int64_t));
         g_free(ids);
-        if (written != builder->entry_count) {
-            fclose(f); unlink(builder->temp_path);
-            return QUADRATURE_ERROR_INTERNAL;
-        }
     }
 
     /* Write pixel data (fixed stride per entry) */
-    for (size_t i = 0; i < builder->entry_count; i++) {
-        if (fwrite(builder->entries[i].pixel_data, 1, builder->pixel_stride, f)
-            != builder->pixel_stride) {
-            fclose(f); unlink(builder->temp_path);
-            return QUADRATURE_ERROR_INTERNAL;
-        }
-    }
+    for (size_t i = 0; i < builder->entry_count && write_ok; i++)
+        CRC_WRITE(builder->entries[i].pixel_data, builder->pixel_stride);
+
+    /* Write v3 no_art section */
+    uint32_t nac = (uint32_t)builder->no_art_count;
+    CRC_WRITE(&nac, sizeof(nac));
+    if (builder->no_art_count > 0)
+        CRC_WRITE(builder->no_art_ids, builder->no_art_count * sizeof(int64_t));
+
+    /* Append CRC32 (not included in its own checksum) */
+    uint32_t final_crc = atlas_crc32_final(crc);
+    if (write_ok)
+        write_ok = (fwrite(&final_crc, sizeof(final_crc), 1, f) == 1);
+
+#undef CRC_WRITE
 
     fclose(f);
+
+    if (!write_ok) {
+        g_warning("Failed to write atlas temp file: %s", builder->temp_path);
+        unlink(builder->temp_path);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
 
     if (rename(builder->temp_path, builder->atlas_path) != 0) {
         g_warning("Failed to rename atlas file: %s -> %s",
@@ -676,9 +1084,8 @@ quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t* builde
         return QUADRATURE_ERROR_INTERNAL;
     }
 
-    size_t total_size = sizeof(header) + builder->entry_count * (sizeof(int64_t) + builder->pixel_stride);
-    g_info("Atlas v2 created: %s (%zu entries, %zu bytes total)",
-           builder->atlas_path, builder->entry_count, total_size);
+    g_info("Atlas v3 written: %s (%zu art, %zu no-art)",
+           builder->atlas_path, builder->entry_count, builder->no_art_count);
 
     return QUADRATURE_OK;
 }
@@ -692,6 +1099,7 @@ void artwork_atlas_builder_destroy(artwork_atlas_builder_t* builder) {
         }
         g_free(builder->entries);
     }
+    g_free(builder->no_art_ids);
 
     g_free(builder->fallback_pixels);
 
@@ -701,6 +1109,8 @@ void artwork_atlas_builder_destroy(artwork_atlas_builder_t* builder) {
         g_free(builder->temp_path);
     }
 
+    g_free(builder->fanart_covers_dir);
+    if (builder->album_rg_map) g_hash_table_destroy(builder->album_rg_map);
     g_free(builder->atlas_path);
     g_mutex_clear(&builder->entries_lock);
     g_free(builder);

@@ -127,6 +127,21 @@ Multiple libraries can be registered. Each has its own SQLite databases and artw
 
 `quadrature-metadata.sqlite` is written by Phase 6 on successful MB resolution and read on-demand by the UI. `quadrature-bios.sqlite` is written by Phase 8. If either is absent, the UI simply shows no relation/bio data — no crash. See [Metadata Architecture](METADATA.md) for schema details.
 
+## Startup Health Check
+
+On launch, before building the UI or starting any background work:
+
+1. **Library paths:** `stat()` each configured `library_root`. Mark unavailable libraries
+   (the cache skips unavailable slots gracefully).
+2. **SQLite databases:** `PRAGMA quick_check` on each `quadrature.sqlite`. If corrupt,
+   log the error and skip that library (UI shows degraded state, not a crash).
+3. **Atlas files:** validate magic bytes + trailing CRC32. On mismatch, fall back to
+   prior atlas or start with no thumbnails.
+4. **PostgreSQL** (if MB resolution enabled): test connection with a 2-second timeout.
+   If unreachable, disable Phases 5–6 for this run and log a warning.
+
+Fail fast with clear diagnostics rather than discovering problems mid-indexing.
+
 ## Platform Requirements
 
 - Linux with PipeWire

@@ -304,3 +304,44 @@ Test(audio_cache, concurrent_cache_reads) {
 
     audio_cache_destroy(cache);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Unlock Delay Computation
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+Test(audio_cache, unlock_delay_computation) {
+    /* Formula: 3 × ceil(quantum_frames / sample_rate × 1000), min 16ms */
+
+    /* 48kHz / 256 frames → period ~5.3ms → 3×6 = 18ms */
+    uint32_t d1 = audio_cache_compute_unlock_delay(256, 48000);
+    cr_assert_geq(d1, AUDIO_CACHE_UNLOCK_DELAY_MIN_MS);
+    cr_assert_leq(d1, 50);
+
+    /* 48kHz / 512 frames → period ~10.7ms → 3×11 = 33ms */
+    uint32_t d2 = audio_cache_compute_unlock_delay(512, 48000);
+    cr_assert_gt(d2, d1, "512 quantum should produce longer delay than 256");
+
+    /* 48kHz / 4096 frames → period ~85ms → 3×86 = 258ms */
+    uint32_t d3 = audio_cache_compute_unlock_delay(4096, 48000);
+    cr_assert_geq(d3, 200);
+
+    /* Minimum clamp: very small quantum */
+    uint32_t d4 = audio_cache_compute_unlock_delay(32, 48000);
+    cr_assert_geq(d4, AUDIO_CACHE_UNLOCK_DELAY_MIN_MS);
+
+    /* Monotonic: larger quantum → larger delay */
+    cr_assert_leq(d1, d2);
+    cr_assert_leq(d2, d3);
+}
+
+Test(audio_cache, set_quantum_updates_delay) {
+    audio_cache_t* cache = NULL;
+    audio_cache_create(NULL, 48000, &cache);
+    cr_assert_not_null(cache);
+
+    /* Update to larger quantum — verify no crash and cache still functional */
+    audio_cache_set_quantum(cache, 1024);
+    cr_assert_eq(audio_cache_get_memory_used(cache), 0);
+
+    audio_cache_destroy(cache);
+}

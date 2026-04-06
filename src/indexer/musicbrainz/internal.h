@@ -213,6 +213,14 @@ quadrature_result_t mb_pg_client_create(const char* conninfo, mb_pg_client_t** o
 void mb_pg_client_destroy(mb_pg_client_t* client);
 
 /**
+ * Attempt to reset/reconnect the PostgreSQL connection.
+ * Uses PQreset() which closes and re-establishes the connection
+ * using the original connection parameters.
+ * @return true if reconnection succeeded, false otherwise
+ */
+bool mb_pg_client_reset(mb_pg_client_t* client);
+
+/**
  * Execute a parameterized query against the PG client.
  * Returns a PGresult* (caller must PQclear).
  * Declared as void* to avoid leaking libpq types into this header.

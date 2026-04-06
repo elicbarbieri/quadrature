@@ -139,10 +139,9 @@ static GtkWidget *lib_badge_create_item(guint index, gpointer user_data) {
 
 void ui_populate_library_badges(GtkWidget *badges_box,
                                  library_cache_t *cache,
-                                 int library_index,
                                  int64_t entity_global_id,
-                                 const int64_t *merged_source_ids,
-                                 int merged_source_count) {
+                                 badge_entity_type_t entity_type,
+                                 GtkWidget *constraint_widget) {
     ui_box_clear(GTK_BOX(badges_box));
 
     if (!cache || library_cache_get_library_count(cache) <= 1) {
@@ -150,30 +149,25 @@ void ui_populate_library_badges(GtkWidget *badges_box,
         return;
     }
 
-    /* Stack-based dedup — no heap allocation for typical library counts */
     int deduped[BADGE_MAX_LIBS];
-    guint count = 0;
+    int count = 0;
 
-    int primary_lib = (library_index >= 0)
-        ? library_index
-        : LIBRARY_GLOBAL_ID_LIB(entity_global_id);
-    if (primary_lib >= 0 && primary_lib < library_cache_get_library_count(cache)
-        && count < BADGE_MAX_LIBS) {
-        if (library_cache_get_library_name(cache, primary_lib)) {
-            deduped[count++] = primary_lib;
-        }
+    switch (entity_type) {
+    case BADGE_ENTITY_ARTIST:
+        count = library_cache_get_artist_libraries(
+            cache, entity_global_id, deduped, BADGE_MAX_LIBS);
+        break;
+    case BADGE_ENTITY_ALBUM:
+        count = library_cache_get_album_libraries(
+            cache, entity_global_id, deduped, BADGE_MAX_LIBS);
+        break;
+    case BADGE_ENTITY_TRACK: {
+        int lib = LIBRARY_GLOBAL_ID_LIB(entity_global_id);
+        if (lib >= 0 && lib < library_cache_get_library_count(cache)
+            && library_cache_get_library_name(cache, lib))
+            deduped[count++] = lib;
+        break;
     }
-
-    for (int i = 0; i < merged_source_count && count < BADGE_MAX_LIBS; i++) {
-        int src_lib = LIBRARY_GLOBAL_ID_LIB(merged_source_ids[i]);
-        /* Linear scan dedup — fine for N ≤ 8 */
-        gboolean seen = FALSE;
-        for (guint j = 0; j < count; j++) {
-            if (deduped[j] == src_lib) { seen = TRUE; break; }
-        }
-        if (seen) continue;
-        if (library_cache_get_library_name(cache, src_lib))
-            deduped[count++] = src_lib;
     }
 
     if (count == 0) {
@@ -189,14 +183,16 @@ void ui_populate_library_badges(GtkWidget *badges_box,
     d->lib_indices = g_memdup2(deduped, count * sizeof(int));
 
     ui_overflow_box_setup(&(UiOverflowBoxParams){
-        .box               = badges_box,
-        .default_max_width = 300,
-        .pinned_children   = 0,
-        .create_item       = lib_badge_create_item,
-        .create_overflow   = NULL,   /* Just stop — badges are small */
-        .item_count        = count,
-        .user_data         = d,
-        .user_data_destroy = lib_badge_data_free,
+        .box                = badges_box,
+        .constraint_widget  = constraint_widget,
+        .constraint_fraction = constraint_widget ? 1.0 : 0.0,
+        .default_max_width  = 300,
+        .pinned_children    = 0,
+        .create_item        = lib_badge_create_item,
+        .create_overflow    = NULL,   /* Just stop — badges are small */
+        .item_count         = count,
+        .user_data          = d,
+        .user_data_destroy  = lib_badge_data_free,
     });
 }
 
@@ -277,6 +273,13 @@ static void overflow_box_relayout(OverflowBoxData *obd) {
         ? (int)(raw_width * obd->constraint_fraction)
         : obd->default_max_width;
 
+    /* Width unknown (pre-allocation) AND a constraint widget exists:
+     * show all items without overflow planning — the notify::width or map
+     * handler will apply the real constraint once the allocation is known.
+     * Only use the default_max_width fallback when there is NO constraint
+     * widget (the caller intentionally chose a fixed budget). */
+    gboolean width_unknown = obd->constraint_widget && raw_width <= 0;
+
     /* Measure pinned children's accumulated width */
     int pinned_width = 0;
     child = gtk_widget_get_first_child(obd->box);
@@ -300,9 +303,16 @@ static void overflow_box_relayout(OverflowBoxData *obd) {
 
     /* ── Plan with pure integer math ── */
     gboolean needs_overflow = FALSE;
-    guint show_count = ui_overflow_box_plan_layout(
-        max_width - pinned_width, item_widths, obd->item_count,
-        overflow_w, &needs_overflow);
+    guint show_count;
+    if (width_unknown) {
+        /* Show all — let parent clip until real width is known */
+        show_count = obd->item_count;
+        needs_overflow = FALSE;
+    } else {
+        show_count = ui_overflow_box_plan_layout(
+            max_width - pinned_width, item_widths, obd->item_count,
+            overflow_w, &needs_overflow);
+    }
 
     /* ── Execute: append only what the plan selected ── */
     for (guint i = 0; i < show_count; i++)
@@ -382,128 +392,58 @@ void ui_overflow_box_setup(const UiOverflowBoxParams *p) {
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Genre Pills — Width-Aware via Overflow Box
+ * Genre Pills — QuadOverflowBox + Pre-Allocated Labels
  *
- * Splits genre string on semicolons. Each genre becomes an ellipsized pill.
- * Overflow collapses into a "…" button with a popover listing all genres.
+ * Uses QuadOverflowBox which does overflow planning inside its own
+ * size_allocate — no signals, no deferred visibility, no clipping.
+ * Pre-allocate GENRE_PILL_MAX labels + 1 "…" overflow label once at setup.
+ * On bind, set label text — the overflow box handles the rest.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-typedef struct {
-    char  **genres;       /* Owned, null-terminated */
-    guint   count;
-} GenrePillData;
+#define GENRE_PILL_MAX 6
 
-static void genre_pill_data_free(gpointer data) {
-    GenrePillData *d = data;
-    g_strfreev(d->genres);
-    g_free(d);
+GtkWidget *ui_genre_pills_new(int spacing) {
+    g_type_ensure(QUADRATURE_TYPE_OVERFLOW_BOX);
+    GtkWidget *box = g_object_new(QUADRATURE_TYPE_OVERFLOW_BOX,
+                                   "spacing", spacing, NULL);
+    gtk_widget_add_css_class(box, "genre-pills");
+
+    /* Pre-allocate pill label slots + overflow indicator (last child) */
+    QuadOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(box);
+    for (int i = 0; i < GENRE_PILL_MAX; i++) {
+        GtkWidget *pill = gtk_label_new("");
+        gtk_widget_add_css_class(pill, "genre-pill");
+        quad_overflow_box_append(ofb, pill);
+    }
+    GtkWidget *overflow = gtk_label_new("…");
+    gtk_widget_add_css_class(overflow, "genre-pill");
+    quad_overflow_box_append(ofb, overflow);
+
+    return box;
 }
 
-static GtkWidget *genre_create_item(guint index, gpointer user_data) {
-    GenrePillData *d = user_data;
-    GtkWidget *pill = gtk_label_new(d->genres[index]);
-    gtk_label_set_ellipsize(GTK_LABEL(pill), PANGO_ELLIPSIZE_END);
-    gtk_label_set_max_width_chars(GTK_LABEL(pill), 18);
-    gtk_widget_add_css_class(pill, "genre-pill");
-    return pill;
-}
+void ui_genre_pills_bind(GtkWidget *genres_box, const char *genres) {
+    if (!genres_box) return;
 
-static void on_genre_overflow_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
-    gtk_popover_popup(GTK_POPOVER(user_data));
-}
-
-static void on_genre_overflow_destroy(GtkWidget *widget, gpointer user_data) {
-    (void)widget;
-    gtk_widget_unparent(GTK_WIDGET(user_data));
-}
-
-static GtkWidget *genre_create_overflow(guint first_hidden, guint total,
-                                         gpointer user_data) {
-    (void)first_hidden;
-    GenrePillData *d = user_data;
-
-    GtkWidget *btn = gtk_button_new_with_label("…");
-    gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
-    gtk_widget_add_css_class(btn, "genre-pill");
-    gtk_widget_add_css_class(btn, "genre-overflow-btn");
-
-    /* Popover with all genres */
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    gtk_widget_set_margin_start(vbox, 4);
-    gtk_widget_set_margin_end(vbox, 4);
-    gtk_widget_set_margin_top(vbox, 4);
-    gtk_widget_set_margin_bottom(vbox, 4);
-
-    for (guint i = 0; i < total; i++) {
-        GtkWidget *label = gtk_label_new(d->genres[i]);
-        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
-        gtk_label_set_max_width_chars(GTK_LABEL(label), 30);
-        gtk_widget_add_css_class(label, "genre-pill");
-        gtk_widget_set_halign(label, GTK_ALIGN_START);
-        gtk_box_append(GTK_BOX(vbox), label);
+    guint genre_count = 0;
+    if (genres && genres[0]) {
+        gchar **raw = g_strsplit(genres, ";", GENRE_PILL_MAX + 1);
+        GtkWidget *child = gtk_widget_get_first_child(genres_box);
+        for (guint i = 0; raw[i] && genre_count < GENRE_PILL_MAX; i++) {
+            g_strstrip(raw[i]);
+            if (!raw[i][0]) continue;
+            if (child) {
+                gtk_label_set_text(GTK_LABEL(child), raw[i]);
+                child = gtk_widget_get_next_sibling(child);
+            }
+            genre_count++;
+        }
+        g_strfreev(raw);
     }
 
-    GtkWidget *popover = gtk_popover_new();
-    gtk_popover_set_child(GTK_POPOVER(popover), vbox);
-    gtk_widget_set_parent(popover, btn);
-    g_signal_connect(btn, "clicked", G_CALLBACK(on_genre_overflow_clicked), popover);
-    g_signal_connect(btn, "destroy", G_CALLBACK(on_genre_overflow_destroy), popover);
-
-    return btn;
-}
-
-void ui_populate_genre_pills(GtkWidget *box, const char *genres,
-                              GtkWidget *constraint_widget,
-                              double constraint_fraction) {
-    ui_box_clear(GTK_BOX(box));
-
-    if (!genres || !genres[0]) {
-        gtk_widget_set_visible(box, FALSE);
-        return;
-    }
-
-    /* Parse genres, skip empty entries */
-    gchar **raw = g_strsplit(genres, ";", 0);
-    GPtrArray *clean = g_ptr_array_new();
-    for (guint i = 0; raw[i]; i++) {
-        g_strstrip(raw[i]);
-        if (raw[i][0])
-            g_ptr_array_add(clean, g_strdup(raw[i]));
-    }
-    g_strfreev(raw);
-
-    if (clean->len == 0) {
-        g_ptr_array_free(clean, TRUE);
-        gtk_widget_set_visible(box, FALSE);
-        return;
-    }
-
-    gtk_widget_set_visible(box, TRUE);
-
-    /* Build null-terminated strv for GenrePillData */
-    g_ptr_array_add(clean, NULL);
-    char **genre_strv = (char **)g_ptr_array_free(clean, FALSE);
-
-    guint count = 0;
-    for (char **p = genre_strv; *p; p++) count++;
-
-    GenrePillData *d = g_new0(GenrePillData, 1);
-    d->genres = genre_strv;
-    d->count  = count;
-
-    ui_overflow_box_setup(&(UiOverflowBoxParams){
-        .box                = box,
-        .constraint_widget  = constraint_widget,
-        .constraint_fraction = constraint_fraction,
-        .default_max_width  = 250,
-        .pinned_children    = 0,
-        .create_item        = genre_create_item,
-        .create_overflow    = genre_create_overflow,
-        .item_count         = count,
-        .user_data          = d,
-        .user_data_destroy  = genre_pill_data_free,
-    });
+    /* Tell the overflow box how many items are populated */
+    quad_overflow_box_set_item_count(QUADRATURE_OVERFLOW_BOX(genres_box), genre_count);
+    gtk_widget_set_visible(genres_box, genre_count > 0);
 }
 
 
@@ -671,6 +611,55 @@ static gboolean on_popover_shortcut_key(GtkEventControllerKey *ctl,
         }
     }
     return FALSE;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Section Header — "── TITLE ──────────────────" rule style
+ *
+ * Snapshot-based separator line bypasses GTK4 CSS cascade issues inside
+ * gtk_list_box_row_set_header(). Uses gtk_snapshot_append_color (GPU-composited).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void sep_snapshot(GtkWidget *widget, GtkSnapshot *snap) {
+    float w = (float)gtk_widget_get_width(widget);
+    float h = (float)gtk_widget_get_height(widget);
+    if (w <= 0 || h <= 0) return;
+    float line_h = 3.0f;
+    float y = (h - line_h) / 2.0f;
+    GdkRGBA color = { 0.5f, 0.5f, 0.5f, 0.5f };
+    graphene_rect_t rect = GRAPHENE_RECT_INIT(0, y, w, line_h);
+    gtk_snapshot_append_color(snap, &color, &rect);
+}
+
+typedef struct { GtkWidget parent; } QuadSepLine;
+typedef struct { GtkWidgetClass parent_class; } QuadSepLineClass;
+G_DEFINE_FINAL_TYPE(QuadSepLine, quad_sep_line, GTK_TYPE_WIDGET)
+static void quad_sep_line_init(QuadSepLine *self) { (void)self; }
+static void quad_sep_line_class_init(QuadSepLineClass *klass) {
+    GTK_WIDGET_CLASS(klass)->snapshot = sep_snapshot;
+}
+
+GtkWidget *ui_make_section_header(const char *title) {
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_add_css_class(box, "search-section-header");
+
+    GtkWidget *label = gtk_label_new(NULL);
+    char *markup = g_markup_printf_escaped(
+        "<span foreground='#888888' weight='bold' size='22528' letter_spacing='1229'>%s</span>",
+        title);
+    gtk_label_set_markup(GTK_LABEL(label), markup);
+    g_free(markup);
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+
+    GtkWidget *sep = g_object_new(quad_sep_line_get_type(), NULL);
+    gtk_widget_set_hexpand(sep, TRUE);
+    gtk_widget_set_valign(sep, GTK_ALIGN_CENTER);
+    gtk_widget_set_size_request(sep, -1, 12);
+
+    gtk_box_append(GTK_BOX(box), label);
+    gtk_box_append(GTK_BOX(box), sep);
+    return box;
 }
 
 void ui_popover_install_shortcuts(GtkPopover *popover) {

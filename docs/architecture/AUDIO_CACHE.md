@@ -100,7 +100,9 @@ For instantaneous track changes, the cache supports two tiers of protection:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Use case:** Audio Engine locks the current and next tracks. When user skips or track ends, the engine swaps to the new buffer pointer, then schedules a delayed unlock (200ms) for the old track. This ensures the audio callback completes any in-flight reads before the buffer becomes evictable.
+**Use case:** Audio Engine locks the current and next tracks. When user skips or track ends, the engine swaps to the new buffer pointer, then schedules a delayed unlock for the old track. This ensures the audio callback completes any in-flight reads before the buffer becomes evictable.
+
+**Delayed unlock timing:** derived from audio parameters, not hardcoded. `delay_ms = 3 × (quantum / sample_rate × 1000)`. At 48kHz/512 frames this is ~32ms; at 48kHz/4096 frames (large quantum) this is ~256ms. The 3× multiplier provides margin for scheduling jitter. This adapts automatically if PipeWire renegotiates buffer sizes.
 
 ### Tier 2: File Prefetch (Kernel Page Cache)
 
@@ -508,7 +510,8 @@ LRU with lock-count protection:
 1. Eviction triggers when `memory_used > memory_limit`
 1. Walk LRU queue from tail (oldest)
 1. Skip if `lock_count > 0` (locked) or `decode_complete == false` (loading)
-1. Skipped buffers move to head (prevents starvation)
+1. Skipped buffers **stay in place** (preserving their true recency). A full-rotation
+   sentinel detects when the scan has wrapped without freeing anything.
 1. Continue until under limit or full rotation
 
 ## Error Handling

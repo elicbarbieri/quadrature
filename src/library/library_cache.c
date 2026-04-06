@@ -9,8 +9,9 @@
  * single-library use.
  *
  * Background warming: each slot gets its own warming thread.  After a slot
- * finishes warming, rebuild_merged_artists() merges MBID-matched artists
- * across warmed slots, then fires the ready callback on the main thread.
+ * finishes warming, build_mbid_indices() builds sorted arrays for O(log n)
+ * cross-library MBID resolution, then fires the ready callback.
+ * Slots keep only their own data — deduplication happens at query time.
  */
 
 #define G_LOG_DOMAIN "quadrature"
@@ -26,10 +27,7 @@
 static void build_search_vocab_slot(struct library_cache *cache, int slot_idx);
 static const char *correct_token(struct library_cache *cache, const char *token);
 static char *build_corrected_query(struct library_cache *cache, const char *query);
-static void rebuild_merged_artists(struct library_cache *cache);
-static void rebuild_merged_albums(struct library_cache *cache);
-static void rebuild_merged_artist_relationships(struct library_cache *cache);
-static void recompute_merged_artist_counts(struct library_cache *cache);
+static void build_mbid_indices(struct library_cache *cache);
 
 #include <string.h>
 #include <stdio.h>
@@ -117,16 +115,29 @@ struct library_cache {
     library_cache_ready_cb ready_cb;
     void                  *ready_cb_data;
 
-    GMutex lock;  /* Covers slot arrays, merged lists, and bitmap_map writes */
+    GMutex lock;  /* Covers slot arrays, MBID indices, and bitmap_map writes */
 
-    /* Set of global artist IDs that are merge sources (non-representative).
-     * Query functions skip these to avoid returning duplicates.
-     * Rebuilt from scratch in rebuild_merged_artists(). */
-    GHashTable *merged_source_set;  /* int64_t* → NULL (set) */
+    /* ── MBID Resolution Indices ──
+     * Sorted arrays for O(log n) cross-library artist/album resolution.
+     * Built after each slot warms. Query functions use these to collect
+     * data from all slots sharing a MusicBrainz ID. */
+    struct {
+        struct mbid_artist_entry {
+            char mbid[37];           /* Inline UUID string */
+            int64_t *global_ids;     /* Heap array of artist global IDs */
+            uint8_t count;
+        } *entries;
+        size_t count;
+    } mbid_artist_index;
 
-    /* Set of global album IDs that are merge sources (non-representative).
-     * Rebuilt from scratch in rebuild_merged_albums(). */
-    GHashTable *merged_album_sources;  /* int64_t* → NULL (set) */
+    struct {
+        struct mbrid_album_entry {
+            char mbrid[37];          /* Inline release-group UUID string */
+            int64_t *global_ids;     /* Heap array of album global IDs */
+            uint8_t count;
+        } *entries;
+        size_t count;
+    } mbrid_album_index;
 
     /* Background prefetch thread — open()+fadvise() off main thread */
     GAsyncQueue *prefetch_queue;    /* char* paths (owned by queue) */
@@ -147,7 +158,6 @@ static void clear_artist_info(gpointer ptr) {
     library_artist_info_t *info = ptr;
     g_free(info->name);
     g_free(info->musicbrainz_id);
-    g_free(info->merged_source_ids);
 }
 
 static void release_artist_info(library_artist_info_t *info) {
@@ -162,7 +172,7 @@ static void clear_album_info(gpointer ptr) {
     g_free(info->path);
     g_free(info->genres);
     g_free(info->musicbrainz_release_id);
-    g_free(info->merged_source_ids);
+    g_free(info->musicbrainz_release_group_id);
 }
 
 static void release_album_info(library_album_info_t *info) {
@@ -481,6 +491,8 @@ static bool on_warm_album(const db_album_t *a, void *data) {
     info->year          = a->year;
     info->musicbrainz_release_id = a->musicbrainz_release_id
                                  ? g_strdup(a->musicbrainz_release_id) : NULL;
+    info->musicbrainz_release_group_id = a->musicbrainz_release_group_id
+                                       ? g_strdup(a->musicbrainz_release_group_id) : NULL;
     /* Resolve artist_name from Phase 1 data */
     library_artist_info_t *artist = slot_get_artist(slot, a->artist_id);
     info->artist_name = g_strdup(artist ? artist->name : "Unknown Artist");
@@ -815,10 +827,7 @@ static gpointer slot_warming_thread_func(gpointer data) {
      * read other slots (READY = immutable). The ready_cb fires via g_idle_add
      * after this, so main-thread readers see the completed merge. */
     phase_start = g_get_monotonic_time();
-    rebuild_merged_artists(cache);
-    rebuild_merged_albums(cache);
-    recompute_merged_artist_counts(cache);
-    rebuild_merged_artist_relationships(cache);
+    build_mbid_indices(cache);
     gint64 phase6_us = g_get_monotonic_time() - phase_start;
 
     atomic_store(&slot->warm_state, LIBRARY_CACHE_READY);
@@ -853,473 +862,222 @@ done:
 }
 
 /* =============================================================================
- * Cross-Library Artist Merging (called from warming thread or admin ops — no concurrent readers)
- * ============================================================================= */
-
-/**
- * Merge a source artist into a representative. Accumulates counts,
- * appends source ID to merged_source_ids, marks rep as cross-library,
- * and adds source to the skip set.
+ * MBID Resolution Indices
  *
- * Relationship arrays (artist_albums, artist_appearances, etc.) are rebuilt
- * eagerly by rebuild_merged_artist_relationships() after all merges complete.
- */
-static void merge_artist_into_rep(library_cache_t *cache,
-                                   library_artist_info_t *rep,
-                                   library_artist_info_t *source) {
-    rep->track_count += source->track_count;
-    rep->album_count += source->album_count;
-    rep->merged_source_count++;
-    rep->merged_source_ids = g_realloc(rep->merged_source_ids,
-        (size_t)rep->merged_source_count * sizeof(int64_t));
-    rep->merged_source_ids[rep->merged_source_count - 1] = source->artist_id;
-    rep->library_index = -1;
-
-    /* Add source to skip set */
-    int64_t *key = g_new(int64_t, 1);
-    *key = source->artist_id;
-    g_hash_table_add(cache->merged_source_set, key);
-}
-
-static void rebuild_merged_artists(library_cache_t *cache) {
-    /* Rebuild the source skip set from scratch */
-    if (cache->merged_source_set)
-        g_hash_table_destroy(cache->merged_source_set);
-    cache->merged_source_set = g_hash_table_new_full(
-        g_int64_hash, g_int64_equal, g_free, NULL);
-
-    /* MBID merge: only merge artists that share a MusicBrainz ID.
-     * Artists without MBIDs remain as separate entries per library. */
-    GHashTable *mbid_to_rep = g_hash_table_new(g_str_hash, g_str_equal);
-
-    for (int i = 0; i < cache->slot_count; i++) {
-        LibrarySlot *slot = &cache->slots[i];
-        for (size_t aid = 1; aid < slot->artists_capacity; aid++) {
-            library_artist_info_t *a = slot_get_artist(slot, (int64_t)aid);
-            if (!a) continue;
-
-            /* Reset merge state from previous rebuild */
-            g_free(a->merged_source_ids);
-            a->merged_source_ids  = NULL;
-            a->merged_source_count = 0;
-            a->library_index      = slot->bitmap_index;
-
-            if (!a->musicbrainz_id)
-                continue;
-
-            library_artist_info_t *rep =
-                g_hash_table_lookup(mbid_to_rep, a->musicbrainz_id);
-            if (!rep) {
-                g_hash_table_insert(mbid_to_rep, a->musicbrainz_id, a);
-            } else {
-                merge_artist_into_rep(cache, rep, a);
-            }
-        }
-    }
-
-    g_hash_table_destroy(mbid_to_rep);
-}
-
-/* =============================================================================
- * Cross-Library Album Merging (called from warming thread or admin ops — no concurrent readers)
- * ============================================================================= */
-
-static void merge_album_into_rep(library_cache_t *cache,
-                                  library_album_info_t *rep,
-                                  library_album_info_t *source) {
-    rep->merged_source_count++;
-    rep->merged_source_ids = g_realloc(rep->merged_source_ids,
-        (size_t)rep->merged_source_count * sizeof(int64_t));
-    rep->merged_source_ids[rep->merged_source_count - 1] = source->album_id;
-    rep->library_index = -1;
-
-    /* Add source to skip set */
-    int64_t *key = g_new(int64_t, 1);
-    *key = source->album_id;
-    g_hash_table_add(cache->merged_album_sources, key);
-}
-
-static void rebuild_merged_albums(library_cache_t *cache) {
-    /* Rebuild the source skip set from scratch */
-    if (cache->merged_album_sources)
-        g_hash_table_destroy(cache->merged_album_sources);
-    cache->merged_album_sources = g_hash_table_new_full(
-        g_int64_hash, g_int64_equal, g_free, NULL);
-
-    GHashTable *mbid_to_rep = g_hash_table_new(g_str_hash, g_str_equal);
-
-    for (int i = 0; i < cache->slot_count; i++) {
-        LibrarySlot *slot = &cache->slots[i];
-        for (size_t aid = 1; aid < slot->albums_capacity; aid++) {
-            library_album_info_t *a = slot_get_album(slot, (int64_t)aid);
-            if (!a) continue;
-
-            /* Reset merge state from previous rebuild */
-            g_free(a->merged_source_ids);
-            a->merged_source_ids  = NULL;
-            a->merged_source_count = 0;
-            a->library_index      = slot->bitmap_index;
-
-            if (!a->musicbrainz_release_id || !a->musicbrainz_release_id[0])
-                continue;
-
-            library_album_info_t *rep =
-                g_hash_table_lookup(mbid_to_rep, a->musicbrainz_release_id);
-            if (!rep) {
-                g_hash_table_insert(mbid_to_rep, a->musicbrainz_release_id, a);
-            } else {
-                merge_album_into_rep(cache, rep, a);
-            }
-        }
-    }
-
-    g_hash_table_destroy(mbid_to_rep);
-}
-
-/* =============================================================================
- * Merged Artist Count Correction
+ * Sorted arrays for O(log n) cross-library artist/album resolution.
+ * Built after each slot warms.  Query functions use these at runtime to
+ * collect data from all slots sharing a MusicBrainz ID.
  *
- * After both artist and album merges are complete, the naively-summed
- * album_count and track_count on merged artists are inflated by any albums
- * that exist in multiple libraries.  Re-query each library's DB, dedup albums
- * by MBID (the same dedup the detail view already does), and set the correct
- * totals.  DB locks are independent of cache->lock, so no deadlock.
+ * Slots keep ONLY their own data — no entity mutation, no combined arrays,
+ * no skip sets.  Deduplication happens at query time.
  * ============================================================================= */
 
-/* Count own albums + tracks for one (slot, local_artist_id) pair.
- * Albums with MBIDs already in `seen_mbids` are skipped (cross-library dedup).
- * Albums WITHOUT MBIDs cannot be deduplicated and are counted per-library
- * (intentional — no reliable key to match them across libraries). */
-/* Count albums for one (slot, local_artist_id) pair using in-memory arrays.
- * Deduplicates by musicbrainz_release_id against seen_mbids. */
-static void count_artist_albums_dedup(LibrarySlot *slot, int64_t local_artist_id,
-                                       GHashTable *seen_mbids,
-                                       uint32_t *album_count, uint32_t *track_count) {
-    if (local_artist_id <= 0 || (size_t)local_artist_id >= slot->artist_albums_capacity)
-        return;
-    GPtrArray *albums = slot->artist_albums[local_artist_id];
-    if (!albums) return;
-
-    for (guint i = 0; i < albums->len; i++) {
-        library_album_info_t *album = g_ptr_array_index(albums, i);
-        if (album->musicbrainz_release_id && album->musicbrainz_release_id[0]) {
-            if (g_hash_table_contains(seen_mbids, album->musicbrainz_release_id))
-                continue;
-            g_hash_table_add(seen_mbids, g_strdup(album->musicbrainz_release_id));
-        }
-        (*album_count)++;
-        *track_count += album->track_count;
-    }
+static void free_mbid_artist_index(library_cache_t *cache) {
+    for (size_t i = 0; i < cache->mbid_artist_index.count; i++)
+        g_free(cache->mbid_artist_index.entries[i].global_ids);
+    g_free(cache->mbid_artist_index.entries);
+    cache->mbid_artist_index.entries = NULL;
+    cache->mbid_artist_index.count = 0;
 }
 
-/* Count featured-appearance tracks for one (slot, local_artist_id) pair
- * using in-memory arrays. Deduplicates by album MBID + track position. */
-static void count_artist_appearances_dedup(LibrarySlot *slot, int64_t local_artist_id,
-                                            GHashTable *seen_mbids,
-                                            uint32_t *track_count) {
-    if (local_artist_id <= 0 || (size_t)local_artist_id >= slot->artist_appearance_tracks_capacity)
-        return;
-    GPtrArray *app_tracks = slot->artist_appearance_tracks[local_artist_id];
-    if (!app_tracks) return;
-
-    for (guint i = 0; i < app_tracks->len; i++) {
-        library_track_info_t *t = g_ptr_array_index(app_tracks, i);
-        /* Dedup by "mbid:disc:track" for resolved albums */
-        int64_t local_album_id = LIBRARY_GLOBAL_ID_LOCAL(t->album_id);
-        library_album_info_t *album = slot_get_album(slot, local_album_id);
-        if (album && album->musicbrainz_release_id && album->musicbrainz_release_id[0]) {
-            char key[128];
-            snprintf(key, sizeof(key), "%s:%u:%u", album->musicbrainz_release_id,
-                     t->disc_num, t->track_num);
-            if (g_hash_table_contains(seen_mbids, key))
-                continue;
-            g_hash_table_add(seen_mbids, g_strdup(key));
-        }
-        (*track_count)++;
-    }
+static void free_mbrid_album_index(library_cache_t *cache) {
+    for (size_t i = 0; i < cache->mbrid_album_index.count; i++)
+        g_free(cache->mbrid_album_index.entries[i].global_ids);
+    g_free(cache->mbrid_album_index.entries);
+    cache->mbrid_album_index.entries = NULL;
+    cache->mbrid_album_index.count = 0;
 }
 
-static void recompute_merged_artist_counts(library_cache_t *cache) {
-    for (int i = 0; i < cache->slot_count; i++) {
-        LibrarySlot *slot = &cache->slots[i];
-        for (size_t aid = 1; aid < slot->artists_capacity; aid++) {
-            library_artist_info_t *a = slot_get_artist(slot, (int64_t)aid);
-            if (!a || a->merged_source_count == 0) continue;
+static int mbid_entry_cmp(const void *a, const void *b) {
+    return strcmp(((const struct mbid_artist_entry *)a)->mbid,
+                  ((const struct mbid_artist_entry *)b)->mbid);
+}
 
-            GHashTable *seen_mbids = g_hash_table_new_full(
-                g_str_hash, g_str_equal, g_free, NULL);
-            uint32_t album_count = 0, track_count = 0;
+static int mbrid_entry_cmp(const void *a, const void *b) {
+    return strcmp(((const struct mbrid_album_entry *)a)->mbrid,
+                  ((const struct mbrid_album_entry *)b)->mbrid);
+}
 
-            /* Representative's own slot */
-            count_artist_albums_dedup(slot, (int64_t)aid, seen_mbids,
-                                       &album_count, &track_count);
-            count_artist_appearances_dedup(slot, (int64_t)aid, seen_mbids,
-                                            &track_count);
+/** Binary search for an artist MBID. Returns entry or NULL. */
+static const struct mbid_artist_entry *mbid_artist_lookup(
+    const library_cache_t *cache, const char *mbid)
+{
+    if (!mbid || !cache->mbid_artist_index.entries) return NULL;
+    struct mbid_artist_entry key;
+    memcpy(key.mbid, mbid, 37);
+    return bsearch(&key, cache->mbid_artist_index.entries,
+                   cache->mbid_artist_index.count,
+                   sizeof(struct mbid_artist_entry), mbid_entry_cmp);
+}
 
-            /* Each merged source */
-            for (int m = 0; m < a->merged_source_count; m++) {
-                int64_t src_global = a->merged_source_ids[m];
-                int     src_lib    = LIBRARY_GLOBAL_ID_LIB(src_global);
-                int64_t src_local  = LIBRARY_GLOBAL_ID_LOCAL(src_global);
-                LibrarySlot *src_slot = bitmap_to_slot(cache, src_lib);
-                if (!src_slot) continue;
-                count_artist_albums_dedup(src_slot, src_local, seen_mbids,
-                                           &album_count, &track_count);
-                count_artist_appearances_dedup(src_slot, src_local, seen_mbids,
-                                                &track_count);
+/** Binary search for an album MBRID. Returns entry or NULL. */
+static const struct mbrid_album_entry *mbrid_album_lookup(
+    const library_cache_t *cache, const char *mbrid)
+{
+    if (!mbrid || !cache->mbrid_album_index.entries) return NULL;
+    struct mbrid_album_entry key;
+    memcpy(key.mbrid, mbrid, 37);
+    return bsearch(&key, cache->mbrid_album_index.entries,
+                   cache->mbrid_album_index.count,
+                   sizeof(struct mbrid_album_entry), mbrid_entry_cmp);
+}
+
+/* ── Public MBID-aware library enumeration ─────────────────────────────── */
+
+int library_cache_get_artist_libraries(library_cache_t *cache,
+                                       int64_t artist_global_id,
+                                       int *out_libs, int max_libs) {
+    if (!cache || !out_libs || max_libs <= 0) return 0;
+
+    int64_t local_id;
+    LibrarySlot *slot = decode_slot(cache, artist_global_id, &local_id);
+    if (!slot) return 0;
+
+    library_artist_info_t *a = slot_get_artist(slot, local_id);
+    if (!a) return 0;
+
+    if (a->musicbrainz_id) {
+        const struct mbid_artist_entry *entry =
+            mbid_artist_lookup(cache, a->musicbrainz_id);
+        if (entry) {
+            int n = 0;
+            for (uint8_t i = 0; i < entry->count && n < max_libs; i++) {
+                int lib = LIBRARY_GLOBAL_ID_LIB(entry->global_ids[i]);
+                /* Dedup — same lib can appear if index is stale */
+                bool dup = false;
+                for (int j = 0; j < n; j++)
+                    if (out_libs[j] == lib) { dup = true; break; }
+                if (!dup) out_libs[n++] = lib;
             }
-
-            g_hash_table_destroy(seen_mbids);
-            a->album_count = album_count;
-            a->track_count = track_count;
+            return n;
         }
     }
+
+    /* Fallback: source library only */
+    out_libs[0] = a->library_index;
+    return 1;
 }
 
-/* =============================================================================
- * Merged Artist Relationship Rebuild
- *
- * After both artist and album merges, each merged representative's
- * artist_albums / artist_appearances / artist_appearance_tracks arrays
- * must be rebuilt to include entities from all source slots.  Albums that
- * are themselves merged sources (in merged_album_sources) are skipped —
- * the album representative already covers them.
- * ============================================================================= */
+int library_cache_get_album_libraries(library_cache_t *cache,
+                                      int64_t album_global_id,
+                                      int *out_libs, int max_libs) {
+    if (!cache || !out_libs || max_libs <= 0) return 0;
 
-/**
- * Collect albums from `slot->artist_albums[local_aid]` into `out`,
- * skipping albums in the merged-album-sources skip set and deduplicating
- * by musicbrainz_release_id against `seen_mbids`.
- */
-static void collect_artist_albums(LibrarySlot *slot, int64_t local_aid,
-                                   GHashTable *merged_album_sources,
-                                   GHashTable *seen_mbids,
-                                   GPtrArray *out) {
-    if (local_aid <= 0 || (size_t)local_aid >= slot->artist_albums_capacity)
-        return;
-    GPtrArray *src = slot->artist_albums[local_aid];
-    if (!src) return;
+    int64_t local_id;
+    LibrarySlot *slot = decode_slot(cache, album_global_id, &local_id);
+    if (!slot) return 0;
 
-    for (guint i = 0; i < src->len; i++) {
-        library_album_info_t *album = g_ptr_array_index(src, i);
-        /* Skip albums that don't belong to this slot (stale cross-library
-         * pointers from a previous merge that wasn't cleaned up) */
-        if (LIBRARY_GLOBAL_ID_LIB(album->album_id) != slot->bitmap_index)
-            continue;
-        /* Skip merged-away album duplicates */
-        if (g_hash_table_contains(merged_album_sources, &album->album_id))
-            continue;
-        /* MBID dedup across libraries */
-        if (album->musicbrainz_release_id && album->musicbrainz_release_id[0]) {
-            if (g_hash_table_contains(seen_mbids, album->musicbrainz_release_id))
-                continue;
-            g_hash_table_add(seen_mbids, album->musicbrainz_release_id);
+    library_album_info_t *a = slot_get_album(slot, local_id);
+    if (!a) return 0;
+
+    if (a->musicbrainz_release_group_id) {
+        const struct mbrid_album_entry *entry =
+            mbrid_album_lookup(cache, a->musicbrainz_release_group_id);
+        if (entry) {
+            int n = 0;
+            for (uint8_t i = 0; i < entry->count && n < max_libs; i++) {
+                int lib = LIBRARY_GLOBAL_ID_LIB(entry->global_ids[i]);
+                bool dup = false;
+                for (int j = 0; j < n; j++)
+                    if (out_libs[j] == lib) { dup = true; break; }
+                if (!dup) out_libs[n++] = lib;
+            }
+            return n;
         }
-        g_ptr_array_add(out, album);
     }
+
+    /* Fallback: source library only */
+    out_libs[0] = a->library_index;
+    return 1;
 }
 
 /**
- * Collect appearances from `slot->artist_appearances[local_aid]` into `out`,
- * skipping merged-away albums and deduplicating by MBID.
+ * Build both MBID indices from scratch.  Walks all slots, collects
+ * MBID → global_id pairs, flattens into sorted arrays.
  */
-static void collect_artist_appearances(LibrarySlot *slot, int64_t local_aid,
-                                        GHashTable *merged_album_sources,
-                                        GHashTable *seen_mbids,
-                                        GPtrArray *out) {
-    if (local_aid <= 0 || (size_t)local_aid >= slot->artist_appearances_capacity)
-        return;
-    GPtrArray *src = slot->artist_appearances[local_aid];
-    if (!src) return;
+static void build_mbid_indices(library_cache_t *cache) {
+    free_mbid_artist_index(cache);
+    free_mbrid_album_index(cache);
 
-    for (guint i = 0; i < src->len; i++) {
-        library_album_info_t *album = g_ptr_array_index(src, i);
-        if (LIBRARY_GLOBAL_ID_LIB(album->album_id) != slot->bitmap_index)
-            continue;
-        if (g_hash_table_contains(merged_album_sources, &album->album_id))
-            continue;
-        if (album->musicbrainz_release_id && album->musicbrainz_release_id[0]) {
-            if (g_hash_table_contains(seen_mbids, album->musicbrainz_release_id))
-                continue;
-            g_hash_table_add(seen_mbids, album->musicbrainz_release_id);
-        }
-        g_ptr_array_add(out, album);
-    }
-}
-
-/**
- * Collect appearance tracks from `slot->artist_appearance_tracks[local_aid]`
- * into `out`, skipping tracks whose album is a merged source and deduplicating
- * by "mbid:disc:track" key.
- */
-static void collect_artist_appearance_tracks(LibrarySlot *slot, int64_t local_aid,
-                                              GHashTable *merged_album_sources,
-                                              GHashTable *seen_keys,
-                                              GPtrArray *out) {
-    if (local_aid <= 0 || (size_t)local_aid >= slot->artist_appearance_tracks_capacity)
-        return;
-    GPtrArray *src = slot->artist_appearance_tracks[local_aid];
-    if (!src) return;
-
-    for (guint i = 0; i < src->len; i++) {
-        library_track_info_t *track = g_ptr_array_index(src, i);
-        /* Skip tracks that don't belong to this slot */
-        if (LIBRARY_GLOBAL_ID_LIB(track->track_id) != slot->bitmap_index)
-            continue;
-        /* Skip tracks from merged-away albums */
-        if (g_hash_table_contains(merged_album_sources, &track->album_id))
-            continue;
-        /* Dedup by album MBID + disc:track position */
-        int64_t local_album_id = LIBRARY_GLOBAL_ID_LOCAL(track->album_id);
-        library_album_info_t *album = slot_get_album(slot, local_album_id);
-        if (album && album->musicbrainz_release_id && album->musicbrainz_release_id[0]) {
-            char key[128];
-            snprintf(key, sizeof(key), "%s:%u:%u",
-                     album->musicbrainz_release_id, track->disc_num, track->track_num);
-            if (g_hash_table_contains(seen_keys, key))
-                continue;
-            g_hash_table_add(seen_keys, g_strdup(key));
-        }
-        g_ptr_array_add(out, track);
-    }
-}
-
-/**
- * For every merged artist representative, rebuild artist_albums,
- * artist_appearances, and artist_appearance_tracks to include entities
- * from all source slots.  Must be called AFTER rebuild_merged_artists(),
- * rebuild_merged_albums(), and recompute_merged_artist_counts().
- */
-static void rebuild_merged_artist_relationships(library_cache_t *cache) {
-    /* Pass 0: Purge stale cross-library entries from all relationship arrays.
-     * After remove_slot or re-merge, arrays may contain pointers to albums/tracks
-     * from a now-destroyed or re-merged slot.  Filter down to local-only. */
-    for (int i = 0; i < cache->slot_count; i++) {
-        LibrarySlot *slot = &cache->slots[i];
-        for (size_t aid = 1; aid < slot->artist_albums_capacity; aid++) {
-            GPtrArray *arr = slot->artist_albums[aid];
-            if (!arr) continue;
-            for (guint j = arr->len; j > 0; j--) {
-                library_album_info_t *album = g_ptr_array_index(arr, j - 1);
-                if (LIBRARY_GLOBAL_ID_LIB(album->album_id) != slot->bitmap_index)
-                    g_ptr_array_remove_index_fast(arr, j - 1);
+    /* ── Artist index ── */
+    {
+        /* Collect: MBID string → GArray of uint32 global_ids */
+        GHashTable *map = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                 NULL, (GDestroyNotify)g_array_unref);
+        for (int i = 0; i < cache->slot_count; i++) {
+            LibrarySlot *slot = &cache->slots[i];
+            for (size_t aid = 1; aid < slot->artists_capacity; aid++) {
+                library_artist_info_t *a = slot_get_artist(slot, (int64_t)aid);
+                if (!a || !a->musicbrainz_id) continue;
+                GArray *ids = g_hash_table_lookup(map, a->musicbrainz_id);
+                if (!ids) {
+                    ids = g_array_new(FALSE, FALSE, sizeof(int64_t));
+                    g_hash_table_insert(map, a->musicbrainz_id, ids);
+                }
+                int64_t gid = LIBRARY_MAKE_GLOBAL_ID(slot->bitmap_index, aid);
+                g_array_append_val(ids, gid);
             }
         }
-        for (size_t aid = 1; aid < slot->artist_appearances_capacity; aid++) {
-            GPtrArray *arr = slot->artist_appearances[aid];
-            if (!arr) continue;
-            for (guint j = arr->len; j > 0; j--) {
-                library_album_info_t *album = g_ptr_array_index(arr, j - 1);
-                if (LIBRARY_GLOBAL_ID_LIB(album->album_id) != slot->bitmap_index)
-                    g_ptr_array_remove_index_fast(arr, j - 1);
-            }
+
+        /* Flatten to sorted array */
+        size_t n = g_hash_table_size(map);
+        struct mbid_artist_entry *entries = g_new(struct mbid_artist_entry, n);
+        GHashTableIter iter;
+        gpointer k, v;
+        size_t idx = 0;
+        g_hash_table_iter_init(&iter, map);
+        while (g_hash_table_iter_next(&iter, &k, &v)) {
+            GArray *ids = v;
+            struct mbid_artist_entry *e = &entries[idx++];
+            g_strlcpy(e->mbid, (const char *)k, sizeof(e->mbid));
+            e->count = (uint8_t)(ids->len < 255 ? ids->len : 255);
+            e->global_ids = g_new(int64_t, e->count);
+            memcpy(e->global_ids, ids->data, e->count * sizeof(int64_t));
         }
-        for (size_t aid = 1; aid < slot->artist_appearance_tracks_capacity; aid++) {
-            GPtrArray *arr = slot->artist_appearance_tracks[aid];
-            if (!arr) continue;
-            for (guint j = arr->len; j > 0; j--) {
-                library_track_info_t *track = g_ptr_array_index(arr, j - 1);
-                if (LIBRARY_GLOBAL_ID_LIB(track->track_id) != slot->bitmap_index)
-                    g_ptr_array_remove_index_fast(arr, j - 1);
-            }
-        }
+        g_hash_table_destroy(map);
+        qsort(entries, n, sizeof(struct mbid_artist_entry), mbid_entry_cmp);
+        cache->mbid_artist_index.entries = entries;
+        cache->mbid_artist_index.count = n;
     }
 
-    /* Pass 1+: For merged reps, rebuild combined arrays from all sources */
-    for (int i = 0; i < cache->slot_count; i++) {
-        LibrarySlot *slot = &cache->slots[i];
-        for (size_t aid = 1; aid < slot->artists_capacity; aid++) {
-            library_artist_info_t *a = slot_get_artist(slot, (int64_t)aid);
-            if (!a || a->merged_source_count == 0) continue;
-
-            /* ── artist_albums ── */
-            {
-                GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
-                GPtrArray *combined = g_ptr_array_new();
-
-                /* Rep's own albums */
-                collect_artist_albums(slot, (int64_t)aid,
-                                      cache->merged_album_sources, seen, combined);
-                /* Each merged source's albums */
-                for (int m = 0; m < a->merged_source_count; m++) {
-                    int64_t src_global = a->merged_source_ids[m];
-                    LibrarySlot *src_slot = bitmap_to_slot(cache,
-                        LIBRARY_GLOBAL_ID_LIB(src_global));
-                    if (!src_slot) continue;
-                    collect_artist_albums(src_slot,
-                        LIBRARY_GLOBAL_ID_LOCAL(src_global),
-                        cache->merged_album_sources, seen, combined);
+    /* ── Album index ── */
+    {
+        GHashTable *map = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                 NULL, (GDestroyNotify)g_array_unref);
+        for (int i = 0; i < cache->slot_count; i++) {
+            LibrarySlot *slot = &cache->slots[i];
+            for (size_t aid = 1; aid < slot->albums_capacity; aid++) {
+                library_album_info_t *a = slot_get_album(slot, (int64_t)aid);
+                if (!a || !a->musicbrainz_release_group_id || !a->musicbrainz_release_group_id[0])
+                    continue;
+                GArray *ids = g_hash_table_lookup(map, a->musicbrainz_release_group_id);
+                if (!ids) {
+                    ids = g_array_new(FALSE, FALSE, sizeof(int64_t));
+                    g_hash_table_insert(map, a->musicbrainz_release_group_id, ids);
                 }
-
-                g_hash_table_destroy(seen);
-
-                /* Replace rep's array */
-                if (aid < slot->artist_albums_capacity) {
-                    if (slot->artist_albums[aid])
-                        g_ptr_array_unref(slot->artist_albums[aid]);
-                    slot->artist_albums[aid] = combined;
-                } else {
-                    g_ptr_array_unref(combined);
-                }
-            }
-
-            /* ── artist_appearances ── */
-            {
-                GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
-                GPtrArray *combined = g_ptr_array_new();
-
-                collect_artist_appearances(slot, (int64_t)aid,
-                                            cache->merged_album_sources, seen, combined);
-                for (int m = 0; m < a->merged_source_count; m++) {
-                    int64_t src_global = a->merged_source_ids[m];
-                    LibrarySlot *src_slot = bitmap_to_slot(cache,
-                        LIBRARY_GLOBAL_ID_LIB(src_global));
-                    if (!src_slot) continue;
-                    collect_artist_appearances(src_slot,
-                        LIBRARY_GLOBAL_ID_LOCAL(src_global),
-                        cache->merged_album_sources, seen, combined);
-                }
-
-                g_hash_table_destroy(seen);
-
-                if (aid < slot->artist_appearances_capacity) {
-                    if (slot->artist_appearances[aid])
-                        g_ptr_array_unref(slot->artist_appearances[aid]);
-                    slot->artist_appearances[aid] = combined;
-                } else {
-                    g_ptr_array_unref(combined);
-                }
-            }
-
-            /* ── artist_appearance_tracks ── */
-            {
-                GHashTable *seen = g_hash_table_new_full(
-                    g_str_hash, g_str_equal, g_free, NULL);
-                GPtrArray *combined = g_ptr_array_new();
-
-                collect_artist_appearance_tracks(slot, (int64_t)aid,
-                    cache->merged_album_sources, seen, combined);
-                for (int m = 0; m < a->merged_source_count; m++) {
-                    int64_t src_global = a->merged_source_ids[m];
-                    LibrarySlot *src_slot = bitmap_to_slot(cache,
-                        LIBRARY_GLOBAL_ID_LIB(src_global));
-                    if (!src_slot) continue;
-                    collect_artist_appearance_tracks(src_slot,
-                        LIBRARY_GLOBAL_ID_LOCAL(src_global),
-                        cache->merged_album_sources, seen, combined);
-                }
-
-                g_hash_table_destroy(seen);
-
-                if (aid < slot->artist_appearance_tracks_capacity) {
-                    if (slot->artist_appearance_tracks[aid])
-                        g_ptr_array_unref(slot->artist_appearance_tracks[aid]);
-                    slot->artist_appearance_tracks[aid] = combined;
-                } else {
-                    g_ptr_array_unref(combined);
-                }
+                int64_t gid = LIBRARY_MAKE_GLOBAL_ID(slot->bitmap_index, aid);
+                g_array_append_val(ids, gid);
             }
         }
+
+        size_t n = g_hash_table_size(map);
+        struct mbrid_album_entry *entries = g_new(struct mbrid_album_entry, n);
+        GHashTableIter iter;
+        gpointer k, v;
+        size_t idx = 0;
+        g_hash_table_iter_init(&iter, map);
+        while (g_hash_table_iter_next(&iter, &k, &v)) {
+            GArray *ids = v;
+            struct mbrid_album_entry *e = &entries[idx++];
+            g_strlcpy(e->mbrid, (const char *)k, sizeof(e->mbrid));
+            e->count = (uint8_t)(ids->len < 255 ? ids->len : 255);
+            e->global_ids = g_new(int64_t, e->count);
+            memcpy(e->global_ids, ids->data, e->count * sizeof(int64_t));
+        }
+        g_hash_table_destroy(map);
+        qsort(entries, n, sizeof(struct mbrid_album_entry), mbrid_entry_cmp);
+        cache->mbrid_album_index.entries = entries;
+        cache->mbrid_album_index.count = n;
     }
 }
 
@@ -1750,10 +1508,8 @@ void library_cache_destroy(library_cache_t *cache) {
         g_free(cache->search_vocab);
     }
 
-    if (cache->merged_source_set)
-        g_hash_table_destroy(cache->merged_source_set);
-    if (cache->merged_album_sources)
-        g_hash_table_destroy(cache->merged_album_sources);
+    free_mbid_artist_index(cache);
+    free_mbrid_album_index(cache);
 
     g_mutex_clear(&cache->lock);
     g_free(cache);
@@ -1849,10 +1605,7 @@ void library_cache_clear_slot(library_cache_t *cache, int bitmap_index) {
     if (slot->db) allocate_slot_arrays(slot);
     atomic_store(&slot->warm_state, LIBRARY_CACHE_IDLE);
 
-    rebuild_merged_artists(cache);
-    rebuild_merged_albums(cache);
-    recompute_merged_artist_counts(cache);
-    rebuild_merged_artist_relationships(cache);
+    build_mbid_indices(cache);
 }
 
 /* =============================================================================
@@ -2230,10 +1983,8 @@ static gpointer cow_refresh_thread_func(gpointer data) {
         slot->album_tracks_ptrs          = shadow.album_tracks_ptrs;
         slot->album_tracks_ptrs_capacity = shadow.album_tracks_ptrs_capacity;
 
-        /* Rebuild cross-library merged data with new arrays in place */
-        rebuild_merged_artists(cache);
-        rebuild_merged_albums(cache);
-        recompute_merged_artist_counts(cache);
+        /* Rebuild MBID indices with new arrays in place */
+        build_mbid_indices(cache);
 
         g_mutex_unlock(&cache->lock);
 
@@ -2465,10 +2216,7 @@ quadrature_result_t library_cache_remove_slot(library_cache_t *cache, int bitmap
     for (int i = 0; i < slot_pos; i++)
         cache->slots[i].cache = cache;
 
-    rebuild_merged_artists(cache);
-    rebuild_merged_albums(cache);
-    recompute_merged_artist_counts(cache);
-    rebuild_merged_artist_relationships(cache);
+    build_mbid_indices(cache);
 
     return QUADRATURE_OK;
 }
@@ -2491,22 +2239,130 @@ const library_track_info_t *library_cache_get_track(library_cache_t *cache,
     return slot_get_track(slot, local_id);
 }
 
-const library_album_info_t *library_cache_get_album(library_cache_t *cache,
-                                                     int64_t album_id) {
+/* Sort helper: compare album info pointers by library_index (ascending). */
+static int cmp_album_by_lib(gconstpointer a, gconstpointer b) {
+    const library_album_info_t *aa = *(const library_album_info_t *const *)a;
+    const library_album_info_t *bb = *(const library_album_info_t *const *)b;
+    return aa->library_index - bb->library_index;
+}
+
+GPtrArray *library_cache_get_albums(library_cache_t *cache,
+                                    int64_t album_id,
+                                    uint32_t library_mask,
+                                    int num_results) {
     if (!cache || album_id <= 0) return NULL;
+
     int64_t local_id;
     LibrarySlot *slot = decode_slot(cache, album_id, &local_id);
     if (!slot) return NULL;
-    return slot_get_album(slot, local_id);
+
+    library_album_info_t *source = slot_get_album(slot, local_id);
+    if (!source) return NULL;
+
+    GPtrArray *results = g_ptr_array_new();
+
+    /* Try MBRID index for cross-library versions */
+    if (source->musicbrainz_release_group_id && num_results != 1) {
+        const struct mbrid_album_entry *entry =
+            mbrid_album_lookup(cache, source->musicbrainz_release_group_id);
+        if (entry) {
+            for (uint8_t i = 0; i < entry->count; i++) {
+                int lib = LIBRARY_GLOBAL_ID_LIB(entry->global_ids[i]);
+                if (!(library_mask & (1u << lib))) continue;
+                int64_t lid;
+                LibrarySlot *s = decode_slot(cache, entry->global_ids[i], &lid);
+                if (!s) continue;
+                library_album_info_t *a = slot_get_album(s, lid);
+                if (a) g_ptr_array_add(results, a);
+            }
+            g_ptr_array_sort(results, cmp_album_by_lib);
+            if (num_results > 0 && results->len > (guint)num_results)
+                g_ptr_array_set_size(results, num_results);
+            return results;
+        }
+    }
+
+    /* No MBRID or single-result mode: return source album if it passes mask */
+    if (library_mask & (1u << slot->bitmap_index))
+        g_ptr_array_add(results, source);
+
+    return results;
 }
 
-const library_artist_info_t *library_cache_get_artist(library_cache_t *cache,
-                                                       int64_t artist_id) {
+const library_album_info_t *library_cache_get_album(library_cache_t *cache,
+                                                     int64_t album_id,
+                                                     uint32_t library_mask) {
+    GPtrArray *results = library_cache_get_albums(cache, album_id, library_mask, 1);
+    if (!results || results->len == 0) {
+        g_clear_pointer(&results, g_ptr_array_unref);
+        return NULL;
+    }
+    const library_album_info_t *album = g_ptr_array_index(results, 0);
+    g_ptr_array_unref(results);
+    return album;
+}
+
+/* Sort helper: compare artist info pointers by library_index (ascending). */
+static int cmp_artist_by_lib(gconstpointer a, gconstpointer b) {
+    const library_artist_info_t *aa = *(const library_artist_info_t *const *)a;
+    const library_artist_info_t *bb = *(const library_artist_info_t *const *)b;
+    return aa->library_index - bb->library_index;
+}
+
+GPtrArray *library_cache_get_artists(library_cache_t *cache,
+                                     int64_t artist_id,
+                                     uint32_t library_mask,
+                                     int num_results) {
     if (!cache || artist_id <= 0) return NULL;
+
     int64_t local_id;
     LibrarySlot *slot = decode_slot(cache, artist_id, &local_id);
     if (!slot) return NULL;
-    return slot_get_artist(slot, local_id);
+
+    library_artist_info_t *source = slot_get_artist(slot, local_id);
+    if (!source) return NULL;
+
+    GPtrArray *results = g_ptr_array_new();
+
+    /* Try MBID index for cross-library versions */
+    if (source->musicbrainz_id && num_results != 1) {
+        const struct mbid_artist_entry *entry =
+            mbid_artist_lookup(cache, source->musicbrainz_id);
+        if (entry) {
+            for (uint8_t i = 0; i < entry->count; i++) {
+                int lib = LIBRARY_GLOBAL_ID_LIB(entry->global_ids[i]);
+                if (!(library_mask & (1u << lib))) continue;
+                int64_t lid;
+                LibrarySlot *s = decode_slot(cache, entry->global_ids[i], &lid);
+                if (!s) continue;
+                library_artist_info_t *a = slot_get_artist(s, lid);
+                if (a) g_ptr_array_add(results, a);
+            }
+            g_ptr_array_sort(results, cmp_artist_by_lib);
+            if (num_results > 0 && results->len > (guint)num_results)
+                g_ptr_array_set_size(results, num_results);
+            return results;
+        }
+    }
+
+    /* No MBID or single-result mode: return source artist if it passes mask */
+    if (library_mask & (1u << slot->bitmap_index))
+        g_ptr_array_add(results, source);
+
+    return results;
+}
+
+const library_artist_info_t *library_cache_get_artist(library_cache_t *cache,
+                                                       int64_t artist_id,
+                                                       uint32_t library_mask) {
+    GPtrArray *results = library_cache_get_artists(cache, artist_id, library_mask, 1);
+    if (!results || results->len == 0) {
+        g_clear_pointer(&results, g_ptr_array_unref);
+        return NULL;
+    }
+    const library_artist_info_t *artist = g_ptr_array_index(results, 0);
+    g_ptr_array_unref(results);
+    return artist;
 }
 
 char *library_cache_resolve_track_path(library_cache_t *cache, int64_t track_id) {
@@ -2600,61 +2456,368 @@ int64_t library_cache_get_prev_track_id(library_cache_t *cache,
  * List Queries
  * ============================================================================= */
 
-const GPtrArray *library_cache_get_tracks_by_album(library_cache_t *cache,
-                                                    int64_t album_id) {
+GPtrArray *library_cache_get_tracks_by_album(library_cache_t *cache,
+                                              int64_t album_id,
+                                              uint32_t library_mask) {
     if (!cache || album_id <= 0) return NULL;
 
     int64_t local_album_id;
     LibrarySlot *slot = decode_slot(cache, album_id, &local_album_id);
     if (!slot) return NULL;
 
-    /* Pre-built during warming — pure array lookup */
-    if (local_album_id > 0 && (size_t)local_album_id < slot->album_tracks_ptrs_capacity)
-        return slot->album_tracks_ptrs[local_album_id];
-    return NULL;
+    /* Mask check: album lives in one library */
+    if (library_mask != LIBRARY_MASK_ALL &&
+        !(library_mask & (1u << slot->bitmap_index)))
+        return NULL;
+
+    if (local_album_id <= 0 || (size_t)local_album_id >= slot->album_tracks_ptrs_capacity)
+        return NULL;
+
+    const GPtrArray *src = slot->album_tracks_ptrs[local_album_id];
+    if (!src) return NULL;
+
+    /* Shallow copy — caller owns array, cache owns items */
+    GPtrArray *result = g_ptr_array_new();
+    for (guint i = 0; i < src->len; i++)
+        g_ptr_array_add(result, g_ptr_array_index(src, i));
+    return result;
 }
 
-const GPtrArray *library_cache_get_albums_by_artist(library_cache_t *cache,
-                                                     int64_t artist_id) {
-    if (!cache || artist_id <= 0) return NULL;
-    int64_t local_artist_id;
-    LibrarySlot *slot = decode_slot(cache, artist_id, &local_artist_id);
-    if (!slot) return NULL;
+/* =============================================================================
+ * Query-Time MBID Resolution
+ *
+ * Instead of pre-building combined relationship arrays, query functions
+ * resolve artist MBID → collect from all matching slots → dedup at query time.
+ * ============================================================================= */
 
-    /* Pre-built during warming Phase 4 — pure array lookup */
-    if (local_artist_id > 0 && (size_t)local_artist_id < slot->artist_albums_capacity)
-        return slot->artist_albums[local_artist_id];
-    return NULL;
+/**
+ * Collect albums from a single slot's artist_albums array into `out`.
+ * If `seen_mbrids` is non-NULL, deduplicates by musicbrainz_release_id.
+ */
+static void collect_slot_artist_albums(LibrarySlot *slot, int64_t local_aid,
+                                        uint32_t library_mask,
+                                        GHashTable *seen_mbrids,
+                                        GPtrArray *out) {
+    if (local_aid <= 0 || (size_t)local_aid >= slot->artist_albums_capacity)
+        return;
+    GPtrArray *src = slot->artist_albums[local_aid];
+    if (!src) return;
+
+    for (guint i = 0; i < src->len; i++) {
+        library_album_info_t *album = g_ptr_array_index(src, i);
+        int lib = LIBRARY_GLOBAL_ID_LIB(album->album_id);
+        if (!(library_mask & (1u << lib))) continue;
+        if (seen_mbrids && album->musicbrainz_release_group_id &&
+            album->musicbrainz_release_group_id[0]) {
+            if (g_hash_table_contains(seen_mbrids, album->musicbrainz_release_group_id))
+                continue;
+            g_hash_table_add(seen_mbrids, album->musicbrainz_release_group_id);
+        }
+        g_ptr_array_add(out, album);
+    }
+}
+
+/**
+ * Collect appearances from a single slot into `out`.
+ */
+static void collect_slot_appearances(LibrarySlot *slot, int64_t local_aid,
+                                      uint32_t library_mask,
+                                      GHashTable *seen_mbrids,
+                                      GPtrArray *out) {
+    if (local_aid <= 0 || (size_t)local_aid >= slot->artist_appearances_capacity)
+        return;
+    GPtrArray *src = slot->artist_appearances[local_aid];
+    if (!src) return;
+
+    for (guint i = 0; i < src->len; i++) {
+        library_album_info_t *album = g_ptr_array_index(src, i);
+        int lib = LIBRARY_GLOBAL_ID_LIB(album->album_id);
+        if (!(library_mask & (1u << lib))) continue;
+        if (seen_mbrids && album->musicbrainz_release_group_id &&
+            album->musicbrainz_release_group_id[0]) {
+            if (g_hash_table_contains(seen_mbrids, album->musicbrainz_release_group_id))
+                continue;
+            g_hash_table_add(seen_mbrids, album->musicbrainz_release_group_id);
+        }
+        g_ptr_array_add(out, album);
+    }
+}
+
+/**
+ * Collect appearance tracks from a single slot into `out`.
+ */
+static void collect_slot_appearance_tracks(LibrarySlot *slot, int64_t local_aid,
+                                            uint32_t library_mask,
+                                            GHashTable *seen_keys,
+                                            GPtrArray *out) {
+    if (local_aid <= 0 || (size_t)local_aid >= slot->artist_appearance_tracks_capacity)
+        return;
+    GPtrArray *src = slot->artist_appearance_tracks[local_aid];
+    if (!src) return;
+
+    for (guint i = 0; i < src->len; i++) {
+        library_track_info_t *track = g_ptr_array_index(src, i);
+        int lib = LIBRARY_GLOBAL_ID_LIB(track->track_id);
+        if (!(library_mask & (1u << lib))) continue;
+        if (seen_keys) {
+            int64_t local_album_id = LIBRARY_GLOBAL_ID_LOCAL(track->album_id);
+            library_album_info_t *album = slot_get_album(slot, local_album_id);
+            if (album && album->musicbrainz_release_group_id &&
+                album->musicbrainz_release_group_id[0]) {
+                char key[128];
+                snprintf(key, sizeof(key), "%s:%u:%u",
+                         album->musicbrainz_release_group_id,
+                         track->disc_num, track->track_num);
+                if (g_hash_table_contains(seen_keys, key))
+                    continue;
+                g_hash_table_add(seen_keys, g_strdup(key));
+            }
+        }
+        g_ptr_array_add(out, track);
+    }
+}
+
+/**
+ * Resolve artist_id via MBID index.  If the artist has a MusicBrainz ID,
+ * returns the index entry with all global_ids across libraries.
+ */
+static const struct mbid_artist_entry *resolve_artist_mbid(
+    library_cache_t *cache, int64_t artist_id)
+{
+    int64_t local_id;
+    LibrarySlot *slot = decode_slot(cache, artist_id, &local_id);
+    if (!slot) return NULL;
+    library_artist_info_t *a = slot_get_artist(slot, local_id);
+    if (!a || !a->musicbrainz_id) return NULL;
+    return mbid_artist_lookup(cache, a->musicbrainz_id);
+}
+
+/**
+ * Check if the mask selects multiple active libraries (for this cache).
+ * When only one library is active, no cross-library dedup is needed.
+ */
+static bool mask_is_multi_library(library_cache_t *cache, uint32_t mask) {
+    int active = 0;
+    for (int i = 0; i < cache->slot_count && active < 2; i++) {
+        if (mask & (1u << cache->slots[i].bitmap_index))
+            active++;
+    }
+    return active > 1;
+}
+
+GPtrArray *library_cache_get_albums_by_artist(library_cache_t *cache,
+                                               int64_t artist_id,
+                                               uint32_t library_mask) {
+    if (!cache || artist_id <= 0 || library_mask == 0) return NULL;
+
+    const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
+    bool need_dedup = entry && mask_is_multi_library(cache, library_mask);
+    GHashTable *seen = need_dedup
+        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
+    GPtrArray *result = g_ptr_array_new();
+
+    if (entry) {
+        /* MBID artist: collect from all matching slots */
+        for (uint8_t i = 0; i < entry->count; i++) {
+            int64_t gid = entry->global_ids[i];
+            int64_t local;
+            LibrarySlot *slot = decode_slot(cache, gid, &local);
+            if (!slot) continue;
+            collect_slot_artist_albums(slot, local, library_mask, seen, result);
+        }
+    } else {
+        /* Non-MBID artist: single slot lookup */
+        int64_t local;
+        LibrarySlot *slot = decode_slot(cache, artist_id, &local);
+        if (slot)
+            collect_slot_artist_albums(slot, local, library_mask, NULL, result);
+    }
+
+    if (seen) g_hash_table_destroy(seen);
+    if (result->len == 0) { g_ptr_array_unref(result); return NULL; }
+    return result;
 }
 
 /* =============================================================================
  * "Appears On" Queries
  * ============================================================================= */
 
-const GPtrArray *library_cache_get_artist_appearances(library_cache_t *cache,
-                                                       int64_t artist_id) {
-    if (!cache || artist_id <= 0) return NULL;
-    int64_t local_artist_id;
-    LibrarySlot *slot = decode_slot(cache, artist_id, &local_artist_id);
-    if (!slot) return NULL;
+GPtrArray *library_cache_get_artist_appearances(library_cache_t *cache,
+                                                 int64_t artist_id,
+                                                 uint32_t library_mask) {
+    if (!cache || artist_id <= 0 || library_mask == 0) return NULL;
 
-    /* Pre-built during warming Phase 4 — pure array lookup */
-    if (local_artist_id > 0 && (size_t)local_artist_id < slot->artist_appearances_capacity)
-        return slot->artist_appearances[local_artist_id];
-    return NULL;
+    const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
+    bool need_dedup = entry && mask_is_multi_library(cache, library_mask);
+    GHashTable *seen = need_dedup
+        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
+    GPtrArray *result = g_ptr_array_new();
+
+    if (entry) {
+        for (uint8_t i = 0; i < entry->count; i++) {
+            int64_t gid = entry->global_ids[i];
+            int64_t local;
+            LibrarySlot *slot = decode_slot(cache, gid, &local);
+            if (!slot) continue;
+            collect_slot_appearances(slot, local, library_mask, seen, result);
+        }
+    } else {
+        int64_t local;
+        LibrarySlot *slot = decode_slot(cache, artist_id, &local);
+        if (slot)
+            collect_slot_appearances(slot, local, library_mask, NULL, result);
+    }
+
+    if (seen) g_hash_table_destroy(seen);
+    if (result->len == 0) { g_ptr_array_unref(result); return NULL; }
+    return result;
 }
 
-const GPtrArray *library_cache_get_artist_appearance_tracks(library_cache_t *cache,
-                                                             int64_t artist_id) {
-    if (!cache || artist_id <= 0) return NULL;
-    int64_t local_artist_id;
-    LibrarySlot *slot = decode_slot(cache, artist_id, &local_artist_id);
-    if (!slot) return NULL;
+GPtrArray *library_cache_get_artist_appearance_tracks(library_cache_t *cache,
+                                                       int64_t artist_id,
+                                                       uint32_t library_mask) {
+    if (!cache || artist_id <= 0 || library_mask == 0) return NULL;
 
-    /* Pre-built during warming Phase 4 — pure array lookup */
-    if (local_artist_id > 0 && (size_t)local_artist_id < slot->artist_appearance_tracks_capacity)
-        return slot->artist_appearance_tracks[local_artist_id];
-    return NULL;
+    const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
+    bool need_dedup = entry && mask_is_multi_library(cache, library_mask);
+    GHashTable *seen = need_dedup
+        ? g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL) : NULL;
+    GPtrArray *result = g_ptr_array_new();
+
+    if (entry) {
+        for (uint8_t i = 0; i < entry->count; i++) {
+            int64_t gid = entry->global_ids[i];
+            int64_t local;
+            LibrarySlot *slot = decode_slot(cache, gid, &local);
+            if (!slot) continue;
+            collect_slot_appearance_tracks(slot, local, library_mask, seen, result);
+        }
+    } else {
+        int64_t local;
+        LibrarySlot *slot = decode_slot(cache, artist_id, &local);
+        if (slot)
+            collect_slot_appearance_tracks(slot, local, library_mask, NULL, result);
+    }
+
+    if (seen) g_hash_table_destroy(seen);
+    if (result->len == 0) { g_ptr_array_unref(result); return NULL; }
+    return result;
+}
+
+/* =============================================================================
+ * Merged Artist Counts (computed on demand)
+ * ============================================================================= */
+
+void library_cache_get_merged_artist_counts(library_cache_t *cache,
+                                             int64_t artist_id,
+                                             uint32_t library_mask,
+                                             uint32_t *album_count,
+                                             uint32_t *appearance_count) {
+    if (album_count) *album_count = 0;
+    if (appearance_count) *appearance_count = 0;
+    if (!cache || artist_id <= 0 || library_mask == 0) return;
+
+    const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
+    bool multi = entry && mask_is_multi_library(cache, library_mask);
+
+    /* ── Album count (MBRID-deduped) ── */
+    if (album_count) {
+        GHashTable *seen = multi ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
+        uint32_t count = 0;
+
+        if (entry) {
+            for (uint8_t i = 0; i < entry->count; i++) {
+                int64_t local;
+                LibrarySlot *slot = decode_slot(cache, entry->global_ids[i], &local);
+                if (!slot) continue;
+                if (local <= 0 || (size_t)local >= slot->artist_albums_capacity) continue;
+                GPtrArray *albums = slot->artist_albums[local];
+                if (!albums) continue;
+                for (guint j = 0; j < albums->len; j++) {
+                    library_album_info_t *a = g_ptr_array_index(albums, j);
+                    int lib = LIBRARY_GLOBAL_ID_LIB(a->album_id);
+                    if (!(library_mask & (1u << lib))) continue;
+                    if (seen && a->musicbrainz_release_group_id && a->musicbrainz_release_group_id[0]) {
+                        if (g_hash_table_contains(seen, a->musicbrainz_release_group_id)) continue;
+                        g_hash_table_add(seen, a->musicbrainz_release_group_id);
+                    }
+                    count++;
+                }
+            }
+        } else {
+            int64_t local;
+            LibrarySlot *slot = decode_slot(cache, artist_id, &local);
+            if (slot && local > 0 && (size_t)local < slot->artist_albums_capacity) {
+                GPtrArray *albums = slot->artist_albums[local];
+                if (albums) {
+                    for (guint j = 0; j < albums->len; j++) {
+                        library_album_info_t *a = g_ptr_array_index(albums, j);
+                        int lib = LIBRARY_GLOBAL_ID_LIB(a->album_id);
+                        if (library_mask & (1u << lib)) count++;
+                    }
+                }
+            }
+        }
+        if (seen) g_hash_table_destroy(seen);
+        *album_count = count;
+    }
+
+    /* ── Appearance count: tracks on OTHER artists' albums ──
+     * artist_appearance_tracks already excludes the artist's own albums
+     * (filtered during warming at line ~737: skip album_local_artist).
+     * Dedup by "mbrid:disc:track" across libraries. */
+    if (appearance_count) {
+        GHashTable *seen = multi
+            ? g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL) : NULL;
+        uint32_t count = 0;
+
+        if (entry) {
+            for (uint8_t i = 0; i < entry->count; i++) {
+                int64_t local;
+                LibrarySlot *slot = decode_slot(cache, entry->global_ids[i], &local);
+                if (!slot) continue;
+                if (local <= 0 || (size_t)local >= slot->artist_appearance_tracks_capacity)
+                    continue;
+                GPtrArray *tracks = slot->artist_appearance_tracks[local];
+                if (!tracks) continue;
+                for (guint j = 0; j < tracks->len; j++) {
+                    library_track_info_t *t = g_ptr_array_index(tracks, j);
+                    int lib = LIBRARY_GLOBAL_ID_LIB(t->track_id);
+                    if (!(library_mask & (1u << lib))) continue;
+                    if (seen) {
+                        int64_t la = LIBRARY_GLOBAL_ID_LOCAL(t->album_id);
+                        library_album_info_t *alb = slot_get_album(slot, la);
+                        if (alb && alb->musicbrainz_release_group_id &&
+                            alb->musicbrainz_release_group_id[0]) {
+                            char key[128];
+                            snprintf(key, sizeof(key), "%s:%u:%u",
+                                     alb->musicbrainz_release_group_id,
+                                     t->disc_num, t->track_num);
+                            if (g_hash_table_contains(seen, key)) continue;
+                            g_hash_table_add(seen, g_strdup(key));
+                        }
+                    }
+                    count++;
+                }
+            }
+        } else {
+            int64_t local;
+            LibrarySlot *slot = decode_slot(cache, artist_id, &local);
+            if (slot && local > 0 &&
+                (size_t)local < slot->artist_appearance_tracks_capacity) {
+                GPtrArray *tracks = slot->artist_appearance_tracks[local];
+                if (tracks) {
+                    for (guint j = 0; j < tracks->len; j++) {
+                        library_track_info_t *t = g_ptr_array_index(tracks, j);
+                        int lib = LIBRARY_GLOBAL_ID_LIB(t->track_id);
+                        if (library_mask & (1u << lib)) count++;
+                    }
+                }
+            }
+        }
+        if (seen) g_hash_table_destroy(seen);
+        *appearance_count = count;
+    }
 }
 
 /* =============================================================================
@@ -2669,6 +2832,9 @@ GPtrArray *library_cache_get_artists_filtered(library_cache_t *cache,
     g_assert(cache != NULL);
 
     GPtrArray *result = g_ptr_array_new();
+    /* Dedup MBID artists when showing all libraries (each MBID appears once) */
+    GHashTable *seen_mbids = mask_is_multi_library(cache, library_mask)
+        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
 
     for (int i = 0; i < cache->slot_count; i++) {
         LibrarySlot *slot = &cache->slots[i];
@@ -2690,15 +2856,20 @@ GPtrArray *library_cache_get_artists_filtered(library_cache_t *cache,
             int64_t local_id = ids[j];
             library_artist_info_t *info = slot_get_artist(slot, local_id);
             if (!info) continue;
-            if (cache->merged_source_set &&
-                g_hash_table_contains(cache->merged_source_set, &info->artist_id))
-                continue;
+            /* MBID dedup: when viewing all libraries, each MBID artist
+             * appears once (first slot encountered wins). */
+            if (seen_mbids && info->musicbrainz_id) {
+                if (g_hash_table_contains(seen_mbids, info->musicbrainz_id))
+                    continue;
+                g_hash_table_add(seen_mbids, info->musicbrainz_id);
+            }
             g_ptr_array_add(result, info);
         }
 
         g_free(ids);
     }
 
+    if (seen_mbids) g_hash_table_destroy(seen_mbids);
     return result;
 }
 
@@ -2710,6 +2881,8 @@ GPtrArray *library_cache_get_albums_filtered(library_cache_t *cache,
     g_assert(cache != NULL);
 
     GPtrArray *result = g_ptr_array_new();
+    GHashTable *seen_mbrids = mask_is_multi_library(cache, library_mask)
+        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
 
     for (int i = 0; i < cache->slot_count; i++) {
         LibrarySlot *slot = &cache->slots[i];
@@ -2731,15 +2904,19 @@ GPtrArray *library_cache_get_albums_filtered(library_cache_t *cache,
             int64_t local_id = ids[j];
             library_album_info_t *info = slot_get_album(slot, local_id);
             if (!info) continue;
-            if (cache->merged_album_sources &&
-                g_hash_table_contains(cache->merged_album_sources, &info->album_id))
-                continue;
+            if (seen_mbrids && info->musicbrainz_release_group_id &&
+                info->musicbrainz_release_group_id[0]) {
+                if (g_hash_table_contains(seen_mbrids, info->musicbrainz_release_group_id))
+                    continue;
+                g_hash_table_add(seen_mbrids, info->musicbrainz_release_group_id);
+            }
             g_ptr_array_add(result, info);
         }
 
         g_free(ids);
     }
 
+    if (seen_mbrids) g_hash_table_destroy(seen_mbrids);
     return result;
 }
 
@@ -2753,6 +2930,13 @@ static size_t run_search_queries(library_cache_t *cache, const char *query,
                                   uint32_t library_mask,
                                   library_search_results_t *results) {
     size_t total = 0;
+    bool multi = mask_is_multi_library(cache, library_mask);
+    GHashTable *seen_artist_mbids = multi
+        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
+    GHashTable *seen_album_mbrids = multi
+        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
+    GHashTable *seen_track_keys = multi
+        ? g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL) : NULL;
 
     for (int slot_idx = 0; slot_idx < cache->slot_count; slot_idx++) {
         LibrarySlot *slot = &cache->slots[slot_idx];
@@ -2770,17 +2954,14 @@ static size_t run_search_queries(library_cache_t *cache, const char *query,
             size_t count = 0;
             db_get_artist_ids_filtered(slot->db, &id_opts, &ids, &count);
 
-            size_t max = (filter == LIBRARY_SEARCH_FILTER_ALL)
-                         ? (limit > 0 ? limit : 5)
-                         : (limit > 0 ? limit : 100);
-            if (count > max) count = max;
-
             for (size_t i = 0; i < count; i++) {
                 library_artist_info_t *info = slot_get_artist(slot, ids[i]);
                 if (!info) continue;
-                if (cache->merged_source_set &&
-                    g_hash_table_contains(cache->merged_source_set, &info->artist_id))
-                    continue;
+                if (seen_artist_mbids && info->musicbrainz_id) {
+                    if (g_hash_table_contains(seen_artist_mbids, info->musicbrainz_id))
+                        continue;
+                    g_hash_table_add(seen_artist_mbids, info->musicbrainz_id);
+                }
                 g_ptr_array_add(results->artists, info);
             }
             g_free(ids);
@@ -2796,37 +2977,69 @@ static size_t run_search_queries(library_cache_t *cache, const char *query,
             size_t count = 0;
             db_get_album_ids_filtered(slot->db, &id_opts, &ids, &count);
 
-            size_t max = (filter == LIBRARY_SEARCH_FILTER_ALL)
-                         ? (limit > 0 ? limit : 5)
-                         : (limit > 0 ? limit : 100);
-            if (count > max) count = max;
-
             for (size_t i = 0; i < count; i++) {
                 library_album_info_t *info = slot_get_album(slot, ids[i]);
                 if (!info) continue;
-                if (cache->merged_album_sources &&
-                    g_hash_table_contains(cache->merged_album_sources, &info->album_id))
-                    continue;
+                if (seen_album_mbrids && info->musicbrainz_release_group_id &&
+                    info->musicbrainz_release_group_id[0]) {
+                    if (g_hash_table_contains(seen_album_mbrids, info->musicbrainz_release_group_id))
+                        continue;
+                    g_hash_table_add(seen_album_mbrids, info->musicbrainz_release_group_id);
+                }
                 g_ptr_array_add(results->albums, info);
             }
             g_free(ids);
         }
 
         if (filter == LIBRARY_SEARCH_FILTER_ALL || filter == LIBRARY_SEARCH_FILTER_TRACKS) {
-            size_t max = (filter == LIBRARY_SEARCH_FILTER_ALL)
-                         ? (limit > 0 ? limit : 10)
-                         : (limit > 0 ? limit : 100);
             int64_t *ids = NULL;
             size_t count = 0;
-            db_search_track_ids(slot->db, query, opts, max, &ids, &count);
+            size_t db_max = limit > 0 ? limit : 100;
+            db_search_track_ids(slot->db, query, opts, db_max, &ids, &count);
 
             for (size_t i = 0; i < count; i++) {
                 library_track_info_t *info = slot_get_track(slot, ids[i]);
-                if (info) g_ptr_array_add(results->tracks, info);
+                if (!info) continue;
+                if (seen_track_keys) {
+                    int64_t local_album = LIBRARY_GLOBAL_ID_LOCAL(info->album_id);
+                    library_album_info_t *alb = slot_get_album(slot, local_album);
+                    if (alb && alb->musicbrainz_release_group_id &&
+                        alb->musicbrainz_release_group_id[0]) {
+                        char key[128];
+                        snprintf(key, sizeof(key), "%s:%u:%u",
+                                 alb->musicbrainz_release_group_id,
+                                 info->disc_num, info->track_num);
+                        if (g_hash_table_contains(seen_track_keys, key))
+                            continue;
+                        g_hash_table_add(seen_track_keys, g_strdup(key));
+                    }
+                }
+                g_ptr_array_add(results->tracks, info);
             }
             g_free(ids);
         }
     }
+
+    if (seen_artist_mbids) g_hash_table_destroy(seen_artist_mbids);
+    if (seen_album_mbrids) g_hash_table_destroy(seen_album_mbrids);
+    if (seen_track_keys) g_hash_table_destroy(seen_track_keys);
+
+    /* Enforce final limits across all slots */
+    size_t artist_max = (filter == LIBRARY_SEARCH_FILTER_ALL)
+                        ? (limit > 0 ? limit : 3)
+                        : (limit > 0 ? limit : 100);
+    size_t album_max  = (filter == LIBRARY_SEARCH_FILTER_ALL)
+                        ? (limit > 0 ? limit : 4)
+                        : (limit > 0 ? limit : 100);
+    size_t track_max  = (filter == LIBRARY_SEARCH_FILTER_ALL)
+                        ? (limit > 0 ? limit : 8)
+                        : (limit > 0 ? limit : 100);
+    if (results->artists->len > artist_max)
+        g_ptr_array_set_size(results->artists, artist_max);
+    if (results->albums->len > album_max)
+        g_ptr_array_set_size(results->albums, album_max);
+    if (results->tracks->len > track_max)
+        g_ptr_array_set_size(results->tracks, track_max);
 
     total = results->artists->len + results->albums->len + results->tracks->len;
     return total;

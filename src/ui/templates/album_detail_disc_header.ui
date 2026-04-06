@@ -2,22 +2,41 @@
 <!--
   Disc Header Template
 
-  Separator row for multi-disc albums showing "DISC N" label.
+  Separator row for multi-disc albums showing "── DISC N ──────────" style.
   Each instantiation via gtk_builder_new_from_resource() creates a new header.
 -->
 <interface>
   <object class="GtkBox" id="disc_header">
     <property name="orientation">horizontal</property>
-    <property name="spacing">8</property>
+    <property name="spacing">12</property>
     <style>
       <class name="disc-header-row"/>
     </style>
+    <child>
+      <object class="GtkSeparator">
+        <property name="hexpand">false</property>
+        <property name="width-request">24</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="disc-header-rule"/>
+        </style>
+      </object>
+    </child>
     <child>
       <object class="GtkLabel" id="disc_label">
         <property name="label">DISC 1</property>
         <property name="xalign">0</property>
         <style>
           <class name="disc-header-label"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkSeparator">
+        <property name="hexpand">true</property>
+        <property name="valign">center</property>
+        <style>
+          <class name="disc-header-rule"/>
         </style>
       </object>
     </child>

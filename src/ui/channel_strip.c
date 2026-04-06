@@ -843,13 +843,13 @@ static void update_album_display(UiChannelStrip *s) {
     /* Get current track info from LibraryCache */
     const library_track_info_t *track = NULL;
     const library_album_info_t *album = NULL;
-    const GPtrArray *album_tracks = NULL;
+    GPtrArray *album_tracks = NULL;
 
     if (s->library && s->current_track_id > 0) {
         track = library_cache_get_track(s->library, s->current_track_id);
         if (track) {
-            album = library_cache_get_album(s->library, track->album_id);
-            album_tracks = library_cache_get_tracks_by_album(s->library, track->album_id);
+            album = library_cache_get_album(s->library, track->album_id, LIBRARY_MASK_ALL);
+            album_tracks = library_cache_get_tracks_by_album(s->library, track->album_id, LIBRARY_MASK_ALL);
         }
     }
 
@@ -945,6 +945,8 @@ static void update_album_display(UiChannelStrip *s) {
         if (s->next_track_btn)
             gtk_widget_set_sensitive(s->next_track_btn, FALSE);
     }
+
+    g_clear_pointer(&album_tracks, g_ptr_array_unref);
 
     /* Update marquee loop points */
     marquee_update_loop_point(s->album_scroll, album_loop);
@@ -1133,7 +1135,7 @@ static void on_artist_clicked(GtkGestureClick *g, int n, double x, double y, gpo
     /* Fallback: album artist (standard albums where track artists aren't cached) */
     const library_track_info_t *track = library_cache_get_track(s->library, s->current_track_id);
     if (!track || track->album_id <= 0) return;
-    const library_album_info_t *album = library_cache_get_album(s->library, track->album_id);
+    const library_album_info_t *album = library_cache_get_album(s->library, track->album_id, LIBRARY_MASK_ALL);
     if (album && album->artist_id > 0 && !ui_is_various_artists(album->artist_name)) {
         g_signal_emit(s, signals[SIGNAL_ARTIST_CLICKED], 0, s->channel_id, album->artist_id);
     }

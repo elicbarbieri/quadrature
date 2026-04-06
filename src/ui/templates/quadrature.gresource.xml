@@ -35,7 +35,6 @@
     <file>artist_detail_page.ui</file>
     <file>album_detail_track_item.ui</file>
     <file>album_detail_track_row_wrapper.ui</file>
-    <file>album_detail_disc_header.ui</file>
     <file>album_card.ui</file>
     <file>track_metadata_popover.ui</file>
     <file>credit_row.ui</file>

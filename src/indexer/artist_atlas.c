@@ -134,7 +134,7 @@ quadrature_result_t artist_atlas_builder_load_existing(artist_atlas_builder_t* b
     if (fd < 0) return QUADRATURE_OK;  // No existing atlas — that's fine
 
     struct stat st;
-    if (fstat(fd, &st) < 0 || (size_t)st.st_size < sizeof(artist_atlas_header_t)) {
+    if (fstat(fd, &st) < 0 || (size_t)st.st_size < sizeof(artist_atlas_header_t) + ATLAS_CRC32_SIZE) {
         close(fd);
         return QUADRATURE_OK;
     }
@@ -150,6 +150,19 @@ quadrature_result_t artist_atlas_builder_load_existing(artist_atlas_builder_t* b
         return QUADRATURE_OK;  // Incompatible version — start fresh
     }
 
+    // Validate CRC32 trailing checksum
+    {
+        size_t body_size = (size_t)st.st_size - ATLAS_CRC32_SIZE;
+        uint32_t expected_crc;
+        memcpy(&expected_crc, (const uint8_t*)map + body_size, sizeof(expected_crc));
+        uint32_t actual_crc = atlas_crc32((const uint8_t*)map, body_size);
+        if (actual_crc != expected_crc) {
+            g_warning("artist_atlas: CRC32 mismatch in existing atlas, starting fresh");
+            munmap(map, st.st_size);
+            return QUADRATURE_OK;
+        }
+    }
+
     uint32_t pixel_stride = h->thumb_size * h->thumb_size * h->channels;
 
     // Validate file size
@@ -157,7 +170,8 @@ quadrature_result_t artist_atlas_builder_load_existing(artist_atlas_builder_t* b
         + (size_t)h->art_count * ARTIST_ATLAS_UUID_SIZE
         + (size_t)h->art_count * pixel_stride
         + sizeof(uint32_t)
-        + (size_t)h->no_art_count * ARTIST_ATLAS_UUID_SIZE;
+        + (size_t)h->no_art_count * ARTIST_ATLAS_UUID_SIZE
+        + ATLAS_CRC32_SIZE;
 
     if ((size_t)st.st_size < expected_min) {
         munmap(map, st.st_size);
@@ -306,7 +320,7 @@ quadrature_result_t artist_atlas_builder_finish(artist_atlas_builder_t* builder)
     qsort(builder->no_art_uuids, builder->no_art_count,
           ARTIST_ATLAS_UUID_SIZE, compare_uuids);
 
-    FILE* f = fopen(builder->temp_path, "wb");
+    FILE* f = fopen(builder->temp_path, "w+b");
     if (!f) {
         g_warning("artist_atlas: failed to create temp file: %s", builder->temp_path);
         return QUADRATURE_ERROR_INTERNAL;
@@ -344,6 +358,22 @@ quadrature_result_t artist_atlas_builder_finish(artist_atlas_builder_t* builder)
         if (fwrite(builder->no_art_uuids, ARTIST_ATLAS_UUID_SIZE,
                    builder->no_art_count, f) != builder->no_art_count)
             goto write_error;
+    }
+
+    // Compute and append CRC32 trailing checksum
+    {
+        long body_size = ftell(f);
+        if (body_size < 0) goto write_error;
+        rewind(f);
+        uint8_t* buf = g_malloc(body_size);
+        if (fread(buf, 1, body_size, f) != (size_t)body_size) {
+            g_free(buf);
+            goto write_error;
+        }
+        uint32_t crc = atlas_crc32(buf, body_size);
+        g_free(buf);
+        fseek(f, 0, SEEK_END);
+        if (fwrite(&crc, sizeof(crc), 1, f) != 1) goto write_error;
     }
 
     fclose(f);
@@ -400,7 +430,7 @@ artist_atlas_reader_t* artist_atlas_reader_open(const char* path) {
     if (fd < 0) return NULL;
 
     struct stat st;
-    if (fstat(fd, &st) < 0 || (size_t)st.st_size < sizeof(artist_atlas_header_t)) {
+    if (fstat(fd, &st) < 0 || (size_t)st.st_size < sizeof(artist_atlas_header_t) + ATLAS_CRC32_SIZE) {
         close(fd);
         return NULL;
     }
@@ -416,13 +446,30 @@ artist_atlas_reader_t* artist_atlas_reader_open(const char* path) {
         return NULL;
     }
 
+    /* Validate CRC32 trailing checksum */
+    {
+        size_t body_size = (size_t)st.st_size - ATLAS_CRC32_SIZE;
+        uint32_t expected_crc;
+        memcpy(&expected_crc, (const uint8_t*)map + body_size, sizeof(expected_crc));
+        uint32_t actual_crc = atlas_crc32((const uint8_t*)map, body_size);
+        if (actual_crc != expected_crc) {
+            g_warning("Artist atlas CRC32 mismatch in %s (expected 0x%08X, got 0x%08X)",
+                      path, expected_crc, actual_crc);
+            munmap(map, st.st_size);
+            close(fd);
+            return NULL;
+        }
+        g_debug("Artist atlas CRC32 verified: %s (0x%08X)", path, actual_crc);
+    }
+
     uint32_t pixel_stride = h->thumb_size * h->thumb_size * h->channels;
 
     size_t expected = sizeof(*h)
         + (size_t)h->art_count * ARTIST_ATLAS_UUID_SIZE
         + (size_t)h->art_count * pixel_stride
         + sizeof(uint32_t)
-        + (size_t)h->no_art_count * ARTIST_ATLAS_UUID_SIZE;
+        + (size_t)h->no_art_count * ARTIST_ATLAS_UUID_SIZE
+        + ATLAS_CRC32_SIZE;
 
     if ((size_t)st.st_size < expected) {
         munmap(map, st.st_size);

@@ -206,6 +206,8 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int li = 0; li < lib_count; li++) {
         int bi = library_cache_get_bitmap_index(ud->cache, li);
+        /* Skip libraries not in the active library mask */
+        if (!(ud->library_mask & (1u << bi))) continue;
         if (!library_cache_get_available(ud->cache, bi)) continue;
         library_cache_dbs_t dbs = library_cache_get_dbs(ud->cache, bi);
         if (!dbs.meta || !dbs.db) continue;
@@ -267,7 +269,7 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
 
             /* Skip own-album by artist name match */
             {
-                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id);
+                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id, ud->library_mask);
                 if (al && al->artist_name && artist_name &&
                     g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
                     g_free(role);
@@ -343,6 +345,8 @@ guint append_credit_rows(UnifiedDetailData *ud,
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int li = 0; li < lib_count; li++) {
         int bi = library_cache_get_bitmap_index(ud->cache, li);
+        /* Skip libraries not in the active library mask */
+        if (!(ud->library_mask & (1u << bi))) continue;
         if (!library_cache_get_available(ud->cache, bi)) continue;
         library_cache_dbs_t dbs = library_cache_get_dbs(ud->cache, bi);
         if (!dbs.meta) continue;
@@ -414,7 +418,7 @@ guint append_credit_rows(UnifiedDetailData *ud,
              * This catches "appears on own album" cases that the ID check
              * can miss across merged libraries. */
             if (track && track->album_id > 0) {
-                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id);
+                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id, ud->library_mask);
                 if (al && al->artist_name && artist_name &&
                     g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
                     g_free(role);
@@ -492,7 +496,7 @@ guint append_credit_rows(UnifiedDetailData *ud,
                                   GSIZE_TO_POINTER((gsize)ars->id)))
             continue;
 
-        const library_album_info_t *album = library_cache_get_album(ud->cache, ars->id);
+        const library_album_info_t *album = library_cache_get_album(ud->cache, ars->id, ud->library_mask);
         if (!album) continue;
 
         /* Build NULL-terminated roles array for UiAlbumCreditInfo */

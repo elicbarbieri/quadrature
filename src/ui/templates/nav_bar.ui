@@ -123,16 +123,11 @@
       </object>
     </child>
 
-    <!-- Spacer -->
-    <child>
-      <object class="GtkBox">
-        <property name="vexpand">true</property>
-      </object>
-    </child>
-
     <child>
       <object class="GtkSeparator">
         <property name="orientation">horizontal</property>
+        <property name="vexpand">true</property>
+        <property name="valign">end</property>
         <style><class name="nav-separator"/></style>
       </object>
     </child>

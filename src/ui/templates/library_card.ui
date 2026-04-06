@@ -444,13 +444,10 @@
                       </object>
                     </child>
                     <child>
-                      <object class="GtkBox">
-                        <property name="hexpand">true</property>
-                      </object>
-                    </child>
-                    <child>
                       <object class="GtkButton" id="card_edit_done">
                         <property name="label">Done</property>
+                        <property name="hexpand">true</property>
+                        <property name="halign">end</property>
                         <style>
                           <class name="suggested-action"/>
                           <class name="library-card-action"/>

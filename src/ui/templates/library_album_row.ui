@@ -5,8 +5,8 @@
   ProportionalBox layout: [art (natural)] [left (60%)] [right (40%)] [meta (natural)]
 
   art:   Album thumbnail
-  left:  Title + primary artists + credit annotation
-  right: Genre pills + [lib-badge]
+  left:  Title + primary artists + [lib-badge]
+  right: Genre pills + [credit annotation]
   meta:  Year + track count (right-aligned)
 -->
 <interface>
@@ -29,7 +29,7 @@
       </object>
     </child>
 
-    <!-- left slot: title + artists + credit -->
+    <!-- left slot: title + artists + credit + library badges -->
     <child type="left">
       <object class="GtkBox" id="col_left">
         <property name="orientation">vertical</property>
@@ -53,19 +53,18 @@
             </style>
           </object>
         </child>
-        <!-- credit annotation: hidden unless credit data is set dynamically -->
+        <!-- library badges: populated dynamically by row_helpers.c -->
         <child>
-          <object class="GtkBox" id="credit_annotation">
+          <object class="GtkBox" id="library_badges">
             <property name="orientation">horizontal</property>
-            <property name="spacing">6</property>
+            <property name="spacing">4</property>
             <property name="visible">false</property>
-            <!-- credit_artist_btn + role pills added dynamically by row_helpers.c -->
           </object>
         </child>
       </object>
     </child>
 
-    <!-- right slot: genres + track count -->
+    <!-- right slot: genres + credit annotation -->
     <child type="right">
       <object class="GtkBox" id="col_right">
         <property name="orientation">vertical</property>
@@ -79,10 +78,13 @@
             <property name="halign">start</property>
           </object>
         </child>
-        <!-- bottom_bar: library badge inserted here dynamically by row_helpers.c -->
+        <!-- credit annotation: hidden unless credit data is set dynamically -->
         <child>
-          <object class="GtkBox" id="bottom_bar">
+          <object class="GtkBox" id="credit_annotation">
             <property name="orientation">horizontal</property>
+            <property name="spacing">6</property>
+            <property name="visible">false</property>
+            <!-- credit_artist_btn + role pills added dynamically by row_helpers.c -->
           </object>
         </child>
       </object>

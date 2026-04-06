@@ -33,6 +33,15 @@
 #define MBRID_DRUKQS       "22222222-2222-2222-2222-222222222222"
 #define MBRID_GEOGADDI     "33333333-3333-3333-3333-333333333333"
 
+/* Release-group IDs — dedup keys on these */
+#define RGID_RAM           "aa997ea0-2936-40bd-884d-3af8a0e064dc"
+#define RGID_DISCOVERY     "cc001111-1111-1111-1111-111111111111"
+#define RGID_HOMEWORK      "cc002222-2222-2222-2222-222222222222"
+#define RGID_HAA           "cc003333-3333-3333-3333-333333333333"
+#define RGID_SAW           "cc004444-4444-4444-4444-444444444444"
+#define RGID_DRUKQS        "cc005555-5555-5555-5555-555555555555"
+#define RGID_GEOGADDI      "cc006666-6666-6666-6666-666666666666"
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * DB helper utilities
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -114,7 +123,8 @@ static void build_cow_library(void) {
     int64_t disc_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/Discovery",
         "Discovery", dp_id, 2001, &disc_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, disc_id, MBRID_DISCOVERY), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, disc_id, "Discovery",
+        MBRID_DISCOVERY, RGID_DISCOVERY, 2001, MB_STATUS_RESOLVED), QUADRATURE_OK);
 
     create_track(db, disc_id, "One More Time", 1, 1);
     create_track(db, disc_id, "Aerodynamic", 2, 1);
@@ -164,7 +174,8 @@ Test(cow_refresh, new_album_appears_after_refresh, .init = cow_setup, .fini = co
     int64_t hw_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/Homework",
         "Homework", dp_id, 1997, &hw_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, hw_id, MBRID_HOMEWORK), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, hw_id, "Homework",
+        MBRID_HOMEWORK, RGID_HOMEWORK, 1997, MB_STATUS_RESOLVED), QUADRATURE_OK);
     create_track(db, hw_id, "Around the World", 1, 1);
 
     db_track_artist_t ta = { .artist_id = dp_id, .position = 0, .join_phrase = "" };
@@ -228,7 +239,7 @@ Test(cow_refresh, delta_refresh_updates_changed_album, .init = cow_setup, .fini 
     cr_assert_str_eq(t3->title, "Digital Love");
 
     /* Album track count should be updated */
-    const library_album_info_t *album = library_cache_get_album(cow_cache, 1);
+    const library_album_info_t *album = library_cache_get_album(cow_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(album);
     cr_assert_eq(album->track_count, 3, "album should have 3 tracks after delta refresh, got %u", album->track_count);
 }
@@ -276,10 +287,11 @@ Test(cow_refresh, genres_recomputed_after_refresh, .init = cow_setup, .fini = co
 Test(cow_refresh, appearance_tracks_after_cow_refresh, .init = cow_setup, .fini = cow_teardown) {
     /* Initially: only Daft Punk with Discovery — no featured credits, no appearances */
     int64_t dp_id = find_artist_id(cow_cache, "Daft Punk");
-    const GPtrArray *before = library_cache_get_artist_appearance_tracks(cow_cache, dp_id);
+    GPtrArray *before = library_cache_get_artist_appearance_tracks(cow_cache, dp_id, LIBRARY_MASK_ALL);
     guint before_count = before ? before->len : 0;
     cr_assert_eq(before_count, 0,
         "no appearance tracks before adding featured credit, got %u", before_count);
+    if (before) g_ptr_array_unref(before);
 
     /* Add a new artist + album + featured credit for DP via DB mutation */
     quadrature_db_t *db = NULL;
@@ -290,7 +302,8 @@ Test(cow_refresh, appearance_tracks_after_cow_refresh, .init = cow_setup, .fini 
     int64_t saw_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "AT/SAW",
         "Selected Ambient Works", at_id, 1992, &saw_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, saw_id, MBRID_SAW), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, saw_id, "Selected Ambient Works",
+        MBRID_SAW, RGID_SAW, 1992, MB_STATUS_RESOLVED), QUADRATURE_OK);
     create_track(db, saw_id, "Xtal", 1, 1);
     create_track(db, saw_id, "DP Collab", 2, 1);
 
@@ -313,7 +326,7 @@ Test(cow_refresh, appearance_tracks_after_cow_refresh, .init = cow_setup, .fini 
 
     /* Re-find DP after refresh */
     dp_id = find_artist_id(cow_cache, "Daft Punk");
-    const GPtrArray *after = library_cache_get_artist_appearance_tracks(cow_cache, dp_id);
+    GPtrArray *after = library_cache_get_artist_appearance_tracks(cow_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(after, "appearance tracks should exist after COW refresh");
     cr_assert(after->len > 0,
         "appearance tracks should be populated after COW refresh, got 0");
@@ -326,9 +339,10 @@ Test(cow_refresh, appearance_tracks_after_cow_refresh, .init = cow_setup, .fini 
             found = true;
     }
     cr_assert(found, "appearance tracks after COW refresh should include 'DP Collab'");
+    g_ptr_array_unref(after);
 
     /* Appearance albums should also have SAW */
-    const GPtrArray *app_albums = library_cache_get_artist_appearances(cow_cache, dp_id);
+    GPtrArray *app_albums = library_cache_get_artist_appearances(cow_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(app_albums);
     bool saw_found = false;
     for (guint i = 0; i < app_albums->len; i++) {
@@ -337,6 +351,7 @@ Test(cow_refresh, appearance_tracks_after_cow_refresh, .init = cow_setup, .fini 
             saw_found = true;
     }
     cr_assert(saw_found, "appearance albums after COW refresh should include SAW");
+    g_ptr_array_unref(app_albums);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -363,14 +378,17 @@ static void build_m2_lib_a(void) {
     /* Daft Punk albums */
     int64_t disc_id = 0, ram_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "DP/Discovery", "Discovery", dp_id, 2001, &disc_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, disc_id, MBRID_DISCOVERY), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, disc_id, "Discovery",
+        MBRID_DISCOVERY, RGID_DISCOVERY, 2001, MB_STATUS_RESOLVED), QUADRATURE_OK);
     cr_assert_eq(db_upsert_folder_album(db, "DP/RAM", "Random Access Memories", dp_id, 2013, &ram_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, ram_id, MBRID_RAM), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, ram_id, "Random Access Memories",
+        MBRID_RAM, RGID_RAM, 2013, MB_STATUS_RESOLVED), QUADRATURE_OK);
 
     /* Aphex Twin album */
     int64_t saw_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "AT/SAW", "Selected Ambient Works", at_id, 1992, &saw_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, saw_id, MBRID_SAW), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, saw_id, "Selected Ambient Works",
+        MBRID_SAW, RGID_SAW, 1992, MB_STATUS_RESOLVED), QUADRATURE_OK);
 
     /* Ambiguous artist — album with NO MBRID */
     int64_t ambig_album_id = 0;
@@ -435,14 +453,17 @@ static void build_m2_lib_b(void) {
     /* DP albums: HAA (different MBRID) + RAM (same MBRID — deduped) */
     int64_t haa_id = 0, ram_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "DP/HAA", "Human After All", dp_id, 2005, &haa_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, haa_id, MBRID_HAA_B), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, haa_id, "Human After All",
+        MBRID_HAA_B, RGID_HAA, 2005, MB_STATUS_RESOLVED), QUADRATURE_OK);
     cr_assert_eq(db_upsert_folder_album(db, "DP/RAM", "Random Access Memories", dp_id, 2013, &ram_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, ram_id, MBRID_RAM), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, ram_id, "Random Access Memories",
+        MBRID_RAM, RGID_RAM, 2013, MB_STATUS_RESOLVED), QUADRATURE_OK);
 
     /* Aphex Twin album */
     int64_t drukqs_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "AT/Drukqs", "Drukqs", at_id, 2001, &drukqs_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, drukqs_id, MBRID_DRUKQS), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, drukqs_id, "Drukqs",
+        MBRID_DRUKQS, RGID_DRUKQS, 2001, MB_STATUS_RESOLVED), QUADRATURE_OK);
 
     /* Ambiguous artist — album with NO MBRID (different from lib A's) */
     int64_t ambig_album_id = 0;
@@ -628,7 +649,7 @@ Test(availability, single_entity_getters_still_work, .init = m2_setup, .fini = m
     library_cache_set_available(m2_cache, 1, FALSE);
 
     /* Single-entity getter should STILL work (for in-flight operations) */
-    const library_album_info_t *album = library_cache_get_album(m2_cache, drukqs_id);
+    const library_album_info_t *album = library_cache_get_album(m2_cache, drukqs_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(album, "get_album should still work for unavailable library");
     cr_assert_str_eq(album->title, "Drukqs");
 
@@ -650,10 +671,8 @@ Test(null_mbid, same_name_no_mbid_not_merged, .init = m2_setup, .fini = m2_teard
         if (g_ascii_strcasecmp(a->name, "Ambient Artist") == 0) {
             count++;
             /* Each should NOT be merged */
-            cr_assert_eq(a->merged_source_count, 0,
-                "Ambient Artist (no MBID) should not have merged sources");
             cr_assert(a->library_index >= 0,
-                "Ambient Artist should have a valid library_index (not merged)");
+                "Ambient Artist should have a valid library_index");
         }
     }
     g_ptr_array_unref(artists);
@@ -718,12 +737,14 @@ static void build_t3_lib_c(void) {
     /* DP album: Homework (unique MBRID, not in lib A or B) */
     int64_t hw_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "DP/Homework", "Homework", dp_id, 1997, &hw_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, hw_id, MBRID_HOMEWORK), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, hw_id, "Homework",
+        MBRID_HOMEWORK, RGID_HOMEWORK, 1997, MB_STATUS_RESOLVED), QUADRATURE_OK);
 
     /* Boards of Canada album (unique to lib C) */
     int64_t geo_id = 0;
     cr_assert_eq(db_upsert_folder_album(db, "BOC/Geogaddi", "Geogaddi", boc_id, 2002, &geo_id), QUADRATURE_OK);
-    cr_assert_eq(db_set_album_release_id_from_tags(db, geo_id, MBRID_GEOGADDI), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, geo_id, "Geogaddi",
+        MBRID_GEOGADDI, RGID_GEOGADDI, 2002, MB_STATUS_RESOLVED), QUADRATURE_OK);
 
     create_track(db, hw_id, "Around the World", 1, 1);
     create_track(db, geo_id, "Music is Math", 1, 1);
@@ -781,10 +802,8 @@ static void t3_teardown(void) {
 Test(add_slot, third_library_merges_correctly, .init = t3_setup, .fini = t3_teardown) {
     /* Before: Daft Punk merged from A+B */
     int64_t dp_id = find_artist_id(t3_cache, "Daft Punk");
-    const library_artist_info_t *dp = library_cache_get_artist(t3_cache, dp_id);
+    const library_artist_info_t *dp = library_cache_get_artist(t3_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(dp);
-    cr_assert(dp->merged_source_count > 0, "Daft Punk should be merged before add_slot");
-
     /* Add Library C */
     library_cache_source_t src_c = {
         .db_path = t3_db_c, .music_base = "/music_c",
@@ -799,18 +818,15 @@ Test(add_slot, third_library_merges_correctly, .init = t3_setup, .fini = t3_tear
 
     /* Daft Punk should now be merged from A+B+C */
     dp_id = find_artist_id(t3_cache, "Daft Punk");
-    dp = library_cache_get_artist(t3_cache, dp_id);
+    dp = library_cache_get_artist(t3_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(dp);
-    cr_assert_eq(dp->merged_source_count, 2,
-        "Daft Punk should have 2 merged sources (from 3 libraries), got %d",
-        dp->merged_source_count);
-
     /* Daft Punk albums: Discovery(A) + RAM(A,deduped) + HAA(B) + Homework(C) = 4 */
-    const GPtrArray *albums = library_cache_get_albums_by_artist(t3_cache, dp_id);
+    GPtrArray *albums = library_cache_get_albums_by_artist(t3_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(albums);
     cr_assert_eq(albums->len, 4,
         "Daft Punk should have 4 albums after adding lib C, got %u", albums->len);
     cr_assert(has_album_title(albums, "Homework"), "missing Homework from lib C");
+    g_ptr_array_unref(albums);
 }
 
 Test(add_slot, new_artist_from_added_library, .init = t3_setup, .fini = t3_teardown) {
@@ -855,8 +871,8 @@ static void *concurrent_reader(void *arg) {
         if (albums) g_ptr_array_unref(albums);
 
         library_cache_get_track(ctx->cache, 1);
-        library_cache_get_album(ctx->cache, 1);
-        library_cache_get_artist(ctx->cache, 1);
+        library_cache_get_album(ctx->cache, 1, LIBRARY_MASK_ALL);
+        library_cache_get_artist(ctx->cache, 1, LIBRARY_MASK_ALL);
 
         library_search_results_t *r = library_cache_search(
             ctx->cache, "Daft", LIBRARY_SEARCH_FILTER_ALL, 5, NULL, LIBRARY_MASK_ALL);
@@ -897,7 +913,7 @@ Test(appearance_dedup, featured_credit_not_duplicated, .init = m2_setup, .fini =
     /* Daft Punk appears as featured on Aphex Twin's SAW in lib A.
      * Lib B has no such feature. So appearances should be exactly 1 album. */
     int64_t dp_id = find_artist_id(m2_cache, "Daft Punk");
-    const GPtrArray *appearances = library_cache_get_artist_appearances(m2_cache, dp_id);
+    GPtrArray *appearances = library_cache_get_artist_appearances(m2_cache, dp_id, LIBRARY_MASK_ALL);
 
     if (appearances) {
         /* SAW should appear exactly once (only in lib A) */
@@ -909,6 +925,7 @@ Test(appearance_dedup, featured_credit_not_duplicated, .init = m2_setup, .fini =
         }
         cr_assert_eq(saw_count, 1,
             "SAW should appear once in DP's appearances, got %d", saw_count);
+        g_ptr_array_unref(appearances);
     }
 }
 
@@ -916,7 +933,7 @@ Test(appearance_dedup, appearance_tracks_populated_from_featured_credits, .init 
     /* Daft Punk is a featured track artist on SAW track 2 ("Pulsewidth feat DP").
      * artist_appearance_tracks must contain this track after cache warming. */
     int64_t dp_id = find_artist_id(m2_cache, "Daft Punk");
-    const GPtrArray *app_tracks = library_cache_get_artist_appearance_tracks(m2_cache, dp_id);
+    GPtrArray *app_tracks = library_cache_get_artist_appearance_tracks(m2_cache, dp_id, LIBRARY_MASK_ALL);
 
     cr_assert_not_null(app_tracks,
         "appearance tracks should not be NULL for artist with featured credits");
@@ -931,9 +948,9 @@ Test(appearance_dedup, appearance_tracks_populated_from_featured_credits, .init 
             found_pulsewidth = true;
 
         /* Each appearance track should be from an album where DP is NOT the primary artist */
-        const library_album_info_t *album = library_cache_get_album(m2_cache, t->album_id);
+        const library_album_info_t *album = library_cache_get_album(m2_cache, t->album_id, LIBRARY_MASK_ALL);
         cr_assert_not_null(album, "appearance track's album should exist");
-        const library_artist_info_t *album_artist = library_cache_get_artist(m2_cache, album->artist_id);
+        const library_artist_info_t *album_artist = library_cache_get_artist(m2_cache, album->artist_id, LIBRARY_MASK_ALL);
         if (album_artist) {
             cr_assert_neq(g_ascii_strcasecmp(album_artist->name, "Daft Punk"), 0,
                 "appearance track should not be on a Daft Punk album");
@@ -941,6 +958,7 @@ Test(appearance_dedup, appearance_tracks_populated_from_featured_credits, .init 
     }
     cr_assert(found_pulsewidth,
         "appearance tracks should include 'Pulsewidth feat DP'");
+    g_ptr_array_unref(app_tracks);
 }
 
 Test(appearance_dedup, appearance_tracks_count_matches_credits, .init = m2_setup, .fini = m2_teardown) {
@@ -948,42 +966,46 @@ Test(appearance_dedup, appearance_tracks_count_matches_credits, .init = m2_setup
      * SAW track 2 ("Pulsewidth feat DP"). Lib B has none.
      * So appearance_tracks should have exactly 1 track. */
     int64_t dp_id = find_artist_id(m2_cache, "Daft Punk");
-    const GPtrArray *app_tracks = library_cache_get_artist_appearance_tracks(m2_cache, dp_id);
+    GPtrArray *app_tracks = library_cache_get_artist_appearance_tracks(m2_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(app_tracks);
     cr_assert_eq(app_tracks->len, 1,
         "DP should have exactly 1 appearance track (Pulsewidth), got %u",
         app_tracks->len);
+    g_ptr_array_unref(app_tracks);
 }
 
 Test(appearance_dedup, appearance_albums_count_matches_credits, .init = m2_setup, .fini = m2_teardown) {
     /* Daft Punk appears on exactly 1 album: SAW (in Lib A). */
     int64_t dp_id = find_artist_id(m2_cache, "Daft Punk");
-    const GPtrArray *appearances = library_cache_get_artist_appearances(m2_cache, dp_id);
+    GPtrArray *appearances = library_cache_get_artist_appearances(m2_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(appearances);
     cr_assert_eq(appearances->len, 1,
         "DP should have exactly 1 appearance album (SAW), got %u",
         appearances->len);
+    g_ptr_array_unref(appearances);
 }
 
 Test(appearance_dedup, no_features_no_appearances, .init = m2_setup, .fini = m2_teardown) {
     /* "Ambient Artist" and "Local Only A" are never featured on other albums.
      * They should have no appearance tracks or albums. */
     int64_t local_id = find_artist_id(m2_cache, "Local Only A");
-    const GPtrArray *albums = library_cache_get_artist_appearances(m2_cache, local_id);
-    const GPtrArray *tracks = library_cache_get_artist_appearance_tracks(m2_cache, local_id);
+    GPtrArray *albums = library_cache_get_artist_appearances(m2_cache, local_id, LIBRARY_MASK_ALL);
+    GPtrArray *tracks = library_cache_get_artist_appearance_tracks(m2_cache, local_id, LIBRARY_MASK_ALL);
 
     cr_assert_eq(albums ? albums->len : 0, 0,
         "Local Only A should have 0 appearance albums");
     cr_assert_eq(tracks ? tracks->len : 0, 0,
         "Local Only A should have 0 appearance tracks");
+    if (albums) g_ptr_array_unref(albums);
+    if (tracks) g_ptr_array_unref(tracks);
 }
 
 Test(appearance_dedup, album_artist_excluded_from_own_album_appearances, .init = m2_setup, .fini = m2_teardown) {
     /* Aphex Twin is the album artist of SAW and all SAW tracks list Aphex Twin
      * as a track artist. Aphex Twin should NOT appear in its own appearances. */
     int64_t at_id = find_artist_id(m2_cache, "Aphex Twin");
-    const GPtrArray *app_tracks = library_cache_get_artist_appearance_tracks(m2_cache, at_id);
-    const GPtrArray *app_albums = library_cache_get_artist_appearances(m2_cache, at_id);
+    GPtrArray *app_tracks = library_cache_get_artist_appearance_tracks(m2_cache, at_id, LIBRARY_MASK_ALL);
+    GPtrArray *app_albums = library_cache_get_artist_appearances(m2_cache, at_id, LIBRARY_MASK_ALL);
 
     /* Aphex Twin has no featured credits on non-AT albums */
     guint track_count = app_tracks ? app_tracks->len : 0;
@@ -994,6 +1016,8 @@ Test(appearance_dedup, album_artist_excluded_from_own_album_appearances, .init =
     cr_assert_eq(album_count, 0,
         "Aphex Twin should not appear in its own album's appearances, got %u",
         album_count);
+    if (app_tracks) g_ptr_array_unref(app_tracks);
+    if (app_albums) g_ptr_array_unref(app_albums);
 }
 
 /* ── P2: Album Tracks Sort Order ──────────────────────────────────────── */
@@ -1001,7 +1025,7 @@ Test(appearance_dedup, album_artist_excluded_from_own_album_appearances, .init =
 /* Use the cow fixture which has a single-library with Discovery (2 tracks) */
 
 Test(sort_order, tracks_by_album_sorted_by_disc_and_track, .init = cow_setup, .fini = cow_teardown) {
-    const GPtrArray *tracks = library_cache_get_tracks_by_album(cow_cache, 1);
+    GPtrArray *tracks = library_cache_get_tracks_by_album(cow_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(tracks);
     cr_assert_eq(tracks->len, 2, "Discovery should have 2 tracks");
 
@@ -1015,6 +1039,7 @@ Test(sort_order, tracks_by_album_sorted_by_disc_and_track, .init = cow_setup, .f
 
     cr_assert_eq(t1->track_num, 1);
     cr_assert_eq(t2->track_num, 2);
+    g_ptr_array_unref(tracks);
 }
 
 /* Multi-disc sort order test — need a fixture with multi-disc album */
@@ -1068,7 +1093,7 @@ static void sort_teardown(void) {
 }
 
 Test(sort_order, multi_disc_tracks_sorted_correctly, .init = sort_setup, .fini = sort_teardown) {
-    const GPtrArray *tracks = library_cache_get_tracks_by_album(sort_cache, 1);
+    GPtrArray *tracks = library_cache_get_tracks_by_album(sort_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(tracks);
     cr_assert_eq(tracks->len, 5, "should have 5 tracks");
 
@@ -1083,10 +1108,11 @@ Test(sort_order, multi_disc_tracks_sorted_correctly, .init = sort_setup, .fini =
         cr_assert_eq(t->track_num, expected_track[i],
             "track %u: expected track %u, got %u", i, expected_track[i], t->track_num);
     }
+    g_ptr_array_unref(tracks);
 }
 
 Test(sort_order, first_track_id_set_correctly, .init = sort_setup, .fini = sort_teardown) {
-    const library_album_info_t *album = library_cache_get_album(sort_cache, 1);
+    const library_album_info_t *album = library_cache_get_album(sort_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(album);
     cr_assert(album->first_track_id != 0, "first_track_id should be set");
 
@@ -1106,11 +1132,11 @@ Test(invalid_ids, fabricated_bitmap_index, .init = cow_setup, .fini = cow_teardo
     int64_t bad_id = LIBRARY_MAKE_GLOBAL_ID(15, 1);
 
     cr_assert_null(library_cache_get_track(cow_cache, bad_id));
-    cr_assert_null(library_cache_get_album(cow_cache, bad_id));
-    cr_assert_null(library_cache_get_artist(cow_cache, bad_id));
+    cr_assert_null(library_cache_get_album(cow_cache, bad_id, LIBRARY_MASK_ALL));
+    cr_assert_null(library_cache_get_artist(cow_cache, bad_id, LIBRARY_MASK_ALL));
     cr_assert_null(library_cache_get_track_artists(cow_cache, bad_id));
-    cr_assert_null(library_cache_get_tracks_by_album(cow_cache, bad_id));
-    cr_assert_null(library_cache_get_albums_by_artist(cow_cache, bad_id));
+    cr_assert_null(library_cache_get_tracks_by_album(cow_cache, bad_id, LIBRARY_MASK_ALL));
+    cr_assert_null(library_cache_get_albums_by_artist(cow_cache, bad_id, LIBRARY_MASK_ALL));
     cr_assert_eq(library_cache_get_next_track_id(cow_cache, bad_id), 0);
     cr_assert_eq(library_cache_get_prev_track_id(cow_cache, bad_id), 0);
 }
@@ -1120,18 +1146,18 @@ Test(invalid_ids, out_of_range_local_id, .init = cow_setup, .fini = cow_teardown
     int64_t bad_id = LIBRARY_MAKE_GLOBAL_ID(0, 999999);
 
     cr_assert_null(library_cache_get_track(cow_cache, bad_id));
-    cr_assert_null(library_cache_get_album(cow_cache, bad_id));
-    cr_assert_null(library_cache_get_artist(cow_cache, bad_id));
+    cr_assert_null(library_cache_get_album(cow_cache, bad_id, LIBRARY_MASK_ALL));
+    cr_assert_null(library_cache_get_artist(cow_cache, bad_id, LIBRARY_MASK_ALL));
     cr_assert_eq(library_cache_get_next_track_id(cow_cache, bad_id), 0);
 }
 
 Test(invalid_ids, zero_and_negative_ids, .init = cow_setup, .fini = cow_teardown) {
     cr_assert_null(library_cache_get_track(cow_cache, 0));
-    cr_assert_null(library_cache_get_album(cow_cache, 0));
-    cr_assert_null(library_cache_get_artist(cow_cache, 0));
+    cr_assert_null(library_cache_get_album(cow_cache, 0, LIBRARY_MASK_ALL));
+    cr_assert_null(library_cache_get_artist(cow_cache, 0, LIBRARY_MASK_ALL));
     cr_assert_null(library_cache_get_track(cow_cache, -1));
-    cr_assert_null(library_cache_get_album(cow_cache, -1));
-    cr_assert_null(library_cache_get_artist(cow_cache, -1));
+    cr_assert_null(library_cache_get_album(cow_cache, -1, LIBRARY_MASK_ALL));
+    cr_assert_null(library_cache_get_artist(cow_cache, -1, LIBRARY_MASK_ALL));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1196,22 +1222,16 @@ Test(remove_middle, merge_updates_after_middle_removal, .init = t3_setup, .fini 
 
     /* Daft Punk merged from A+B+C */
     int64_t dp_id = find_artist_id(t3_cache, "Daft Punk");
-    const library_artist_info_t *dp = library_cache_get_artist(t3_cache, dp_id);
-    cr_assert_eq(dp->merged_source_count, 2, "DP should have 2 sources from 3 libs");
-
+    const library_artist_info_t *dp = library_cache_get_artist(t3_cache, dp_id, LIBRARY_MASK_ALL);
     /* Remove Library B (middle slot) */
     cr_assert_eq(library_cache_remove_slot(t3_cache, 1), QUADRATURE_OK);
 
     /* Re-find Daft Punk — still merged from A+C */
     dp_id = find_artist_id(t3_cache, "Daft Punk");
-    dp = library_cache_get_artist(t3_cache, dp_id);
+    dp = library_cache_get_artist(t3_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(dp);
-    cr_assert_eq(dp->merged_source_count, 1,
-        "DP should have 1 merged source after removing B (A+C remain), got %d",
-        dp->merged_source_count);
-
     /* Albums: Discovery(A) + RAM(A) + Homework(C) = 3. HAA was only in B (removed). */
-    const GPtrArray *albums = library_cache_get_albums_by_artist(t3_cache, dp_id);
+    GPtrArray *albums = library_cache_get_albums_by_artist(t3_cache, dp_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(albums);
     cr_assert_eq(albums->len, 3,
         "DP should have 3 albums after removing B (A+C), got %u", albums->len);
@@ -1219,6 +1239,7 @@ Test(remove_middle, merge_updates_after_middle_removal, .init = t3_setup, .fini 
     cr_assert(has_album_title(albums, "Homework"), "missing Homework");
     cr_assert(has_album_title(albums, "Random Access Memories"), "missing RAM");
     cr_assert(!has_album_title(albums, "Human After All"), "HAA should be gone with lib B");
+    g_ptr_array_unref(albums);
 }
 
 Test(remove_middle, bitmap_index_stable_after_removal, .init = t3_setup, .fini = t3_teardown) {
@@ -1245,7 +1266,7 @@ Test(remove_middle, bitmap_index_stable_after_removal, .init = t3_setup, .fini =
     library_cache_remove_slot(t3_cache, 0);
 
     /* geo_id should still resolve correctly — bitmap_index is stable */
-    const library_album_info_t *geo = library_cache_get_album(t3_cache, geo_id);
+    const library_album_info_t *geo = library_cache_get_album(t3_cache, geo_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(geo, "Geogaddi should still be accessible by same global ID after removing slot 0");
     cr_assert_str_eq(geo->title, "Geogaddi");
 }

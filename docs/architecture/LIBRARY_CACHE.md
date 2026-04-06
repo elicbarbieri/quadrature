@@ -332,14 +332,15 @@ O(1) flat array lookup. On cache miss (before warming completes), falls back to 
 const GPtrArray* library_cache_get_artists(library_cache_t* cache, library_sort_t sort);
 const GPtrArray* library_cache_get_albums(library_cache_t* cache, library_sort_t sort);
 
-// Relationship queries (cache-owned, do not free)
-const GPtrArray* library_cache_get_tracks_by_album(library_cache_t* cache, int64_t album_id);
-const GPtrArray* library_cache_get_albums_by_artist(library_cache_t* cache, int64_t artist_id);
-const GPtrArray* library_cache_get_artist_appearances(library_cache_t* cache, int64_t artist_id);
-const GPtrArray* library_cache_get_artist_appearance_tracks(library_cache_t* cache, int64_t artist_id);
+// Relationship queries (caller owns array, cache owns items — g_ptr_array_unref when done)
+// library_mask: LIBRARY_MASK_ALL = all libraries, or bitmask of enabled libraries
+GPtrArray* library_cache_get_tracks_by_album(library_cache_t* cache, int64_t album_id, uint32_t library_mask);
+GPtrArray* library_cache_get_albums_by_artist(library_cache_t* cache, int64_t artist_id, uint32_t library_mask);
+GPtrArray* library_cache_get_artist_appearances(library_cache_t* cache, int64_t artist_id, uint32_t library_mask);
+GPtrArray* library_cache_get_artist_appearance_tracks(library_cache_t* cache, int64_t artist_id, uint32_t library_mask);
 
 // Filtered queries (caller owns array, cache owns items — g_ptr_array_unref when done)
-// library_filter: -1 = all libraries (deduplicated), 0..N = specific library
+// library_mask: LIBRARY_MASK_ALL = all libraries, or bitmask of enabled libraries
 GPtrArray* library_cache_get_artists_filtered(library_cache_t* cache,
     library_sort_t sort, const char* search_text, const db_search_opts_t* filters,
     int library_filter);
@@ -498,6 +499,7 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track, ...) {
 Indexer thread: completes phase → fires INDEXER_LIBRARY_UPDATED
 
 Main thread (on_indexer_library_updated):
+  debounce: if refresh already pending for this slot within 500ms, skip
   library_cache_refresh_slot(cache, bitmap_index)
     → spawns background warm thread for that slot
     → OLD slot data stays live (no invalidation yet)
@@ -510,6 +512,10 @@ Warming thread: rebuilds shadow arrays for that slot under cache->lock
 Main thread (on_cache_ready):
   refresh_library_views() → views re-populate with new data
 ```
+
+**Signal debouncing:** `INDEXER_LIBRARY_UPDATED` fires after both Phase 3 and Phase 6. If
+they arrive within 500ms, only one `refresh_slot()` executes. This avoids redundant
+`rebuild_merged_artists()` passes — O(total_artists) across all slots under the cache mutex.
 
 During refresh, old slot data stays live — `library_cache_get_*` calls continue to work against stale but valid data. After the swap, all new queries use the refreshed arrays.
 

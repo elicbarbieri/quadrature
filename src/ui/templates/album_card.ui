@@ -125,11 +125,11 @@
               </object>
             </child>
 
-            <!-- Genre Pills -->
+            <!-- Genre Pills (populated by C code, up to 3 rows) -->
             <child>
               <object class="GtkBox" id="card_genres">
-                <property name="orientation">horizontal</property>
-                <property name="spacing">6</property>
+                <property name="orientation">vertical</property>
+                <property name="spacing">4</property>
                 <property name="visible">false</property>
               </object>
             </child>

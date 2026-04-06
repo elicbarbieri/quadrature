@@ -523,14 +523,15 @@ static void on_album_secondary(int64_t album_id, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
     if (!w->library_cache) return;
 
-    const GPtrArray *tracks = library_cache_get_tracks_by_album(w->library_cache, album_id);
-    if (!tracks || tracks->len == 0) return;
+    GPtrArray *tracks = library_cache_get_tracks_by_album(w->library_cache, album_id, LIBRARY_MASK_ALL);
+    if (!tracks || tracks->len == 0) { g_clear_pointer(&tracks, g_ptr_array_unref); return; }
 
     const library_track_info_t *track = g_ptr_array_index(tracks, 0);
     char *resolved = library_cache_resolve_track_path(w->library_cache, track->track_id);
     on_library_play(resolved, track->title, track->artist_display,
                     track->album_title, track->track_id, w);
     g_free(resolved);
+    g_ptr_array_unref(tracks);
 }
 
 /* Artist: activate navigates to artist detail, no right-click action */
@@ -776,27 +777,44 @@ static void load_css(UiWindow *w) {
 static void sync_library_toggles(UiWindow *w) {
     w->library_toggle_updating = TRUE;
     for (int i = 0; i < w->library_toggle_count; i++) {
-        gboolean active = (w->library_mask & (1u << i)) != 0;
+        int bi = GPOINTER_TO_INT(g_object_get_data(
+            G_OBJECT(w->library_toggles[i]), "lib-idx"));
+        gboolean active = (w->library_mask & (1u << bi)) != 0;
         gtk_toggle_button_set_active(w->library_toggles[i], active);
     }
     w->library_toggle_updating = FALSE;
 }
 
 static void set_library_mask(UiWindow *w, uint32_t mask) {
-    if (mask == 0) mask = LIBRARY_MASK_ALL;  /* Never empty — reactivate all */
+    if (mask == w->library_mask) return;  /* No change — skip reflow */
     w->library_mask = mask;
     sync_library_toggles(w);
     refresh_library_views(w);
 }
 
-static void on_library_toggle(GtkToggleButton *btn, gpointer data) {
+static void on_library_left_click(GtkGestureClick *gesture, int n_press,
+                                  double x, double y, gpointer data) {
+    (void)n_press; (void)x; (void)y;
     UiWindow *w = UI_WINDOW(data);
-    if (w->library_toggle_updating) return;
 
+    /* Claim the gesture so GtkToggleButton's default handler doesn't fire */
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
+    GtkWidget *btn = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
     int lib_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "lib-idx"));
-    gboolean now_active = gtk_toggle_button_get_active(btn);
-    uint32_t new_mask = library_mask_after_toggle(
-        w->library_mask, lib_idx, now_active);
+
+    GdkModifierType mods = gtk_event_controller_get_current_event_state(
+        GTK_EVENT_CONTROLLER(gesture));
+
+    uint32_t new_mask;
+    if (mods & GDK_SHIFT_MASK) {
+        /* Shift+click → solo this library */
+        new_mask = library_mask_solo(lib_idx);
+    } else {
+        /* Plain click → toggle this library */
+        new_mask = library_mask_after_toggle(w->library_mask, lib_idx);
+    }
+
     set_library_mask(w, new_mask);
 }
 
@@ -830,7 +848,14 @@ static void build_library_bar(UiWindow *w) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
         gtk_widget_add_css_class(btn, "library-toggle");
         g_object_set_data(G_OBJECT(btn), "lib-idx", GINT_TO_POINTER(bi));
-        g_signal_connect(btn, "toggled", G_CALLBACK(on_library_toggle), w);
+        gtk_widget_set_tooltip_text(btn,
+            "Click: toggle\nShift+Click: solo\nRight-click: show all");
+
+        /* Left-click (with modifier detection) */
+        GtkGesture *lc = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(lc), 1);
+        g_signal_connect(lc, "pressed", G_CALLBACK(on_library_left_click), w);
+        gtk_widget_add_controller(btn, GTK_EVENT_CONTROLLER(lc));
 
         /* Right-click → select all libraries */
         GtkGesture *rc = gtk_gesture_click_new();
@@ -950,11 +975,8 @@ static void build_ui(UiWindow *w) {
     }
 
     /* Set fixed width on channels panel - CSS min/max-width alone isn't reliable */
-    GtkWidget *channels_panel = gtk_widget_get_parent(w->channel_strips_box);
-    if (channels_panel) {
-        gtk_widget_set_size_request(channels_panel, 720, -1);
-        gtk_widget_set_hexpand(channels_panel, FALSE);
-    }
+    gtk_widget_set_size_request(w->channel_strips_box, 720, -1);
+    gtk_widget_set_hexpand(w->channel_strips_box, FALSE);
 
     /* Setup keyboard shortcut actions */
     setup_keyboard_actions(w);
@@ -1024,6 +1046,7 @@ static void ui_window_dispose(GObject *obj) {
     if (w->toast_timer) { g_source_remove(w->toast_timer); w->toast_timer = 0; }
     if (w->device_hotplug_timer_id) { g_source_remove(w->device_hotplug_timer_id); w->device_hotplug_timer_id = 0; }
     if (w->device_rebuild_idle_id) { g_source_remove(w->device_rebuild_idle_id); w->device_rebuild_idle_id = 0; }
+    indexer_bridge_cancel_pending_refreshes();
     /* Flush any pending debounced settings save before shutdown */
     if (w->settings_save_timer) {
         g_source_remove(w->settings_save_timer);
@@ -1081,7 +1104,6 @@ static void ui_window_class_init(UiWindowClass *klass) {
     /* Bind template children */
     gtk_widget_class_bind_template_child(widget_class, UiWindow, main_box);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, content_stack);
-    gtk_widget_class_bind_template_child(widget_class, UiWindow, content_column);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, library_bar);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, channel_strips_box);
     gtk_widget_class_bind_template_child(widget_class, UiWindow, toast_overlay);
@@ -1264,27 +1286,23 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
         indexer_controller_set_fanart_api_key(w->indexer, settings->fanart_api_key);
     }
 
-    /* Create artwork manager — library_roots order must match library_cache source indices.
-     * Use data paths (where artwork/ lives) instead of library paths. */
+    /* Create artwork manager — sources use bitmap_index for stable library addressing,
+     * mirroring library_cache_source_t. */
     int thumb_size = settings ? settings->art_thumb_size : 96;
-    const char **art_roots = NULL;
-    int art_root_count = 0;
-    const char **lib_roots = NULL;
+    artwork_manager_source_t *art_sources = NULL;
+    int art_source_count = 0;
     if (settings && settings->library_count > 0) {
-        art_root_count = settings->library_count;
-        art_roots = g_new(const char *, art_root_count);
-        lib_roots = g_new(const char *, art_root_count);
-        for (int i = 0; i < art_root_count; i++) {
-            art_roots[i] = app_settings_get_library_data_path(settings, i);
-            lib_roots[i] = settings->libraries[i].path;
+        art_source_count = settings->library_count;
+        art_sources = g_new0(artwork_manager_source_t, art_source_count);
+        for (int i = 0; i < art_source_count; i++) {
+            art_sources[i].bitmap_index = settings->libraries[i].library_index;
+            art_sources[i].data_root = app_settings_get_library_data_path(settings, i);
+            art_sources[i].music_root = settings->libraries[i].path;
         }
     }
     w->artwork_mgr = artwork_manager_new(
-        w->library_cache, art_roots,
-        lib_roots,
-        art_root_count, thumb_size, 0);
-    g_free(art_roots);
-    g_free(lib_roots);
+        w->library_cache, art_sources, art_source_count, thumb_size, 0);
+    g_free(art_sources);
 
     build_ui(w);
 

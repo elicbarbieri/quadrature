@@ -24,7 +24,6 @@
 #define ARTWORK_CACHE_DEFAULT_MAX_ENTRIES 1000
 #define ARTIST_CACHE_DEFAULT_MAX_ENTRIES 500
 #define ARTWORK_MANAGER_DEFAULT_WORKERS 4
-#define ARTWORK_ATLAS_KEEP_COUNT 3
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Data Structures
@@ -37,17 +36,15 @@ typedef enum {
     LOAD_FULLSIZE = 2,
 } LoadTaskType;
 
-/* Per-library atlas state (v2: fixed-stride raw RGB pixels) */
+/* Per-library atlas slot — bundles reader + paths, addressed via bitmap_map.
+ * Mirrors library_cache's LibrarySlot pattern for consistent multi-library
+ * indirection across the codebase. */
 typedef struct {
-    char *root;                              /* Library root path (owned) */
-    int atlas_fd;
-    void *atlas_map;
-    size_t atlas_size;
-    const artwork_atlas_header_t *atlas_header;
-    const int64_t *album_ids;               /* Sorted album ID array (into mmap) */
-    const uint8_t *pixel_data;              /* Fixed-stride pixel arrays (into mmap) */
-    uint32_t pixel_stride;                  /* thumb_size * thumb_size * channels */
-} LibraryAtlas;
+    int bitmap_index;                   /* Stable library ID (matches library_cache) */
+    artwork_atlas_reader_t *reader;     /* mmap'd atlas (or NULL if no atlas yet) */
+    char *data_root;                    /* Library data root (for fanart fallback) */
+    char *music_root;                   /* Music file root (for embedded art fallback) */
+} ArtworkSlot;
 
 typedef struct {
     int64_t album_id;
@@ -61,7 +58,7 @@ typedef struct {
 } CallbackReg;
 
 typedef struct {
-    int64_t album_id;
+    int64_t id;
     GSList *callbacks;
 } PendingLoad;
 
@@ -75,11 +72,15 @@ struct _ArtworkManager {
     library_cache_t *library;
     int thumb_size;
 
-    /* Per-library atlas slots, indexed by library index */
-    LibraryAtlas *libraries;           /* Album atlases (root = data path) */
-    char **music_roots;                /* Music file roots (for embedded art fallback) */
-    int lib_count;
-    GMutex atlas_lock;   /* Covers all LibraryAtlas + global artist atlas */
+    /* Per-library atlas slots, addressed by bitmap_index via bitmap_map.
+     * Mirrors library_cache's slot + bitmap_map architecture:
+     *   bitmap_map[bitmap_index] → &slots[position]
+     * Reads are lock-free (g_atomic_pointer_get); writes under atlas_rwlock. */
+    ArtworkSlot *slots;               /* Dense array of slots */
+    int slot_count;
+    ArtworkSlot **bitmap_map;         /* [bitmap_index] → &ArtworkSlot (atomic reads) */
+    int bitmap_capacity;
+    GRWLock atlas_rwlock;             /* Write: reload/add/remove. Read: worker lookups */
 
     /* Global artist atlas (UUID-keyed, shared across all libraries) */
     artist_atlas_reader_t *artist_atlas;
@@ -192,9 +193,14 @@ static char *find_latest_atlas(const char *library_root, int thumb_size) {
 #define EVICTION_SCAN_MIN 16
 #define EVICTION_SCAN_PERCENT 10
 
-static void evict_if_needed(ArtworkManager *mgr) {
-    while (g_hash_table_size(mgr->cache) > mgr->max_entries && !g_queue_is_empty(&mgr->lru)) {
-        guint queue_len = g_queue_get_length(&mgr->lru);
+/**
+ * Frequency-weighted eviction: scan bottom EVICTION_SCAN_PERCENT% of the LRU,
+ * evict the entry with the lowest access_count. Shared between album and artist caches.
+ * Caller must hold the corresponding cache mutex.
+ */
+static void cache_evict_if_needed(GHashTable *cache, GQueue *lru, size_t max_entries) {
+    while (g_hash_table_size(cache) > max_entries && !g_queue_is_empty(lru)) {
+        guint queue_len = g_queue_get_length(lru);
         guint scan_count = queue_len * EVICTION_SCAN_PERCENT / 100;
         if (scan_count < EVICTION_SCAN_MIN) scan_count = EVICTION_SCAN_MIN;
         if (scan_count > queue_len) scan_count = queue_len;
@@ -202,7 +208,7 @@ static void evict_if_needed(ArtworkManager *mgr) {
         GList *best_to_evict = NULL;
         uint32_t min_count = UINT32_MAX;
 
-        GList *l = mgr->lru.tail;
+        GList *l = lru->tail;
         for (guint i = 0; l && i < scan_count; i++, l = l->prev) {
             CacheEntry *e = l->data;
             if (e->access_count < min_count) {
@@ -211,99 +217,45 @@ static void evict_if_needed(ArtworkManager *mgr) {
             }
         }
 
-        if (!best_to_evict) best_to_evict = mgr->lru.tail;
+        if (!best_to_evict) best_to_evict = lru->tail;
 
         CacheEntry *e = best_to_evict->data;
-        atomic_fetch_add(&mgr->evictions, 1);
-        g_hash_table_remove(mgr->cache, &e->album_id);
-        g_queue_delete_link(&mgr->lru, best_to_evict);
+        g_hash_table_remove(cache, &e->album_id);
+        g_queue_delete_link(lru, best_to_evict);
         cache_entry_free(e);
     }
 }
 
-static void touch_entry(ArtworkManager *mgr, CacheEntry *e) {
+static void touch_entry(GQueue *lru, CacheEntry *e) {
     e->access_count++;
     if (e->lru_link) {
-        g_queue_unlink(&mgr->lru, e->lru_link);
-        g_queue_push_head_link(&mgr->lru, e->lru_link);
+        g_queue_unlink(lru, e->lru_link);
+        g_queue_push_head_link(lru, e->lru_link);
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Per-Library Atlas Operations
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-static void lib_atlas_unmap(LibraryAtlas *la) {
-    if (la->atlas_map && la->atlas_map != MAP_FAILED)
-        munmap(la->atlas_map, la->atlas_size);
-    if (la->atlas_fd >= 0) close(la->atlas_fd);
-    la->atlas_map = NULL;
-    la->atlas_fd = -1;
-    la->atlas_size = 0;
-    la->atlas_header = NULL;
-    la->album_ids = NULL;
-    la->pixel_data = NULL;
-    la->pixel_stride = 0;
+/**
+ * Evict all texture cache entries belonging to a specific library.
+ * Caller must hold the corresponding cache mutex.
+ */
+static void cache_evict_library(GHashTable *cache, GQueue *lru, int bitmap_index) {
+    GList *l = lru->head;
+    while (l) {
+        GList *next = l->next;
+        CacheEntry *e = l->data;
+        if (LIBRARY_GLOBAL_ID_LIB(e->album_id) == bitmap_index) {
+            g_hash_table_remove(cache, &e->album_id);
+            g_queue_delete_link(lru, l);
+            cache_entry_free(e);
+        }
+        l = next;
+    }
 }
 
-static void lib_atlas_load(LibraryAtlas *la, const char *path) {
-    lib_atlas_unmap(la);
-    if (!path) return;
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return;
-
-    struct stat st;
-    if (fstat(fd, &st) < 0 || (size_t)st.st_size < sizeof(artwork_atlas_header_t)) {
-        close(fd); return;
-    }
-
-    void *map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (map == MAP_FAILED) { close(fd); return; }
-
-    const artwork_atlas_header_t *h = map;
-    if (memcmp(h->magic, ARTWORK_ATLAS_MAGIC, ARTWORK_ATLAS_MAGIC_SIZE) != 0 ||
-        h->version != ARTWORK_ATLAS_VERSION) {
-        munmap(map, st.st_size); close(fd); return;
-    }
-
-    la->atlas_fd = fd;
-    la->atlas_map = map;
-    la->atlas_size = st.st_size;
-    la->atlas_header = h;
-    la->pixel_stride = h->thumb_size * h->thumb_size * h->channels;
-    la->album_ids = (const int64_t *)((uint8_t *)map + sizeof(*h));
-    la->pixel_data = (const uint8_t *)la->album_ids + h->count * sizeof(int64_t);
-    g_info("Atlas v2 loaded for lib '%s': %s (%u entries, stride=%u)",
-           la->root ? la->root : "?", path, h->count, la->pixel_stride);
-}
-
-/* Binary search for local_id within a library's atlas. Returns index or -1. */
-static int32_t lib_atlas_lookup(const LibraryAtlas *la, int64_t local_id) {
-    if (!la->atlas_header || !la->album_ids) return -1;
-    uint32_t lo = 0, hi = la->atlas_header->count;
-    while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2;
-        int64_t mid_id = la->album_ids[mid];
-        if (mid_id == local_id) return (int32_t)mid;
-        if (mid_id < local_id) lo = mid + 1; else hi = mid;
-    }
-    return -1;
-}
-
-/* Create texture directly from raw mmap'd pixel data (zero decode). */
-static GdkTexture *lib_atlas_load_texture(const LibraryAtlas *la, int32_t index) {
-    if (!la->pixel_data || index < 0) return NULL;
-    const uint8_t *pixels = la->pixel_data + (uint32_t)index * la->pixel_stride;
-    GBytes *bytes = g_bytes_new(pixels, la->pixel_stride);
-    GdkTexture *tex = gdk_memory_texture_new(
-        la->atlas_header->thumb_size,
-        la->atlas_header->thumb_size,
-        GDK_MEMORY_R8G8B8,
-        bytes,
-        la->atlas_header->thumb_size * la->atlas_header->channels);
-    g_bytes_unref(bytes);
-    return tex;
+/* Bitmap index → slot lookup (lock-free read, mirrors library_cache's bitmap_to_slot) */
+static inline ArtworkSlot *bitmap_to_art_slot(ArtworkManager *mgr, int bitmap_index) {
+    if (bitmap_index < 0 || bitmap_index >= mgr->bitmap_capacity) return NULL;
+    return g_atomic_pointer_get(&mgr->bitmap_map[bitmap_index]);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -318,60 +270,49 @@ typedef struct {
     LoadTaskType type;
 } LoadComplete;
 
-/* Artist eviction — identical to album eviction but on artist cache */
-static void artist_evict_if_needed(ArtworkManager *mgr) {
-    while (g_hash_table_size(mgr->artist_cache) > mgr->artist_max_entries &&
-           !g_queue_is_empty(&mgr->artist_lru)) {
-        guint queue_len = g_queue_get_length(&mgr->artist_lru);
-        guint scan_count = queue_len * EVICTION_SCAN_PERCENT / 100;
-        if (scan_count < EVICTION_SCAN_MIN) scan_count = EVICTION_SCAN_MIN;
-        if (scan_count > queue_len) scan_count = queue_len;
-
-        GList *best_to_evict = NULL;
-        uint32_t min_count = UINT32_MAX;
-
-        GList *l = mgr->artist_lru.tail;
-        for (guint i = 0; l && i < scan_count; i++, l = l->prev) {
-            CacheEntry *e = l->data;
-            if (e->access_count < min_count) {
-                min_count = e->access_count;
-                best_to_evict = l;
-            }
-        }
-        if (!best_to_evict) best_to_evict = mgr->artist_lru.tail;
-
-        CacheEntry *e = best_to_evict->data;
-        g_hash_table_remove(mgr->artist_cache, &e->album_id);
-        g_queue_delete_link(&mgr->artist_lru, best_to_evict);
-        cache_entry_free(e);
+/* P1 fix: GDestroyNotify for LoadComplete — ensures cleanup even if idle
+ * source is removed during shutdown before the callback fires. */
+static void load_complete_free(gpointer data) {
+    LoadComplete *lc = data;
+    if (!lc) return;
+    g_clear_object(&lc->texture);
+    for (GSList *l = lc->callbacks; l; l = l->next) {
+        CallbackReg *reg = l->data;
+        if (reg && reg->image)
+            g_object_remove_weak_pointer(G_OBJECT(reg->image), (gpointer *)&reg->image);
+        g_free(reg);
     }
+    g_slist_free(lc->callbacks);
+    lc->callbacks = NULL;
+    g_free(lc);
 }
 
+/* Main-thread idle callback for completed artwork loads.
+ * Paired with load_complete_free as GDestroyNotify (P1 fix):
+ * on normal dispatch this callback processes widgets and NULLs fields so the
+ * destroy notify only frees the struct.  On shutdown (source removed before
+ * firing), the destroy notify cleans up unprocessed resources. */
 static gboolean complete_on_main(gpointer data) {
     LoadComplete *lc = data;
     ArtworkManager *mgr = lc->mgr;
 
-    /* Fullsize loads: no cache, just set the texture on the GtkPicture */
     if (lc->type == LOAD_FULLSIZE) {
         for (GSList *l = lc->callbacks; l; l = l->next) {
             CallbackReg *reg = l->data;
             if (reg->image) {
-                g_object_remove_weak_pointer(G_OBJECT(reg->image), (gpointer *)&reg->image);
-                GtkWidget *parent = gtk_widget_get_parent(reg->image);
+                GtkWidget *image = reg->image;
+                g_object_remove_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
+                reg->image = NULL;
+                GtkWidget *parent = gtk_widget_get_parent(image);
                 if (parent)
                     gtk_widget_remove_css_class(parent, "artwork-loading");
                 if (lc->texture)
-                    gtk_picture_set_paintable(GTK_PICTURE(reg->image), GDK_PAINTABLE(lc->texture));
+                    gtk_picture_set_paintable(GTK_PICTURE(image), GDK_PAINTABLE(lc->texture));
             }
-            g_free(reg);
         }
-        g_slist_free(lc->callbacks);
-        g_clear_object(&lc->texture);
-        g_free(lc);
-        return G_SOURCE_REMOVE;
+        return G_SOURCE_REMOVE;  /* load_complete_free handles struct cleanup */
     }
 
-    /* Route to the correct cache based on task type */
     GHashTable *cache;
     GQueue *lru;
     GMutex *lock;
@@ -389,16 +330,16 @@ static gboolean complete_on_main(gpointer data) {
         g_mutex_lock(lock);
         if (!g_hash_table_contains(cache, &lc->id)) {
             CacheEntry *e = g_new0(CacheEntry, 1);
-            e->album_id = lc->id;  /* album_id field used for both album/artist IDs */
+            e->album_id = lc->id;
             e->texture = g_object_ref(lc->texture);
             e->access_count = 1;
             g_hash_table_insert(cache, &e->album_id, e);
             g_queue_push_head(lru, e);
             e->lru_link = lru->head;
             if (lc->type == LOAD_ARTIST)
-                artist_evict_if_needed(mgr);
+                cache_evict_if_needed(cache, lru, mgr->artist_max_entries);
             else
-                evict_if_needed(mgr);
+                cache_evict_if_needed(cache, lru, mgr->max_entries);
         }
         g_mutex_unlock(lock);
     }
@@ -406,39 +347,30 @@ static gboolean complete_on_main(gpointer data) {
     for (GSList *l = lc->callbacks; l; l = l->next) {
         CallbackReg *reg = l->data;
         if (reg->image) {
-            g_object_remove_weak_pointer(G_OBJECT(reg->image), (gpointer *)&reg->image);
+            GtkWidget *image = reg->image;
+            g_object_remove_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
+            reg->image = NULL;
             if (lc->texture) {
-                gtk_widget_remove_css_class(reg->image, "artwork-loading");
-                gtk_image_set_from_paintable(GTK_IMAGE(reg->image), GDK_PAINTABLE(lc->texture));
+                gtk_widget_remove_css_class(image, "artwork-loading");
+                gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(lc->texture));
             }
         }
-        g_free(reg);
     }
-    g_slist_free(lc->callbacks);
-    g_clear_object(&lc->texture);
-    g_free(lc);
-    return G_SOURCE_REMOVE;
+    return G_SOURCE_REMOVE;  /* load_complete_free handles struct cleanup */
 }
-
-typedef enum {
-    ARTIST_LOOKUP_HIT,        /* Found artwork in atlas */
-    ARTIST_LOOKUP_NO_ART,     /* Known to have no artwork (silent) */
-    ARTIST_LOOKUP_UNKNOWN,    /* Not in atlas at all */
-} ArtistLookupResult;
 
 /**
  * Look up an artist in the global UUID-keyed atlas.
- * Must be called with atlas_lock held.
- * Returns texture (caller owns) or NULL, and sets *result accordingly.
+ * Must be called with atlas_rwlock reader-held.
+ * Returns pixel data as GBytes (caller owns), or NULL if not found.
+ * On success, sets *out_thumb_size and *out_channels for texture creation.
  */
-static GdkTexture *artist_atlas_lookup(ArtworkManager *mgr, int64_t artist_id,
-                                        ArtistLookupResult *result) {
-    *result = ARTIST_LOOKUP_UNKNOWN;
-
+static GBytes *artist_atlas_lookup_pixels(ArtworkManager *mgr, int64_t artist_id,
+                                           uint32_t *out_thumb_size, uint8_t *out_channels) {
     if (!mgr->artist_atlas || !mgr->library) return NULL;
 
     /* Get MBID from library cache — need it for UUID-keyed lookup */
-    const library_artist_info_t *info = library_cache_get_artist(mgr->library, artist_id);
+    const library_artist_info_t *info = library_cache_get_artist(mgr->library, artist_id, LIBRARY_MASK_ALL);
     if (!info || !info->musicbrainz_id) return NULL;
 
     uint8_t uuid_bin[ARTIST_ATLAS_UUID_SIZE];
@@ -447,23 +379,11 @@ static GdkTexture *artist_atlas_lookup(ArtworkManager *mgr, int64_t artist_id,
     /* Binary search in the global artist atlas */
     int32_t idx = artist_atlas_reader_lookup(mgr->artist_atlas, uuid_bin);
     if (idx >= 0) {
-        *result = ARTIST_LOOKUP_HIT;
         const uint8_t *pixels = artist_atlas_reader_get_pixels(mgr->artist_atlas, idx);
         if (!pixels) return NULL;
-        uint32_t thumb_size = artist_atlas_reader_get_thumb_size(mgr->artist_atlas);
-        uint32_t stride = artist_atlas_reader_get_pixel_stride(mgr->artist_atlas);
-        GBytes *bytes = g_bytes_new(pixels, stride);
-        GdkTexture *tex = gdk_memory_texture_new(
-            thumb_size, thumb_size, GDK_MEMORY_R8G8B8,
-            bytes, thumb_size * artist_atlas_reader_get_channels(mgr->artist_atlas));
-        g_bytes_unref(bytes);
-        return tex;
-    }
-
-    /* Check no-art index */
-    if (artist_atlas_reader_is_no_art(mgr->artist_atlas, uuid_bin)) {
-        *result = ARTIST_LOOKUP_NO_ART;
-        return NULL;
+        *out_thumb_size = artist_atlas_reader_get_thumb_size(mgr->artist_atlas);
+        *out_channels = artist_atlas_reader_get_channels(mgr->artist_atlas);
+        return g_bytes_new(pixels, artist_atlas_reader_get_pixel_stride(mgr->artist_atlas));
     }
 
     return NULL;
@@ -503,23 +423,13 @@ static gpointer worker_func(gpointer data) {
         if (task->type == LOAD_FULLSIZE) {
             GdkTexture *tex = NULL;
             const library_album_info_t *album =
-                library_cache_get_album(mgr->library, task->id);
+                library_cache_get_album(mgr->library, task->id, LIBRARY_MASK_ALL);
             if (album && album->path) {
-                /* Build candidate library indices: representative first, then sources */
-                int candidates[16];
-                int n_candidates = 0;
+                /* Resolve library slot via bitmap_map */
                 int rep_lib = LIBRARY_GLOBAL_ID_LIB(task->id);
-                if (rep_lib >= 0 && rep_lib < mgr->lib_count)
-                    candidates[n_candidates++] = rep_lib;
-                for (int m = 0; m < album->merged_source_count && n_candidates < 16; m++) {
-                    int src_lib = LIBRARY_GLOBAL_ID_LIB(album->merged_source_ids[m]);
-                    if (src_lib >= 0 && src_lib < mgr->lib_count)
-                        candidates[n_candidates++] = src_lib;
-                }
-
-                for (int c = 0; c < n_candidates && !tex; c++) {
-                    char *album_dir = g_build_filename(
-                        mgr->music_roots[candidates[c]], album->path, NULL);
+                ArtworkSlot *slot = bitmap_to_art_slot(mgr, rep_lib);
+                if (slot) {
+                    char *album_dir = g_build_filename(slot->music_root, album->path, NULL);
                     uint8_t *art_data = NULL;
                     size_t art_size = 0;
                     if (artwork_find_bytes(album_dir, &art_data, &art_size) == QUADRATURE_OK) {
@@ -534,6 +444,27 @@ static gpointer worker_func(gpointer data) {
                         }
                     }
                     g_free(album_dir);
+
+                    /* Fallback: fanart.tv cached album cover (keyed by release group UUID) */
+                    if (!tex && album->musicbrainz_release_group_id && slot->data_root) {
+                        char *fanart_path = g_strdup_printf(
+                            "%s/artwork/fanart_album_covers/%s.jpg",
+                            slot->data_root,
+                            album->musicbrainz_release_group_id);
+                        if (g_file_test(fanart_path, G_FILE_TEST_EXISTS)) {
+                            gchar *contents = NULL;
+                            gsize length = 0;
+                            if (g_file_get_contents(fanart_path, &contents, &length, NULL)
+                                && length > 0) {
+                                GBytes *bytes = g_bytes_new_take(contents, length);
+                                GError *error = NULL;
+                                tex = gdk_texture_new_from_bytes(bytes, &error);
+                                g_bytes_unref(bytes);
+                                if (!tex) g_clear_error(&error);
+                            }
+                        }
+                        g_free(fanart_path);
+                    }
                 }
             }
 
@@ -550,7 +481,8 @@ static gpointer worker_func(gpointer data) {
                 lc->texture = tex ? g_object_ref(tex) : NULL;
                 lc->callbacks = callbacks;
                 lc->type = LOAD_FULLSIZE;
-                g_idle_add(complete_on_main, lc);
+                g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, complete_on_main,
+                                lc, (GDestroyNotify)load_complete_free);
             }
             g_clear_object(&tex);
             load_task_free(task);
@@ -558,62 +490,57 @@ static gpointer worker_func(gpointer data) {
         }
 
         /* Decode global ID → library index + local ID, then look up in correct atlas.
-         * Instrumented: time the atlas lock+lookup+decode for perf dashboard. */
+         * P2 fix: copy pixel data under atlas_rwlock, create texture OUTSIDE lock
+         * to reduce contention across all 4 worker threads. */
         struct timespec _at0, _at1;
         clock_gettime(CLOCK_MONOTONIC, &_at0);
 
         GdkTexture *tex = NULL;
-        ArtistLookupResult artist_result = ARTIST_LOOKUP_UNKNOWN;
 
-        /* Pre-fetch merged source IDs BEFORE acquiring atlas_lock to avoid
-         * nested locking (atlas_lock → cache->lock). Stack-local copy of
-         * source global IDs is safe — they're immutable integers. */
-        int64_t merge_sources[16];
-        int merge_count = 0;
-        if (task->type == LOAD_ALBUM && mgr->library) {
-            const library_album_info_t *album =
-                library_cache_get_album(mgr->library, task->id);
-            if (album) {
-                merge_count = album->merged_source_count < 16
-                            ? album->merged_source_count : 16;
-                for (int m = 0; m < merge_count; m++)
-                    merge_sources[m] = album->merged_source_ids[m];
-            }
-        }
+        /* Under atlas_rwlock: binary search + pixel copy to GBytes.
+         * Texture creation (allocation-heavy) happens after unlock. */
+        GBytes *pixel_bytes = NULL;
+        uint32_t tex_thumb_size = 0;
+        uint8_t tex_channels = 0;
 
-        g_mutex_lock(&mgr->atlas_lock);
+        g_rw_lock_reader_lock(&mgr->atlas_rwlock);
         if (task->type == LOAD_ARTIST) {
-            tex = artist_atlas_lookup(mgr, task->id, &artist_result);
+            pixel_bytes = artist_atlas_lookup_pixels(mgr, task->id,
+                                                      &tex_thumb_size, &tex_channels);
         } else {
-            /* Try representative's atlas first */
             int lib_idx = LIBRARY_GLOBAL_ID_LIB(task->id);
             int64_t local_id = LIBRARY_GLOBAL_ID_LOCAL(task->id);
-            if (lib_idx >= 0 && lib_idx < mgr->lib_count) {
-                int32_t idx = lib_atlas_lookup(&mgr->libraries[lib_idx], local_id);
-                if (idx >= 0)
-                    tex = lib_atlas_load_texture(&mgr->libraries[lib_idx], idx);
-            }
-            /* Fallback: try merged source libraries' atlases (no lock nesting) */
-            for (int m = 0; m < merge_count && !tex; m++) {
-                int src_lib = LIBRARY_GLOBAL_ID_LIB(merge_sources[m]);
-                int64_t src_local = LIBRARY_GLOBAL_ID_LOCAL(merge_sources[m]);
-                if (src_lib >= 0 && src_lib < mgr->lib_count) {
-                    int32_t idx = lib_atlas_lookup(&mgr->libraries[src_lib], src_local);
-                    if (idx >= 0)
-                        tex = lib_atlas_load_texture(&mgr->libraries[src_lib], idx);
+            ArtworkSlot *slot = bitmap_to_art_slot(mgr, lib_idx);
+            if (slot && slot->reader) {
+                int32_t idx = artwork_atlas_reader_lookup(slot->reader, local_id);
+                if (idx >= 0) {
+                    const uint8_t *px = artwork_atlas_reader_get_pixels_at(slot->reader, idx);
+                    if (px) {
+                        pixel_bytes = g_bytes_new(px,
+                            artwork_atlas_reader_get_pixel_stride(slot->reader));
+                        tex_thumb_size = artwork_atlas_reader_get_thumb_size(slot->reader);
+                        tex_channels = artwork_atlas_reader_get_channels(slot->reader);
+                    }
                 }
             }
         }
-        g_mutex_unlock(&mgr->atlas_lock);
+        g_rw_lock_reader_unlock(&mgr->atlas_rwlock);
+
+        /* Create texture outside lock (P2: narrows critical section) */
+        if (pixel_bytes) {
+            tex = gdk_memory_texture_new(
+                tex_thumb_size, tex_thumb_size, GDK_MEMORY_R8G8B8,
+                pixel_bytes, tex_thumb_size * tex_channels);
+            g_bytes_unref(pixel_bytes);
+        }
 
         clock_gettime(CLOCK_MONOTONIC, &_at1);
         uint64_t atlas_us = (uint64_t)(_at1.tv_sec - _at0.tv_sec) * 1000000 +
                             (uint64_t)(_at1.tv_nsec - _at0.tv_nsec) / 1000;
         perf_histogram_record_us(&mgr->atlas_decode_hist, atlas_us);
 
-        if (tex) {
+        if (tex)
             atomic_fetch_add(&mgr->atlas_hits, 1);
-        }
 
         g_mutex_lock(pending_lock);
         p = g_hash_table_lookup(pending_table, &task->id);
@@ -628,7 +555,8 @@ static gpointer worker_func(gpointer data) {
             lc->texture = tex ? g_object_ref(tex) : NULL;
             lc->callbacks = callbacks;
             lc->type = task->type;
-            g_idle_add(complete_on_main, lc);
+            g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, complete_on_main,
+                            lc, (GDestroyNotify)load_complete_free);
         }
 
         g_clear_object(&tex);
@@ -642,30 +570,42 @@ static gpointer worker_func(gpointer data) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 ArtworkManager *artwork_manager_new(library_cache_t *library,
-                                    const char **data_roots,
-                                    const char **music_roots,
-                                    int lib_count,
-                                    int cache_size, size_t cache_count) {
+                                    const artwork_manager_source_t *sources,
+                                    int source_count,
+                                    int thumb_size, size_t cache_count) {
     ArtworkManager *mgr = g_new0(ArtworkManager, 1);
     mgr->library = library;
-    mgr->thumb_size = cache_size > 0 ? cache_size : 96;
+    mgr->thumb_size = thumb_size > 0 ? thumb_size : 96;
     mgr->max_entries = cache_count > 0 ? cache_count : ARTWORK_CACHE_DEFAULT_MAX_ENTRIES;
     mgr->artist_max_entries = ARTIST_CACHE_DEFAULT_MAX_ENTRIES;
 
-    /* Allocate per-library atlas slots (album only) */
-    mgr->lib_count = lib_count > 0 ? lib_count : 0;
-    int alloc = mgr->lib_count > 0 ? mgr->lib_count : 1;
-    mgr->libraries = g_new0(LibraryAtlas, alloc);
-    mgr->music_roots = mgr->lib_count > 0 ? g_new0(char *, mgr->lib_count) : NULL;
-    for (int i = 0; i < mgr->lib_count; i++) {
-        mgr->libraries[i].root = g_strdup(data_roots[i]);
-        mgr->libraries[i].atlas_fd = -1;
-        mgr->music_roots[i] = g_strdup(music_roots ? music_roots[i] : data_roots[i]);
+    /* Allocate per-library slots + bitmap_map (mirrors library_cache init) */
+    int n = source_count > 0 ? source_count : 0;
+    mgr->slots = n > 0 ? g_new0(ArtworkSlot, n) : NULL;
+    mgr->slot_count = n;
+
+    /* Determine bitmap_capacity: max bitmap_index + 1 */
+    int max_bi = -1;
+    for (int i = 0; i < n; i++) {
+        if (sources[i].bitmap_index > max_bi)
+            max_bi = sources[i].bitmap_index;
+    }
+    mgr->bitmap_capacity = max_bi + 1;
+    mgr->bitmap_map = g_new0(ArtworkSlot *, mgr->bitmap_capacity > 0 ? mgr->bitmap_capacity : 1);
+
+    for (int i = 0; i < n; i++) {
+        ArtworkSlot *s = &mgr->slots[i];
+        s->bitmap_index = sources[i].bitmap_index;
+        s->data_root = g_strdup(sources[i].data_root);
+        s->music_root = g_strdup(sources[i].music_root ? sources[i].music_root
+                                                        : sources[i].data_root);
+        s->reader = NULL;  /* Loaded below under rwlock */
+        g_atomic_pointer_set(&mgr->bitmap_map[s->bitmap_index], s);
     }
 
     g_mutex_init(&mgr->cache_lock);
     g_mutex_init(&mgr->pending_lock);
-    g_mutex_init(&mgr->atlas_lock);
+    g_rw_lock_init(&mgr->atlas_rwlock);
     g_mutex_init(&mgr->artist_cache_lock);
     g_mutex_init(&mgr->artist_pending_lock);
 
@@ -685,11 +625,11 @@ ArtworkManager *artwork_manager_new(library_cache_t *library,
 
     mgr->load_queue = g_async_queue_new_full((GDestroyNotify)load_task_free);
 
-    /* Load latest album atlases for each library */
-    g_mutex_lock(&mgr->atlas_lock);
-    for (int i = 0; i < mgr->lib_count; i++) {
-        char *path = find_latest_atlas(mgr->libraries[i].root, mgr->thumb_size);
-        lib_atlas_load(&mgr->libraries[i], path);
+    /* Load latest album atlases for each library slot */
+    g_rw_lock_writer_lock(&mgr->atlas_rwlock);
+    for (int i = 0; i < mgr->slot_count; i++) {
+        char *path = find_latest_atlas(mgr->slots[i].data_root, mgr->thumb_size);
+        mgr->slots[i].reader = path ? artwork_atlas_reader_open(path) : NULL;
         g_free(path);
     }
 
@@ -701,7 +641,7 @@ ArtworkManager *artwork_manager_new(library_cache_t *library,
         mgr->artist_atlas_path = artist_path;
         g_free(atlas_dir);
     }
-    g_mutex_unlock(&mgr->atlas_lock);
+    g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
 
     for (int i = 0; i < ARTWORK_MANAGER_DEFAULT_WORKERS; i++) {
         char name[16];
@@ -718,6 +658,14 @@ void artwork_manager_free(ArtworkManager *mgr) {
     g_atomic_int_set(&mgr->shutdown, TRUE);
     for (int i = 0; i < ARTWORK_MANAGER_DEFAULT_WORKERS; i++)
         if (mgr->workers[i]) g_thread_join(mgr->workers[i]);
+
+    /* P0 fix: drain any pending LoadComplete idle callbacks while mgr is
+     * still valid.  Workers are dead (joined above), so no new callbacks
+     * will be posted.  This ensures complete_on_main runs before we free
+     * caches/atlases.  Remaining sources get their load_complete_free
+     * destroy notify called automatically. */
+    while (g_main_context_pending(NULL))
+        g_main_context_iteration(NULL, FALSE);
 
     g_mutex_lock(&mgr->pending_lock);
     g_hash_table_destroy(mgr->pending);
@@ -745,23 +693,22 @@ void artwork_manager_free(ArtworkManager *mgr) {
     g_hash_table_destroy(mgr->artist_cache);
     g_mutex_unlock(&mgr->artist_cache_lock);
 
-    g_mutex_lock(&mgr->atlas_lock);
-    for (int i = 0; i < mgr->lib_count; i++) {
-        lib_atlas_unmap(&mgr->libraries[i]);
-        g_free(mgr->libraries[i].root);
+    g_rw_lock_writer_lock(&mgr->atlas_rwlock);
+    for (int i = 0; i < mgr->slot_count; i++) {
+        artwork_atlas_reader_close(mgr->slots[i].reader);
+        g_free(mgr->slots[i].data_root);
+        g_free(mgr->slots[i].music_root);
     }
-    g_free(mgr->libraries);
+    g_free(mgr->slots);
+    g_free(mgr->bitmap_map);
     artist_atlas_reader_close(mgr->artist_atlas);
     g_free(mgr->artist_atlas_path);
-    for (int i = 0; i < mgr->lib_count; i++)
-        g_free(mgr->music_roots[i]);
-    g_free(mgr->music_roots);
-    g_mutex_unlock(&mgr->atlas_lock);
+    g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
 
     g_async_queue_unref(mgr->load_queue);
     g_mutex_clear(&mgr->cache_lock);
     g_mutex_clear(&mgr->pending_lock);
-    g_mutex_clear(&mgr->atlas_lock);
+    g_rw_lock_clear(&mgr->atlas_rwlock);
     g_mutex_clear(&mgr->artist_cache_lock);
     g_mutex_clear(&mgr->artist_pending_lock);
     g_mutex_clear(&mgr->fullsize_pending_lock);
@@ -785,7 +732,7 @@ void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWid
     g_mutex_lock(&mgr->cache_lock);
     CacheEntry *e = g_hash_table_lookup(mgr->cache, &album_id);
     if (e) {
-        touch_entry(mgr, e);
+        touch_entry(&mgr->lru, e);
         atomic_fetch_add(&mgr->hits, 1);
         gtk_widget_remove_css_class(image, "artwork-loading");
         gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(e->texture));
@@ -817,12 +764,12 @@ void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWid
     }
 
     p = g_new0(PendingLoad, 1);
-    p->album_id = album_id;
+    p->id = album_id;
     CallbackReg *reg = g_new0(CallbackReg, 1);
     reg->image = image;
     g_object_add_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
     p->callbacks = g_slist_prepend(NULL, reg);
-    g_hash_table_insert(mgr->pending, &p->album_id, p);
+    g_hash_table_insert(mgr->pending, &p->id, p);
     g_mutex_unlock(&mgr->pending_lock);
 
     LoadTask *task = g_new0(LoadTask, 1);
@@ -837,110 +784,111 @@ int artwork_manager_get_thumb_size(ArtworkManager *mgr) {
     return mgr->thumb_size;
 }
 
-void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int lib_idx,
+void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int bitmap_index,
                                            const char *atlas_path) {
     g_assert(mgr != NULL);
-    if (lib_idx < 0 || lib_idx >= mgr->lib_count) {
-        g_warning("artwork_manager_reload_library_atlas: lib_idx %d out of range [0, %d)",
-                  lib_idx, mgr->lib_count);
-        return;
-    }
     g_assert(atlas_path != NULL && atlas_path[0] != '\0');
 
     /* Evict only texture cache entries belonging to this library —
      * preserves warm textures for other libraries during multi-library indexing */
     g_mutex_lock(&mgr->cache_lock);
-    GList *l = mgr->lru.head;
-    while (l) {
-        GList *next = l->next;
-        CacheEntry *e = l->data;
-        if (LIBRARY_GLOBAL_ID_LIB(e->album_id) == lib_idx) {
-            g_hash_table_remove(mgr->cache, &e->album_id);
-            g_queue_delete_link(&mgr->lru, l);
-            cache_entry_free(e);
-        }
-        l = next;
-    }
+    cache_evict_library(mgr->cache, &mgr->lru, bitmap_index);
     g_mutex_unlock(&mgr->cache_lock);
 
     /* Swap in the new atlas for this library */
-    g_mutex_lock(&mgr->atlas_lock);
-    lib_atlas_load(&mgr->libraries[lib_idx], atlas_path);
-    g_mutex_unlock(&mgr->atlas_lock);
+    g_rw_lock_writer_lock(&mgr->atlas_rwlock);
+    ArtworkSlot *slot = bitmap_to_art_slot(mgr, bitmap_index);
+    if (slot) {
+        artwork_atlas_reader_close(slot->reader);
+        slot->reader = artwork_atlas_reader_open(atlas_path);
+    } else {
+        g_warning("artwork_manager_reload_library_atlas: bitmap_index %d not found",
+                  bitmap_index);
+    }
+    g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
 }
 
-void artwork_manager_add_library(ArtworkManager *mgr, const char *data_root,
-                                  const char *music_root) {
+void artwork_manager_add_library(ArtworkManager *mgr, int bitmap_index,
+                                  const char *data_root, const char *music_root) {
     g_assert(mgr != NULL);
     g_assert(data_root != NULL);
+    g_assert(bitmap_index >= 0);
 
-    g_mutex_lock(&mgr->atlas_lock);
-    int new_idx = mgr->lib_count;
-    mgr->libraries = g_realloc(mgr->libraries,
-                               sizeof(LibraryAtlas) * (size_t)(new_idx + 1));
-    memset(&mgr->libraries[new_idx], 0, sizeof(LibraryAtlas));
-    mgr->libraries[new_idx].root = g_strdup(data_root);
-    mgr->libraries[new_idx].atlas_fd = -1;
+    g_rw_lock_writer_lock(&mgr->atlas_rwlock);
 
-    mgr->music_roots = g_realloc(mgr->music_roots,
-                                  sizeof(char *) * (size_t)(new_idx + 1));
-    mgr->music_roots[new_idx] = g_strdup(music_root ? music_root : data_root);
-
-    /* Try loading existing atlas (may not exist yet for new library) */
+    /* Grow slots array (realloc may move it → must re-register all bitmap_map ptrs) */
+    int new_pos = mgr->slot_count;
+    mgr->slots = g_realloc(mgr->slots, sizeof(ArtworkSlot) * (size_t)(new_pos + 1));
+    ArtworkSlot *s = &mgr->slots[new_pos];
+    s->bitmap_index = bitmap_index;
+    s->data_root = g_strdup(data_root);
+    s->music_root = g_strdup(music_root ? music_root : data_root);
     char *path = find_latest_atlas(data_root, mgr->thumb_size);
-    lib_atlas_load(&mgr->libraries[new_idx], path);
+    s->reader = path ? artwork_atlas_reader_open(path) : NULL;
     g_free(path);
+    mgr->slot_count = new_pos + 1;
 
-    mgr->lib_count = new_idx + 1;
-    g_mutex_unlock(&mgr->atlas_lock);
+    /* Grow bitmap_map if needed */
+    if (bitmap_index >= mgr->bitmap_capacity) {
+        int new_cap = bitmap_index + 1;
+        mgr->bitmap_map = g_realloc(mgr->bitmap_map, sizeof(ArtworkSlot *) * (size_t)new_cap);
+        memset(&mgr->bitmap_map[mgr->bitmap_capacity], 0,
+               sizeof(ArtworkSlot *) * (size_t)(new_cap - mgr->bitmap_capacity));
+        mgr->bitmap_capacity = new_cap;
+    }
+
+    /* Re-register ALL slots (realloc may have moved the array) */
+    for (int i = 0; i < mgr->slot_count; i++)
+        g_atomic_pointer_set(&mgr->bitmap_map[mgr->slots[i].bitmap_index], &mgr->slots[i]);
+
+    g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
 }
 
-void artwork_manager_remove_library(ArtworkManager *mgr, int lib_idx) {
+void artwork_manager_remove_library(ArtworkManager *mgr, int bitmap_index) {
     g_assert(mgr != NULL);
-    if (lib_idx < 0 || lib_idx >= mgr->lib_count) return;
 
-    /* Evict ALL album texture cache entries — global IDs shift after removal,
-     * so entries from shifted libraries have stale keys. */
+    /* Evict only this library's texture cache entries.
+     * bitmap_index is stable — no global ID shift, so other libraries' entries stay valid. */
     g_mutex_lock(&mgr->cache_lock);
-    GList *l = mgr->lru.head;
-    while (l) {
-        GList *next = l->next;
-        CacheEntry *e = l->data;
-        g_hash_table_remove(mgr->cache, &e->album_id);
-        g_queue_delete_link(&mgr->lru, l);
-        cache_entry_free(e);
-        l = next;
-    }
+    cache_evict_library(mgr->cache, &mgr->lru, bitmap_index);
     g_mutex_unlock(&mgr->cache_lock);
 
-    /* Evict ALL artist texture cache entries (artist IDs may also shift) */
     g_mutex_lock(&mgr->artist_cache_lock);
-    l = mgr->artist_lru.head;
-    while (l) {
-        GList *next = l->next;
-        CacheEntry *e = l->data;
-        g_hash_table_remove(mgr->artist_cache, &e->album_id);
-        g_queue_delete_link(&mgr->artist_lru, l);
-        cache_entry_free(e);
-        l = next;
-    }
+    cache_evict_library(mgr->artist_cache, &mgr->artist_lru, bitmap_index);
     g_mutex_unlock(&mgr->artist_cache_lock);
 
-    /* Remove the atlas slot and shift remaining down */
-    g_mutex_lock(&mgr->atlas_lock);
-    lib_atlas_unmap(&mgr->libraries[lib_idx]);
-    g_free(mgr->libraries[lib_idx].root);
-    g_free(mgr->music_roots[lib_idx]);
+    /* Remove the slot, compact, and re-register bitmap_map pointers */
+    g_rw_lock_writer_lock(&mgr->atlas_rwlock);
 
-    int remaining = mgr->lib_count - lib_idx - 1;
-    if (remaining > 0) {
-        memmove(&mgr->libraries[lib_idx], &mgr->libraries[lib_idx + 1],
-                sizeof(LibraryAtlas) * (size_t)remaining);
-        memmove(&mgr->music_roots[lib_idx], &mgr->music_roots[lib_idx + 1],
-                sizeof(char *) * (size_t)remaining);
+    /* Find slot position by bitmap_index */
+    int pos = -1;
+    for (int i = 0; i < mgr->slot_count; i++) {
+        if (mgr->slots[i].bitmap_index == bitmap_index) { pos = i; break; }
     }
-    mgr->lib_count--;
-    g_mutex_unlock(&mgr->atlas_lock);
+    if (pos < 0) {
+        g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
+        return;
+    }
+
+    /* Destroy slot internals */
+    artwork_atlas_reader_close(mgr->slots[pos].reader);
+    g_free(mgr->slots[pos].data_root);
+    g_free(mgr->slots[pos].music_root);
+
+    /* Clear bitmap_map entry */
+    g_atomic_pointer_set(&mgr->bitmap_map[bitmap_index], NULL);
+
+    /* Shift remaining slots down */
+    int remaining = mgr->slot_count - pos - 1;
+    if (remaining > 0)
+        memmove(&mgr->slots[pos], &mgr->slots[pos + 1], sizeof(ArtworkSlot) * (size_t)remaining);
+    mgr->slot_count--;
+
+    /* Re-register shifted slots in bitmap_map (addresses changed after memmove) */
+    for (int i = pos; i < mgr->slot_count; i++)
+        g_atomic_pointer_set(&mgr->bitmap_map[mgr->slots[i].bitmap_index], &mgr->slots[i]);
+
+    g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -955,11 +903,7 @@ void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id
     g_mutex_lock(&mgr->artist_cache_lock);
     CacheEntry *e = g_hash_table_lookup(mgr->artist_cache, &artist_id);
     if (e) {
-        e->access_count++;
-        if (e->lru_link) {
-            g_queue_unlink(&mgr->artist_lru, e->lru_link);
-            g_queue_push_head_link(&mgr->artist_lru, e->lru_link);
-        }
+        touch_entry(&mgr->artist_lru, e);
         atomic_fetch_add(&mgr->artist_hits, 1);
         gtk_widget_remove_css_class(image, "artwork-loading");
         gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(e->texture));
@@ -984,12 +928,12 @@ void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id
     }
 
     p = g_new0(PendingLoad, 1);
-    p->album_id = artist_id;  /* album_id field reused for artist_id */
+    p->id = artist_id;
     CallbackReg *reg = g_new0(CallbackReg, 1);
     reg->image = image;
     g_object_add_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
     p->callbacks = g_slist_prepend(NULL, reg);
-    g_hash_table_insert(mgr->artist_pending, &p->album_id, p);
+    g_hash_table_insert(mgr->artist_pending, &p->id, p);
     g_mutex_unlock(&mgr->artist_pending_lock);
 
     LoadTask *task = g_new0(LoadTask, 1);
@@ -1015,10 +959,10 @@ void artwork_manager_reload_artist_atlas(ArtworkManager *mgr) {
     g_mutex_unlock(&mgr->artist_cache_lock);
 
     /* Re-open the global artist atlas */
-    g_mutex_lock(&mgr->atlas_lock);
+    g_rw_lock_writer_lock(&mgr->atlas_rwlock);
     artist_atlas_reader_close(mgr->artist_atlas);
     mgr->artist_atlas = artist_atlas_reader_open(mgr->artist_atlas_path);
-    g_mutex_unlock(&mgr->atlas_lock);
+    g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1048,12 +992,12 @@ void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr,
     }
 
     p = g_new0(PendingLoad, 1);
-    p->album_id = album_id;
+    p->id = album_id;
     CallbackReg *reg = g_new0(CallbackReg, 1);
     reg->image = picture;
     g_object_add_weak_pointer(G_OBJECT(picture), (gpointer *)&reg->image);
     p->callbacks = g_slist_prepend(NULL, reg);
-    g_hash_table_insert(mgr->fullsize_pending, &p->album_id, p);
+    g_hash_table_insert(mgr->fullsize_pending, &p->id, p);
     g_mutex_unlock(&mgr->fullsize_pending_lock);
 
     LoadTask *task = g_new0(LoadTask, 1);
@@ -1079,12 +1023,12 @@ void artwork_manager_get_stats(ArtworkManager *mgr, artwork_manager_stats_t *out
     size_t px = (size_t)mgr->thumb_size * mgr->thumb_size * 4;  /* RGBA */
     out->texture_cache_bytes = out->texture_cache_count * px;
 
-    /* Per-library atlas mmap sizes (set once at load, safe without lock) */
-    int n = mgr->lib_count;
+    /* Per-library atlas mmap sizes */
+    int n = mgr->slot_count;
     if (n > ARTWORK_MANAGER_MAX_LIBRARIES) n = ARTWORK_MANAGER_MAX_LIBRARIES;
     out->lib_count = n;
     for (int i = 0; i < n; i++)
-        out->atlas_mmap_bytes[i] = mgr->libraries[i].atlas_size;
+        out->atlas_mmap_bytes[i] = artwork_atlas_reader_get_file_size(mgr->slots[i].reader);
 
     /* Atomic counters — relaxed reads are fine for dashboard display */
     out->total_hits   = atomic_load(&mgr->hits);

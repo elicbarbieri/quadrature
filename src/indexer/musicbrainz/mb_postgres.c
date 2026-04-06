@@ -45,6 +45,12 @@ void mb_pg_client_destroy(mb_pg_client_t* client) {
     g_free(client);
 }
 
+bool mb_pg_client_reset(mb_pg_client_t* client) {
+    if (!client || !client->conn) return false;
+    PQreset(client->conn);
+    return PQstatus(client->conn) == CONNECTION_OK;
+}
+
 // =============================================================================
 // Query Helper (used by mb_acoustid.c)
 // =============================================================================

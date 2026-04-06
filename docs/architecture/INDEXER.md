@@ -28,24 +28,51 @@ Phase 8  ARTIST_BIO    Fetch artist bios from Wikipedia via Wikidata → bios DB
 
 ______________________________________________________________________
 
+## Core Invariant: mtime change → full re-process
+
+**If an album directory's mtime or size changes, it is re-processed through the entire pipeline: metadata extraction (Phase 2), artwork generation (Phase 4), and enrichment (Phases 5–8).**
+
+This is the fundamental correctness guarantee. A user replacing `cover.jpg`, fixing tags, adding tracks, or renaming files all manifest as an mtime change on the album directory. The indexer must not skip any phase for changed albums — metadata and artwork are re-derived from the filesystem state, not cached from a previous run.
+
+**Separation of concerns:** The scanner (Phase 1) detects changed directories and pushes them to
+a work queue. It knows nothing about atlas state, metadata schema, or enrichment status. Each
+downstream phase owns its domain-specific logic:
+
+- Phase 2 (metadata) decides how to extract and write tags from changed directories.
+- Phase 4 (artwork) receives the changed directory list AND sweeps its own no-art index to
+  promote albums that have since gained fanart covers (downloaded by Phase 7 on a prior run).
+  This atlas-specific promotion logic belongs in Phase 4, not the scanner.
+
+______________________________________________________________________
+
 ## Phase 1 — SCAN
 
 **Goal:** identify changed albums without reading any audio files.
 
 ```
 1. db_get_album_mtimes_page() (paged, 1000/page) → GHashTable<abs_path → album_mtime_t>
-2. Recurse library root with opendir/readdir:
-   - stat(dir) → current mtime
+2. Recurse library root with nftw(FTW_PHYS):
+   - stat(dir) → current mtime + entry count + total size
    - lookup in hashmap:
-       hit + mtime match  → skip (enqueue as unchanged)
-       hit + mtime differs → queue for Phase 2
-       miss               → queue for Phase 2 (new album)
+       hit + mtime match + size match → skip (enqueue as unchanged)
+       hit + mtime OR size differs    → queue for Phase 2
+       miss                           → queue for Phase 2 (new album)
 3. Detect disc subdirectories (CD1/, Disc 1/, etc.) → work_queue_push_multi_disc()
 ```
 
 No FFmpeg. No SQLite writes. Completes in < 1 s for unchanged libraries.
 
-**DB reads:** `albums.path`, `albums.last_updated_at`, `albums.mb_status`
+**Two-factor delta detection:** mtime is the fast path, but unreliable on NFS/SMB (clock
+skew), FAT32 (2-second granularity), and `rsync --archive` (preserved mtime). The scan
+also tracks file count + total byte size per album directory as a secondary signal. If mtime
+matches but count/size differs, the album is re-queued. Cost: one extra `int64` column
+(`albums.last_updated_size`), negligible scan overhead (already calling `stat()` per entry).
+
+**Symlink policy:** `nftw()` with `FTW_PHYS` — symlinks are **not followed**. This prevents
+infinite loops from symlink cycles and avoids crossing device boundaries. If users need
+symlinked album directories, the symlink target should be added as a separate library root.
+
+**DB reads:** `albums.path`, `albums.last_updated_at`, `albums.last_updated_size`, `albums.mb_status`
 
 ______________________________________________________________________
 
@@ -53,22 +80,28 @@ ______________________________________________________________________
 
 **Goal:** extract file tags and write all track/album/artist data to SQLite. No network. No audio decoding. No fingerprinting.
 
-### Per-album transaction scope
+### Producer-Consumer Write Architecture
 
-All DB writes for one album execute inside a single `BEGIN IMMEDIATE` / `COMMIT`:
+FFmpeg extraction runs in parallel via `GThreadPool`, but SQLite is single-writer. To
+avoid lock contention, Phase 2 uses a producer-consumer pattern:
 
 ```
-db_begin_transaction()
-  get_or_create_artist_cached()       ← album artist (in-memory cache first)
-  db_upsert_folder_album()            ← INSERT OR UPDATE albums
-  db_set_album_release_id_from_tags() ← stores MUSICBRAINZ_ALBUMID if present
-  for each track:
-    db_upsert_track_with_album()      ← INSERT OR CONFLICT UPDATE tracks
-    write_phase2_track_artists()      ← get_or_create_artist_cached per credit
-                                         db_set_track_artists()
-  db_sync_album_fts(album_id)         ← one bulk FTS sync for all tracks
-db_commit()
+GThreadPool workers (producers):     Single writer thread (consumer):
+  FFmpeg extract tags + duration       Dequeue batch (up to 50 albums)
+  Build folder_album_context           BEGIN IMMEDIATE
+  Enqueue result to GAsyncQueue   →      for each album in batch:
+                                           upsert artists, albums, tracks
+                                           db_sync_album_fts(album_id)
+                                         COMMIT
+                                       Repeat until queue drained + workers done
 ```
+
+This eliminates `BEGIN IMMEDIATE` contention between workers and enables multi-album
+transactions (50 albums per commit vs 1), reducing WAL flush overhead.
+
+The work queue is bounded (`PHASE2_QUEUE_DEPTH`, default 256 items). When full,
+`GThreadPool` workers block on enqueue — this provides natural backpressure so large
+libraries don't accumulate unbounded metadata in memory.
 
 `get_or_create_artist_cached()` uses an in-memory GHashTable pre-loaded from `SELECT id, name FROM artists` before the GThreadPool starts. Cache misses fall through to `db_get_or_create_artist()` and backfill the cache. Eliminates redundant SELECTs for the common case (same artist across many albums).
 
@@ -96,15 +129,19 @@ db_commit()
 
 `tracks_fts(rowid, title, artist, album)` is written **once per album** after all tracks and artist credits are committed (`db_sync_album_fts`). Per-track FTS writes are eliminated — the bulk sync reads `artist_display` which is already set by `db_set_track_artists`.
 
+FTS5 tables are **standalone** (not `content-sync`) because the FTS columns are derived from JOINs (`artist_display` from track_artists, album title from albums table), not direct column mappings. Manual sync via `db_sync_album_fts()` is the correct approach for this schema.
+
 ### Performance design
 
 | Technique                         | Benefit                                                           |
 | --------------------------------- | ----------------------------------------------------------------- |
-| One `BEGIN IMMEDIATE` per album   | Eliminates 3 implicit transaction flushes per album               |
+| Producer-consumer + batched txns  | 50 albums per `BEGIN IMMEDIATE`; zero lock contention             |
+| Bounded work queue (256 items)    | Backpressure prevents unbounded memory growth on large libraries  |
 | In-memory artist name cache       | Eliminates repeated `SELECT id FROM artists WHERE name=?`         |
 | 8 pre-compiled SQLite statements  | No per-call `sqlite3_prepare_v2` on hot paths                     |
 | Bulk album FTS sync               | N per-track FTS writes → 1 per album                              |
 | `PRAGMA wal_autocheckpoint=10000` | Defers checkpoint until ~40 MB burst; keeps WAL writes sequential |
+| Periodic `PASSIVE` checkpoint     | Every 500 albums; prevents WAL from growing unbounded during bulk |
 
 ______________________________________________________________________
 
@@ -127,15 +164,28 @@ ______________________________________________________________________
 
 **Goal:** write a timestamped atlas file. Pure image processing, no DB metadata writes.
 
+**Two input sources:**
+
+1. **Changed albums** from Phase 2 (`processed_album_t[]`) — directories the scanner detected as
+   modified. These are re-scanned for artwork unconditionally (core invariant: mtime change → full
+   re-process).
+2. **No-art promotion** (atlas-internal) — `artwork_atlas_builder_sweep_no_art()` walks the atlas
+   no-art list and checks if a fanart.tv cover has since been downloaded (by Phase 7 on a prior
+   run). Promoted album IDs are returned and queued for artwork extraction. This is the only
+   recovery path — it handles the case where an album had no local artwork, then got a MusicBrainz
+   ID (Phase 6), and a fanart cover was downloaded (Phase 7). No full DB scan needed.
+
 ```
 1. Open previous atlas (if exists) → read existing album_id index
-2. GThreadPool workers per album:
+2. Sweep no-art list: promote albums that now have fanart covers → queue promoted IDs
+3. GThreadPool workers per album (changed + promoted):
    - scan for cover.jpg / folder.jpg / front.jpg / embedded art
+   - fanart.tv cover fallback (via release_group_id)
    - resize to thumb_size pixels (default 48)
    - add RGB blob to atlas builder
-3. Preserve unchanged entries from prior atlas (O(log n) binary search)
-4. artwork_atlas_builder_finish() → write atlas atomically
-5. Rotate: keep 3 most recent atlas files
+4. Preserve unchanged entries from prior atlas (O(log n) binary search)
+5. artwork_atlas_builder_finish() → write atlas atomically
+6. Rotate: keep 3 most recent atlas files
 ```
 
 **DB reads only.** Writes zero SQLite rows.
@@ -193,6 +243,17 @@ Step 5: db_begin_transaction()
 
 Each album commit is independent. A kill mid-Phase 6 leaves resolved albums in the DB and unresolved albums with their Phase 2 data intact — fully browseable. The next run resumes from `mb_status IN (NOT_ATTEMPTED, HAS_RELEASE_ID)`.
 
+### PostgreSQL connection resilience
+
+Phase 6 must tolerate flaky PG connections (especially over VPN or WAN):
+
+- **Per-batch retry:** if `mb_fetch_all_batch()` fails, retry once after reconnect. If retry
+  fails, mark affected albums as `FAILED` and continue with remaining batches.
+- **Circuit breaker:** after 3 consecutive PG failures, skip remaining Phase 6 work and
+  proceed to Phase 7. Avoids blocking the entire enrichment pipeline on a dead database.
+- **Partial-phase resume:** already handled by `mb_status` — next run picks up `FAILED` albums
+  only if explicitly reset to `NOT_ATTEMPTED`.
+
 After all albums are processed, `db_prune_orphan_artists()` removes Phase 2 artists that were replaced by corrected MusicBrainz entries.
 
 ### Phase 6 metadata table
@@ -242,6 +303,41 @@ ______________________________________________________________________
 - Auto-migrates existing bios from `quadrature-metadata.sqlite` on first open (one-time)
 
 After Phase 8 completes: `INDEXER_COMPLETED` fires.
+
+______________________________________________________________________
+
+## External API Resilience (Phases 7–8)
+
+Both phases hit rate-limited external services. Error handling strategy:
+
+- **Exponential backoff** on HTTP 429/5xx: start 1s, max 30s, 3 retries per artist
+- **Poison tracking:** artists that fail 3 times across runs are recorded in a
+  `failed_fetches` set (in-memory, per-run) and skipped for the remainder of the phase.
+  The no-art UUID list in the artist atlas serves this role for Phase 7.
+- **Phase timeout:** configurable max wall-clock per phase (default 30 min). If exceeded,
+  the phase terminates gracefully — completed work is preserved, remaining artists are
+  picked up on the next run.
+- **DNS/network failure:** treated as transient. After 3 consecutive network errors
+  (not per-artist — consecutive), the phase aborts early.
+
+______________________________________________________________________
+
+## Indexer Telemetry
+
+Each phase records wall-clock timing and per-phase counters for operational visibility.
+Exposed via `indexer_get_stats()` after completion and emitted in the `INDEXER_COMPLETED`
+signal payload.
+
+| Phase | Metrics |
+| ----- | ------- |
+| 1 — SCAN | `dirs_scanned`, `dirs_queued`, `dirs_unchanged`, `scan_duration_ms` |
+| 2 — METADATA | `albums_processed`, `tracks_extracted`, `ffmpeg_failures`, `albums_per_sec`, `metadata_duration_ms` |
+| 3 — FINALIZE | `mtime_updates`, `errors_pruned`, `finalize_duration_ms` |
+| 4 — ARTWORK | `atlases_built`, `entries_preserved`, `entries_new`, `artwork_duration_ms` |
+| 5 — FINGERPRINT | `albums_fingerprinted`, `tracks_fingerprinted`, `fingerprint_duration_ms` |
+| 6 — RESOLVE | `albums_attempted`, `albums_resolved`, `albums_no_match`, `albums_failed`, `pg_query_avg_ms`, `resolve_duration_ms` |
+| 7 — ARTIST_ART | `artists_fetched`, `artists_skipped`, `http_errors`, `artist_art_duration_ms` |
+| 8 — ARTIST_BIO | `artists_fetched`, `artists_skipped`, `http_errors`, `artist_bio_duration_ms` |
 
 ______________________________________________________________________
 

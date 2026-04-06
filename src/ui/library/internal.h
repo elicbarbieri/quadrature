@@ -45,11 +45,20 @@ typedef enum {
 
 typedef struct _ArtworkManager ArtworkManager;
 
+/**
+ * Source descriptor for one library slot in the artwork manager.
+ * Mirrors library_cache_source_t for consistent multi-library addressing.
+ */
+typedef struct {
+    int bitmap_index;          /* Stable library ID (matches library_cache bitmap_index) */
+    const char *data_root;     /* Library data root (DB, atlas files, fanart cache) */
+    const char *music_root;    /* Music file root (for embedded art fallback); NULL = data_root */
+} artwork_manager_source_t;
+
 ArtworkManager *artwork_manager_new(library_cache_t *library,
-                                    const char **data_roots,
-                                    const char **music_roots,
-                                    int lib_count,
-                                    int cache_size, size_t cache_count);
+                                    const artwork_manager_source_t *sources,
+                                    int source_count,
+                                    int thumb_size, size_t cache_count);
 void artwork_manager_free(ArtworkManager *mgr);
 void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWidget *image);
 int artwork_manager_get_thumb_size(ArtworkManager *mgr);
@@ -60,11 +69,11 @@ static inline void ui_set_album_thumbnail(ArtworkManager *mgr, GtkWidget *img, i
     gtk_image_set_pixel_size(GTK_IMAGE(img), artwork_manager_get_thumb_size(mgr));
     artwork_manager_get_thumbnail(mgr, album_id, img);
 }
-void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int lib_idx,
+void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int bitmap_index,
                                           const char *atlas_path);
-void artwork_manager_add_library(ArtworkManager *mgr, const char *data_root,
-                                  const char *music_root);
-void artwork_manager_remove_library(ArtworkManager *mgr, int lib_idx);
+void artwork_manager_add_library(ArtworkManager *mgr, int bitmap_index,
+                                  const char *data_root, const char *music_root);
+void artwork_manager_remove_library(ArtworkManager *mgr, int bitmap_index);
 void artwork_manager_prefetch_fullsize(ArtworkManager *mgr, int64_t album_id);
 
 /* Load full-resolution album art directly from the album directory on disk.
@@ -425,6 +434,7 @@ typedef struct {
     ArtworkManager *art_mgr;
     LibraryCallbacks cbs;
     app_settings_t *settings;
+    uint32_t library_mask;      /* Current library filter bitmask */
 
     DetailState state;
     int64_t current_id;
@@ -447,6 +457,7 @@ typedef struct {
 
     GtkWidget *artist_name;
     GtkWidget *artist_stats;
+    GtkWidget *artist_library_toggles;
     GtkWidget *albums_section;
     GtkWidget *artist_albums_container;
     GtkWidget *appears_on_section;
@@ -525,6 +536,7 @@ void library_unified_detail_navigate_to_meta_artist(GtkWidget *view,
 
 gboolean library_unified_detail_go_back(GtkWidget *view);
 void library_unified_detail_reload(GtkWidget *view);
+void library_unified_detail_set_library_mask(GtkWidget *view, uint32_t mask);
 void library_unified_detail_clear_nav(GtkWidget *view);
 DetailState library_unified_detail_get_state(GtkWidget *view);
 int64_t library_unified_detail_get_current_entity_id(GtkWidget *view);

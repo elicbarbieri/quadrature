@@ -98,8 +98,11 @@ static gboolean on_indexer_event_idle(gpointer user_data) {
     IdleCallbackData* data = user_data;
     IndexerController* self = data->controller;
 
+    /* Controller was disposed while this idle callback was queued — drop it.
+     * The ref we hold keeps the GObject memory valid so this check is safe. */
     if (!INDEXER_IS_CONTROLLER(self)) {
         g_free(data->library_path);
+        g_object_unref(self);
         g_free(data);
         return G_SOURCE_REMOVE;
     }
@@ -158,6 +161,7 @@ static gboolean on_indexer_event_idle(gpointer user_data) {
     }
 
     g_free(data->library_path);
+    g_object_unref(self);
     g_free(data);
     return G_SOURCE_REMOVE;
 }
@@ -172,7 +176,7 @@ static void on_indexer_callback(indexer_event_t event,
     ScanCallbackData* scan_data = user_data;
 
     IdleCallbackData* data = g_new(IdleCallbackData, 1);
-    data->controller = scan_data->controller;
+    data->controller = g_object_ref(scan_data->controller);
     data->library_path = g_strdup(scan_data->library_path);
     data->event = event;
     if (progress) {

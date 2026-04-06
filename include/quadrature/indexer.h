@@ -109,6 +109,23 @@ typedef struct {
     bool mb_pg_error;       /* MusicBrainz PG database unreachable */
     bool acoustid_error;    /* AcoustID index or PG unreachable */
     bool fanart_error;      /* fanart.tv API key invalid or service unreachable */
+
+    /* Per-phase wall-clock durations in ms (populated on INDEXER_COMPLETED).
+     * Indexed by indexer_phase_t. Zero if phase was skipped. */
+    uint32_t phase_duration_ms[INDEXER_PHASE_COUNT];
+
+    /* Phase 2 throughput */
+    float metadata_albums_per_sec;    /* albums_processed / metadata_duration */
+
+    /* Phase 6 resolution stats */
+    size_t mb_albums_attempted;
+    size_t mb_albums_resolved;
+    size_t mb_albums_no_match;
+    size_t mb_albums_failed;
+
+    /* Phase 7/8 HTTP stats */
+    size_t artist_art_http_errors;
+    size_t artist_bio_http_errors;
 } indexer_progress_t;
 
 /* =============================================================================

@@ -10,6 +10,7 @@
 
 #include "internal.h"
 #include "quadrature/library.h"
+#include "quadrature/settings.h"
 
 #include <glib.h>
 #include <string.h>
@@ -63,6 +64,7 @@ struct audio_cache {
 
     /* Delayed unlock tracking: track_id -> GSource timeout ID */
     GHashTable* pending_unlocks;
+    uint32_t unlock_delay_ms;  /* Derived from audio quantum; see audio_cache_compute_unlock_delay */
 
     /* Decode events ring buffer (for statistics) */
     audio_cache_decode_event_t decode_events[AUDIO_CACHE_MAX_DECODE_EVENTS];
@@ -129,24 +131,25 @@ static void touch_buffer(audio_cache_t* cache, audio_buffer_t* buffer) {
 }
 
 static void evict_lru(audio_cache_t* cache) {
+    /* Walk from tail (oldest) toward head. Locked/loading buffers stay in place
+     * to preserve their true recency — moving them to head would give them
+     * artificial freshness and waste cache space after unlock. */
+    GList* cursor = g_queue_peek_tail_link(&cache->lru);
+    uint32_t scanned = 0;
     uint32_t queue_len = g_queue_get_length(&cache->lru);
-    uint32_t iterations = 0;
 
     while (cache->memory_used > cache->memory_limit &&
-           !g_queue_is_empty(&cache->lru) &&
-           iterations < queue_len) {
+           cursor != NULL &&
+           scanned < queue_len) {
 
-        GList* tail = g_queue_peek_tail_link(&cache->lru);
-        if (!tail) break;
+        GList* prev = cursor->prev; /* save before potential deletion */
+        audio_buffer_t* buffer = cursor->data;
+        scanned++;
 
-        audio_buffer_t* buffer = tail->data;
-        iterations++;
-
-        /* Skip locked or still-decoding buffers */
+        /* Skip locked or still-decoding buffers in place */
         if (atomic_load(&buffer->lock_count) > 0 ||
             !atomic_load(&buffer->decode_complete)) {
-            g_queue_unlink(&cache->lru, tail);
-            g_queue_push_head_link(&cache->lru, tail);
+            cursor = prev;
             continue;
         }
 
@@ -157,8 +160,10 @@ static void evict_lru(audio_cache_t* cache) {
                 buffer->track_id, buffer->memory_bytes / (1024.0 * 1024.0));
 
         g_hash_table_remove(cache->buffers, &buffer->track_id);
-        g_queue_delete_link(&cache->lru, tail);
+        g_queue_delete_link(&cache->lru, cursor);
         buffer_free(buffer);
+
+        cursor = prev;
     }
 }
 
@@ -412,6 +417,8 @@ quadrature_result_t audio_cache_create(library_cache_t* library,
     cache->sample_rate = sample_rate;
     cache->memory_limit = AUDIO_CACHE_DEFAULT_MEMORY_LIMIT;
     cache->memory_used = 0;
+    cache->unlock_delay_ms = audio_cache_compute_unlock_delay(
+        APP_SETTINGS_DEFAULT_QUANTUM, sample_rate);
 
     /* Initialize decode events ring buffer */
     memset(cache->decode_events, 0, sizeof(cache->decode_events));
@@ -725,12 +732,20 @@ void audio_cache_unlock_delayed(audio_cache_t* cache, int64_t track_id) {
     data->cache = cache;
     data->track_id = track_id;
 
-    guint source_id = g_timeout_add(AUDIO_CACHE_UNLOCK_DELAY_MS, delayed_unlock_callback, data);
+    guint source_id = g_timeout_add(cache->unlock_delay_ms, delayed_unlock_callback, data);
     g_hash_table_insert(cache->pending_unlocks, make_track_id_key(track_id),
                         GUINT_TO_POINTER(source_id));
 
-    g_debug("audio_cache: scheduled delayed unlock for track %" G_GINT64_FORMAT " (%d ms)",
-            track_id, AUDIO_CACHE_UNLOCK_DELAY_MS);
+    g_debug("audio_cache: scheduled delayed unlock for track %" G_GINT64_FORMAT " (%u ms)",
+            track_id, cache->unlock_delay_ms);
+}
+
+void audio_cache_set_quantum(audio_cache_t* cache, uint32_t quantum_frames) {
+    g_assert(cache != NULL);
+    cache->unlock_delay_ms = audio_cache_compute_unlock_delay(
+        quantum_frames, cache->sample_rate);
+    g_message("audio_cache: unlock delay updated to %u ms (quantum=%u)",
+              cache->unlock_delay_ms, quantum_frames);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

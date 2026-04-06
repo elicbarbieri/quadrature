@@ -105,12 +105,19 @@ void dir_scan_single_pass(const char* dir_path, dir_scan_result_t* result) {
         unsigned char dtype = ent->d_type;
         struct stat st;
 
-        if (dtype == DT_UNKNOWN || dtype == DT_LNK) {
-            // Filesystem doesn't provide d_type or it's a symlink - use stat()
-            if (stat(path_buf, &st) != 0) {
-                g_debug("dir_scan: stat failed for %s: %s", path_buf, strerror(errno));
+        if (dtype == DT_LNK) {
+            // Skip symlinks — prevents cycles and cross-device traversal.
+            // Symlinked directories should be added as separate library roots.
+            continue;
+        }
+
+        if (dtype == DT_UNKNOWN) {
+            // Filesystem doesn't provide d_type (e.g. some NFS) — use lstat()
+            if (lstat(path_buf, &st) != 0) {
+                g_debug("dir_scan: lstat failed for %s: %s", path_buf, strerror(errno));
                 continue;
             }
+            if (S_ISLNK(st.st_mode)) continue;  // Skip symlinks
             if (S_ISREG(st.st_mode)) {
                 dtype = DT_REG;
             } else if (S_ISDIR(st.st_mode)) {
@@ -147,6 +154,15 @@ static int64_t scan_max_file_mtime(const dir_scan_result_t* scan) {
     return max_mtime;
 }
 
+// Compute directory size fingerprint: file_count in upper 32 bits, total bytes in lower 32.
+// This catches changes that mtime misses (rsync --archive, FAT32 2s granularity, NFS clock skew).
+static int64_t scan_dir_size(const dir_scan_result_t* scan) {
+    int64_t total_bytes = 0;
+    for (size_t i = 0; i < scan->file_count; i++)
+        total_bytes += scan->stats[i].st_size;
+    return ((int64_t)scan->file_count << 32) | (total_bytes & 0xFFFFFFFF);
+}
+
 // Forward declaration — struct defined later in this file (before struct indexer usage)
 typedef struct artist_cache artist_cache_t;
 
@@ -157,6 +173,7 @@ typedef struct artist_cache artist_cache_t;
 typedef struct {
     char* dir_path;         // Album directory (parent for multi-disc)
     int64_t dir_mtime;      // Max file mtime across album tracks
+    int64_t dir_size;       // Size fingerprint: (file_count << 32) | (total_bytes & 0xFFFFFFFF)
     int64_t album_id;       // 0 if new album
     bool mb_resolved;       // albums.mb_status == MB_STATUS_RESOLVED at scan time — cached, no point-query needed
     bool is_multi_disc;     // True if album has disc subdirectories
@@ -178,7 +195,7 @@ static void work_queue_init(work_queue_t* q) {
 }
 
 static void work_queue_push(work_queue_t* q, const char* dir_path, int64_t mtime,
-                             int64_t album_id, bool mb_resolved) {
+                             int64_t dir_size, int64_t album_id, bool mb_resolved) {
     if (q->count >= q->capacity) {
         q->capacity = q->capacity ? q->capacity * 2 : 64;
         q->items = g_realloc(q->items, q->capacity * sizeof(album_work_item_t));
@@ -186,6 +203,7 @@ static void work_queue_push(work_queue_t* q, const char* dir_path, int64_t mtime
     q->items[q->count++] = (album_work_item_t){
         .dir_path    = g_strdup(dir_path),
         .dir_mtime   = mtime,
+        .dir_size    = dir_size,
         .album_id    = album_id,
         .mb_resolved = mb_resolved,
         .is_multi_disc = false,
@@ -198,7 +216,7 @@ static void work_queue_push(work_queue_t* q, const char* dir_path, int64_t mtime
 // Push a multi-disc album work item
 // Takes ownership of disc_dirs and disc_nums arrays
 static void work_queue_push_multi_disc(work_queue_t* q, const char* dir_path, int64_t mtime,
-                                        int64_t album_id, bool mb_resolved,
+                                        int64_t dir_size, int64_t album_id, bool mb_resolved,
                                         char** disc_dirs, uint16_t* disc_nums, size_t disc_count) {
     if (q->count >= q->capacity) {
         q->capacity = q->capacity ? q->capacity * 2 : 64;
@@ -207,6 +225,7 @@ static void work_queue_push_multi_disc(work_queue_t* q, const char* dir_path, in
     q->items[q->count++] = (album_work_item_t){
         .dir_path    = g_strdup(dir_path),
         .dir_mtime   = mtime,
+        .dir_size    = dir_size,
         .album_id    = album_id,
         .mb_resolved = mb_resolved,
         .is_multi_disc = true,
@@ -239,7 +258,8 @@ static void work_queue_free(work_queue_t* q) {
 typedef struct {
     int64_t album_id;
     int64_t mtime;
-    char* path;  // Directory path (owned, for artwork phase)
+    int64_t dir_size;  // file count + total bytes for two-factor delta detection
+    char* path;        // Directory path (owned, for artwork phase)
 } processed_album_t;
 
 static void processed_albums_free(processed_album_t* albums, size_t count) {
@@ -312,6 +332,16 @@ struct indexer {
     atomic_int mb_pg_error;         /* MusicBrainz PG unreachable */
     atomic_int acoustid_error;      /* AcoustID index/PG unreachable */
 
+    /* Telemetry — MB resolution */
+    atomic_size_t mb_albums_attempted;
+    atomic_size_t mb_albums_resolved;
+    atomic_size_t mb_albums_no_match;
+    atomic_size_t mb_albums_failed;
+
+    /* Telemetry — HTTP errors (phases 7-8) */
+    atomic_size_t artist_art_http_errors;
+    atomic_size_t artist_bio_http_errors;
+
     // Progress throttling (per-instance, not global)
     int64_t last_progress_time;
 
@@ -347,6 +377,7 @@ struct indexer {
     atomic_size_t artist_art_total;
     atomic_size_t artist_art_processed;
     atomic_size_t artist_art_downloaded;
+    atomic_size_t album_covers_downloaded;  // fanart.tv album covers (triggers atlas rebuild)
     atomic_int fanart_error;
 
     // Artist bio config (Phase 8)
@@ -553,10 +584,11 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
         // Sort disc folders by disc number
         qsort(disc_infos, disc_info_count, sizeof(disc_info_t), compare_disc_info);
 
-        // Count total files and compute max file mtime across all disc directories
+        // Count total files, compute max mtime and size across all disc directories
         size_t total_files = 0;
         bool any_empty = false;
         int64_t max_file_mtime = 0;
+        int64_t total_dir_size = 0;
 
         for (size_t i = 0; i < disc_info_count; i++) {
             dir_scan_result_t disc_scan = {0};
@@ -568,20 +600,22 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
                 total_files += disc_scan.file_count;
                 int64_t disc_max = scan_max_file_mtime(&disc_scan);
                 if (disc_max > max_file_mtime) max_file_mtime = disc_max;
+                total_dir_size += scan_dir_size(&disc_scan);
             }
 
             dir_scan_result_free(&disc_scan);
         }
 
-        // Mtime check: compare max file mtime (catches in-place metadata edits)
+        // Two-factor delta: compare mtime AND size (catches NFS/FAT32/rsync misses)
         gpointer value = (total_files > 0)
             ? g_hash_table_lookup(album_mtimes, dir_path) : NULL;
         bool needs_processing = true;
 
         if (value) {
             db_album_mtime_t* cached = value;
-            if (cached->last_updated_at == max_file_mtime) {
-                // Unchanged - skip, errors from previous scan persist
+            if (cached->last_updated_at == max_file_mtime &&
+                cached->last_updated_size == total_dir_size) {
+                // Both match — unchanged, skip
                 atomic_fetch_add(&idx->files_unchanged, total_files);
                 needs_processing = false;
             }
@@ -641,8 +675,8 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
                 db_album_mtime_t* cached = value;
                 int64_t album_id = cached ? cached->album_id  : 0;
                 bool mb_resolved = cached ? cached->mb_status == MB_STATUS_RESOLVED : false;
-                work_queue_push_multi_disc(queue, dir_path, max_file_mtime, album_id,
-                                           mb_resolved, disc_dirs, disc_nums, disc_info_count);
+                work_queue_push_multi_disc(queue, dir_path, max_file_mtime, total_dir_size,
+                                           album_id, mb_resolved, disc_dirs, disc_nums, disc_info_count);
                 atomic_fetch_add(&idx->files_total, total_files);
             }
         }
@@ -662,8 +696,9 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
 
         // Check if this directory has audio files (is an album)
         if (scan.file_count > 0) {
-            // Compute max file mtime (catches in-place metadata edits, not just dir changes)
+            // Two-factor delta detection: mtime + size fingerprint
             int64_t max_file_mtime = scan_max_file_mtime(&scan);
+            int64_t dir_size = scan_dir_size(&scan);
 
             // Lookup in album mtimes hashmap
             gpointer value = g_hash_table_lookup(album_mtimes, dir_path);
@@ -671,8 +706,9 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
 
             if (value) {
                 db_album_mtime_t* cached = value;
-                if (cached->last_updated_at == max_file_mtime) {
-                    // Unchanged - skip
+                if (cached->last_updated_at == max_file_mtime &&
+                    cached->last_updated_size == dir_size) {
+                    // Both mtime and size match — unchanged, skip
                     atomic_fetch_add(&idx->files_unchanged, scan.file_count);
                     needs_processing = false;
                 }
@@ -686,7 +722,7 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
                 db_album_mtime_t* cached = value;
                 int64_t album_id = cached ? cached->album_id  : 0;
                 bool mb_resolved = cached ? cached->mb_status == MB_STATUS_RESOLVED : false;
-                work_queue_push(queue, dir_path, max_file_mtime, album_id, mb_resolved);
+                work_queue_push(queue, dir_path, max_file_mtime, dir_size, album_id, mb_resolved);
                 atomic_fetch_add(&idx->files_total, scan.file_count);
             }
         }
@@ -765,8 +801,9 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
             const char* prefix_str = (const char*)sib_key;
             char* synthetic_path = g_build_filename(dir_path, prefix_str, NULL);
 
-            // Compute max file mtime across all sibling disc dirs
+            // Compute max file mtime and size across all sibling disc dirs
             int64_t max_mtime = 0;
+            int64_t total_sib_size = 0;
             size_t total_files = 0;
             for (size_t si = 0; si < disc_count; si++) {
                 dir_scan_result_t dscan = {0};
@@ -774,17 +811,19 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
                 total_files += dscan.file_count;
                 int64_t disc_max = scan_max_file_mtime(&dscan);
                 if (disc_max > max_mtime) max_mtime = disc_max;
+                total_sib_size += scan_dir_size(&dscan);
                 dir_scan_result_free(&dscan);
             }
 
             // Look up in album_mtimes using the absolute synthetic path as key
             gpointer existing_val = g_hash_table_lookup(album_mtimes, synthetic_path);
             db_album_mtime_t* sib_cached = existing_val;
-            int64_t sib_album_id  = sib_cached ? sib_cached->album_id        : 0;
-            int64_t cached_mtime  = sib_cached ? sib_cached->last_updated_at  : 0;
-            bool sib_mb_resolved  = sib_cached ? sib_cached->mb_status == MB_STATUS_RESOLVED   : false;
+            int64_t sib_album_id  = sib_cached ? sib_cached->album_id           : 0;
+            int64_t cached_mtime  = sib_cached ? sib_cached->last_updated_at     : 0;
+            int64_t cached_size   = sib_cached ? sib_cached->last_updated_size   : 0;
+            bool sib_mb_resolved  = sib_cached ? sib_cached->mb_status == MB_STATUS_RESOLVED : false;
 
-            bool needs_processing = (cached_mtime != max_mtime);
+            bool needs_processing = (cached_mtime != max_mtime || cached_size != total_sib_size);
 
             if (needs_processing) {
                 // Clear old errors before reprocessing this directory
@@ -797,8 +836,8 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
                     disc_nums[si] = pairs[si].disc_num;
                 }
 
-                work_queue_push_multi_disc(queue, synthetic_path, max_mtime, sib_album_id,
-                                           sib_mb_resolved, disc_dirs, disc_nums, disc_count);
+                work_queue_push_multi_disc(queue, synthetic_path, max_mtime, total_sib_size,
+                                           sib_album_id, sib_mb_resolved, disc_dirs, disc_nums, disc_count);
                 atomic_fetch_add(&idx->files_total, total_files);
             } else {
                 atomic_fetch_add(&idx->files_unchanged, total_files);
@@ -1177,6 +1216,7 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
     result->album_artist        = g_strdup(album_artist);
     result->album_mb_release_id = g_strdup(album_mb_release_id);
     result->dir_mtime           = work->item->dir_mtime;
+    result->dir_size            = work->item->dir_size;
     result->mb_resolved         = work->item->mb_resolved;
     result->tracks              = tracks;
     result->track_count         = track_idx;
@@ -1338,6 +1378,7 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
     result->album_artist        = g_strdup(album_artist);
     result->album_mb_release_id = g_strdup(album_mb_release_id);
     result->dir_mtime           = work->item->dir_mtime;
+    result->dir_size            = work->item->dir_size;
     result->mb_resolved         = work->item->mb_resolved;
     result->tracks              = tracks;
     result->track_count         = track_idx;
@@ -1451,6 +1492,7 @@ static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr)
     // Populate result for artwork/finalize phases
     ctx->results[mr->result_index].album_id = album_id;
     ctx->results[mr->result_index].mtime = mr->dir_mtime;
+    ctx->results[mr->result_index].dir_size = mr->dir_size;
     ctx->results[mr->result_index].path = g_strdup(mr->dir_path);
     return true;
 }
@@ -1462,6 +1504,7 @@ static gpointer metadata_db_writer_thread(gpointer data) {
     // Accumulate items into batches for transaction efficiency
     GPtrArray* batch = g_ptr_array_new();
     size_t albums_written = 0;
+    size_t albums_since_checkpoint = 0;
 
     // Start first batch transaction
     db_begin_batch(idx->db);
@@ -1498,6 +1541,14 @@ static gpointer metadata_db_writer_thread(gpointer data) {
 
         // Rotate batch transaction: commit current, start new
         db_commit_batch(idx->db);
+
+        // Periodic WAL checkpoint to prevent unbounded WAL growth
+        albums_since_checkpoint += batch->len;
+        if (albums_since_checkpoint >= 500) {
+            db_checkpoint(idx->db);
+            albums_since_checkpoint = 0;
+        }
+
         db_begin_batch(idx->db);
 
         g_ptr_array_set_size(batch, 0);
@@ -1729,127 +1780,100 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
     snprintf(artwork_dir, sizeof(artwork_dir), "%s/artwork", art_root);
     g_mkdir_with_parents(artwork_dir, 0755);
 
-    /* Find latest existing atlas for entry preservation */
+    /* Use existing atlas path for incremental update, or generate new if none exists */
     char *existing_path = find_latest_existing_atlas(artwork_dir, idx->art_size);
-
-    /* Generate a new timestamped atlas path for this run */
-    gint64 ts = g_get_real_time() / G_USEC_PER_SEC;
     char atlas_path[INDEXER_PATH_MAX];
-    g_snprintf(atlas_path, sizeof(atlas_path), "%s/%dpx-artwork-%" G_GINT64_FORMAT ".atlas",
-               artwork_dir, idx->art_size, ts);
-
-    // Open existing atlas to preserve unchanged entries
-    artwork_atlas_reader_t* existing_atlas = artwork_atlas_reader_open(existing_path);
+    if (existing_path) {
+        g_strlcpy(atlas_path, existing_path, sizeof(atlas_path));
+    } else {
+        gint64 ts = g_get_real_time() / G_USEC_PER_SEC;
+        g_snprintf(atlas_path, sizeof(atlas_path), "%s/%dpx-artwork-%" G_GINT64_FORMAT ".atlas",
+                   artwork_dir, idx->art_size, ts);
+    }
     g_free(existing_path);
-    size_t existing_count = existing_atlas ? artwork_atlas_reader_get_count(existing_atlas) : 0;
 
-    // Build hash set of album_ids already in the existing atlas (O(n), no file I/O)
-    GHashTable* atlas_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
-    for (size_t i = 0; i < existing_count; i++) {
-        int64_t aid = artwork_atlas_reader_get_album_id_at(existing_atlas, i);
-        if (aid >= 0) {
-            gint64* key = g_new(gint64, 1);
-            *key = aid;
-            g_hash_table_add(atlas_ids, key);
-        }
-    }
-
-    // Build hash set of album_ids being re-processed this scan
-    GHashTable* reprocessed_ids = g_hash_table_new(g_int64_hash, g_int64_equal);
-    for (size_t i = 0; i < album_count; i++) {
-        g_hash_table_add(reprocessed_ids, &albums[i].album_id);
-    }
-
-    // Find albums in the DB with no existing atlas entry — these need artwork processing
-    // even though their metadata was unchanged (e.g. artwork failed on first index,
-    // or library was indexed before atlas support was added).
-    GArray*    no_atlas_ids   = g_array_new(FALSE, FALSE, sizeof(int64_t));
-    GPtrArray* no_atlas_paths = g_ptr_array_new_with_free_func(g_free);
-    {
-        size_t offset = 0;
-        while (!atomic_load(&idx->cancel_flag)) {
-            db_album_mtime_t* page = NULL;
-            size_t page_count = 0;
-            if (db_get_album_mtimes_page(idx->db, offset, ALBUM_MTIME_PAGE_SIZE,
-                                         &page, &page_count) != QUADRATURE_OK)
-                break;
-            if (page_count == 0) { db_free_album_mtimes(page, 0); break; }
-
-            for (size_t i = 0; i < page_count; i++) {
-                if (!page[i].path || !page[i].path[0]) continue;
-                if (g_hash_table_contains(reprocessed_ids, &page[i].album_id)) continue;
-                if (g_hash_table_contains(atlas_ids, &page[i].album_id)) continue;
-                /* Album has no atlas entry and wasn't re-processed — queue for artwork */
-                g_array_append_val(no_atlas_ids, page[i].album_id);
-                g_ptr_array_add(no_atlas_paths,
-                    g_build_filename(idx->library_root, page[i].path, NULL));
-            }
-
-            db_free_album_mtimes(page, page_count);
-            offset += page_count;
-            if (page_count < ALBUM_MTIME_PAGE_SIZE) break;
-        }
-    }
-
-    g_hash_table_destroy(atlas_ids);
-    g_hash_table_destroy(reprocessed_ids);
-
-    size_t total_to_process = album_count + no_atlas_ids->len;
-
-    // Nothing to process — existing atlas (if any) is already up to date
-    if (total_to_process == 0) {
-        if (existing_atlas) artwork_atlas_reader_close(existing_atlas);
-        g_array_free(no_atlas_ids, TRUE);
-        g_ptr_array_free(no_atlas_paths, TRUE);
-        return;
-    }
-
-    if (total_to_process > 0) {
-        set_phase(idx, INDEXER_PHASE_ARTWORK);
-        atomic_store(&idx->albums_total, total_to_process);
-        atomic_store(&idx->albums_processed, 0);
-    }
-
+    /* Create builder and load existing atlas state (art + no_art entries).
+     * This replaces the old reader→preservation→pixel-scan pipeline. */
     artwork_atlas_builder_t* builder = NULL;
-    if (artwork_atlas_builder_create(atlas_path, idx->art_size, &builder) != QUADRATURE_OK) {
-        if (existing_atlas) artwork_atlas_reader_close(existing_atlas);
-        g_array_free(no_atlas_ids, TRUE);
-        g_ptr_array_free(no_atlas_paths, TRUE);
+    if (artwork_atlas_builder_create(atlas_path, idx->art_size, &builder) != QUADRATURE_OK)
+        return;
+    artwork_atlas_builder_load_existing(builder);
+
+    // Set fanart.tv album cover cache as fallback for albums without local artwork
+    {
+        char fanart_dir[INDEXER_PATH_MAX];
+        snprintf(fanart_dir, sizeof(fanart_dir), "%s/artwork/fanart_album_covers",
+                 get_data_root(idx));
+        artwork_atlas_builder_set_fanart_covers_dir(builder, fanart_dir);
+
+        // Build album_id → release_group_id map for the fanart cover lookup
+        int64_t* rg_album_ids = NULL;
+        char** rg_ids = NULL;
+        char** rg_artist_mbids = NULL;
+        size_t rg_count = 0;
+        if (db_get_albums_with_release_group_id(idx->db, &rg_album_ids, &rg_ids,
+                &rg_artist_mbids, &rg_count) == QUADRATURE_OK && rg_count > 0) {
+            GHashTable* rg_map = g_hash_table_new_full(
+                g_int64_hash, g_int64_equal, g_free, g_free);
+            for (size_t i = 0; i < rg_count; i++) {
+                gint64* key = g_new(gint64, 1);
+                *key = rg_album_ids[i];
+                g_hash_table_insert(rg_map, key, g_strdup(rg_ids[i]));
+            }
+            artwork_atlas_builder_set_album_rg_map(builder, rg_map);
+        }
+        g_free(rg_album_ids);
+        g_strfreev(rg_ids);
+        g_strfreev(rg_artist_mbids);
+    }
+
+    // Sweep no_art list: promote albums that now have fanart covers on disk.
+    // This is the only recovery path — albums promoted from no_art get re-queued.
+    GArray* promoted_ids = g_array_new(FALSE, FALSE, sizeof(int64_t));
+    artwork_atlas_builder_sweep_no_art(builder, promoted_ids);
+
+    // Resolve paths for promoted albums (targeted lookups, not full table scan)
+    GPtrArray* promoted_paths = g_ptr_array_new_with_free_func(g_free);
+    for (guint i = 0; i < promoted_ids->len; i++) {
+        int64_t aid = g_array_index(promoted_ids, int64_t, i);
+        db_album_t* album = NULL;
+        if (db_get_album_by_id(idx->db, aid, &album) == QUADRATURE_OK && album) {
+            if (album->path)
+                g_ptr_array_add(promoted_paths,
+                    g_build_filename(idx->library_root, album->path, NULL));
+            else
+                g_ptr_array_add(promoted_paths, NULL);
+            db_albums_free(album, 1);
+        } else {
+            g_ptr_array_add(promoted_paths, NULL);
+        }
+    }
+
+    size_t total_to_process = album_count + promoted_ids->len;
+
+    if (total_to_process == 0) {
+        artwork_atlas_builder_finish(builder);
+        artwork_atlas_builder_destroy(builder);
+        g_array_free(promoted_ids, TRUE);
+        g_ptr_array_free(promoted_paths, TRUE);
         return;
     }
 
-    // Copy unchanged entries from existing atlas (already fully loaded into memory by reader)
-    int64_t preserve_start = profile_now_ns();
-    size_t preserved_count = 0;
-    if (existing_atlas && existing_count > 0) {
-        uint32_t pixel_stride = artwork_atlas_reader_get_pixel_stride(existing_atlas);
-        for (size_t i = 0; i < existing_count && !atomic_load(&idx->cancel_flag); i++) {
-            int64_t album_id = artwork_atlas_reader_get_album_id_at(existing_atlas, i);
-            if (album_id < 0) continue;
+    set_phase(idx, INDEXER_PHASE_ARTWORK);
+    atomic_store(&idx->albums_total, total_to_process);
+    atomic_store(&idx->albums_processed, 0);
 
-            const uint8_t* pixels = artwork_atlas_reader_get_pixels_at(existing_atlas, i);
-            if (pixels) {
-                artwork_atlas_add_cached_pixels(builder, album_id, pixels, pixel_stride);
-                preserved_count++;
-            }
-        }
-    }
-    int64_t preserve_ns = profile_now_ns() - preserve_start;
-
-    if (existing_atlas) artwork_atlas_reader_close(existing_atlas);
-
-    // Process changed albums AND albums missing from atlas in parallel
     int64_t pool_start = profile_now_ns();
-    if (total_to_process > 0) {
+    {
         GThreadPool* pool = g_thread_pool_new(artwork_worker, builder, idx->thread_count, FALSE, NULL);
         if (!pool) {
-            g_array_free(no_atlas_ids, TRUE);
-            g_ptr_array_free(no_atlas_paths, TRUE);
+            g_array_free(promoted_ids, TRUE);
+            g_ptr_array_free(promoted_paths, TRUE);
             artwork_atlas_builder_destroy(builder);
             return;
         }
 
-        // Queue artwork work (paths carried from metadata phase)
+        // Queue changed albums (paths from metadata phase)
         for (size_t i = 0; i < album_count && !atomic_load(&idx->cancel_flag); i++) {
             if (albums[i].path) {
                 artwork_work_t* work = g_new(artwork_work_t, 1);
@@ -1860,13 +1884,16 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
             }
         }
 
-        // Queue albums with no existing atlas entry
-        for (guint i = 0; i < no_atlas_ids->len && !atomic_load(&idx->cancel_flag); i++) {
-            artwork_work_t* work = g_new(artwork_work_t, 1);
-            work->album_id = g_array_index(no_atlas_ids, int64_t, i);
-            work->path = g_strdup(g_ptr_array_index(no_atlas_paths, i));
-            work->indexer = idx;
-            g_thread_pool_push(pool, work, NULL);
+        // Queue promoted albums (no_art → fanart cover now available)
+        for (guint i = 0; i < promoted_ids->len && !atomic_load(&idx->cancel_flag); i++) {
+            char* path = g_ptr_array_index(promoted_paths, i);
+            if (path) {
+                artwork_work_t* work = g_new(artwork_work_t, 1);
+                work->album_id = g_array_index(promoted_ids, int64_t, i);
+                work->path = g_strdup(path);
+                work->indexer = idx;
+                g_thread_pool_push(pool, work, NULL);
+            }
         }
 
         // Wait with progress updates
@@ -1874,7 +1901,7 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
             size_t processed, errors;
             artwork_atlas_builder_get_progress(builder, &processed, &errors);
             // Subtract preserved count since those aren't "processed" in this run
-            atomic_store(&idx->albums_processed, processed > preserved_count ? processed - preserved_count : 0);
+            atomic_store(&idx->albums_processed, processed);
 
             if (g_thread_pool_unprocessed(pool) == 0) break;
             notify_progress_throttled(idx);
@@ -1885,8 +1912,8 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
     }
     int64_t pool_ns = profile_now_ns() - pool_start;
 
-    g_array_free(no_atlas_ids, TRUE);
-    g_ptr_array_free(no_atlas_paths, TRUE);
+    g_array_free(promoted_ids, TRUE);
+    g_ptr_array_free(promoted_paths, TRUE);
 
     int64_t finish_start = profile_now_ns();
     if (!atomic_load(&idx->cancel_flag)) {
@@ -1911,15 +1938,13 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
     artwork_atlas_profile_t prof;
     artwork_atlas_builder_get_profile(builder, &prof);
 
-    if (new_count > 0 || preserved_count > 0) {
+    if (new_count > 0) {
         double wall_ms = (double)wall_ns / 1e6;
         double n = (double)new_count;
 
-        g_info("=== Artwork Atlas Profile (%zu new + %zu preserved = %zu total) ===",
-               new_count, preserved_count, new_count + preserved_count);
-        g_info("  Phase-level:  preserve=%.0fms  pool=%.0fms  finish=%.0fms  wall=%.0fms",
-               (double)preserve_ns / 1e6, (double)pool_ns / 1e6,
-               (double)finish_ns / 1e6, wall_ms);
+        g_info("=== Artwork Atlas Profile (%zu processed) ===", new_count);
+        g_info("  Phase-level:  pool=%.0fms  finish=%.0fms  wall=%.0fms",
+               (double)pool_ns / 1e6, (double)finish_ns / 1e6, wall_ms);
         if (n > 0) {
             g_info("  Per-album avg (%.2fms total):",
                    (double)pool_ns / 1e6 / n);
@@ -1943,20 +1968,23 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
 static void phase_finalize(indexer_t* idx, processed_album_t* albums, size_t album_count) {
     set_phase(idx, INDEXER_PHASE_FINALIZE);
 
-    // Batch update album mtimes
+    // Batch update album mtimes + sizes
     if (album_count > 0) {
         int64_t* ids = g_new(int64_t, album_count);
         int64_t* mtimes = g_new(int64_t, album_count);
+        int64_t* sizes = g_new(int64_t, album_count);
 
         for (size_t i = 0; i < album_count; i++) {
             ids[i] = albums[i].album_id;
             mtimes[i] = albums[i].mtime;
+            sizes[i] = albums[i].dir_size;
         }
 
-        db_set_album_mtimes_batch(idx->db, ids, mtimes, album_count);
+        db_set_album_mtimes_batch(idx->db, ids, mtimes, sizes, album_count);
 
         g_free(ids);
         g_free(mtimes);
+        g_free(sizes);
     }
 
     // Prune orphan artists left behind by artist name normalization/splitting
@@ -1981,6 +2009,12 @@ static void on_mb_resolver_progress(const mb_resolver_progress_t* p, void* user_
     if (p->acoustid_error)
         atomic_store(&idx->acoustid_error, 1);
 
+    /* Propagate MB resolution telemetry */
+    atomic_store(&idx->mb_albums_attempted, p->albums_total);
+    atomic_store(&idx->mb_albums_resolved, p->albums_resolved);
+    atomic_store(&idx->mb_albums_no_match, p->albums_no_match);
+    atomic_store(&idx->mb_albums_failed, p->albums_failed);
+
     /* Transition indexer phase based on resolver phase */
     if (p->phase == MB_RESOLVE_FINGERPRINTING || p->phase == MB_RESOLVE_MATCHING) {
         indexer_phase_t cur = atomic_load(&idx->phase);
@@ -2000,6 +2034,7 @@ static void on_artist_art_progress(const artist_art_progress_t* p, void* user_da
     atomic_store(&idx->artist_art_total, p->total);
     atomic_store(&idx->artist_art_processed, p->processed);
     atomic_store(&idx->artist_art_downloaded, p->downloaded);
+    atomic_store(&idx->album_covers_downloaded, p->album_covers);
     notify_progress_throttled(idx);
 }
 
@@ -2240,6 +2275,7 @@ static void* indexer_worker(void* arg) {
         atomic_store(&idx->artist_art_total, 0);
         atomic_store(&idx->artist_art_processed, 0);
         atomic_store(&idx->artist_art_downloaded, 0);
+        atomic_store(&idx->album_covers_downloaded, 0);
         atomic_store(&idx->fanart_error, 0);
         idx->last_progress_time = 0;
         notify_progress_throttled(idx);
@@ -2260,6 +2296,9 @@ static void* indexer_worker(void* arg) {
             .atlas_lock_path = atlas_lock_path,
             .other_artwork_dirs = (const char* const*)idx->other_artwork_dirs,
             .other_artwork_dirs_count = idx->other_artwork_dirs_count,
+            .http_errors = &idx->artist_art_http_errors,
+            .album_artwork_dir = artwork_dir,
+            .album_thumb_size = idx->art_size,
         };
 
         g_message("Phase 7: starting artist art fetch (fanart.tv)");
@@ -2275,6 +2314,17 @@ static void* indexer_worker(void* arg) {
         g_free(atlas_lock_path);
         g_free(atlas_dir);
         // Artist atlas updated — reload so new artist thumbnails appear
+        notify_event(idx, INDEXER_ARTWORK_UPDATED);
+    }
+    if (atomic_load(&idx->cancel_flag)) goto cancelled;
+
+    // =========================================================================
+    // Phase 7b: Album Atlas Rebuild (if Phase 7 downloaded fanart covers)
+    // =========================================================================
+    if (atomic_load(&idx->album_covers_downloaded) > 0) {
+        g_message("Phase 7b: %zu album covers downloaded — rebuilding album atlas",
+                  atomic_load(&idx->album_covers_downloaded));
+        phase_artwork(idx, NULL, 0);
         notify_event(idx, INDEXER_ARTWORK_UPDATED);
     }
     if (atomic_load(&idx->cancel_flag)) goto cancelled;
@@ -2296,6 +2346,7 @@ static void* indexer_worker(void* arg) {
             .library_root = get_data_root(idx),
             .cancel_flag = &idx->cancel_flag,
             .rate_limit_ms = 250,
+            .http_errors = &idx->artist_bio_http_errors,
         };
 
         g_message("Phase 8: starting artist bio fetch (Wikipedia)");
@@ -2415,9 +2466,16 @@ quadrature_result_t indexer_scan(indexer_t* idx, const char* library_root,
     atomic_store(&idx->fingerprint_processed, 0);
     atomic_store(&idx->mb_pg_error, 0);
     atomic_store(&idx->acoustid_error, 0);
+    atomic_store(&idx->mb_albums_attempted, 0);
+    atomic_store(&idx->mb_albums_resolved, 0);
+    atomic_store(&idx->mb_albums_no_match, 0);
+    atomic_store(&idx->mb_albums_failed, 0);
+    atomic_store(&idx->artist_art_http_errors, 0);
+    atomic_store(&idx->artist_bio_http_errors, 0);
     atomic_store(&idx->artist_art_total, 0);
     atomic_store(&idx->artist_art_processed, 0);
     atomic_store(&idx->artist_art_downloaded, 0);
+    atomic_store(&idx->album_covers_downloaded, 0);
     atomic_store(&idx->fanart_error, 0);
     atomic_store(&idx->artist_bio_total, 0);
     atomic_store(&idx->artist_bio_processed, 0);
@@ -2476,10 +2534,41 @@ void indexer_get_progress(indexer_t* idx, indexer_progress_t* p) {
     p->acoustid_error = atomic_load(&idx->acoustid_error);
     p->fanart_error = atomic_load(&idx->fanart_error);
 
+    p->mb_albums_attempted = atomic_load(&idx->mb_albums_attempted);
+    p->mb_albums_resolved = atomic_load(&idx->mb_albums_resolved);
+    p->mb_albums_no_match = atomic_load(&idx->mb_albums_no_match);
+    p->mb_albums_failed = atomic_load(&idx->mb_albums_failed);
+    p->artist_art_http_errors = atomic_load(&idx->artist_art_http_errors);
+    p->artist_bio_http_errors = atomic_load(&idx->artist_bio_http_errors);
+
     pthread_mutex_lock(&idx->lock);
     memcpy(p->phase_start_times, idx->phase_start_times, sizeof(p->phase_start_times));
     p->current_path = idx->current_path;
     strncpy(p->atlas_path, idx->atlas_path, sizeof(p->atlas_path) - 1);
     p->atlas_path[sizeof(p->atlas_path) - 1] = '\0';
     pthread_mutex_unlock(&idx->lock);
+
+    /* Compute per-phase durations from start times (g_get_monotonic_time = microseconds) */
+    for (int i = 0; i < INDEXER_PHASE_COUNT; i++) {
+        if (p->phase_start_times[i] == 0) {
+            p->phase_duration_ms[i] = 0;
+            continue;
+        }
+        /* End time = start of next phase, or now if this is the current/last phase */
+        int64_t end_us = 0;
+        for (int j = i + 1; j < INDEXER_PHASE_COUNT; j++) {
+            if (p->phase_start_times[j] != 0) { end_us = p->phase_start_times[j]; break; }
+        }
+        if (end_us == 0) end_us = g_get_monotonic_time();
+        int64_t dur_us = end_us - p->phase_start_times[i];
+        p->phase_duration_ms[i] = (uint32_t)(dur_us > 0 ? dur_us / 1000 : 0);
+    }
+
+    /* Phase 2 throughput */
+    if (p->phase_duration_ms[INDEXER_PHASE_METADATA] > 0) {
+        p->metadata_albums_per_sec = (float)p->albums_processed /
+            ((float)p->phase_duration_ms[INDEXER_PHASE_METADATA] / 1000.0f);
+    } else {
+        p->metadata_albums_per_sec = 0;
+    }
 }

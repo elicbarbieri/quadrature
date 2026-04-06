@@ -298,7 +298,7 @@ Test(library_cache, get_track_nonexistent, .init = setup, .fini = teardown) {
 }
 
 Test(library_cache, get_album, .init = setup, .fini = teardown) {
-    const library_album_info_t* album = library_cache_get_album(test_cache, 1);
+    const library_album_info_t* album = library_cache_get_album(test_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(album);
     cr_assert_eq(album->album_id, 1);
     cr_assert_str_eq(album->title, "First Album");
@@ -306,7 +306,7 @@ Test(library_cache, get_album, .init = setup, .fini = teardown) {
 }
 
 Test(library_cache, get_artist, .init = setup, .fini = teardown) {
-    const library_artist_info_t* artist = library_cache_get_artist(test_cache, 1);
+    const library_artist_info_t* artist = library_cache_get_artist(test_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(artist);
     cr_assert_eq(artist->artist_id, 1);
     cr_assert_str_eq(artist->name, "Test Artist");
@@ -385,7 +385,7 @@ Test(library_cache, navigation_invalid_track, .init = setup, .fini = teardown) {
 // =============================================================================
 
 Test(library_cache, get_tracks_by_album_ordered, .init = setup, .fini = teardown) {
-    const GPtrArray* tracks = library_cache_get_tracks_by_album(test_cache, 1);
+    GPtrArray* tracks = library_cache_get_tracks_by_album(test_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(tracks);
     cr_assert_eq(tracks->len, 3);
 
@@ -399,13 +399,14 @@ Test(library_cache, get_tracks_by_album_ordered, .init = setup, .fini = teardown
     cr_assert_eq(t3->track_num, 3);
 
     // Clean up (the GPtrArray is not cached in current implementation)
-    g_ptr_array_unref((GPtrArray*)tracks);
+    g_ptr_array_unref(tracks);
 }
 
 Test(library_cache, get_albums_by_artist, .init = setup, .fini = teardown) {
-    const GPtrArray* albums = library_cache_get_albums_by_artist(test_cache, 1);
+    GPtrArray* albums = library_cache_get_albums_by_artist(test_cache, 1, LIBRARY_MASK_ALL);
     cr_assert_not_null(albums);
     cr_assert_eq(albums->len, 2);  // "First Album" and "Double Album"
+    g_ptr_array_unref(albums);
 }
 
 Test(library_cache, get_artists_loads_all, .init = setup, .fini = teardown) {
@@ -582,15 +583,24 @@ Test(library_cache, concurrent_reads, .init = setup, .fini = teardown) {
 static void* writer_thread(void* arg) {
     library_cache_t* cache = (library_cache_t*)arg;
 
-    for (int i = 0; i < 20; i++) {
-        library_cache_clear(cache);
-        usleep(1000);  // Small delay
+    // Use the COW refresh path (clear_slot + warm_slot) which is the actual
+    // production concurrent read/write pattern. library_cache_clear() is a
+    // teardown operation that is NOT safe to call with concurrent readers.
+    for (int i = 0; i < 10; i++) {
+        library_cache_clear_slot(cache, 0);
+        library_cache_warm_slot(cache, 0);
+        library_cache_await_slot(cache, 0);
+        usleep(1000);
     }
 
     return NULL;
 }
 
 Test(library_cache, concurrent_read_write, .init = setup, .fini = teardown) {
+    // Warm the cache first so readers have data
+    library_cache_warm_slot(test_cache, 0);
+    library_cache_await_slot(test_cache, 0);
+
     pthread_t readers[3];
     pthread_t writer;
 

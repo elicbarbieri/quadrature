@@ -18,7 +18,11 @@
 #include "internal.h"
 #include "quadrature/library.h"
 
+#include <errno.h>
 #include <glib-unix.h>
+#include <libpq-fe.h>
+#include <sqlite3.h>
+#include <sys/stat.h>
 
 #define SAMPLE_RATE 48000
 
@@ -28,6 +32,80 @@ typedef struct {
     library_cache_t *library_cache;
     app_settings_t *settings;
 } AppData;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Startup Health Checks — early validation before subsystem init
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void startup_health_check(const app_settings_t *settings) {
+    if (!settings) return;
+
+    /* 1. Library path accessibility + 2. SQLite quick_check */
+    for (int i = 0; i < settings->library_count; i++) {
+        const char *path = settings->libraries[i].path;
+        struct stat st;
+
+        if (stat(path, &st) != 0) {
+            g_warning("Startup: library '%s' is not accessible: %s",
+                      path, strerror(errno));
+            continue;
+        }
+
+        const char *data_root = app_settings_get_library_data_path(settings, i);
+        g_autofree char *db_path = g_build_filename(data_root,
+                                                     "quadrature.sqlite", NULL);
+
+        if (stat(db_path, &st) != 0)
+            continue;  /* DB doesn't exist yet — first run for this library */
+
+        sqlite3 *db = NULL;
+        if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+            g_critical("Startup: cannot open database %s: %s",
+                       db_path, db ? sqlite3_errmsg(db) : "unknown error");
+            if (db) sqlite3_close(db);
+            continue;
+        }
+
+        sqlite3_stmt *stmt = NULL;
+        gboolean ok = FALSE;
+        if (sqlite3_prepare_v2(db, "PRAGMA quick_check", -1, &stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *result = (const char *)sqlite3_column_text(stmt, 0);
+                ok = result && g_strcmp0(result, "ok") == 0;
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        if (!ok)
+            g_critical("Startup: database integrity check failed for %s", db_path);
+
+        sqlite3_close(db);
+    }
+
+    /* 3. PostgreSQL connectivity */
+    const char *pg_conninfos[] = {
+        settings->musicbrainz_pg_conninfo,
+        settings->acoustid_pg_conninfo,
+    };
+    const char *pg_labels[] = {
+        "MusicBrainz",
+        "AcoustID",
+    };
+
+    for (int i = 0; i < 2; i++) {
+        if (!pg_conninfos[i] || pg_conninfos[i][0] == '\0')
+            continue;
+
+        g_autofree char *conninfo = g_strdup_printf(
+            "%s connect_timeout=2", pg_conninfos[i]);
+
+        PGconn *conn = PQconnectdb(conninfo);
+        if (PQstatus(conn) != CONNECTION_OK)
+            g_warning("Startup: %s PostgreSQL unreachable — "
+                      "MB resolution will be disabled", pg_labels[i]);
+        PQfinish(conn);
+    }
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Signal Handling — graceful shutdown on SIGINT/SIGTERM
@@ -95,6 +173,10 @@ int main(int argc, char *argv[]) {
 
     /* Load settings first to get library paths */
     data.settings = app_settings_load();
+
+    /* Early health checks — log warnings for inaccessible paths,
+     * corrupt databases, or unreachable services */
+    startup_health_check(data.settings);
 
     /* Create library cache for ALL configured libraries.
      * Each library gets its own slot (indexed 0..N-1) in the cache.

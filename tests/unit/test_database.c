@@ -544,3 +544,166 @@ Test(database, concurrent_reads) {
 
     db_close(db);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Migration system: version tracking, idempotency, downgrade rejection
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+Test(database, fresh_db_version) {
+    quadrature_db_t* db = NULL;
+    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+
+    /* user_version must be set after migrations run (currently 1) */
+    db_lock(db);
+    sqlite3_stmt* stmt = NULL;
+    sqlite3_prepare_v2(db->db, "PRAGMA user_version", -1, &stmt, NULL);
+    cr_assert_eq(sqlite3_step(stmt), SQLITE_ROW);
+    int version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    db_unlock(db);
+
+    cr_assert_geq(version, 1, "Fresh DB must have user_version >= 1");
+    db_close(db);
+}
+
+Test(database, idempotent_reopen) {
+    const char* path = "test_migration_idempotent.db";
+    unlink(path);
+
+    /* Open, write data, close */
+    quadrature_db_t* db = NULL;
+    cr_assert_eq(db_open(path, &db), QUADRATURE_OK);
+    int64_t artist_id = db_get_or_create_artist(db, "Migration Test Artist");
+    cr_assert_gt(artist_id, 0);
+    db_close(db);
+
+    /* Reopen — should succeed without re-running migrations */
+    db = NULL;
+    cr_assert_eq(db_open(path, &db), QUADRATURE_OK);
+
+    /* Data intact */
+    int64_t artist_id2 = db_get_or_create_artist(db, "Migration Test Artist");
+    cr_assert_eq(artist_id, artist_id2);
+
+    /* Version still correct */
+    db_lock(db);
+    sqlite3_stmt* stmt = NULL;
+    sqlite3_prepare_v2(db->db, "PRAGMA user_version", -1, &stmt, NULL);
+    cr_assert_eq(sqlite3_step(stmt), SQLITE_ROW);
+    cr_assert_geq(sqlite3_column_int(stmt, 0), 1);
+    sqlite3_finalize(stmt);
+    db_unlock(db);
+
+    db_close(db);
+    unlink(path);
+}
+
+Test(database, rejects_newer_database) {
+    const char* path = "test_migration_downgrade.db";
+    unlink(path);
+
+    /* Create a DB with a future version */
+    sqlite3* raw = NULL;
+    cr_assert_eq(sqlite3_open(path, &raw), SQLITE_OK);
+    sqlite3_exec(raw, "PRAGMA user_version = 999", NULL, NULL, NULL);
+    sqlite3_close(raw);
+
+    /* db_open should reject it */
+    quadrature_db_t* db = NULL;
+    cr_assert_eq(db_open(path, &db), QUADRATURE_ERROR_INTERNAL);
+
+    unlink(path);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * db_log_error_ex: structured error round-trip
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+Test(database, log_error_ex_writes_structured_fields) {
+    quadrature_db_t* db = NULL;
+    db_open_memory(&db);
+
+    /* Write a structured error */
+    quadrature_result_t res = db_log_error_ex(db, "/test/path",
+        INDEXER_ERR_FFMPEG_DECODE, 2, INDEXER_SEV_ERROR,
+        "Failed to decode audio", 1);
+    cr_assert_eq(res, QUADRATURE_OK);
+
+    /* Read it back via direct SQL */
+    db_lock(db);
+    sqlite3_stmt* stmt = NULL;
+    sqlite3_prepare_v2(db->db,
+        "SELECT path, error_code, phase, severity, message, scan_generation "
+        "FROM indexer_errors ORDER BY id DESC LIMIT 1",
+        -1, &stmt, NULL);
+    int rc = sqlite3_step(stmt);
+    cr_assert_eq(rc, SQLITE_ROW);
+
+    cr_assert_str_eq((const char*)sqlite3_column_text(stmt, 0), "/test/path");
+    cr_assert_eq(sqlite3_column_int(stmt, 1), INDEXER_ERR_FFMPEG_DECODE);
+    cr_assert_eq(sqlite3_column_int(stmt, 2), 2);  /* phase */
+    cr_assert_eq(sqlite3_column_int(stmt, 3), INDEXER_SEV_ERROR);
+    cr_assert_str_eq((const char*)sqlite3_column_text(stmt, 4), "Failed to decode audio");
+    cr_assert_eq(sqlite3_column_int64(stmt, 5), 1);  /* scan_generation */
+
+    sqlite3_finalize(stmt);
+    db_unlock(db);
+
+    db_close(db);
+}
+
+Test(database, log_error_legacy_wrapper_defaults) {
+    quadrature_db_t* db = NULL;
+    db_open_memory(&db);
+
+    /* Legacy wrapper should write defaults: error_code=0, phase=0, severity=2 */
+    db_log_error(db, "/legacy/path", "Legacy error", 5);
+
+    db_lock(db);
+    sqlite3_stmt* stmt = NULL;
+    sqlite3_prepare_v2(db->db,
+        "SELECT error_code, phase, severity FROM indexer_errors LIMIT 1",
+        -1, &stmt, NULL);
+    cr_assert_eq(sqlite3_step(stmt), SQLITE_ROW);
+    cr_assert_eq(sqlite3_column_int(stmt, 0), 0);  /* INDEXER_ERR_UNKNOWN */
+    cr_assert_eq(sqlite3_column_int(stmt, 1), 0);  /* phase 0 */
+    cr_assert_eq(sqlite3_column_int(stmt, 2), 2);  /* INDEXER_SEV_ERROR */
+    sqlite3_finalize(stmt);
+    db_unlock(db);
+
+    db_close(db);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Album mtime batch with sizes
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+Test(database, mtime_batch_writes_size) {
+    quadrature_db_t* db = NULL;
+    db_open_memory(&db);
+
+    /* Create an artist and album */
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    cr_assert_gt(artist_id, 0);
+
+    int64_t album_id = 0;
+    db_upsert_folder_album(db, "test/album", "Test Album", artist_id, 2024, &album_id);
+    cr_assert_gt(album_id, 0);
+
+    /* Write mtime + size */
+    int64_t ids[] = { album_id };
+    int64_t mtimes[] = { 1700000000 };
+    int64_t sizes[] = { (3LL << 32) | 12345 };  /* 3 files, 12345 bytes */
+    db_set_album_mtimes_batch(db, ids, mtimes, sizes, 1);
+
+    /* Read back via db_get_album_mtimes_page */
+    db_album_mtime_t* out = NULL;
+    size_t count = 0;
+    db_get_album_mtimes_page(db, 0, 100, &out, &count);
+    cr_assert_eq(count, 1);
+    cr_assert_eq(out[0].last_updated_at, 1700000000);
+    cr_assert_eq(out[0].last_updated_size, (3LL << 32) | 12345);
+    db_free_album_mtimes(out, count);
+
+    db_close(db);
+}

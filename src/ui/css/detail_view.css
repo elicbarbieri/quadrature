@@ -121,26 +121,8 @@
     background-color: rgba(0, 212, 255, 0.12);
 }
 
-/* Disc Headers */
-.disc-header-row {
-    padding: 16px 16px 8px 16px;
-    margin-top: 16px;
-    border-top: 1px solid #2a2a2a;
-}
-
-.disc-header-row:first-child {
-    margin-top: 0;
-    border-top: none;
-    padding-top: 8px;
-}
-
-.disc-header-label {
-    font-size: 17px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: #888888;
-    letter-spacing: 1.2px;
-}
+/* Disc headers now use ui_make_section_header() via header_func —
+ * styled by Pango markup + snapshot separator (same as search headers). */
 
 /* Album Path Button */
 .album-path-btn {

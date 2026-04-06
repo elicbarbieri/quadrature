@@ -14,55 +14,7 @@ static void clear_search_results(GtkWidget *list_box) {
     gtk_list_box_remove_all(GTK_LIST_BOX(list_box));
 }
 
-/* Snapshot-based separator line for search section headers.
- * GtkSeparator+CSS won't work here: CSS cascade is broken inside
- * gtk_list_box_row_set_header() — widgets there inherit no theme colors.
- * Uses gtk_snapshot_append_color (GPU-composited) instead of cairo. */
-static void sep_snapshot(GtkWidget *widget, GtkSnapshot *snap) {
-    float w = (float)gtk_widget_get_width(widget);
-    float h = (float)gtk_widget_get_height(widget);
-    if (w <= 0 || h <= 0) return;
-    /* 3px line centered vertically, 50% gray at 50% opacity */
-    float line_h = 3.0f;
-    float y = (h - line_h) / 2.0f;
-    GdkRGBA color = { 0.5f, 0.5f, 0.5f, 0.5f };
-    graphene_rect_t rect = GRAPHENE_RECT_INIT(0, y, w, line_h);
-    gtk_snapshot_append_color(snap, &color, &rect);
-}
-
-typedef struct { GtkWidget parent; } QuadSepLine;
-typedef struct { GtkWidgetClass parent_class; } QuadSepLineClass;
-G_DEFINE_FINAL_TYPE(QuadSepLine, quad_sep_line, GTK_TYPE_WIDGET)
-static void quad_sep_line_init(QuadSepLine *self) { (void)self; }
-static void quad_sep_line_class_init(QuadSepLineClass *klass) {
-    GTK_WIDGET_CLASS(klass)->snapshot = sep_snapshot;
-}
-
-/* Build the label widget used as a section header by search_section_header_func.
- * Pango markup and Cairo drawing bypass GTK4 CSS cascade issues that occur
- * when a widget is parented as a row header vs. normal row content. */
-static GtkWidget *make_section_header_label(const char *title) {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_add_css_class(box, "search-section-header");
-
-    GtkWidget *label = gtk_label_new(NULL);
-    char *markup = g_markup_printf_escaped(
-        "<span foreground='#888888' weight='bold' size='22528' letter_spacing='1229'>%s</span>",
-        title);
-    gtk_label_set_markup(GTK_LABEL(label), markup);
-    g_free(markup);
-    gtk_label_set_xalign(GTK_LABEL(label), 0.0);
-    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-
-    GtkWidget *sep = g_object_new(quad_sep_line_get_type(), NULL);
-    gtk_widget_set_hexpand(sep, TRUE);
-    gtk_widget_set_valign(sep, GTK_ALIGN_CENTER);
-    gtk_widget_set_size_request(sep, -1, 12);
-
-    gtk_box_append(GTK_BOX(box), label);
-    gtk_box_append(GTK_BOX(box), sep);
-    return box;
-}
+/* Section header creation moved to ui_make_section_header() in row_helpers.c */
 
 /* GtkListBoxUpdateHeaderFunc for the search results list.
  * "quad-section" is stored on the content widget (first child of the row wrapper)
@@ -92,7 +44,7 @@ static void search_section_header_func(GtkListBoxRow *row,
             const char *existing_section = g_object_get_data(G_OBJECT(existing), "quad-header-section");
             if (g_strcmp0(section, existing_section) == 0) return;
         }
-        GtkWidget *header = make_section_header_label(section);
+        GtkWidget *header = ui_make_section_header(section);
         g_object_set_data_full(G_OBJECT(header), "quad-header-section",
                                g_strdup(section), g_free);
         gtk_list_box_row_set_header(row, header);
@@ -322,7 +274,7 @@ static void populate_search_artists(UiWindow *w, GPtrArray *artists) {
 
     for (guint i = 0; i < artists->len; i++) {
         const library_artist_info_t *artist = g_ptr_array_index(artists, i);
-        GtkWidget *row = ui_create_artist_row(artist, w->library_cache, w->artwork_mgr, TRUE, &artist_groups);
+        GtkWidget *row = ui_create_artist_row(artist, w->library_cache, w->artwork_mgr, TRUE, &artist_groups, w->library_mask);
         ui_row_attach_handlers(row, &w->lib_cbs.artist_cbs);
         g_object_set_data(G_OBJECT(row), "quad-section", (gpointer)"Artists");
         if (i == 0)
@@ -387,7 +339,7 @@ static void populate_search_tracks(UiWindow *w, GPtrArray *tracks,
                         for (guint j = 0; j < ta->len; j++) {
                             const library_track_artist_t *a = g_ptr_array_index(ta, j);
                             const library_artist_info_t *ai = library_cache_get_artist(
-                                w->library_cache, a->artist_id);
+                                w->library_cache, a->artist_id, w->library_mask);
                             if (ai && ai->musicbrainz_id &&
                                 g_strcmp0(ai->musicbrainz_id, ci->artist_mbid) == 0) {
                                 resolved_artist_id = a->artist_id;
@@ -503,8 +455,8 @@ void do_search(UiWindow *w) {
             if (results->albums) {
                 for (guint i = results->albums->len; i > 0; i--) {
                     const library_album_info_t *album = g_ptr_array_index(results->albums, i - 1);
-                    const GPtrArray *atracks = library_cache_get_tracks_by_album(
-                        w->library_cache, album->album_id);
+                    GPtrArray *atracks = library_cache_get_tracks_by_album(
+                        w->library_cache, album->album_id, LIBRARY_MASK_ALL);
                     gboolean keep = FALSE;
                     if (atracks) {
                         for (guint t = 0; t < atracks->len; t++) {
@@ -514,6 +466,7 @@ void do_search(UiWindow *w) {
                                 break;
                             }
                         }
+                        g_ptr_array_unref(atracks);
                     }
                     if (!keep)
                         g_ptr_array_remove_index(results->albums, i - 1);

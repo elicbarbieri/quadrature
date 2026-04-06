@@ -25,6 +25,8 @@
 
 #define INITIAL_BACKOFF_MS 1000
 #define MAX_BACKOFF_MS 30000
+#define CONSECUTIVE_ERROR_LIMIT 3
+#define PHASE_TIMEOUT_US ((int64_t)30 * 60 * G_USEC_PER_SEC)  // 30 minutes
 
 // =============================================================================
 // Rate Limiter (with exponential backoff, matches artist_art.c)
@@ -125,8 +127,10 @@ static GBytes *http_get_with_retry(SoupSession *session, const char *url,
  * Returns {NULL, NULL} if no Wikipedia article found or on failure.
  */
 static bio_result_t fetch_artist_bio(SoupSession *session, const char *mbid,
-                                      rate_limiter_t *rl, atomic_int *cancel_flag) {
+                                      rate_limiter_t *rl, atomic_int *cancel_flag,
+                                      bool *http_error_out) {
     bio_result_t result = {0};
+    if (http_error_out) *http_error_out = false;
 
     /* Step 1: MBID → Wikidata Q-ID via P434 property search */
     char *wikidata_url = g_strdup_printf(
@@ -137,7 +141,10 @@ static bio_result_t fetch_artist_bio(SoupSession *session, const char *mbid,
 
     GBytes *body = http_get_with_retry(session, wikidata_url, rl, cancel_flag);
     g_free(wikidata_url);
-    if (!body) return result;
+    if (!body) {
+        if (http_error_out) *http_error_out = true;
+        return result;
+    }
 
     gsize body_size;
     const char *body_data = g_bytes_get_data(body, &body_size);
@@ -257,6 +264,7 @@ typedef struct {
     char *bio_text;         /* Owned, may be NULL */
     char *wiki_url;         /* Owned, may be NULL */
     bool has_bio;           /* true if bio_text is non-empty */
+    bool http_error;        /* true if all HTTP requests for this artist failed */
 } bio_fetch_result_t;
 
 /* Shared context for worker threads */
@@ -304,13 +312,16 @@ static void bio_worker_func(gpointer data, gpointer user_data) {
         g_private_set(&rl_key, rl);
     }
 
-    bio_result_t bio = fetch_artist_bio(session, item->mbid, rl, ctx->cancel_flag);
+    bool http_error = false;
+    bio_result_t bio = fetch_artist_bio(session, item->mbid, rl, ctx->cancel_flag,
+                                         &http_error);
 
     bio_fetch_result_t *result = g_malloc(sizeof(bio_fetch_result_t));
     result->mbid = item->mbid;  /* Transfer ownership */
     result->bio_text = bio.bio_text;
     result->wiki_url = bio.wiki_url;
     result->has_bio = (bio.bio_text && bio.bio_text[0]);
+    result->http_error = http_error;
 
     g_async_queue_push(ctx->result_queue, result);
 
@@ -422,9 +433,12 @@ quadrature_result_t artist_bio_fetch_all(const artist_bio_config_t *config,
     db_bios_begin(bios_db);
     size_t batch_count = 0;
     size_t results_received = 0;
+    int consecutive_errors = 0;
+    int64_t phase_start = g_get_monotonic_time();
+    bool abort_phase = false;
 
-    while (results_received < work_count) {
-        /* Pop with 200ms timeout so we can check cancel_flag */
+    while (results_received < work_count && !abort_phase) {
+        /* Pop with 200ms timeout so we can check cancel_flag and timeout */
         bio_fetch_result_t *result = g_async_queue_timeout_pop(
             worker_ctx.result_queue, 200 * 1000);
 
@@ -437,9 +451,39 @@ quadrature_result_t artist_bio_fetch_all(const artist_bio_config_t *config,
             break;
         }
 
+        /* Phase timeout */
+        if (g_get_monotonic_time() - phase_start > PHASE_TIMEOUT_US) {
+            g_warning("Phase 8: timeout after 30 minutes — %zu/%zu artists processed",
+                      results_received, work_count);
+            if (result) bio_fetch_result_free(result);
+            db_bios_commit(bios_db);
+            db_bios_begin(bios_db);
+            batch_count = 0;
+            break;
+        }
+
         if (!result) continue;  /* Timeout — check cancel and loop */
 
         results_received++;
+
+        /* Consecutive error tracking and telemetry */
+        if (result->http_error) {
+            if (config->http_errors)
+                atomic_fetch_add(config->http_errors, 1);
+            consecutive_errors++;
+            if (consecutive_errors >= CONSECUTIVE_ERROR_LIMIT) {
+                g_warning("Phase 8: aborting after %d consecutive network errors",
+                          CONSECUTIVE_ERROR_LIMIT);
+                bio_fetch_result_free(result);
+                db_bios_commit(bios_db);
+                db_bios_begin(bios_db);
+                batch_count = 0;
+                abort_phase = true;
+                break;
+            }
+        } else {
+            consecutive_errors = 0;
+        }
 
         if (result->has_bio) {
             db_bios_upsert(bios_db, result->mbid,

@@ -71,7 +71,8 @@ typedef struct {
     size_t track_count;
     char* genres;          /* Comma-separated distinct genres, or NULL */
     char* path;            /* Album directory path (relative to library root) */
-    char* musicbrainz_release_id; /* MusicBrainz release MBID, or NULL */
+    char* musicbrainz_release_id;       /* MusicBrainz release MBID, or NULL */
+    char* musicbrainz_release_group_id; /* MusicBrainz release group MBID, or NULL */
 } db_album_t;
 
 /* Track artist credit (from track_artists junction table) */
@@ -483,6 +484,39 @@ quadrature_result_t db_upsert_folder_album(quadrature_db_t* db,
  * Indexer Error Operations
  * ============================================================================= */
 
+/* Structured error codes for indexer_errors.error_code */
+typedef enum {
+    INDEXER_ERR_UNKNOWN          = 0,
+    /* 1xx — file access */
+    INDEXER_ERR_FILE_UNREADABLE  = 100,
+    INDEXER_ERR_PERMISSION       = 101,
+    /* 2xx — FFmpeg / metadata */
+    INDEXER_ERR_FFMPEG_DECODE    = 200,
+    INDEXER_ERR_FFMPEG_NO_STREAM = 201,
+    INDEXER_ERR_TRACK_NUMBERING  = 202,
+    /* 3xx — artwork */
+    INDEXER_ERR_ARTWORK_MISSING  = 300,
+    INDEXER_ERR_ARTWORK_CORRUPT  = 301,
+    /* 4xx — MusicBrainz */
+    INDEXER_ERR_MB_NO_MATCH      = 400,
+    INDEXER_ERR_MB_PG_ERROR      = 401,
+    /* 5xx — network (phases 7-8) */
+    INDEXER_ERR_NETWORK          = 500,
+} indexer_error_code_t;
+
+/* Error severity for indexer_errors.severity */
+typedef enum {
+    INDEXER_SEV_WARN  = 1,
+    INDEXER_SEV_ERROR = 2,
+    INDEXER_SEV_FATAL = 3,
+} indexer_error_severity_t;
+
+quadrature_result_t db_log_error_ex(quadrature_db_t* db, const char* path,
+                                    indexer_error_code_t error_code, int phase,
+                                    indexer_error_severity_t severity,
+                                    const char* message, int64_t scan_generation);
+
+/* Convenience: logs with error_code=0, phase=0, severity=ERROR (backward compat) */
 quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const char* message,
                                 int64_t scan_generation);
 quadrature_result_t db_clear_errors_for_path(quadrature_db_t* db, const char* path_prefix);
@@ -510,8 +544,9 @@ quadrature_result_t db_get_errors_page(quadrature_db_t* db, const char* path_pre
 typedef struct {
     int64_t album_id;
     char* path;
-    int64_t last_updated_at;  /* 0 if never processed */
-    int mb_status;            /* see MB_STATUS_* constants -- cached from Phase 1 scan */
+    int64_t last_updated_at;    /* 0 if never processed */
+    int64_t last_updated_size;  /* file count + total bytes; 0 if never computed */
+    int mb_status;              /* see MB_STATUS_* constants -- cached from Phase 1 scan */
 } db_album_mtime_t;
 
 quadrature_result_t db_get_album_mtimes_page(quadrature_db_t* db,
@@ -522,6 +557,7 @@ quadrature_result_t db_get_album_mtimes_page(quadrature_db_t* db,
 quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
                                                const int64_t* album_ids,
                                                const int64_t* mtimes,
+                                               const int64_t* sizes,
                                                size_t count);
 void db_free_album_mtimes(db_album_mtime_t* albums, size_t count);
 
@@ -556,6 +592,18 @@ quadrature_result_t db_get_artist_by_mbid(
  */
 quadrature_result_t db_get_artists_with_mbid(quadrature_db_t* db,
     int64_t** artist_ids, char*** mbids, size_t* count);
+
+/**
+ * Get all albums that have a MusicBrainz release group ID and whose artist
+ * also has a MusicBrainz ID. Returns parallel arrays of album IDs, release
+ * group IDs, and artist MBIDs. Used by the artist art phase to find albums
+ * eligible for fanart.tv cover art.
+ * Caller must g_free(*album_ids), g_strfreev(*release_group_ids),
+ * and g_strfreev(*artist_mbids).
+ */
+quadrature_result_t db_get_albums_with_release_group_id(quadrature_db_t* db,
+    int64_t** album_ids, char*** release_group_ids, char*** artist_mbids,
+    size_t* count);
 
 /* =============================================================================
  * Aggregate Queries

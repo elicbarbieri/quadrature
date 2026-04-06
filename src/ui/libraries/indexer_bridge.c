@@ -565,8 +565,10 @@ void on_indexer_progress(IndexerController *idx, const char *library_path,
 void refresh_library_views(UiWindow *w) {
     library_view_refresh(w->artists_view);
     library_view_refresh(w->albums_view);
-    if (w->detail_view)
+    if (w->detail_view) {
+        library_unified_detail_set_library_mask(w->detail_view, w->library_mask);
         library_unified_detail_reload(w->detail_view);
+    }
     if (strcmp(w->current_view, "search") == 0)
         do_search(w);
 
@@ -597,6 +599,72 @@ int find_lib_idx(UiWindow *w, const char *library_path) {
     return -1;
 }
 
+/* ── Debounced cache refresh ───────────────────────────────────────────────
+ * LIBRARY_UPDATED fires after both Phase 3 and Phase 6 in quick succession.
+ * We debounce per bitmap_index (500ms) so only one COW rebuild runs. */
+
+typedef struct {
+    UiWindow         *w;
+    int               bitmap_index;
+    guint             source_id;
+} PendingRefresh;
+
+/* bitmap_index (GINT_TO_POINTER) → PendingRefresh*.  Lazily created. */
+static GHashTable *pending_refreshes = NULL;
+
+static gboolean debounced_refresh_cb(gpointer user_data) {
+    PendingRefresh *pr = user_data;
+    UiWindow *w = pr->w;
+    int bitmap = pr->bitmap_index;
+
+    /* Remove from table before firing — the entry is about to be freed. */
+    if (pending_refreshes)
+        g_hash_table_remove(pending_refreshes, GINT_TO_POINTER(bitmap));
+
+    if (w->library_cache) {
+        library_cache_refresh_slot(w->library_cache, bitmap, NULL, 0);
+        g_message("library-updated: debounced COW refresh fired for bitmap_index=%d", bitmap);
+    }
+
+    g_free(pr);
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_debounced_refresh(UiWindow *w, int bitmap_index) {
+    if (!pending_refreshes)
+        pending_refreshes = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    gpointer key = GINT_TO_POINTER(bitmap_index);
+    PendingRefresh *existing = g_hash_table_lookup(pending_refreshes, key);
+    if (existing) {
+        g_source_remove(existing->source_id);
+        g_hash_table_remove(pending_refreshes, key);
+        g_free(existing);
+    }
+
+    PendingRefresh *pr = g_new0(PendingRefresh, 1);
+    pr->w = w;
+    pr->bitmap_index = bitmap_index;
+    pr->source_id = g_timeout_add(500, debounced_refresh_cb, pr);
+
+    g_hash_table_insert(pending_refreshes, key, pr);
+    g_message("library-updated: scheduled debounced refresh for bitmap_index=%d", bitmap_index);
+}
+
+void indexer_bridge_cancel_pending_refreshes(void) {
+    if (!pending_refreshes) return;
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, pending_refreshes);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        PendingRefresh *pr = value;
+        g_source_remove(pr->source_id);
+        g_free(pr);
+    }
+    g_hash_table_destroy(pending_refreshes);
+    pending_refreshes = NULL;
+}
+
 /* Called whenever SQLite metadata changes and the library cache must be reloaded.
  * Fired after: phases 1-3 (initial scan), phase 6 (MB enrichment). */
 void on_indexer_library_updated(IndexerController *idx, const char *library_path,
@@ -608,12 +676,11 @@ void on_indexer_library_updated(IndexerController *idx, const char *library_path
     g_message("library-updated: library=%s lib_idx=%d cache=%p",
               library_path, lib_idx, (void*)w->library_cache);
 
-    /* COW refresh: old data stays live while new data builds in shadow arrays.
-     * on_cache_ready() fires refresh_library_views() when the swap completes. */
+    /* COW refresh: debounced per bitmap_index (500ms) to coalesce rapid
+     * LIBRARY_UPDATED signals from consecutive indexer phases. */
     if (w->library_cache && lib_idx >= 0) {
         int bitmap = w->settings->libraries[lib_idx].library_index;
-        library_cache_refresh_slot(w->library_cache, bitmap, NULL, 0);
-        g_message("library-updated: COW refresh started for bitmap_index=%d", bitmap);
+        schedule_debounced_refresh(w, bitmap);
     }
 
     LibEntry *e = find_lib_entry(w, library_path);
@@ -644,10 +711,11 @@ void on_indexer_artwork_updated(IndexerController *idx, const char *library_path
     UiWindow *w = UI_WINDOW(data);
 
     int lib_idx = find_lib_idx(w, library_path);
+    int bitmap = (lib_idx >= 0) ? w->settings->libraries[lib_idx].library_index : -1;
 
     /* Reload per-library album atlas */
-    if (p && p->atlas_path[0] && w->artwork_mgr && lib_idx >= 0)
-        artwork_manager_reload_library_atlas(w->artwork_mgr, lib_idx, p->atlas_path);
+    if (p && p->atlas_path[0] && w->artwork_mgr && bitmap >= 0)
+        artwork_manager_reload_library_atlas(w->artwork_mgr, bitmap, p->atlas_path);
 
     /* Reload global artist atlas (cheap re-mmap, safe to call every time) */
     if (w->artwork_mgr)

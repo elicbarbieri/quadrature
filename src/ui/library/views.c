@@ -284,7 +284,9 @@ static void artist_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer dat
     ViewData *vd = data;
     QuadArtistItem *item = QUAD_ARTIST_ITEM(gtk_list_item_get_item(li));
     GtkWidget *row = gtk_list_item_get_child(li);
-    ui_rebind_artist_row(row, item->info, vd->cache, vd->art_mgr);
+    UiWindow *w = UI_WINDOW(vd->cbs.user_data);
+    uint32_t mask = w ? w->library_mask : LIBRARY_MASK_ALL;
+    ui_rebind_artist_row(row, item->info, vd->cache, vd->art_mgr, mask);
     guint pos = gtk_list_item_get_position(li);
     guint n = g_list_model_get_n_items(lazy_list_get_filtered_model(vd->lazy_list));
     sync_section_position_classes(row, pos, n);

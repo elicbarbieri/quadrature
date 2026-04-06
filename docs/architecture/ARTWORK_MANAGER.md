@@ -69,6 +69,11 @@ typedef struct __attribute__((packed)) {
 
 Body: `[sorted int64 album_ids][pixel_data: count × stride]` where `stride = thumb_size × thumb_size × channels`.
 
+**Trailing checksum:** a CRC32 of the entire file (header + body) is appended as the final
+4 bytes. On load, the reader verifies the checksum before mmapping. A mismatch (partial
+write during power loss) causes a fallback to the previous atlas file — the 3-file rotation
+guarantees at least one valid atlas exists. The artist atlas uses the same trailing CRC32.
+
 - **One atlas per library root** — no shared global atlas
 - **Timestamped filenames** — each indexer run produces a new file, enabling atomic swap without disturbing live readers
 - **3-file rotation** — the indexer keeps only the 3 most recent atlas files per library per size; older files are deleted after a successful write

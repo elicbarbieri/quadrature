@@ -127,6 +127,11 @@ and browsing. Relation data is queried at most on detail-view open, so it gets a
 cache + 128MB mmap only while a query is in flight. Between queries the metadata DB
 is closed entirely — zero persistent RAM.
 
+**Future consideration:** the metadata DB could become a set of tables within
+`quadrature.sqlite` accessed via `ATTACH`/`DETACH` at query time. Same memory benefit
+(detached = zero RAM), one fewer DB file, and the data moves together. The bios DB
+remains separate (survives metadata reset).
+
 ### Schema
 
 Mirrors the MusicBrainz relational model for SQLite:
