@@ -12,7 +12,6 @@
     <property name="transition-duration">200</property>
     <child>
       <object class="GtkBox" id="advanced_panel">
-        <property name="orientation">horizontal</property>
         <property name="spacing">8</property>
         <property name="margin-end">16</property>
         <style>
@@ -22,8 +21,6 @@
         <!-- Credit search -->
         <child>
           <object class="GtkBox">
-            <property name="orientation">horizontal</property>
-            <property name="spacing">0</property>
             <style>
               <class name="filter-field"/>
             </style>
@@ -43,10 +40,20 @@
 
         <!-- Role filter -->
         <child>
-          <object class="GtkDropDown" id="filter_role">
+          <object class="GtkBox">
             <style>
               <class name="filter-field"/>
             </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Role</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="filter_role">
+                <property name="label">All Roles</property>
+              </object>
+            </child>
           </object>
         </child>
       </object>

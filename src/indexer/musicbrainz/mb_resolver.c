@@ -408,6 +408,36 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
             }
         }
 
+        // Folder-path fallback (Picard's album_artist_from_path equivalent):
+        // When files have no album/artist tags, extract from the album's directory
+        // path. For "BRONSON/BRONSON (2020)/01.flac", album_path = "BRONSON/BRONSON (2020)"
+        // → artist = "BRONSON", album = "BRONSON (2020)" → strip year → "BRONSON".
+        if (!tag_album && track_count > 0 && tracks[0].album_path) {
+            const char* apath = tracks[0].album_path;
+            const char* last_sep = strrchr(apath, '/');
+            if (last_sep && last_sep > apath) {
+                tag_album = g_strdup(last_sep + 1);
+
+                char* parent = g_strndup(apath, last_sep - apath);
+                const char* artist_start = strrchr(parent, '/');
+                if (!tag_artist)
+                    tag_artist = g_strdup(artist_start ? artist_start + 1 : parent);
+                g_free(parent);
+
+                // Strip trailing year suffix: "Album (2020)" → "Album"
+                char* paren = strrchr(tag_album, '(');
+                if (paren && paren > tag_album && *(paren - 1) == ' '
+                    && strlen(paren) == 6 && paren[5] == ')'
+                    && g_ascii_isdigit(paren[1]) && g_ascii_isdigit(paren[2])
+                    && g_ascii_isdigit(paren[3]) && g_ascii_isdigit(paren[4])) {
+                    *(paren - 1) = '\0';
+                }
+
+                g_debug("folder-path fallback: album='%s' artist='%s' (from '%s')",
+                        tag_album, tag_artist, apath);
+            }
+        }
+
         if (isrc_count >= 2) {
             mb_acoustid_response_t isrc_response;
             quadrature_result_t isrc_res = mb_isrc_lookup(mb_pg, isrcs, isrc_count,
@@ -1137,6 +1167,8 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
     mb_pg_set_schema(ctx->pg_client, "musicbrainz");
     // Install session-local batch function for consolidated fetching
     mb_pg_install_batch_function(ctx->pg_client);
+    // Prepare ISRC + SOLR validation statements (needed for no-AcoustID path)
+    mb_acoustid_prepare_stmts(ctx->pg_client, NULL);
 
     // Second PG client for prefetch overlap (non-fatal if it fails)
     ctx->pg_client_prefetch = NULL;

@@ -293,6 +293,8 @@ void metadata_result_free(metadata_result_t* result) {
     g_free(result->folder_name);
     g_free(result->album_artist);
     g_free(result->album_mb_release_id);
+    g_free(result->album_mb_release_group_id);
+    g_free(result->album_mb_artist_id);
     g_free(result);
 }
 
@@ -371,6 +373,7 @@ struct indexer {
     char* acoustid_index_url;
 
     // Artist art config (Phase 7)
+    bool fetch_artist_art;
     char* fanart_api_key;
     char** other_artwork_dirs;      // artwork dirs from other libraries (heap-owned)
     size_t other_artwork_dirs_count;
@@ -381,6 +384,7 @@ struct indexer {
     atomic_int fanart_error;
 
     // Artist bio config (Phase 8)
+    bool fetch_artist_bios;
     atomic_size_t artist_bio_total;
     atomic_size_t artist_bio_processed;
     atomic_size_t artist_bio_fetched;
@@ -393,9 +397,14 @@ struct indexer {
 // Helpers
 // =============================================================================
 
-/** Get effective data root (where DB + artwork live). */
+/** Get data root (where DB + artwork live). */
 static const char* get_data_root(const indexer_t* idx) {
-    return idx->data_root ? idx->data_root : idx->library_root;
+    return idx->data_root;
+}
+
+/** Get library root (where audio files live). */
+static const char* get_library_root(const indexer_t* idx) {
+    return idx->library_root;
 }
 
 static void set_phase(indexer_t* idx, indexer_phase_t phase) {
@@ -609,6 +618,8 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
         // Two-factor delta: compare mtime AND size (catches NFS/FAT32/rsync misses)
         gpointer value = (total_files > 0)
             ? g_hash_table_lookup(album_mtimes, dir_path) : NULL;
+        // Mark as seen for orphan detection (remove from candidates)
+        if (value) g_hash_table_remove(album_mtimes, dir_path);
         bool needs_processing = true;
 
         if (value) {
@@ -702,6 +713,8 @@ static void scan_directory_recursive(indexer_t* idx, const char* dir_path,
 
             // Lookup in album mtimes hashmap
             gpointer value = g_hash_table_lookup(album_mtimes, dir_path);
+            // Mark as seen for orphan detection
+            if (value) g_hash_table_remove(album_mtimes, dir_path);
             bool needs_processing = true;
 
             if (value) {
@@ -911,6 +924,23 @@ static void phase_scan(indexer_t* idx, work_queue_t* queue) {
 
     g_message("Scan complete: %zu albums queued, %zu directories visited",
               queue->count, (size_t)atomic_load(&idx->dirs_scanned));
+
+    // Orphan detection: entries remaining in album_mtimes were NOT found during
+    // the directory walk — their folders have been deleted from disk.
+    if (g_hash_table_size(album_mtimes) > 0 && !atomic_load(&idx->cancel_flag)) {
+        GArray* orphan_ids = g_array_new(FALSE, FALSE, sizeof(int64_t));
+        GHashTableIter iter;
+        gpointer key, value;
+        g_hash_table_iter_init(&iter, album_mtimes);
+        while (g_hash_table_iter_next(&iter, &key, &value)) {
+            db_album_mtime_t* cached = value;
+            g_array_append_val(orphan_ids, cached->album_id);
+        }
+        g_message("Pruning %u orphan album(s) (deleted from disk)", orphan_ids->len);
+        db_prune_orphan_albums(idx->db,
+            (const int64_t*)orphan_ids->data, orphan_ids->len);
+        g_array_free(orphan_ids, TRUE);
+    }
 
     // Cleanup
     g_hash_table_destroy(album_mtimes);
@@ -1128,6 +1158,8 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
     const char* first_artist = NULL;
     const char* first_album_artist = NULL;
     const char* album_mb_release_id = NULL;
+    const char* album_mb_release_group_id = NULL;
+    const char* album_mb_artist_id = NULL;
 
     for (size_t i = 0; i < scan.file_count && !atomic_load(&idx->cancel_flag); i++) {
         quadrature_result_t res = extract_audio_metadata(scan.files[i], &items[i]);
@@ -1138,6 +1170,10 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
                 first_album_artist = items[i].album_artist;
             if (!album_mb_release_id && items[i].mb_release_id)
                 album_mb_release_id = items[i].mb_release_id;
+            if (!album_mb_release_group_id && items[i].mb_release_group_id)
+                album_mb_release_group_id = items[i].mb_release_group_id;
+            if (!album_mb_artist_id && items[i].mb_album_artist_id)
+                album_mb_artist_id = items[i].mb_album_artist_id;
             valid_count++;
         } else {
             const char* filename = strrchr(scan.files[i], '/');
@@ -1214,7 +1250,9 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
     result->album_rel_path      = g_strdup(rel_path);
     result->folder_name         = g_strdup(folder_name);
     result->album_artist        = g_strdup(album_artist);
-    result->album_mb_release_id = g_strdup(album_mb_release_id);
+    result->album_mb_release_id       = g_strdup(album_mb_release_id);
+    result->album_mb_release_group_id = g_strdup(album_mb_release_group_id);
+    result->album_mb_artist_id        = g_strdup(album_mb_artist_id);
     result->dir_mtime           = work->item->dir_mtime;
     result->dir_size            = work->item->dir_size;
     result->mb_resolved         = work->item->mb_resolved;
@@ -1242,6 +1280,8 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
     const char* first_artist = NULL;
     const char* first_album_artist = NULL;
     const char* album_mb_release_id = NULL;
+    const char* album_mb_release_group_id = NULL;
+    const char* album_mb_artist_id = NULL;
 
     for (size_t d = 0; d < work->item->disc_count && !atomic_load(&idx->cancel_flag); d++) {
         const char* disc_dir = work->item->disc_dirs[d];
@@ -1267,6 +1307,10 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
                     first_album_artist = disc_items[i].album_artist;
                 if (!album_mb_release_id && disc_items[i].mb_release_id)
                     album_mb_release_id = disc_items[i].mb_release_id;
+                if (!album_mb_release_group_id && disc_items[i].mb_release_group_id)
+                    album_mb_release_group_id = disc_items[i].mb_release_group_id;
+                if (!album_mb_artist_id && disc_items[i].mb_album_artist_id)
+                    album_mb_artist_id = disc_items[i].mb_album_artist_id;
                 valid_count++;
             } else {
                 const char* filename = strrchr(scan->files[i], '/');
@@ -1376,7 +1420,9 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
     result->album_rel_path      = g_strdup(rel_path);
     result->folder_name         = g_strdup(folder_name);
     result->album_artist        = g_strdup(album_artist);
-    result->album_mb_release_id = g_strdup(album_mb_release_id);
+    result->album_mb_release_id       = g_strdup(album_mb_release_id);
+    result->album_mb_release_group_id = g_strdup(album_mb_release_group_id);
+    result->album_mb_artist_id        = g_strdup(album_mb_artist_id);
     result->dir_mtime           = work->item->dir_mtime;
     result->dir_size            = work->item->dir_size;
     result->mb_resolved         = work->item->mb_resolved;
@@ -1436,8 +1482,15 @@ static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr)
     indexer_t* idx = ctx->idx;
     quadrature_db_t* db = idx->db;
 
-    int64_t artist_id = get_or_create_artist_cached(
-        ctx->artist_cache, db, mr->album_artist);
+    /* Use MB-aware artist creation when Picard tags provide ALBUMARTISTID */
+    int64_t artist_id;
+    if (mr->album_mb_artist_id && mr->album_mb_artist_id[0]) {
+        artist_id = db_get_or_create_artist_mb(db,
+            mr->album_artist, mr->album_artist, mr->album_mb_artist_id);
+    } else {
+        artist_id = get_or_create_artist_cached(
+            ctx->artist_cache, db, mr->album_artist);
+    }
     if (artist_id < 0) {
         log_indexer_error(idx, mr->dir_path,
             "Failed to create artist: %s", mr->album_artist);
@@ -1455,6 +1508,8 @@ static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr)
 
     if (mr->album_mb_release_id)
         db_set_album_release_id_from_tags(db, album_id, mr->album_mb_release_id);
+    if (mr->album_mb_release_group_id)
+        db_set_album_release_group_id_from_tags(db, album_id, mr->album_mb_release_group_id);
 
     for (size_t t = 0; t < mr->track_count; t++) {
         extracted_track_t* tr = &mr->tracks[t];
@@ -2242,7 +2297,7 @@ static void* indexer_worker(void* arg) {
             .acoustid_pg_conninfo = idx->acoustid_pg_conninfo,
             .acoustid_index_url = idx->acoustid_index_url,
             .mb_solr_url = idx->mb_solr_url,
-            .library_root = get_data_root(idx),
+            .library_root = get_library_root(idx),
         };
         mb_resolver_t* resolver = NULL;
         quadrature_result_t res = mb_resolver_create(&resolver, idx->db, &opts,
@@ -2270,7 +2325,7 @@ static void* indexer_worker(void* arg) {
     // Phase 7: Artist Art (fanart.tv)
     // =========================================================================
 
-    {
+    if (idx->fetch_artist_art) {
         set_phase(idx, INDEXER_PHASE_ARTIST_ART);
         atomic_store(&idx->artist_art_total, 0);
         atomic_store(&idx->artist_art_processed, 0);
@@ -2321,7 +2376,7 @@ static void* indexer_worker(void* arg) {
     // =========================================================================
     // Phase 7b: Album Atlas Rebuild (if Phase 7 downloaded fanart covers)
     // =========================================================================
-    if (atomic_load(&idx->album_covers_downloaded) > 0) {
+    if (idx->fetch_artist_art && atomic_load(&idx->album_covers_downloaded) > 0) {
         g_message("Phase 7b: %zu album covers downloaded — rebuilding album atlas",
                   atomic_load(&idx->album_covers_downloaded));
         phase_artwork(idx, NULL, 0);
@@ -2333,7 +2388,7 @@ static void* indexer_worker(void* arg) {
     // Phase 8: Artist Bios (Wikipedia via Wikidata)
     // =========================================================================
 
-    {
+    if (idx->fetch_artist_bios) {
         set_phase(idx, INDEXER_PHASE_ARTIST_BIO);
         atomic_store(&idx->artist_bio_total, 0);
         atomic_store(&idx->artist_bio_processed, 0);
@@ -2406,6 +2461,8 @@ quadrature_result_t indexer_create(indexer_t** out, const indexer_config_t* conf
         idx->mb_solr_url = config->mb_solr_url ? strdup(config->mb_solr_url) : NULL;
         idx->acoustid_pg_conninfo = config->acoustid_pg_conninfo ? strdup(config->acoustid_pg_conninfo) : NULL;
         idx->acoustid_index_url = config->acoustid_index_url ? strdup(config->acoustid_index_url) : NULL;
+        idx->fetch_artist_art = config->fetch_artist_art;
+        idx->fetch_artist_bios = config->fetch_artist_bios;
         idx->fanart_api_key = config->fanart_api_key ? strdup(config->fanart_api_key) : NULL;
         if (config->other_library_roots && config->other_library_roots_count > 0) {
             idx->other_artwork_dirs_count = config->other_library_roots_count;
@@ -2448,8 +2505,8 @@ quadrature_result_t indexer_scan(indexer_t* idx, const char* library_root,
     free(idx->library_root);
     idx->library_root = strdup(library_root);
     free(idx->data_root);
-    idx->data_root = (data_root && data_root[0] && strcmp(data_root, library_root) != 0)
-                     ? strdup(data_root) : NULL;
+    idx->data_root = (data_root && data_root[0])
+                     ? strdup(data_root) : strdup(library_root);
 
     // Reset all counters
     atomic_store(&idx->cancel_flag, 0);

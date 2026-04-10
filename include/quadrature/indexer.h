@@ -172,13 +172,17 @@ typedef struct {
     const char* acoustid_pg_conninfo;  /* libpq conninfo for AcoustID PG (NULL = skip fingerprinting) */
     const char* acoustid_index_url;    /* acoustid-index HTTP URL, e.g. "http://host:8081" (NULL = skip) */
 
-    /* Artist art (Phase 7) */
-    const char* fanart_api_key;  /* fanart.tv personal API key (NULL = skip artist art) */
+    /* Artist art (Phase 7) — skipped entirely when false */
+    bool fetch_artist_art;
+    const char* fanart_api_key;  /* fanart.tv personal API key (NULL = skip fanart.tv download) */
 
     /* Cross-library artist art reuse: other library roots whose
      * artwork/artists/{mbid}/ dirs can be checked before fetching. */
     const char* const* other_library_roots;
     size_t other_library_roots_count;
+
+    /* Artist bios (Phase 8) — skipped entirely when false */
+    bool fetch_artist_bios;
 } indexer_config_t;
 
 /* =============================================================================

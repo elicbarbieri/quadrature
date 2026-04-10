@@ -47,7 +47,6 @@
         </child>
         <child>
           <object class="GtkBox" id="library_badges">
-            <property name="orientation">horizontal</property>
             <property name="spacing">4</property>
             <property name="visible">false</property>
           </object>
@@ -67,7 +66,6 @@
     <!-- right slot: album art strip -->
     <child type="right">
       <object class="GtkBox" id="art_strip">
-        <property name="orientation">horizontal</property>
         <property name="spacing">4</property>
         <property name="valign">center</property>
         <property name="halign">end</property>

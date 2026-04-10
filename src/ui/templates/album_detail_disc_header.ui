@@ -7,14 +7,12 @@
 -->
 <interface>
   <object class="GtkBox" id="disc_header">
-    <property name="orientation">horizontal</property>
     <property name="spacing">12</property>
     <style>
       <class name="disc-header-row"/>
     </style>
     <child>
       <object class="GtkSeparator">
-        <property name="hexpand">false</property>
         <property name="width-request">24</property>
         <property name="valign">center</property>
         <style>

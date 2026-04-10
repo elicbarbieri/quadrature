@@ -34,166 +34,221 @@
 }
 
 .search-entry:focus {
-    border-color: #34d399;
-    outline: 2px solid rgba(52, 211, 153, 0.2);
+    border-color: @green_3;
+    outline: 2px solid alpha(@green_3, 0.2);
     outline-offset: -1px;
 }
 
-/* Search-type selector chips (All / Artists / Albums / Songs)
- * Larger and visually distinct from filter-bar chips.
- * Active state shared with .filter-chip--on modifier. */
-.search-type-chip {
-    background-color: transparent;
-    color: #606060;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
-    padding: 0 20px;
-    min-height: 36px;
-    font-size: 16px;
-    font-weight: 500;
-}
-.search-type-chip:hover {
-    background-color: rgba(255, 255, 255, 0.06);
-    color: #a0a0a0;
-    border-color: rgba(255, 255, 255, 0.15);
-}
-
-/* Active — solid cyan for clear toggle state */
-.search-type-chip.filter-chip--on {
-    background-color: #00d4ff;
-    color: #ffffff;
-    border-color: #00d4ff;
-    font-weight: 700;
-}
-.search-type-chip.filter-chip--on:hover {
-    background-color: #33ddff;
-    color: #ffffff;
-    border-color: #33ddff;
-}
-
 /* ═══════════════════════════════════════════════════════════════════════
- * Filter / Sort Bar System — 4 canonical classes
+ * Filter / Sort Bar System
  *
  *   .filter-bar      row container
- *   .filter-field    label + dropdown/entry frame
- *   .filter-chip     pill button (type toggles, adv toggle, clear)
- *   .filter-chip--on active/selected modifier (also via GTK :checked)
+ *   .filter-field    label + dropdown/entry composite frame
+ *   .filter-btn      standalone button (adv toggle, clear)
+ *   .library-toggle-btn  library version toggle (detail views, add-library)
+ *   .filter-toggle-btn   search type, appears-on, show-featuring toggles
  *
  * ═══════════════════════════════════════════════════════════════════════ */
 
 .filter-bar {
-    padding: 4px 0 8px 0;
+    padding: 0;
 }
 
-/* Labeled field frame — holds a label + inner MenuButton or SearchEntry.
- * min-height matches .filter-chip so GTK's horizontal box equalizes them. */
-.filter-field {
-    background-color: #252525;
-    border: 1px solid #505050;
-    border-radius: 6px;
-    padding: 0 0 0 10px;
+/* Filter button — adv toggle, clear */
+.filter-btn {
+    background-color: #2a2a2a;
+    color: #cccccc;
+    border: 1.5px solid #444444;
+    border-radius: 8px;
+    padding: 0 20px;
     min-height: 36px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
-.filter-field:hover { border-color: #686868; }
+.filter-btn:hover {
+    background-color: #333333;
+    color: #e0e0e0;
+    border-color: #555555;
+}
+
+/* Active/selected — blue bg + border, white text */
+.filter-btn:checked {
+    background-color: alpha(@blue_3, 0.2);
+    color: #e0e0e0;
+    border-color: @blue_3;
+}
+.filter-btn:checked:hover {
+    background-color: alpha(@blue_3, 0.3);
+    color: #ffffff;
+    border-color: @blue_2;
+}
+
+/* Labeled field frame — holds a label + inner MenuButton or SearchEntry */
+.filter-field {
+    background-color: #2a2a2a;
+    border: 1.5px solid #444444;
+    border-radius: 8px;
+    padding: 0 0 0 10px;
+    min-height: 28px;
+    transition: border-color 150ms ease-out;
+}
+.filter-field:hover {
+    border-color: #555555;
+}
+
+.filter-field--active {
+    background-color: alpha(@blue_3, 0.12);
+    border-color: @blue_3;
+}
 
 .filter-field > label {
-    font-size: 13px;
-    color: #b0b0b0;
-    font-weight: 600;
+    font-size: 14px;
+    color: #999999;
+    font-weight: 500;
     margin-right: 4px;
 }
 
-/* Inner MenuButton — zero vertical padding so min-height drives height */
+/* Inner MenuButton */
 .filter-field menubutton > button {
     background: transparent;
     border: none;
     padding: 0 10px;
     min-height: 36px;
     min-width: 72px;
-    font-size: 13px;
-    color: #e8e8e8;
-    border-radius: 0 6px 6px 0;
+    font-size: 14px;
+    color: #e0e0e0;
+    border-radius: 0 8px 8px 0;
 }
 .filter-field menubutton > button:hover { background: rgba(255,255,255,0.06); }
 
-/* Inner SearchEntry — same height driver */
+/* Inner SearchEntry */
 .filter-field entry {
     background: transparent;
     border: none;
-    min-height: 36px;
-    font-size: 13px;
-    margin-left: 4px;
-}
-
-/* Pill button — search-type toggles, adv toggle, clear.
- * Zero vertical padding + min-height keeps height equal to .filter-field. */
-.filter-chip {
-    background-color: #363636;
-    color: #cccccc;
-    border: 1px solid #505050;
-    border-radius: 6px;
-    padding: 0 16px;
-    min-height: 36px;
+    min-height: 28px;
     font-size: 14px;
-    font-weight: 500;
-}
-.filter-chip:hover {
-    background-color: #444444;
-    color: #ffffff;
-    border-color: #686868;
-}
-
-/* Active/selected — solid bright cyan with maximum contrast */
-.filter-chip--on,
-.filter-chip:checked {
-    background-color: #00d4ff;
-    color: #001520;
-    border-color: #00d4ff;
-    font-weight: 700;
-}
-.filter-chip--on:hover,
-.filter-chip:checked:hover {
-    background-color: #33ddff;
-    border-color: #33ddff;
+    margin-left: 4px;
 }
 
 /* Filter popover (multi-select checkboxes) */
 .filter-popover {
-    background-color: #2a2a2a;
-    padding: 4px;
+    background: transparent;
+}
+.filter-popover > contents {
+    background-color: #1e1e1e;
+    border: 1px solid #444444;
+    border-radius: 8px;
+    padding: 6px;
     min-width: 180px;
 }
-.filter-popover checkbutton { padding: 4px 8px; min-height: 24px; }
-.filter-popover checkbutton label { font-size: 12px; color: #e0e0e0; }
+.filter-popover > arrow {
+    background: transparent;
+    border: none;
+    min-width: 0;
+    min-height: 0;
+}
+.filter-popover checkbutton {
+    padding: 2px 12px;
+    min-height: 28px;
+    border-radius: 6px;
+}
+.filter-popover checkbutton label {
+    font-size: 14px;
+    font-weight: 400;
+    color: #e0e0e0;
+}
 .filter-popover checkbutton:hover {
-    background-color: rgba(255, 255, 255, 0.05);
-    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.06);
+}
+.filter-popover checkbutton:checked label {
+    color: #ffffff;
 }
 
-/* Toggle Buttons */
-.toggle-btn {
-    font-size: 12px;
+/* Genre search entry inside filter popover — slim and unobtrusive */
+.filter-popover .genre-search {
+    min-height: 22px;
+    padding: 1px 6px;
+    margin: 0 2px 2px 2px;
+    font-size: 13px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.06);
+    color: #e0e0e0;
+}
+.filter-popover .genre-search > text {
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+}
+.filter-popover .genre-search image {
+    min-width: 12px;
+    min-height: 12px;
+    -gtk-icon-size: 12px;
+    margin: 0;
+    padding: 0;
+}
+
+/* Library Toggle — purple, for library version switching in detail views */
+.library-toggle-btn {
+    font-size: 16px;
     font-weight: 500;
-    padding: 6px 12px;
-    min-height: 28px;
-    background-color: #3a3a3a;
-    color: #888888;
-    border: 1px solid #555555;
+    padding: 5px 18px;
+    border-radius: 8px;
+    border: 2.5px solid rgba(129, 140, 248, 0.45);
+    background-color: rgba(129, 140, 248, 0.08);
+    color: #e0e0e0;
+    min-height: 0;
+    min-width: 0;
+    transition: background-color 150ms ease-out, border-color 150ms ease-out, opacity 150ms ease-out;
+}
+
+.library-toggle-btn:not(:checked) {
+    opacity: 0.4;
+}
+
+.library-toggle-btn:checked {
+    background-color: rgba(129, 140, 248, 0.22);
+    border-color: rgba(129, 140, 248, 0.7);
+    color: #e0e0e0;
+}
+
+.library-toggle-btn:hover {
+    opacity: 1.0;
+}
+
+/* Filter Toggle — for search type, appears-on, show-featuring toggles */
+.filter-toggle-btn {
+    font-size: 14px;
+    font-weight: 500;
+    padding: 0 10px;
+    min-height: 36px;
+    border-radius: 8px;
+    background-color: #2a2a2a;
+    color: #cccccc;
+    border: 1.5px solid #444444;
     transition: background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
 
-.toggle-btn:hover {
-    background-color: #4a4a4a;
-    color: #aaaaaa;
+.filter-toggle-btn:not(:checked) {
+    opacity: 0.5;
 }
 
-.toggle-btn:checked {
-    background-color: #00d4ff;
-    color: #000000;
-    border-color: #00d4ff;
+.filter-toggle-btn:checked {
+    background-color: alpha(@blue_3, 0.2);
+    color: #e0e0e0;
+    border-color: @blue_3;
 }
 
-.toggle-btn:checked:hover { background-color: #33ddff; }
+.filter-toggle-btn:hover {
+    opacity: 1.0;
+}
+
+.filter-toggle-btn:checked:hover {
+    background-color: alpha(@blue_3, 0.3);
+    color: #ffffff;
+    border-color: @blue_2;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
  * Library Row Typography & Styles
@@ -375,7 +430,7 @@
 
 .library-lock-btn.library-locked {
     opacity: 0.7;
-    color: #e5a640;
+    color: @yellow_5;
 }
 
 .library-lock-btn.library-unlocked {
@@ -418,18 +473,18 @@
     color: #e0e0e0;
 }
 
-.progress-phase-error .progress-phase-title { color: #f87171; }
+.progress-phase-error .progress-phase-title { color: @red_1; }
 .progress-phase-error .progress-phase-bar progress {
     background-color: transparent;
     background-image: repeating-linear-gradient(
         -45deg,
-        #f87171,
-        #f87171 4px,
-        #b91c1c 4px,
-        #b91c1c 8px
+        @red_1,
+        @red_1 4px,
+        @red_5 4px,
+        @red_5 8px
     );
 }
-.progress-phase-error .progress-phase-label { color: #f87171; }
+.progress-phase-error .progress-phase-label { color: @red_1; }
 
 .library-row-year {
     font-size: 17px;
@@ -441,7 +496,7 @@
 }
 
 .album-btn {
-    color: #e5a640;
+    color: @yellow_5;
     background: transparent;
     border: 1px solid rgba(229, 166, 64, 0.3);
     border-radius: 4px;
@@ -490,6 +545,12 @@
     outline-offset: 1px;
 }
 
+.artist-btn:disabled {
+    color: rgba(0, 212, 255, 0.4);
+    background: transparent;
+    border-color: rgba(0, 212, 255, 0.15);
+}
+
 
 /* ═══════════════════════════════════════════════════════════════════════
  * ListBox Row Normalization - Remove GTK default backgrounds
@@ -526,16 +587,16 @@
 
 .library-list > row:hover > :first-child {
     border-radius: 8px;
-    border-color: rgba(52, 211, 153, 0.22);
+    border-color: alpha(@green_3, 0.22);
 }
 
 .library-list > row:selected > :first-child {
     border-radius: 8px;
-    border-color: rgba(52, 211, 153, 0.35);
+    border-color: alpha(@green_3, 0.35);
 }
 
 .library-list:focus-within > row:selected > :first-child {
-    border-color: rgba(52, 211, 153, 1.0);
+    border-color: @green_3;
 }
 
 .library-list > row:hover .library-row-title { color: #ffffff; }

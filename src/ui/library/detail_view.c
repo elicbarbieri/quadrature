@@ -18,6 +18,7 @@
 static const char *UNIFIED_DATA_KEY = "unified-detail-data";
 
 static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t select_track_id);
+static void sync_spacer_heights(UnifiedDetailData *ud);
 
 static void unified_detail_data_free(UnifiedDetailData *ud) {
     if (!ud) return;
@@ -39,7 +40,8 @@ static void unified_detail_data_free(UnifiedDetailData *ud) {
         g_object_unref(ud->bio_bg_cancel);
     }
     ui_selection_group_free(ud->sel_group);
-    g_clear_object(&ud->header_height_group);
+    if (ud->header_height_signal && ud->back_header)
+        g_signal_handler_disconnect(ud->back_header, ud->header_height_signal);
     g_free(ud);
 }
 
@@ -135,7 +137,8 @@ static void on_bio_background_loaded(GObject *src, GAsyncResult *res, gpointer d
     }
     if (!mbid && ud->meta_artist_mbid) mbid = ud->meta_artist_mbid;
     if (!mbid && ud->state == DETAIL_STATE_ARTIST && ud->current_id > 0) {
-        const library_artist_info_t *a = library_cache_get_artist(ud->cache, ud->current_id, ud->library_mask);
+        /* MBID is universal — resolve from any library, not just the filtered set */
+        const library_artist_info_t *a = library_cache_get_artist(ud->cache, ud->current_id, LIBRARY_MASK_ALL);
         if (a) mbid = a->musicbrainz_id;
     }
     if (!mbid) return;
@@ -265,12 +268,15 @@ static void on_wiki_link_clicked(GtkButton *btn, gpointer data) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void nav_push(UnifiedDetailData *ud, NavEntryType type, int64_t id, const char *view_name) {
-    if (ud->nav_depth >= MAX_NAV_STACK) return;
+    if (ud->nav_depth >= MAX_NAV_STACK) {
+        g_warning("nav_push: navigation stack overflow (depth=%d)", ud->nav_depth);
+        return;
+    }
     NavEntry *e = &ud->nav_stack[ud->nav_depth++];
+    memset(e, 0, sizeof(*e));
     e->type = type;
     e->id = id;
     e->view_name = view_name ? g_strdup(view_name) : NULL;
-    e->scroll_pos = 0;
 }
 
 static NavEntry *nav_pop(UnifiedDetailData *ud) {
@@ -324,7 +330,6 @@ static void update_back_label(UnifiedDetailData *ud) {
  * Forward Declarations
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void on_album_card_navigate(GtkButton *btn, gpointer data);
 static void on_unified_artist_link_clicked(GtkButton *btn, gpointer data);
 /* Defined in this file, shared with credits_view.c (declared in library/internal.h) */
 void on_album_card_artist_navigate(GtkButton *btn, gpointer data);
@@ -335,60 +340,239 @@ static void load_meta_artist_state(UnifiedDetailData *ud, const char *artist_mbi
  * Album Card Signal Handlers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ── Selection deconfliction ──────────────────────────────────────────────
- * On the artist page, each album card has its own GtkListBox for tracks,
- * plus the appears-on-tracks and appears-on-albums lists.  GTK manages
- * selection per-list, so clicking a track in Album B leaves Album A's
- * selection intact.  These helpers ensure only one list has a selection
- * at a time.
- */
-
-static void attach_album_card_handlers(GtkWidget *card, UnifiedDetailData *ud, int64_t album_id) {
-    GtkWidget *child = gtk_widget_get_first_child(card);
-    while (child) {
-        if (GTK_IS_BOX(child)) {
-            GtkWidget *inner = gtk_widget_get_first_child(child);
-            while (inner) {
-                if (GTK_IS_BUTTON(inner)) {
-                    const char *tooltip = gtk_widget_get_tooltip_text(inner);
-                    if (tooltip && strstr(tooltip, "View album")) {
-                        g_object_set_data(G_OBJECT(inner), "album-id",
-                                          GSIZE_TO_POINTER((gsize)album_id));
-                        g_object_set_data(G_OBJECT(inner), "unified-data", ud);
-                        g_signal_connect(inner, "clicked", G_CALLBACK(on_album_card_navigate), ud);
-                    }
-                }
-                inner = gtk_widget_get_next_sibling(inner);
-            }
-        }
-        child = gtk_widget_get_next_sibling(child);
-    }
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * State Loading
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id);
+static void populate_library_toggles(UnifiedDetailData *ud, GtkWidget *toggles_box,
+                                      const library_album_info_t *album,
+                                      int64_t active_album_id,
+                                      GCallback toggle_cb, int64_t artist_id);
 
-/* Callback for library toggle buttons in merged album detail view. */
-static void on_library_toggle_clicked(GtkToggleButton *btn, gpointer data) {
+/* Callback for library toggle buttons in the single-album detail view. */
+static void on_album_library_toggle(GtkToggleButton *btn, gpointer data) {
     UnifiedDetailData *ud = data;
     if (!gtk_toggle_button_get_active(btn))
-        return;  /* Ignore deactivation — the newly activated button triggers reload */
+        return;
 
     int64_t target_id = (int64_t)GPOINTER_TO_SIZE(
         g_object_get_data(G_OBJECT(btn), "album-id"));
     if (target_id == ud->current_id)
-        return;  /* Already showing this version */
+        return;
 
     load_album_state(ud, target_id, 0);
 }
 
-/* Populate library toggle buttons for albums with same MBRID across libraries. */
+/* Rebuild a single album card in-place within the artist detail view. */
+static void rebuild_artist_album_card(UnifiedDetailData *ud,
+                                       GtkWidget *card,
+                                       int64_t new_album_id);
+
+/* Callback for library toggle buttons on album cards inside the artist detail view.
+ * Swaps the card in-place without navigating away from the artist view. */
+static void on_artist_card_library_toggle(GtkToggleButton *btn, gpointer data) {
+    UnifiedDetailData *ud = data;
+    if (!gtk_toggle_button_get_active(btn))
+        return;
+
+    int64_t target_id = (int64_t)GPOINTER_TO_SIZE(
+        g_object_get_data(G_OBJECT(btn), "album-id"));
+
+    /* Walk up to the album_card widget */
+    GtkWidget *card = GTK_WIDGET(btn);
+    while (card && gtk_widget_get_parent(card) != ud->artist_albums_container)
+        card = gtk_widget_get_parent(card);
+    if (!card) return;
+
+    /* Check if already showing this version */
+    int64_t current_card_id = (int64_t)GPOINTER_TO_SIZE(
+        g_object_get_data(G_OBJECT(card), "album-id"));
+    if (current_card_id == target_id)
+        return;
+
+    rebuild_artist_album_card(ud, card, target_id);
+}
+
+/* In-place update of an album card's library-specific data.
+ * No widgets are created or destroyed — just text, IDs, and artwork. */
+static void rebuild_artist_album_card(UnifiedDetailData *ud,
+                                       GtkWidget *card,
+                                       int64_t new_album_id) {
+    const library_album_info_t *album = library_cache_get_album(
+        ud->cache, new_album_id, ud->library_mask);
+    if (!album) return;
+
+    /* Build (disc_num, track_num) → new track lookup */
+    GPtrArray *new_tracks = library_cache_get_tracks_by_album(
+        ud->cache, new_album_id, LIBRARY_MASK_ALL);
+
+    GHashTable *track_map = g_hash_table_new(g_direct_hash, g_direct_equal);
+    if (new_tracks) {
+        for (guint i = 0; i < new_tracks->len; i++) {
+            const library_track_info_t *t = g_ptr_array_index(new_tracks, i);
+            uint32_t key = ((uint32_t)t->disc_num << 16) | t->track_num;
+            g_hash_table_insert(track_map, GUINT_TO_POINTER(key), (gpointer)t);
+        }
+    }
+
+    /* Update track rows in-place */
+    GtkWidget *track_list = find_widget_by_name(card, "track_list");
+    if (track_list) {
+        for (GtkWidget *row = gtk_widget_get_first_child(track_list);
+             row; row = gtk_widget_get_next_sibling(row)) {
+            if (!GTK_IS_LIST_BOX_ROW(row)) continue;
+            GtkWidget *content = gtk_list_box_row_get_child(GTK_LIST_BOX_ROW(row));
+            if (!content) continue;
+
+            guint disc = GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(content), "disc-num"));
+            guint tnum = GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(content), "track-num"));
+            uint32_t key = ((uint32_t)disc << 16) | tnum;
+
+            const library_track_info_t *new_t = g_hash_table_lookup(
+                track_map, GUINT_TO_POINTER(key));
+
+            GtkWidget *dur_w = find_widget_by_name(content, "duration");
+            GtkWidget *info_w = find_widget_by_name(content, "info_btn");
+            GtkWidget *artists_w = find_widget_by_name(content, "artists_box");
+
+            if (new_t) {
+                /* Update IDs and library index */
+                g_object_set_data(G_OBJECT(content), "track-id",
+                                  GSIZE_TO_POINTER((gsize)new_t->track_id));
+                g_object_set_data(G_OBJECT(content), "library-index",
+                                  GSIZE_TO_POINTER((gsize)new_t->library_index));
+                gtk_widget_remove_css_class(content, "missing-track");
+
+                /* Restore duration text */
+                if (dur_w) {
+                    char buf[16];
+                    ui_format_duration(new_t->duration_ms, buf, sizeof(buf));
+                    gtk_label_set_text(GTK_LABEL(dur_w), buf);
+                }
+                if (info_w) gtk_widget_set_sensitive(info_w, TRUE);
+                if (artists_w) gtk_widget_set_visible(artists_w, TRUE);
+            } else {
+                /* Track missing in this library version */
+                g_object_set_data(G_OBJECT(content), "track-id", GSIZE_TO_POINTER(0));
+                gtk_widget_add_css_class(content, "missing-track");
+
+                if (dur_w)
+                    gtk_label_set_text(GTK_LABEL(dur_w), "—");
+                if (info_w) gtk_widget_set_sensitive(info_w, FALSE);
+                if (artists_w) gtk_widget_set_visible(artists_w, FALSE);
+            }
+        }
+    }
+
+    g_hash_table_destroy(track_map);
+    g_clear_pointer(&new_tracks, g_ptr_array_unref);
+
+    /* Update album art */
+    GtkWidget *art = find_widget_by_name(card, "card_art");
+    if (art && ud->art_mgr)
+        artwork_manager_get_fullsize_album_art(ud->art_mgr, new_album_id, art);
+
+    /* Update album path button (per-library: different library roots) */
+    GtkWidget *path_btn = find_widget_by_name(card, "card_path_btn");
+    if (path_btn && album->first_track_id) {
+        char *full_path = library_cache_resolve_track_path(ud->cache, album->first_track_id);
+        char *dir = full_path ? g_path_get_dirname(full_path) : NULL;
+        g_free(full_path);
+        if (dir) {
+            GtkWidget *path_label = gtk_button_get_child(GTK_BUTTON(path_btn));
+            if (path_label)
+                gtk_label_set_text(GTK_LABEL(path_label), dir);
+            gtk_widget_set_tooltip_text(path_btn, dir);
+            g_object_set_data_full(G_OBJECT(path_btn), "dir-path", dir, g_free);
+            gtk_widget_set_visible(path_btn, TRUE);
+        }
+    }
+
+    /* Update release info and label (per-library: different metadata DBs) */
+    db_meta_release_t *meta_release = NULL;
+    int lib_idx = album->library_index;
+    if (lib_idx < 0) lib_idx = LIBRARY_GLOBAL_ID_LIB(album->album_id);
+    if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] && lib_idx >= 0) {
+        quadrature_meta_db_t *meta_db = library_cache_get_dbs(ud->cache, lib_idx).meta;
+        if (meta_db)
+            db_meta_get_release(meta_db, album->musicbrainz_release_id, &meta_release);
+    }
+
+    GtkWidget *release_info = find_widget_by_name(card, "card_release_info");
+    if (release_info) {
+        const char *type = (meta_release && meta_release->release_type &&
+                            meta_release->release_type[0])
+                           ? meta_release->release_type : NULL;
+        char *date_str = NULL;
+        if (meta_release && meta_release->release_date)
+            date_str = ui_format_release_date(meta_release->release_date);
+        if (!date_str && album->year > 0)
+            date_str = g_strdup_printf("%u", album->year);
+
+        if (type && date_str) {
+            char *combined = g_strdup_printf("%s \u00b7 %s", type, date_str);
+            gtk_label_set_text(GTK_LABEL(release_info), combined);
+            gtk_widget_set_visible(release_info, TRUE);
+            g_free(combined);
+        } else if (type) {
+            gtk_label_set_text(GTK_LABEL(release_info), type);
+            gtk_widget_set_visible(release_info, TRUE);
+        } else if (date_str) {
+            gtk_label_set_text(GTK_LABEL(release_info), date_str);
+            gtk_widget_set_visible(release_info, TRUE);
+        } else {
+            gtk_widget_set_visible(release_info, FALSE);
+        }
+        g_free(date_str);
+    }
+
+    GtkWidget *label_w = find_widget_by_name(card, "card_label");
+    if (label_w) {
+        if (meta_release && meta_release->label && meta_release->label[0]) {
+            char *label_text = g_strdup_printf("Label: %s", meta_release->label);
+            gtk_label_set_text(GTK_LABEL(label_w), label_text);
+            gtk_widget_set_visible(label_w, TRUE);
+            g_free(label_text);
+        } else {
+            gtk_widget_set_visible(label_w, FALSE);
+        }
+    }
+
+    db_meta_release_free(meta_release);
+
+    /* Update track count stats (per-library: may have different tracks) */
+    GtkWidget *stats = find_widget_by_name(card, "card_stats");
+    if (stats) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%u track%s",
+                 album->track_count, album->track_count == 1 ? "" : "s");
+        gtk_label_set_text(GTK_LABEL(stats), buf);
+    }
+
+    /* Update stored album-id on card */
+    g_object_set_data(G_OBJECT(card), "album-id",
+                      GSIZE_TO_POINTER((gsize)new_album_id));
+
+    /* Re-populate library toggles to reflect the new active album */
+    GtkWidget *card_toggles = find_widget_by_name(card, "card_library_toggles");
+    if (card_toggles) {
+        int64_t artist_id = (int64_t)GPOINTER_TO_SIZE(
+            g_object_get_data(G_OBJECT(card_toggles), "artist-id"));
+        populate_library_toggles(ud, card_toggles, album, new_album_id,
+                                  G_CALLBACK(on_artist_card_library_toggle), artist_id);
+    }
+}
+
+/* Populate library toggle buttons for albums with same MBRID across libraries.
+ * toggle_cb selects the behavior: on_album_library_toggle for album detail view,
+ * on_artist_card_library_toggle for in-place swap in artist detail view.
+ * artist_id is stored on each button for the artist card handler (ignored otherwise). */
 static void populate_library_toggles(UnifiedDetailData *ud, GtkWidget *toggles_box,
                                       const library_album_info_t *album,
-                                      int64_t active_album_id) {
+                                      int64_t active_album_id,
+                                      GCallback toggle_cb,
+                                      int64_t artist_id) {
     /* Clear any previous toggle buttons */
     GtkWidget *child = gtk_widget_get_first_child(toggles_box);
     while (child) {
@@ -413,10 +597,12 @@ static void populate_library_toggles(UnifiedDetailData *ud, GtkWidget *toggles_b
         if (!name) continue;
 
         GtkWidget *btn = gtk_toggle_button_new_with_label(name);
-        gtk_widget_add_css_class(btn, "toggle-btn");
+        gtk_widget_add_css_class(btn, "library-toggle-btn");
 
         g_object_set_data(G_OBJECT(btn), "album-id",
                           GSIZE_TO_POINTER((gsize)ver->album_id));
+        g_object_set_data(G_OBJECT(btn), "artist-id",
+                          GSIZE_TO_POINTER((gsize)artist_id));
 
         if (ver->album_id == active_album_id)
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
@@ -426,9 +612,13 @@ static void populate_library_toggles(UnifiedDetailData *ud, GtkWidget *toggles_b
         else
             group = GTK_TOGGLE_BUTTON(btn);
 
-        g_signal_connect(btn, "toggled", G_CALLBACK(on_library_toggle_clicked), ud);
+        g_signal_connect(btn, "toggled", toggle_cb, ud);
         gtk_box_append(GTK_BOX(toggles_box), btn);
     }
+
+    /* Store artist_id on the container for rebuild_artist_album_card retrieval */
+    g_object_set_data(G_OBJECT(toggles_box), "artist-id",
+                      GSIZE_TO_POINTER((gsize)artist_id));
 
     gtk_widget_set_visible(toggles_box, TRUE);
     g_ptr_array_unref(versions);
@@ -438,25 +628,20 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
     ud->state = DETAIL_STATE_ALBUM;
     ud->current_id = album_id;
 
+    /* No artist suppression in album view */
+    ud->cbs.artist_cbs.suppress_id = 0;
+    ud->cbs.artist_cbs.suppress_mbid = NULL;
+
     /* Clear artist name from header bar — album view does not show it */
     gtk_label_set_text(GTK_LABEL(ud->header_artist_name), "");
+    sync_spacer_heights(ud);
 
     /* Get album info and tracks */
     const library_album_info_t *album = library_cache_get_album(ud->cache, album_id, ud->library_mask);
     if (!album)
         return;
 
-    /* Use the album directly — MBID index handles cross-library resolution
-     * at query time, no representative concept needed. */
-    const library_album_info_t *rep_album = album;
     ud->merged_rep_album_id = album_id;
-
-    /* For source albums, determine library_index for metadata DB lookup */
-    int lib_idx = album->library_index;
-    if (lib_idx < 0 && rep_album) {
-        /* Merged representative: use its own library for metadata */
-        lib_idx = LIBRARY_GLOBAL_ID_LIB(album->album_id);
-    }
 
     GPtrArray *tracks = library_cache_get_tracks_by_album(ud->cache, album_id, LIBRARY_MASK_ALL);
     if (!tracks || tracks->len == 0) {
@@ -465,7 +650,7 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
     }
 
     /* Prefetch audio files for instant playback */
-    if (ud->cache && tracks->len > 0) {
+    if (tracks->len > 0) {
         int64_t *track_ids = g_new(int64_t, tracks->len);
         for (guint i = 0; i < tracks->len; i++) {
             const library_track_info_t *t = g_ptr_array_index(tracks, i);
@@ -475,33 +660,22 @@ static void load_album_state(UnifiedDetailData *ud, int64_t album_id, int64_t se
         g_free(track_ids);
     }
 
-    /* Query metadata DB for enriched release info (non-fatal) */
-    db_meta_release_t *meta_release = NULL;
-    if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] && lib_idx >= 0) {
-        quadrature_meta_db_t *meta_db = library_cache_get_dbs(ud->cache, lib_idx).meta;
-        if (meta_db)
-            db_meta_get_release(meta_db, album->musicbrainz_release_id, &meta_release);
-    }
-
     /* Clear inner container and create album card */
     ui_box_clear(GTK_BOX(ud->album_card_inner));
 
     GtkWidget *card = ui_create_album_detail_card(album, tracks, ud->cache, ud->art_mgr, 0,
                                                    (RowCallbacks *)&ud->cbs.album_track_cbs,
-                                                   (RowCallbacks *)&ud->cbs.artist_cbs,
-                                                   meta_release);
-    db_meta_release_free(meta_release);
+                                                   (RowCallbacks *)&ud->cbs.artist_cbs);
     gtk_box_append(GTK_BOX(ud->album_card_inner), card);
 
     /* Wire info button handlers for track rows */
     wire_info_buttons(card, ud);
 
     /* Populate library toggles for merged albums */
-    if (rep_album) {
-        GtkWidget *toggles_box = find_widget_by_name(card, "card_library_toggles");
-        if (toggles_box)
-            populate_library_toggles(ud, toggles_box, rep_album, album_id);
-    }
+    GtkWidget *toggles_box = find_widget_by_name(card, "card_library_toggles");
+    if (toggles_box)
+        populate_library_toggles(ud, toggles_box, album, album_id,
+                                  G_CALLBACK(on_album_library_toggle), 0);
 
     /* Find and connect artist link button */
     GtkWidget *artist_link = find_widget_by_name(card, "card_artist_link");
@@ -585,7 +759,7 @@ static void populate_artist_library_toggles(UnifiedDetailData *ud, int64_t activ
         if (!name) continue;
 
         GtkWidget *btn = gtk_toggle_button_new_with_label(name);
-        gtk_widget_add_css_class(btn, "toggle-btn");
+        gtk_widget_add_css_class(btn, "library-toggle-btn");
 
         g_object_set_data(G_OBJECT(btn), "artist-id",
                           GSIZE_TO_POINTER((gsize)ver->artist_id));
@@ -606,10 +780,22 @@ static void populate_artist_library_toggles(UnifiedDetailData *ud, int64_t activ
     g_ptr_array_unref(versions);
 }
 
+/* Sort albums by year descending (latest first), title as tiebreaker. */
+static int detail_album_year_desc_cmp(gconstpointer a, gconstpointer b) {
+    const library_album_info_t *aa = *(const library_album_info_t *const *)a;
+    const library_album_info_t *bb = *(const library_album_info_t *const *)b;
+    int cmp = (int)bb->year - (int)aa->year;
+    return cmp != 0 ? cmp : g_utf8_collate(aa->title, bb->title);
+}
+
 static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     ud->state = DETAIL_STATE_ARTIST;
     ud->current_id = artist_id;
     ud->merged_rep_album_id = 0;
+
+    /* Suppress buttons for the artist we're viewing */
+    ud->cbs.artist_cbs.suppress_id = artist_id;
+    ud->cbs.artist_cbs.suppress_mbid = NULL;
 
     /* Reset sections */
     gtk_widget_set_visible(ud->artist_banner_overlay, FALSE);
@@ -617,6 +803,8 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     gtk_widget_set_visible(ud->about_section, FALSE);
 
     GPtrArray *albums = library_cache_get_albums_by_artist(ud->cache, artist_id, ud->library_mask);
+    if (albums && albums->len > 1)
+        g_ptr_array_sort(albums, (GCompareFunc)detail_album_year_desc_cmp);
     GPtrArray *appearance_albums = library_cache_get_artist_appearances(ud->cache, artist_id, ud->library_mask);
     GPtrArray *appearance_tracks = library_cache_get_artist_appearance_tracks(ud->cache, artist_id, ud->library_mask);
 
@@ -624,8 +812,8 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     gboolean has_appearances = (appearance_albums && appearance_albums->len > 0) ||
                                (appearance_tracks && appearance_tracks->len > 0);
 
-    /* Check if artist may have MB credits (don't bail early) */
-    const library_artist_info_t *artist_check = library_cache_get_artist(ud->cache, artist_id, ud->library_mask);
+    /* MBID lookup for art/bio/credits — resolve from any library (MBID is universal) */
+    const library_artist_info_t *artist_check = library_cache_get_artist(ud->cache, artist_id, LIBRARY_MASK_ALL);
     gboolean may_have_credits = artist_check && artist_check->musicbrainz_id && ud->settings;
 
     if (!has_albums && !has_appearances && !may_have_credits) {
@@ -646,6 +834,7 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
             artist_name = artist->name;
     }
     gtk_label_set_text(GTK_LABEL(ud->header_artist_name), artist_name ? artist_name : "Unknown Artist");
+    sync_spacer_heights(ud);
 
     /* Library toggles for multi-library artists */
     populate_artist_library_toggles(ud, artist_id);
@@ -721,21 +910,9 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
         const library_album_info_t *album = g_ptr_array_index(albums, i);
         GPtrArray *tracks = library_cache_get_tracks_by_album(ud->cache, album->album_id, LIBRARY_MASK_ALL);
         if (tracks && tracks->len > 0) {
-            /* Fetch enriched release info (label, release date) */
-            db_meta_release_t *meta_release = NULL;
-            int lib_idx = album->library_index;
-            if (lib_idx < 0) lib_idx = LIBRARY_GLOBAL_ID_LIB(album->album_id);
-            if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] && lib_idx >= 0) {
-                quadrature_meta_db_t *meta_db = library_cache_get_dbs(ud->cache, lib_idx).meta;
-                if (meta_db)
-                    db_meta_get_release(meta_db, album->musicbrainz_release_id, &meta_release);
-            }
-
             GtkWidget *card = ui_create_album_detail_card(album, tracks, ud->cache, ud->art_mgr, 0,
                                                            (RowCallbacks *)&ud->cbs.album_track_cbs,
-                                                           (RowCallbacks *)&ud->cbs.artist_cbs,
-                                                           meta_release);
-            db_meta_release_free(meta_release);
+                                                           (RowCallbacks *)&ud->cbs.artist_cbs);
 
             /* Find artist link and configure it */
             GtkWidget *artist_link = find_widget_by_name(card, "card_artist_link");
@@ -748,7 +925,14 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
                 g_signal_connect(artist_link, "clicked", G_CALLBACK(on_album_card_artist_navigate), ud);
             }
 
-            attach_album_card_handlers(card, ud, album->album_id);
+            /* Populate library toggles for multi-library albums */
+            GtkWidget *card_toggles = find_widget_by_name(card, "card_library_toggles");
+            if (card_toggles)
+                populate_library_toggles(ud, card_toggles, album, album->album_id,
+                                          G_CALLBACK(on_artist_card_library_toggle), artist_id);
+
+            g_object_set_data(G_OBJECT(card), "album-id",
+                              GSIZE_TO_POINTER((gsize)album->album_id));
             wire_info_buttons(card, ud);
 
             /* Add track list to selection group for mutual-exclusion */
@@ -808,7 +992,7 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
 
     /* Pre-collect MB credit roles per album so cache appearance rows can
      * be annotated with role pills (Vocal, Producer, etc.) in one pass. */
-    const library_artist_info_t *artist_info = library_cache_get_artist(ud->cache, artist_id, ud->library_mask);
+    const library_artist_info_t *artist_info = library_cache_get_artist(ud->cache, artist_id, LIBRARY_MASK_ALL);
     GHashTable *credit_album_roles = NULL;  /* album_id → GPtrArray<char*> */
     if (artist_info && artist_info->musicbrainz_id && ud->settings) {
         credit_album_roles = collect_credit_album_roles(
@@ -954,13 +1138,6 @@ static void on_unified_artist_link_clicked(GtkButton *btn, gpointer data) {
     }
 }
 
-static void on_album_card_navigate(GtkButton *btn, gpointer data) {
-    UnifiedDetailData *ud = data;
-    int64_t album_id = (int64_t)GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(btn), "album-id"));
-    if (album_id > 0) {
-        library_unified_detail_navigate_to_album(ud->container, album_id, NULL, 0);
-    }
-}
 
 void on_album_card_artist_navigate(GtkButton *btn, gpointer data) {
     UnifiedDetailData *ud = data;
@@ -1157,6 +1334,27 @@ static gboolean on_detail_key_pressed(GtkEventControllerKey *ctl, guint keyval,
  * Widget Builders
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Sync spacer heights to back_header.  Called:
+ *  1. Proactively after every header text change (before GTK's measure pass)
+ *  2. Reactively via notify::height (catches allocation-driven changes)
+ * Uses gtk_widget_measure to predict height from current text, so the
+ * spacer's size request is correct DURING measure, not one frame late. */
+static void sync_spacer_heights(UnifiedDetailData *ud) {
+    int min_h, nat_h;
+    gtk_widget_measure(ud->back_header, GTK_ORIENTATION_VERTICAL, -1,
+                       &min_h, &nat_h, NULL, NULL);
+    if (nat_h <= 0) return;
+    if (ud->album_header_spacer)
+        gtk_widget_set_size_request(ud->album_header_spacer, -1, nat_h);
+    if (ud->artist_header_spacer)
+        gtk_widget_set_size_request(ud->artist_header_spacer, -1, nat_h);
+}
+
+static void on_back_header_height_changed(GObject *obj, GParamSpec *pspec, gpointer data) {
+    (void)obj; (void)pspec;
+    sync_spacer_heights(data);
+}
+
 static GtkWidget *build_album_page(UnifiedDetailData *ud) {
     /* Create scrolled window programmatically */
     GtkWidget *scroll = gtk_scrolled_window_new();
@@ -1169,12 +1367,11 @@ static GtkWidget *build_album_page(UnifiedDetailData *ud) {
     ud->album_card_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(ud->album_card_container, "album-card-container");
 
-    /* Invisible spacer: joins the shared header_height_group so its height
-     * always matches back_header, pushing album art below the overlay.
+    /* Invisible spacer: height synced to back_header via notify::height,
+     * pushing album art below the overlay.
      * Lives in the outer container so ui_box_clear(album_card_inner) cannot remove it. */
-    GtkWidget *header_spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_size_group_add_widget(ud->header_height_group, header_spacer);
-    gtk_box_append(GTK_BOX(ud->album_card_container), header_spacer);
+    ud->album_header_spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(ud->album_card_container), ud->album_header_spacer);
 
     /* Inner container: cleared and repopulated on each album load. */
     ud->album_card_inner = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -1188,6 +1385,9 @@ static GtkWidget *build_album_page(UnifiedDetailData *ud) {
         gtk_viewport_set_scroll_to_focus(GTK_VIEWPORT(viewport), TRUE);
     }
     
+    /* Smooth scroll for album detail */
+    ui_smooth_scroll_attach(GTK_SCROLLED_WINDOW(scroll));
+
     /* Key controller for navigation */
     GtkEventController *key_ctl = gtk_event_controller_key_new();
     g_signal_connect(key_ctl, "key-pressed", G_CALLBACK(on_detail_key_pressed), ud);
@@ -1205,6 +1405,9 @@ static GtkWidget *build_artist_page(UnifiedDetailData *ud) {
     /* Get the root scroll window and all child widgets */
     GtkWidget *scroll = GTK_WIDGET(gtk_builder_get_object(builder, "artist_page_scroll"));
     g_assert(scroll != NULL);  /* Template must exist */
+
+    /* Smooth scroll for artist detail */
+    ui_smooth_scroll_attach(GTK_SCROLLED_WINDOW(scroll));
 
     /* Store references to widgets we need to update dynamically */
     ud->artist_name = GTK_WIDGET(gtk_builder_get_object(builder, "artist_name"));
@@ -1277,14 +1480,12 @@ static GtkWidget *build_artist_page(UnifiedDetailData *ud) {
         gtk_viewport_set_scroll_to_focus(GTK_VIEWPORT(viewport), TRUE);
     }
 
-    /* Invisible spacer: joins the shared header_height_group so its height
-     * always matches back_header, pushing the banner (and all content below
-     * it) clear of the opaque overlay header. */
+    /* Invisible spacer: height synced to back_header via notify::height,
+     * pushing the banner (and all content below it) clear of the overlay header. */
     GtkWidget *artist_page_content = GTK_WIDGET(gtk_builder_get_object(builder, "artist_page_content"));
     g_assert(artist_page_content != NULL);
-    GtkWidget *header_spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_size_group_add_widget(ud->header_height_group, header_spacer);
-    gtk_box_prepend(GTK_BOX(artist_page_content), header_spacer);
+    ud->artist_header_spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_prepend(GTK_BOX(artist_page_content), ud->artist_header_spacer);
 
     /* Take ownership of root widget and release builder */
     g_object_ref(scroll);
@@ -1304,6 +1505,10 @@ static void load_meta_artist_state(UnifiedDetailData *ud, const char *artist_mbi
     ud->current_id = 0;
     ud->merged_rep_album_id = 0;
 
+    /* Suppress buttons for the meta-artist we're viewing */
+    ud->cbs.artist_cbs.suppress_id = 0;
+    ud->cbs.artist_cbs.suppress_mbid = NULL;  /* Set after g_strdup below */
+
     /* Reset sections */
     gtk_widget_set_visible(ud->artist_banner_overlay, FALSE);
     gtk_widget_set_visible(ud->appears_on_section, FALSE);
@@ -1315,9 +1520,13 @@ static void load_meta_artist_state(UnifiedDetailData *ud, const char *artist_mbi
     ud->meta_artist_mbid = g_strdup(artist_mbid);
     ud->meta_artist_name = g_strdup(artist_name);
 
+    /* Now safe to set suppress_mbid — points into ud->meta_artist_mbid lifetime */
+    ud->cbs.artist_cbs.suppress_mbid = ud->meta_artist_mbid;
+
     /* Set name in the full-width header bar; hide albums and stats (meta artist has no own albums) */
     gtk_label_set_text(GTK_LABEL(ud->header_artist_name),
                        artist_name ? artist_name : "Unknown Artist");
+    sync_spacer_heights(ud);
     gtk_label_set_text(GTK_LABEL(ud->artist_stats), "");
     gtk_widget_set_visible(ud->artist_stats, FALSE);
     gtk_widget_set_visible(ud->albums_section, FALSE);
@@ -1428,16 +1637,16 @@ GtkWidget *library_unified_detail_view_new(library_cache_t *cache,
 
     g_object_unref(builder);
 
-    /* Shared VERTICAL size group: back_header + one spacer per page.
-     * GTK propagates back_header's natural height to every spacer automatically,
-     * so content on both the album and artist pages always starts below the
-     * opaque header overlay — no hardcoded pixel values, no callbacks. */
-    ud->header_height_group = gtk_size_group_new(GTK_SIZE_GROUP_VERTICAL);
-    gtk_size_group_add_widget(ud->header_height_group, ud->back_header);
-
     /* Build and add detail pages to stack */
     gtk_stack_add_named(GTK_STACK(ud->content_stack), build_album_page(ud), "album");
     gtk_stack_add_named(GTK_STACK(ud->content_stack), build_artist_page(ud), "artist");
+
+    /* Sync spacer heights: initial seed + reactive notify::height.
+     * sync_spacer_heights() is also called proactively after every header
+     * text change in load_album_state / load_artist_state / load_meta_artist. */
+    sync_spacer_heights(ud);
+    ud->header_height_signal = g_signal_connect(ud->back_header, "notify::height",
+        G_CALLBACK(on_back_header_height_changed), ud);
 
     /* Connect signals - CANNOT be done in template (requires C callbacks) */
     g_signal_connect(ud->back_button, "clicked", G_CALLBACK(on_unified_back_clicked), ud);
@@ -1557,6 +1766,11 @@ void library_unified_detail_navigate_to_meta_artist(GtkWidget *view,
     UnifiedDetailData *ud = g_object_get_data(G_OBJECT(view), UNIFIED_DATA_KEY);
     g_assert(ud != NULL);
 
+    /* Skip duplicate navigation to same meta-artist */
+    if (ud->state == DETAIL_STATE_META_ARTIST && artist_mbid &&
+        ud->meta_artist_mbid && g_strcmp0(ud->meta_artist_mbid, artist_mbid) == 0)
+        return;
+
     g_info("Navigate → Credits: '%s' (mbid=%s)",
            artist_name ? artist_name : "<unknown>",
            artist_mbid ? artist_mbid : "<none>");
@@ -1593,12 +1807,14 @@ gboolean library_unified_detail_go_back(GtkWidget *view) {
     NavEntry *prev = nav_pop(ud);
     g_assert(prev != NULL);  /* nav_depth > 0 guarantees nav_pop returns non-NULL */
 
+    gboolean handled = TRUE;
+
     switch (prev->type) {
     case NAV_ENTRY_VIEW:
         /* Exiting detail view - caller will navigate to previous main view */
         g_info("Navigate ← Back to %s", prev->view_name ? prev->view_name : "previous view");
-        g_free(prev->view_name);
-        return FALSE;
+        handled = FALSE;
+        break;
     case NAV_ENTRY_ARTIST:
         {
             const library_artist_info_t *artist = library_cache_get_artist(ud->cache, prev->id, ud->library_mask);
@@ -1626,13 +1842,16 @@ gboolean library_unified_detail_go_back(GtkWidget *view) {
         break;
     }
 
-    update_back_label(ud);
+    if (handled)
+        update_back_label(ud);
 
+    /* Common cleanup for all entry types */
     g_free(prev->view_name);
     g_free(prev->meta_artist_mbid);
     g_free(prev->meta_artist_name);
     g_free(prev->meta_artist_type);
-    return TRUE;
+    memset(prev, 0, sizeof(*prev));
+    return handled;
 }
 
 void library_unified_detail_reload(GtkWidget *view) {

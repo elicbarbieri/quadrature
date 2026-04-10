@@ -57,6 +57,13 @@ ______________________________________________________________________
 Each library is an independent unit with its own `quadrature.sqlite`, metadata DBs,
 and `artwork/` directory. The only shared state is the global artist atlas.
 
+**Content vs metadata boundary:** Library bitmask filtering applies to content queries
+(which albums, tracks, and artist listings to display). Metadata resolution — MBID
+lookups, artist artwork, bios — always uses `LIBRARY_MASK_ALL`. The MBID is a
+universal key: if an artist is known in any library, its art and bio are available
+everywhere. Library filtering only controls whether the artist *appears* in the UI;
+once shown, all enrichment data is library-agnostic.
+
 Libraries are configured in `settings.ini` as `library_config_t` entries with:
 
 - `path` — music folder root (required)
@@ -106,15 +113,20 @@ ______________________________________________________________________
 
 ### Phase 1 — SCAN
 
-Fast, single-threaded. Builds a work queue of changed album directories.
+Fast, single-threaded. Builds a work queue of changed album directories and detects orphans.
 
 1. `db_get_album_mtimes_page()` → build `GHashTable` of `path → (album_id, last_updated_at, last_updated_size)`
 1. Walk library root with `nftw(FTW_PHYS)` (symlinks not followed — see INDEXER.md)
 1. `stat(dir)` → current mtime + file count + total size
 1. Lookup in hashmap: mtime AND size match → skip; either differs or missing → queue
+1. Remove matched entry from hashmap (mark as "seen")
 1. Sibling disc detection: subdirectories sharing a common prefix differing only by a disc
    suffix (`Disc N`, `CD N`, `(Disc N)`) are grouped into one multi-disc work item with a
    synthetic canonical path equal to the common prefix. Requires ≥2 matching siblings.
+1. **Orphan pruning:** after walk, remaining hashmap entries = albums deleted from disk.
+   `db_prune_orphan_albums()` deletes these albums, their tracks (→ track_artists CASCADE),
+   and cleans FTS tables. Subsequent `db_prune_orphan_artists()` in Phase 3 removes any
+   artists left without track or album references.
 
 Completes in \<1 second for unchanged libraries.
 
@@ -217,6 +229,7 @@ Fetches artist images from fanart.tv for all artists with MusicBrainz IDs.
 - Builds/updates the global artist atlas at `~/.local/share/quadrature/atlas/artists.atlas`
 - Uses `flock()` on `artists.atlas.lock` for write serialization across concurrent indexer runs
 - Atlas is UUID-keyed (binary MusicBrainz UUIDs) — shared across all libraries
+- Each library run deduplicates: copies art from other libraries before fetching, writes merged atlas
 
 ### Phase 8 — ARTIST_BIO
 
@@ -226,6 +239,9 @@ Fetches artist biographies from Wikipedia via Wikidata for all artists with Musi
 - Writes to `{data_root}/quadrature-bios.sqlite` (separate DB so deleting metadata DB
   for re-resolve doesn't destroy expensive-to-refetch bios)
 - Rate-limited (250ms between requests)
+
+Both Phase 7 and 8 outputs are queried by MBID, not by library — art and bios are
+available regardless of the active library filter (see Multi-Library Architecture above).
 
 ### MB Staleness Sync
 

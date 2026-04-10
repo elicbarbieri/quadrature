@@ -740,7 +740,21 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
 
         /* Wire artist button callback: prefer library ID, fall back to MBID */
         if (credit_artist_btn) {
-            if (credit->artist_id > 0 && artist_cbs && artist_cbs->on_activate) {
+            gboolean suppressed = FALSE;
+
+            /* Suppress if this credit artist is the one we're currently viewing */
+            if (artist_cbs && credit->artist_id > 0 &&
+                artist_cbs->suppress_id == credit->artist_id) {
+                suppressed = TRUE;
+            } else if (artist_cbs && credit->artist_mbid &&
+                       artist_cbs->suppress_mbid &&
+                       g_strcmp0(credit->artist_mbid, artist_cbs->suppress_mbid) == 0) {
+                suppressed = TRUE;
+            }
+
+            if (suppressed) {
+                gtk_widget_set_sensitive(credit_artist_btn, FALSE);
+            } else if (credit->artist_id > 0 && artist_cbs && artist_cbs->on_activate) {
                 g_object_set_data(G_OBJECT(credit_artist_btn), "artist-id",
                                   GSIZE_TO_POINTER((gsize)credit->artist_id));
                 RowCallbacks *cbs_copy = g_new0(RowCallbacks, 1);
@@ -923,7 +937,7 @@ static void disc_header_func(GtkListBoxRow *row,
  * "2024-03"    → "March 2024"
  * "2024"       → "2024"
  * Returns a g_malloc'd string. */
-static char *format_release_date(const char *date) {
+char *ui_format_release_date(const char *date) {
     static const char *months[] = {
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December"
@@ -979,8 +993,17 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
                                         ArtworkManager *art_mgr,
                                         guint max_preview_tracks,
                                         RowCallbacks *track_cbs,
-                                        RowCallbacks *artist_cbs,
-                                        const db_meta_release_t *meta_release) {
+                                        RowCallbacks *artist_cbs) {
+    /* Fetch enriched release info (label, release date) from metadata DB */
+    db_meta_release_t *meta_release = NULL;
+    int lib_idx = album->library_index;
+    if (lib_idx < 0) lib_idx = LIBRARY_GLOBAL_ID_LIB(album->album_id);
+    if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] && lib_idx >= 0) {
+        quadrature_meta_db_t *meta_db = library_cache_get_dbs(cache, lib_idx).meta;
+        if (meta_db)
+            db_meta_get_release(meta_db, album->musicbrainz_release_id, &meta_release);
+    }
+
     GtkBuilder *builder;
     GtkWidget *card = ui_builder_load("/org/quadrature/ui/album_card.ui", "album_card", &builder);
 
@@ -988,7 +1011,7 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
     GtkWidget *art = GTK_WIDGET(gtk_builder_get_object(builder, "card_art"));
     GtkWidget *title = GTK_WIDGET(gtk_builder_get_object(builder, "card_title"));
     GtkWidget *artist_link = GTK_WIDGET(gtk_builder_get_object(builder, "card_artist_link"));
-    GtkWidget *year = GTK_WIDGET(gtk_builder_get_object(builder, "card_year"));
+    GtkWidget *release_info = GTK_WIDGET(gtk_builder_get_object(builder, "card_release_info"));
     GtkWidget *label_w = GTK_WIDGET(gtk_builder_get_object(builder, "card_label"));
     GtkWidget *stats = GTK_WIDGET(gtk_builder_get_object(builder, "card_stats"));
     GtkWidget *template_genres = GTK_WIDGET(gtk_builder_get_object(builder, "card_genres"));
@@ -1011,24 +1034,35 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
                          GSIZE_TO_POINTER((gsize)album->artist_id));
     }
 
-    if (year) {
-        /* Prefer full release date from metadata DB, fall back to year */
+    /* Release info: "Type · Date" or just date or just type */
+    if (release_info) {
+        const char *type = (meta_release && meta_release->release_type &&
+                            meta_release->release_type[0])
+                           ? meta_release->release_type : NULL;
         char *date_str = NULL;
         if (meta_release && meta_release->release_date)
-            date_str = format_release_date(meta_release->release_date);
-
-        if (date_str) {
-            gtk_label_set_text(GTK_LABEL(year), date_str);
-            gtk_widget_set_visible(year, TRUE);
-            g_free(date_str);
-        } else if (album->year > 0) {
+            date_str = ui_format_release_date(meta_release->release_date);
+        if (!date_str && album->year > 0) {
             char buf[8];
             snprintf(buf, sizeof(buf), "%u", album->year);
-            gtk_label_set_text(GTK_LABEL(year), buf);
-            gtk_widget_set_visible(year, TRUE);
-        } else {
-            gtk_widget_set_visible(year, FALSE);
+            date_str = g_strdup(buf);
         }
+
+        if (type && date_str) {
+            char *combined = g_strdup_printf("%s \u00b7 %s", type, date_str);
+            gtk_label_set_text(GTK_LABEL(release_info), combined);
+            gtk_widget_set_visible(release_info, TRUE);
+            g_free(combined);
+        } else if (type) {
+            gtk_label_set_text(GTK_LABEL(release_info), type);
+            gtk_widget_set_visible(release_info, TRUE);
+        } else if (date_str) {
+            gtk_label_set_text(GTK_LABEL(release_info), date_str);
+            gtk_widget_set_visible(release_info, TRUE);
+        } else {
+            gtk_widget_set_visible(release_info, FALSE);
+        }
+        g_free(date_str);
     }
 
     if (stats) {
@@ -1040,8 +1074,10 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
 
     /* Record label */
     if (label_w && meta_release && meta_release->label && meta_release->label[0]) {
-        gtk_label_set_text(GTK_LABEL(label_w), meta_release->label);
+        char *label_text = g_strdup_printf("Label: %s", meta_release->label);
+        gtk_label_set_text(GTK_LABEL(label_w), label_text);
         gtk_widget_set_visible(label_w, TRUE);
+        g_free(label_text);
     }
 
     /* Genre pills: multi-row wrapping overflow layout.
@@ -1081,8 +1117,11 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
         char *dir = full_path ? g_path_get_dirname(full_path) : NULL;
         g_free(full_path);
         if (dir) {
-            gtk_button_set_label(GTK_BUTTON(path_btn), dir);
-            gtk_widget_set_tooltip_text(path_btn, "Open in file manager");
+            GtkWidget *path_label = gtk_label_new(dir);
+            gtk_label_set_ellipsize(GTK_LABEL(path_label), PANGO_ELLIPSIZE_MIDDLE);
+            gtk_label_set_xalign(GTK_LABEL(path_label), 0);
+            gtk_button_set_child(GTK_BUTTON(path_btn), path_label);
+            gtk_widget_set_tooltip_text(path_btn, dir);
             g_object_set_data_full(G_OBJECT(path_btn), "dir-path", dir, g_free);
             g_signal_connect(path_btn, "clicked", G_CALLBACK(on_path_btn_clicked), NULL);
             gtk_widget_set_visible(path_btn, TRUE);
@@ -1161,5 +1200,6 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
         g_object_set_data_full(G_OBJECT(card), "release-mbid",
                                g_strdup(album->musicbrainz_release_id), g_free);
 
+    db_meta_release_free(meta_release);
     return card;
 }

@@ -66,6 +66,9 @@ typedef struct {
      * NULL = no filter active (all items pass). Rebuilt on each filter change. */
     GHashTable *filter_match_ids;
 
+    /* Cancellable for in-flight async credit entity search */
+    GCancellable *credit_cancel;
+
     /* Shared filter bar */
     FilterBarState filter_bar;
 
@@ -77,8 +80,16 @@ typedef struct {
 
 static const char *VIEW_DATA_KEY = "library-view-data";
 
+/* Forward declarations for functions used in async completion callbacks */
+static void update_subtitle(ViewData *vd);
+static void rebuild_scrubber_buckets(ViewData *vd);
+
 static void view_data_free(gpointer data) {
     ViewData *vd = data;
+    if (vd->credit_cancel) {
+        g_cancellable_cancel(vd->credit_cancel);
+        g_clear_object(&vd->credit_cancel);
+    }
     filter_bar_destroy(&vd->filter_bar);
     g_clear_pointer(&vd->filter_match_ids, g_hash_table_unref);
     lazy_list_free(vd->lazy_list);
@@ -100,19 +111,41 @@ static void view_data_free(gpointer data) {
  *
  * @param kind LIBRARY_ITEM_ALBUM → return album IDs, LIBRARY_ITEM_ARTIST → artist IDs
  */
-static GHashTable *build_credit_entity_set(ViewData *vd) {
-    const char *credit_text = filter_bar_get_credit_text(&vd->filter_bar);
-    if (!credit_text) return NULL;  /* No credit text → no credit filter */
+/* ── Async Credit Entity Search (GTask-based) ─────────────────────────── */
 
-    const char *role_gid = filter_bar_get_role_gid(&vd->filter_bar);
+/* Input for background credit entity search */
+typedef struct {
+    library_cache_t *cache;
+    LibraryItemKind kind;
+    char *credit_text;
+    char *role_gid;
+} CreditEntityInput;
 
+static void credit_entity_input_free(gpointer data) {
+    CreditEntityInput *in = data;
+    if (!in) return;
+    g_free(in->credit_text);
+    g_free(in->role_gid);
+    g_free(in);
+}
+
+/**
+ * Build a set of global entity IDs matched by credit search.
+ * Thread-safe: accesses only library_cache and DB handles (no GTK widgets).
+ *
+ * @param kind LIBRARY_ITEM_ALBUM → return album IDs, LIBRARY_ITEM_ARTIST → artist IDs
+ */
+static GHashTable *build_credit_entity_set_impl(library_cache_t *cache,
+                                                  LibraryItemKind kind,
+                                                  const char *credit_text,
+                                                  const char *role_gid) {
     GHashTable *entity_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 
-    int lib_count = library_cache_get_library_count(vd->cache);
+    int lib_count = library_cache_get_library_count(cache);
     for (int li = 0; li < lib_count; li++) {
-        int bi = library_cache_get_bitmap_index(vd->cache, li);
-        if (!library_cache_get_available(vd->cache, bi)) continue;
-        library_cache_dbs_t dbs = library_cache_get_dbs(vd->cache, bi);
+        int bi = library_cache_get_bitmap_index(cache, li);
+        if (!library_cache_get_available(cache, bi)) continue;
+        library_cache_dbs_t dbs = library_cache_get_dbs(cache, bi);
         if (!dbs.meta) continue;
 
         /* Search metadata artists matching credit text */
@@ -126,10 +159,8 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
             continue;
         }
 
-        /* Get main DB for positional bridge */
         gboolean have_lib_db = (dbs.db != NULL);
 
-        /* For each matched artist, get credits and resolve to entity IDs */
         for (size_t ai = 0; ai < artist_count; ai++) {
             const char *artist_mbid = artists[ai].artist_mbid;
             if (!artist_mbid) continue;
@@ -140,27 +171,37 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
                 dbs.meta, artist_mbid, role_gid, &credits, &credit_count);
 
             if (res == QUADRATURE_OK && credit_count > 0 && have_lib_db) {
-                for (size_t ci = 0; ci < credit_count; ci++) {
-                    db_meta_artist_credit_t *c = &credits[ci];
-                    if (!c->release_mbid) continue;
+                /* Batch-resolve all credit positions at once */
+                db_track_position_t *positions = g_new0(db_track_position_t, credit_count);
+                int64_t *track_ids = g_new0(int64_t, credit_count);
 
-                    int64_t local_track_id = 0;
-                    if (db_get_track_by_position(dbs.db, c->release_mbid,
-                            c->disc_num, c->track_num, &local_track_id) == QUADRATURE_OK) {
-                        int64_t global_track_id = LIBRARY_MAKE_GLOBAL_ID(li, local_track_id);
-                        const library_track_info_t *track =
-                            library_cache_get_track(vd->cache, global_track_id);
-                        if (track) {
-                            int64_t eid = (vd->kind == LIBRARY_ITEM_ALBUM)
-                                          ? track->album_id : track->artist_id;
-                            if (!g_hash_table_contains(entity_ids, &eid)) {
-                                int64_t *key = g_new(int64_t, 1);
-                                *key = eid;
-                                g_hash_table_add(entity_ids, key);
-                            }
+                for (size_t ci = 0; ci < credit_count; ci++) {
+                    positions[ci].release_mbid = credits[ci].release_mbid;
+                    positions[ci].disc_num = credits[ci].disc_num;
+                    positions[ci].track_num = credits[ci].track_num;
+                }
+
+                db_resolve_track_positions_batch(dbs.db, positions, credit_count, track_ids);
+
+                for (size_t ci = 0; ci < credit_count; ci++) {
+                    if (track_ids[ci] == 0) continue;
+
+                    int64_t global_track_id = LIBRARY_MAKE_GLOBAL_ID(li, track_ids[ci]);
+                    const library_track_info_t *track =
+                        library_cache_get_track(cache, global_track_id);
+                    if (track) {
+                        int64_t eid = (kind == LIBRARY_ITEM_ALBUM)
+                                      ? track->album_id : track->artist_id;
+                        if (!g_hash_table_contains(entity_ids, &eid)) {
+                            int64_t *key = g_new(int64_t, 1);
+                            *key = eid;
+                            g_hash_table_add(entity_ids, key);
                         }
                     }
                 }
+
+                g_free(positions);
+                g_free(track_ids);
             }
             db_meta_artist_credits_free(credits, credit_count);
         }
@@ -169,6 +210,60 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
     }
 
     return entity_ids;
+}
+
+/* GTask worker thread for credit entity search */
+static void credit_entity_search_thread(GTask *task, gpointer src,
+                                          gpointer data, GCancellable *cancel) {
+    (void)src;
+    CreditEntityInput *in = data;
+
+    if (g_cancellable_is_cancelled(cancel)) return;
+
+    GHashTable *result = build_credit_entity_set_impl(
+        in->cache, in->kind, in->credit_text, in->role_gid);
+
+    if (g_cancellable_is_cancelled(cancel)) {
+        g_hash_table_unref(result);
+        return;
+    }
+
+    g_task_return_pointer(task, result, (GDestroyNotify)g_hash_table_unref);
+}
+
+/* Completion: apply credit set intersection and notify GTK filter */
+static void on_credit_entity_search_done(GObject *src, GAsyncResult *res,
+                                           gpointer data) {
+    (void)src;
+    ViewData *vd = data;
+    GError *error = NULL;
+    GHashTable *credit_set = g_task_propagate_pointer(G_TASK(res), &error);
+
+    if (!credit_set) {
+        if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+            g_warning("credit entity search failed: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+
+    /* Intersect: remove items from filter_match_ids not in credit_set */
+    if (vd->filter_match_ids) {
+        GHashTableIter iter;
+        gpointer key;
+        g_hash_table_iter_init(&iter, vd->filter_match_ids);
+        while (g_hash_table_iter_next(&iter, &key, NULL)) {
+            if (!g_hash_table_contains(credit_set, key))
+                g_hash_table_iter_remove(&iter);
+        }
+    }
+    g_hash_table_unref(credit_set);
+
+    /* Notify GTK that the filter has changed */
+    gtk_filter_changed(GTK_FILTER(vd->filter), GTK_FILTER_CHANGE_DIFFERENT);
+
+    /* Update dependent UI */
+    update_subtitle(vd);
+    rebuild_scrubber_buckets(vd);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -181,6 +276,14 @@ static GHashTable *build_credit_entity_set(ViewData *vd) {
 
 static gboolean view_filter_func(gpointer item, gpointer user_data) {
     ViewData *vd = user_data;
+
+    /* "Show Featuring" filter — hide artists with no albums of their own */
+    if (vd->kind == LIBRARY_ITEM_ARTIST && QUAD_IS_ARTIST_ITEM(item) &&
+        !filter_bar_get_show_featuring(&vd->filter_bar)) {
+        if (QUAD_ARTIST_ITEM(item)->info->album_count < 1)
+            return FALSE;
+    }
+
     if (!vd->filter_match_ids) return TRUE;
 
     int64_t eid;
@@ -454,65 +557,117 @@ static void invalidate_filter(ViewData *vd) {
     /* Clear previous filter state */
     g_clear_pointer(&vd->filter_match_ids, g_hash_table_unref);
 
+    /* Cancel any in-flight credit search */
+    if (vd->credit_cancel) {
+        g_cancellable_cancel(vd->credit_cancel);
+        g_clear_object(&vd->credit_cancel);
+    }
+
     if (!vd->cache || !filter_bar_is_active(&vd->filter_bar)) {
         /* No filter active — all items pass */
         gtk_filter_changed(GTK_FILTER(vd->filter), GTK_FILTER_CHANGE_LESS_STRICT);
         return;
     }
 
-    /* Query cache for matching IDs */
-    CacheQueryFn query_fn = (vd->kind == LIBRARY_ITEM_ARTIST)
-        ? (CacheQueryFn)library_cache_get_artists_filtered
-        : (CacheQueryFn)library_cache_get_albums_filtered;
+    gboolean metadata_mode = (filter_bar_get_search_mode(&vd->filter_bar) == FILTER_SEARCH_METADATA);
+    const char *credit_text = metadata_mode ? filter_bar_get_search_text(&vd->filter_bar) : NULL;
 
-    const char *search_text = filter_bar_get_search_text(&vd->filter_bar);
-    const char **genre_arr = NULL;
-    size_t genre_count = 0;
-    db_search_opts_t filter_opts = filter_bar_build_search_opts(
-        &vd->filter_bar, &genre_arr, &genre_count);
-    const db_search_opts_t *opts = (genre_count > 0 || filter_opts.year_mask) ? &filter_opts : NULL;
-    uint32_t mask = view_library_mask(vd);
+    if (metadata_mode && credit_text) {
+        /* ── Metadata mode: credit search is the sole text filter ──
+         * Don't pass search text to the entity query — the credit set
+         * determines which entities pass. Genre/year filters still apply. */
 
-    GPtrArray *filtered = query_fn(vd->cache, LIBRARY_SORT_NAME_ASC, search_text, opts, mask);
+        const char **genre_arr = NULL;
+        size_t genre_count = 0;
+        db_search_opts_t filter_opts = filter_bar_build_search_opts(
+            &vd->filter_bar, &genre_arr, &genre_count);
+        const db_search_opts_t *opts = (genre_count > 0 || filter_opts.year_mask) ? &filter_opts : NULL;
+        uint32_t mask = view_library_mask(vd);
 
-    /* Build matching ID set */
-    vd->filter_match_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+        /* Start with all entities (no text filter), optionally narrowed by genre/year */
+        CacheQueryFn query_fn = (vd->kind == LIBRARY_ITEM_ARTIST)
+            ? (CacheQueryFn)library_cache_get_artists_filtered
+            : (CacheQueryFn)library_cache_get_albums_filtered;
 
-    if (filtered) {
-        for (guint i = 0; i < filtered->len; i++) {
-            int64_t eid;
-            if (vd->kind == LIBRARY_ITEM_ARTIST)
-                eid = ((const library_artist_info_t *)g_ptr_array_index(filtered, i))->artist_id;
-            else
-                eid = ((const library_album_info_t *)g_ptr_array_index(filtered, i))->album_id;
+        GPtrArray *filtered = query_fn(vd->cache, LIBRARY_SORT_NAME_ASC, NULL, opts, mask);
 
-            if (!g_hash_table_contains(vd->filter_match_ids, &eid)) {
-                int64_t *key = g_new(int64_t, 1);
-                *key = eid;
-                g_hash_table_add(vd->filter_match_ids, key);
+        vd->filter_match_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+        if (filtered) {
+            for (guint i = 0; i < filtered->len; i++) {
+                int64_t eid;
+                if (vd->kind == LIBRARY_ITEM_ARTIST)
+                    eid = ((const library_artist_info_t *)g_ptr_array_index(filtered, i))->artist_id;
+                else
+                    eid = ((const library_album_info_t *)g_ptr_array_index(filtered, i))->album_id;
+
+                if (!g_hash_table_contains(vd->filter_match_ids, &eid)) {
+                    int64_t *key = g_new(int64_t, 1);
+                    *key = eid;
+                    g_hash_table_add(vd->filter_match_ids, key);
+                }
             }
+            g_ptr_array_unref(filtered);
         }
-        g_ptr_array_unref(filtered);
-    }
+        g_free(genre_arr);
 
-    /* Credit post-filter: intersect with credit-matched entity IDs */
-    GHashTable *credit_set = build_credit_entity_set(vd);
-    if (credit_set) {
-        /* Remove items from filter_match_ids that aren't in credit_set */
-        GHashTableIter iter;
-        gpointer key;
-        g_hash_table_iter_init(&iter, vd->filter_match_ids);
-        while (g_hash_table_iter_next(&iter, &key, NULL)) {
-            if (!g_hash_table_contains(credit_set, key))
-                g_hash_table_iter_remove(&iter);
+        /* Dispatch async credit search — will intersect with filter_match_ids on completion */
+        int role_count = 0;
+        const char **role_gids = filter_bar_get_selected_role_gids(&vd->filter_bar, &role_count);
+
+        CreditEntityInput *input = g_new0(CreditEntityInput, 1);
+        input->cache = vd->cache;
+        input->kind = vd->kind;
+        input->credit_text = g_strdup(credit_text);
+        input->role_gid = (role_gids && role_count > 0) ? g_strdup(role_gids[0]) : NULL;
+        g_free(role_gids);
+
+        vd->credit_cancel = g_cancellable_new();
+        GTask *task = g_task_new(NULL, vd->credit_cancel,
+                                  on_credit_entity_search_done, vd);
+        g_task_set_task_data(task, input, credit_entity_input_free);
+        g_task_run_in_thread(task, credit_entity_search_thread);
+        g_object_unref(task);
+
+        /* Apply genre/year filter immediately; credit narrowing arrives async */
+        gtk_filter_changed(GTK_FILTER(vd->filter), GTK_FILTER_CHANGE_DIFFERENT);
+    } else {
+        /* ── Default mode: text search + genre/year filters applied synchronously ── */
+
+        CacheQueryFn query_fn = (vd->kind == LIBRARY_ITEM_ARTIST)
+            ? (CacheQueryFn)library_cache_get_artists_filtered
+            : (CacheQueryFn)library_cache_get_albums_filtered;
+
+        const char *search_text = filter_bar_get_search_text(&vd->filter_bar);
+        const char **genre_arr = NULL;
+        size_t genre_count = 0;
+        db_search_opts_t filter_opts = filter_bar_build_search_opts(
+            &vd->filter_bar, &genre_arr, &genre_count);
+        const db_search_opts_t *opts = (genre_count > 0 || filter_opts.year_mask) ? &filter_opts : NULL;
+        uint32_t mask = view_library_mask(vd);
+
+        GPtrArray *filtered = query_fn(vd->cache, LIBRARY_SORT_NAME_ASC, search_text, opts, mask);
+
+        vd->filter_match_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+        if (filtered) {
+            for (guint i = 0; i < filtered->len; i++) {
+                int64_t eid;
+                if (vd->kind == LIBRARY_ITEM_ARTIST)
+                    eid = ((const library_artist_info_t *)g_ptr_array_index(filtered, i))->artist_id;
+                else
+                    eid = ((const library_album_info_t *)g_ptr_array_index(filtered, i))->album_id;
+
+                if (!g_hash_table_contains(vd->filter_match_ids, &eid)) {
+                    int64_t *key = g_new(int64_t, 1);
+                    *key = eid;
+                    g_hash_table_add(vd->filter_match_ids, key);
+                }
+            }
+            g_ptr_array_unref(filtered);
         }
-        g_hash_table_unref(credit_set);
+        g_free(genre_arr);
+
+        gtk_filter_changed(GTK_FILTER(vd->filter), GTK_FILTER_CHANGE_DIFFERENT);
     }
-
-    g_free(genre_arr);
-
-    /* Notify GTK that the filter has changed */
-    gtk_filter_changed(GTK_FILTER(vd->filter), GTK_FILTER_CHANGE_DIFFERENT);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -697,6 +852,9 @@ GtkWidget *library_view_new(LibraryItemKind kind,
     /* Connect scroll monitoring */
     lazy_list_connect_scroll(vd->lazy_list, GTK_SCROLLED_WINDOW(vd->scroll));
 
+    /* Smooth scroll — animate discrete wheel events instead of instant jumps */
+    ui_smooth_scroll_attach(GTK_SCROLLED_WINDOW(vd->scroll));
+
     /* ── Scrubber overlay ──
      * Wrap the scroll window in a GtkOverlay so QuadScrubber can slide in. */
     vd->scrubber_overlay = gtk_overlay_new();
@@ -709,7 +867,6 @@ GtkWidget *library_view_new(LibraryItemKind kind,
 
     vd->scrubber = quad_scrubber_new();
     gtk_widget_set_halign(vd->scrubber, GTK_ALIGN_END);
-    gtk_widget_set_valign(vd->scrubber, GTK_ALIGN_FILL);
     gtk_overlay_add_overlay(GTK_OVERLAY(vd->scrubber_overlay), vd->scrubber);
 
     vd->scrubber_badge = gtk_label_new("");
@@ -748,8 +905,11 @@ GtkWidget *library_view_new(LibraryItemKind kind,
         /* Insert filter bar between subtitle and scrubber overlay */
         gtk_box_insert_child_after(GTK_BOX(vd->container), bar, vd->subtitle);
 
-        /* Attach advanced credit search panel */
-        filter_bar_attach_advanced(&vd->filter_bar, vd->container);
+        /* Show "Show Feat." toggle for artists view */
+        if (kind == LIBRARY_ITEM_ARTIST && vd->filter_bar.show_featuring_toggle)
+            gtk_widget_set_visible(vd->filter_bar.show_featuring_toggle, TRUE);
+
+        /* (Role filter is built into the filter bar, shown via search mode dropdown) */
     }
 
     g_object_unref(builder);
@@ -771,12 +931,31 @@ void library_view_refresh(GtkWidget *view) {
     ViewData *vd = g_object_get_data(G_OBJECT(view), VIEW_DATA_KEY);
     if (!vd) return;
 
+    /* Rebuild genre popover from (now-warm) cache */
+    filter_bar_rebuild_genre_popover(&vd->filter_bar);
+
     /* Full reload: repopulate store, re-apply filter, update UI */
     reload_store(vd);
     invalidate_filter(vd);
     gtk_sorter_changed(GTK_SORTER(vd->sorter), GTK_SORTER_CHANGE_DIFFERENT);
     update_subtitle(vd);
     rebuild_scrubber_buckets(vd);
+}
+
+int64_t library_view_get_selected_track_id(GtkWidget *view) {
+    g_assert(view != NULL);
+    ViewData *vd = g_object_get_data(G_OBJECT(view), VIEW_DATA_KEY);
+    if (!vd) return 0;
+
+    GObject *item = lazy_list_get_selected_item(vd->lazy_list);
+    if (!item) return 0;
+
+    if (vd->kind == LIBRARY_ITEM_ALBUM && QUAD_IS_ALBUM_ITEM(item)) {
+        QuadAlbumItem *ai = QUAD_ALBUM_ITEM(item);
+        return ai->info->first_track_id;
+    }
+    /* Artists don't have a single track to load */
+    return 0;
 }
 
 void library_view_clear_filters(GtkWidget *view) {

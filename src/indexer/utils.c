@@ -121,6 +121,9 @@ void index_item_free(index_item_t* item) {
     free(item->album);
     free(item->genre);
     free(item->mb_release_id);
+    free(item->mb_release_group_id);
+    free(item->mb_artist_id);
+    free(item->mb_album_artist_id);
     item->path = NULL;
     item->title = NULL;
     item->artist = NULL;
@@ -128,6 +131,9 @@ void index_item_free(index_item_t* item) {
     item->album = NULL;
     item->genre = NULL;
     item->mb_release_id = NULL;
+    item->mb_release_group_id = NULL;
+    item->mb_artist_id = NULL;
+    item->mb_album_artist_id = NULL;
 }
 
 // =============================================================================
@@ -146,6 +152,9 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     out->album = NULL;
     out->genre = NULL;
     out->mb_release_id = NULL;
+    out->mb_release_group_id = NULL;
+    out->mb_artist_id = NULL;
+    out->mb_album_artist_id = NULL;
     out->duration_ms = 0;
     out->track_num = 0;
     out->disc_num = 0;
@@ -201,6 +210,15 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
         } else if (strcasecmp(tag->key, "musicbrainz_albumid") == 0) {
             free(out->mb_release_id);
             out->mb_release_id = strdup(tag->value);
+        } else if (strcasecmp(tag->key, "musicbrainz_releasegroupid") == 0) {
+            free(out->mb_release_group_id);
+            out->mb_release_group_id = strdup(tag->value);
+        } else if (strcasecmp(tag->key, "musicbrainz_artistid") == 0) {
+            free(out->mb_artist_id);
+            out->mb_artist_id = strdup(tag->value);
+        } else if (strcasecmp(tag->key, "musicbrainz_albumartistid") == 0) {
+            free(out->mb_album_artist_id);
+            out->mb_album_artist_id = strdup(tag->value);
         }
     }
 

@@ -199,6 +199,7 @@ endif()
 # GTK4 UI (optional)
 if(BUILD_UI)
     pkg_check_modules(GTK4 REQUIRED gtk4)
+    pkg_check_modules(LIBADWAITA REQUIRED libadwaita-1)
 
     # Find glib-compile-resources for GResource compilation
     find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
@@ -298,9 +299,9 @@ if(BUILD_UI)
 
 
     add_executable(quadrature ${UI_SOURCES})
-    target_include_directories(quadrature PRIVATE ${GTK4_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/src/ui ${CMAKE_SOURCE_DIR}/src/ui/library ${CMAKE_SOURCE_DIR}/src/ui/perf ${CMAKE_SOURCE_DIR}/src/ui/search ${CMAKE_SOURCE_DIR}/src/ui/libraries ${CMAKE_SOURCE_DIR}/src/ui/settings ${CMAKE_SOURCE_DIR}/src/indexer)
-    target_link_libraries(quadrature quadrature_indexer_core quadrature_gpio ${GTK4_LIBRARIES})
-    target_link_directories(quadrature PRIVATE ${GTK4_LIBRARY_DIRS})
+    target_include_directories(quadrature PRIVATE ${GTK4_INCLUDE_DIRS} ${LIBADWAITA_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/src/ui ${CMAKE_SOURCE_DIR}/src/ui/library ${CMAKE_SOURCE_DIR}/src/ui/perf ${CMAKE_SOURCE_DIR}/src/ui/search ${CMAKE_SOURCE_DIR}/src/ui/libraries ${CMAKE_SOURCE_DIR}/src/ui/settings ${CMAKE_SOURCE_DIR}/src/indexer)
+    target_link_libraries(quadrature quadrature_indexer_core quadrature_gpio ${GTK4_LIBRARIES} ${LIBADWAITA_LIBRARIES})
+    target_link_directories(quadrature PRIVATE ${GTK4_LIBRARY_DIRS} ${LIBADWAITA_LIBRARY_DIRS})
 endif()
 
 # Tests (optional)
@@ -327,7 +328,6 @@ if(BUILD_TESTS)
     # Engine tests
     unit_test(test_database         INCLUDES ${S}/database          LIBS quadrature_engine)
     unit_test(test_library_cache                                    LIBS quadrature_engine)
-    unit_test(test_cross_library_merge                              LIBS quadrature_engine)
     unit_test(test_library_cache_advanced                           LIBS quadrature_engine)
     unit_test(test_path_resolution                                  LIBS quadrature_engine)
 
@@ -338,11 +338,14 @@ if(BUILD_TESTS)
 
     # Indexer tests
     unit_test(test_indexer              INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
-    unit_test(test_indexer_integration  INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
+    unit_test(test_indexer_integration  INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core quadrature_engine)
     unit_test(test_multi_disc           INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
 
     # MusicBrainz tests
     unit_test(test_mb_resolve  INCLUDES ${S}/indexer/musicbrainz ${S}/database  LIBS quadrature_indexer_core quadrature_engine)
+
+    # End-to-end integration tests (require MB PG + SOLR — skip if unavailable)
+    unit_test(test_e2e_library_resolution  INCLUDES ${S}/indexer ${S}/indexer/musicbrainz ${S}/database  LIBS quadrature_indexer_core quadrature_engine)
 
     # GPIO tests
     unit_test(test_axia_gpio  INCLUDES ${S}/gpio  LIBS quadrature_gpio ${GLIB_LIBRARIES} Threads::Threads)

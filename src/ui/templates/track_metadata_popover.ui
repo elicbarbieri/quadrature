@@ -34,7 +34,6 @@
             <!-- Album row -->
             <child>
               <object class="GtkBox" id="album_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>
@@ -61,7 +60,6 @@
             <!-- Artist row -->
             <child>
               <object class="GtkBox" id="artist_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>
@@ -88,7 +86,6 @@
             <!-- Featuring row -->
             <child>
               <object class="GtkBox" id="featuring_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>
@@ -115,7 +112,6 @@
             <!-- Release Date row -->
             <child>
               <object class="GtkBox" id="release_date_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>
@@ -142,7 +138,6 @@
             <!-- Position row -->
             <child>
               <object class="GtkBox" id="position_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>
@@ -187,7 +182,6 @@
             <!-- Path row -->
             <child>
               <object class="GtkBox" id="path_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>
@@ -214,7 +208,6 @@
             <!-- Duration row -->
             <child>
               <object class="GtkBox" id="duration_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>
@@ -241,7 +234,6 @@
             <!-- Recording row -->
             <child>
               <object class="GtkBox" id="recording_row">
-                <property name="orientation">horizontal</property>
 
                 <property name="visible">false</property>
                 <style><class name="track-info-row"/></style>

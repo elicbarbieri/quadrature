@@ -26,13 +26,12 @@ Click artist/album from Search, Artists, or Albums to open the Details View. Bac
 
 ## Search View
 
-Full-text search with type filtering.
+Full-text search with type filtering and optional metadata mode.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ [search icon] Search tracks, artists, albums...                         │
-├─────────────────────────────────────────────────────────────────────────┤
-│ [*ALL*] [ Artists ] [ Albums ] [ Songs ]                                │
+│ [🔍 Search...              ] [*ALL*] [Artists] [Albums] [Songs] [Meta] │
+│ [Genre ▼▼] [Year ▼▼]                                                    │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ ARTISTS (3)                                                             │
 │   The Beatles        4 albums   [art][art][art][art]               [>]  │
@@ -45,9 +44,25 @@ Full-text search with type filtering.
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Input:** 200ms debounce, auto-focus on view activation, `Escape` clears.
+**Metadata mode active:**
 
-**Filters:** All (grouped, limited), Artists, Albums, Songs. `Ctrl+F/A/B/S` to switch.
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ [🔍 Search...              ] [*ALL*] [Artists] [Albums] [Songs] [*Meta*]│
+│ [Genre ▼▼] [Year ▼▼] [Role ▼▼]                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│ ...                                                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Row 1 — Search & type toggles:**
+- **Search:** 200ms debounce, auto-focus on view activation, `Escape` clears
+- **Type toggles:** All, Artists, Albums, Songs. `Ctrl+F/A/B/S` to switch
+- **Metadata toggle:** `Ctrl+M`. Switches search to credit/metadata matching
+
+**Row 2 — Facet filters:**
+- **Genre and Year** are always visible — multi-select, stay open until click-away (same behavior as filter bar)
+- **Role** appears when Metadata is active, hidden otherwise — multi-select dropdown of credit roles (Producer, Engineer, Composer, Mixer, etc.). Stays open until click-away; multiple roles can be selected; results match any selected role
 
 **All mode limits:** 5 artists, 5 albums, 10 songs. Filtered modes are unlimited.
 
@@ -83,24 +98,39 @@ Art strip shows up to 6 album thumbnails.
 
 ## Filter Bar
 
-Unified filter bar shared by Artists and Albums views.
+Unified filter bar shared by Artists and Albums views. Two rows.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│ [Genre ▼][Year ▼][Search [________]][Advanced][Clear]  ...padding...  [Sort ▼]  │
+│ [Genre ▼] [Year ▼]                          ...padding...  [Clear]   [Sort ▼]  │
+│ [Search [____________________________]]  [Default ▼]                            │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Genre:** Dropdown populated from library genres
-- **Year:** Decade buckets (2020s, 2010s, ..., Pre-1960)
+**Row 1 — Filters & Sort:**
+- **Genre:** Multi-select dropdown populated from library genres. Stays open until click-away.
+- **Year:** Multi-select dropdown, decade buckets (2020s, 2010s, ..., Pre-1960). Stays open until click-away.
+- **Clear:** Resets all filters to default (right-aligned)
+- **Sort:** Single-select dropdown, closes on selection (right-aligned, after Clear)
+
+**Row 2 — Search:**
 - **Search:** 200ms debounce, case-insensitive substring
-- **Advanced:** Toggles additional filter options (hidden by default)
-- **Clear:** Resets all filters to default
-- **Sort:** View-specific sort dropdown (right-aligned, separated by padding)
+- **Search mode** (`[Default ▼]`): Single-select dropdown, closes on selection
+  - *Default:* Plaintext search across names/titles
+  - *Metadata:* Searches credits, labels, and other metadata fields
+
+**Metadata mode** (search mode set to Metadata):
+- Role dropdown appears alongside Genre and Year on row 1
+- All three facets (Genre, Year, Role) visible simultaneously
+
+**Dropdown behavior:**
+- Multi-select (Genre, Year, Role): popover stays open until user clicks outside — allows toggling multiple values
+- Single-select (Sort, Search mode): popover closes immediately on selection
+
+**Behavior:**
 - All filters AND together
 - `/` focuses search box, `Escape` clears
-
-**Active indicator:** Filter button shows cyan dot, count shows "(filtered)".
+- Active indicator: filter button shows cyan dot, count shows "(filtered)"
 
 ## Details View
 
@@ -114,8 +144,9 @@ Context-aware view showing Album or Artist detail based on navigation.
 ├─────────────────────────────────────────────────────────────────────────┤
 │ ┌──────────┐  ABBEY ROAD                                                │
 │ │  250px   │  The Beatles                   (artist button > popover)   │
-│ │   art    │  1969 · 17 songs · 47:23                                   │
-│ └──────────┘                                                            │
+│ │   art    │  Album · September 26, 1969                                │
+│ │          │  Label: Apple Records                                      │
+│ └──────────┘  17 songs · 47:23                                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  1. Come Together        The Beatles                        [i]  4:19  │
 │  2. Something            The Beatles                        [i]  3:02  │
@@ -136,8 +167,9 @@ Track list uses compact track items with inline artist buttons. Multi-disc album
 ├─────────────────────────────────────────────────────────────────────────┤
 │ ALBUMS                                                                  │
 │ ┌─────────┐  ABBEY ROAD                                            [>] │
-│ │ 250x250 │  1969 · 17 tracks · 47:23                                   │
-│ └─────────┘                                                            │
+│ │ 250x250 │  Album · September 26, 1969                                 │
+│ │         │  Label: Apple Records                                       │
+│ └─────────┘  17 tracks · 47:23                                          │
 │   1. Come Together       The Beatles                             4:19  │
 │   2. Something           The Beatles                             3:02  │
 │      ...see all 17 tracks                                              │

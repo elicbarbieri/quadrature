@@ -76,6 +76,15 @@ struct _QuadScrubber {
     PangoFontDescription *fd_normal;
     PangoFontDescription *fd_bold;
 
+    /* Cached PangoLayout — reused across frames (never destroyed until dispose).
+     * Text + font descriptor set per-bucket during snapshot, but the layout
+     * object itself is allocated once. */
+    PangoLayout *cached_layout;
+
+    /* Last scroll_fraction that triggered a queue_draw.  Skip redraws when the
+     * bell-curve centre hasn't moved enough to produce visible change. */
+    float last_drawn_fraction;
+
     /* Bell-curve LUT — avoid exp() per bucket per frame */
     float bell_lut[256];
 };
@@ -281,6 +290,13 @@ static void on_click_pressed(GtkGestureClick *gesture, int n_press, double x, do
  * Scroll Tracking — keep state in sync with external scroll
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Minimum bell-curve centre movement (in list-fraction units) before we
+ * repaint tick marks. At sigma=0.18 the bell FWHM covers ~0.42 of the
+ * list, so a shift of 0.005 moves the bell edge by ~1% of a tick length —
+ * below visual perception on any real screen.  This turns ~60 redraws/sec
+ * during kinetic scroll into ~5-10, saving PangoLayout + snapshot work. */
+#define BELL_REDRAW_THRESHOLD 0.005f
+
 static void on_vadj_changed(GtkAdjustment *adj, gpointer data) {
     QuadScrubber *self = QUAD_SCRUBBER(data);
     if (self->dragging || !self->buckets || self->total_items == 0) return;
@@ -293,8 +309,15 @@ static void on_vadj_changed(GtkAdjustment *adj, gpointer data) {
     self->scroll_fraction = CLAMP(value / range, 0.0, 1.0);
 
     int new_idx = bucket_from_fraction(self, self->scroll_fraction);
-    if (new_idx != self->active_idx) {
+    gboolean idx_changed = (new_idx != self->active_idx);
+    if (idx_changed)
         self->active_idx = new_idx;
+
+    /* Only repaint if the active bucket changed OR the bell-curve centre
+     * moved far enough to produce a visible tick-length change. */
+    float delta = fabsf((float)self->scroll_fraction - self->last_drawn_fraction);
+    if (idx_changed || delta >= BELL_REDRAW_THRESHOLD) {
+        self->last_drawn_fraction = (float)self->scroll_fraction;
         gtk_widget_queue_draw(GTK_WIDGET(self));
     }
 }
@@ -316,8 +339,11 @@ static void quad_scrubber_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     int height = gtk_widget_get_height(widget);
     if (height <= 0 || width <= 0) return;
 
-    /* All rendering uses native GtkSnapshot ops (GPU render nodes).
-     * No cairo fallback — eliminates per-frame CPU surface allocation. */
+    /* Ensure cached layout exists (lazy — first snapshot after realize) */
+    if (G_UNLIKELY(!self->cached_layout))
+        self->cached_layout = gtk_widget_create_pango_layout(widget, NULL);
+
+    PangoLayout *layout = self->cached_layout;
 
     float usable_h = (float)MAX(1.0, (double)height - 2.0 * SCRUB_PADDING);
     float rail_x   = floorf((float)(width - RAIL_MARGIN_END)) + 0.5f;
@@ -328,7 +354,6 @@ static void quad_scrubber_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
         rail_x - 0.5f, (float)SCRUB_PADDING, 1.0f, usable_h);
     gtk_snapshot_append_color(snapshot, &rail_color, &rail_rect);
 
-    PangoLayout *layout = gtk_widget_create_pango_layout(widget, NULL);
     float prev_y = -999.0f;
 
     for (guint i = 0; i < self->buckets->len; i++) {
@@ -352,12 +377,14 @@ static void quad_scrubber_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
         float label_alpha = active ? 1.0f : (0.18f + 0.62f * bell);
         float tick_alpha  = active ? 0.90f : (0.15f + 0.50f * bell);
 
-        /* Use cached font descriptors — no string parsing per frame */
+        /* Use pre-measured label sizes (computed in set_buckets).
+         * Only set text + font on the layout for the actual render node —
+         * no pango_layout_get_pixel_size() call per bucket per frame. */
+        int lw = active ? b->label_w_bold : b->label_w;
+        int lh = active ? b->label_h_bold : b->label_h;
+
         pango_layout_set_font_description(layout, active ? self->fd_bold : self->fd_normal);
         pango_layout_set_text(layout, b->label, -1);
-
-        int lw, lh;
-        pango_layout_get_pixel_size(layout, &lw, &lh);
 
         float tick_start_x = rail_x - tick_len;
         float label_x      = rail_x - (float)TICK_LENGTH_MAX - (float)LABEL_MARGIN - (float)lw;
@@ -381,8 +408,6 @@ static void quad_scrubber_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
             rail_x - floorf(tick_start_x) - 0.5f, tick_h);
         gtk_snapshot_append_color(snapshot, &tick_color, &tick_rect);
     }
-
-    g_object_unref(layout);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -402,6 +427,7 @@ static void quad_scrubber_dispose(GObject *object) {
         g_ptr_array_unref(self->buckets);
         self->buckets = NULL;
     }
+    g_clear_object(&self->cached_layout);
     g_clear_pointer(&self->fd_normal, pango_font_description_free);
     g_clear_pointer(&self->fd_bold, pango_font_description_free);
 
@@ -484,6 +510,31 @@ void quad_scrubber_set_buckets(QuadScrubber *self, GPtrArray *buckets) {
     if (self->buckets) g_ptr_array_unref(self->buckets);
     self->buckets    = buckets;
     self->active_idx = -1;
+
+    /* Pre-measure all bucket labels (both normal and bold) so snapshot
+     * never calls pango_layout_get_pixel_size().  This runs once per
+     * filter/sort change — amortised across thousands of scroll frames. */
+    if (buckets && buckets->len > 0) {
+        /* Ensure layout exists for measurement */
+        if (G_UNLIKELY(!self->cached_layout))
+            self->cached_layout = gtk_widget_create_pango_layout(
+                GTK_WIDGET(self), NULL);
+
+        PangoLayout *layout = self->cached_layout;
+
+        for (guint i = 0; i < buckets->len; i++) {
+            ScrubberBucket *b = g_ptr_array_index(buckets, i);
+
+            pango_layout_set_font_description(layout, self->fd_normal);
+            pango_layout_set_text(layout, b->label, -1);
+            pango_layout_get_pixel_size(layout, &b->label_w, &b->label_h);
+
+            pango_layout_set_font_description(layout, self->fd_bold);
+            pango_layout_set_text(layout, b->label, -1);
+            pango_layout_get_pixel_size(layout, &b->label_w_bold, &b->label_h_bold);
+        }
+    }
+
     gtk_widget_queue_draw(GTK_WIDGET(self));
 }
 

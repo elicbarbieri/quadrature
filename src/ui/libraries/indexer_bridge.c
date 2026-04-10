@@ -55,10 +55,14 @@ static void phase_reset(PhaseRow *ph) {
     ph->rate_ema   = 0.0;
     if (!ph->container) return;
     set_phase_css(ph, "progress-phase-dim");
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 0.0);
-    gtk_label_set_text(GTK_LABEL(ph->label), "Waiting");
-    gtk_label_set_text(GTK_LABEL(ph->rate_label), "");
-    gtk_widget_set_visible(ph->rate_label, FALSE);
+    if (ph->bar)
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 0.0);
+    if (ph->label)
+        gtk_label_set_text(GTK_LABEL(ph->label), "Waiting");
+    if (ph->rate_label) {
+        gtk_label_set_text(GTK_LABEL(ph->rate_label), "");
+        gtk_widget_set_visible(ph->rate_label, FALSE);
+    }
 }
 
 static void phase_activate(PhaseRow *ph) {
@@ -74,8 +78,10 @@ static void phase_startup(PhaseRow *ph, const char *message) {
     ph->state    = PHASE_STARTUP;
     ph->start_us = g_get_monotonic_time();
     set_phase_css(ph, "progress-phase-active");
-    gtk_label_set_text(GTK_LABEL(ph->label), message ? message : "Starting...");
-    gtk_widget_set_visible(ph->rate_label, FALSE);
+    if (ph->label)
+        gtk_label_set_text(GTK_LABEL(ph->label), message ? message : "Starting...");
+    if (ph->rate_label)
+        gtk_widget_set_visible(ph->rate_label, FALSE);
 }
 
 static void phase_complete(PhaseRow *ph, size_t total, const char *unit) {
@@ -87,33 +93,38 @@ static void phase_complete(PhaseRow *ph, size_t total, const char *unit) {
     gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 1.0);
 
     /* Always show count when available */
-    if (total > 0) {
-        char count_buf[64];
-        snprintf(count_buf, sizeof(count_buf), "%zu %s", total, unit);
-        gtk_label_set_text(GTK_LABEL(ph->label), count_buf);
-    } else {
-        gtk_label_set_text(GTK_LABEL(ph->label), "Complete");
+    if (ph->label) {
+        if (total > 0) {
+            char count_buf[64];
+            snprintf(count_buf, sizeof(count_buf), "%zu %s", total, unit);
+            gtk_label_set_text(GTK_LABEL(ph->label), count_buf);
+        } else {
+            gtk_label_set_text(GTK_LABEL(ph->label), "Complete");
+        }
+        gtk_widget_set_visible(ph->label, TRUE);
     }
 
     /* Show rate/duration only when we have valid timing */
-    if (ph->start_us > 0 && total > 0) {
-        if (ph->end_us == 0)
-            ph->end_us = g_get_monotonic_time();
-        int64_t elapsed_us = ph->end_us - ph->start_us;
-        double elapsed_s   = elapsed_us / 1e6;
-        double avg_rate    = elapsed_s > 0.0 ? (double)total / elapsed_s : 0.0;
+    if (ph->rate_label) {
+        if (ph->start_us > 0 && total > 0) {
+            if (ph->end_us == 0)
+                ph->end_us = g_get_monotonic_time();
+            int64_t elapsed_us = ph->end_us - ph->start_us;
+            double elapsed_s   = elapsed_us / 1e6;
+            double avg_rate    = elapsed_s > 0.0 ? (double)total / elapsed_s : 0.0;
 
-        char rate_buf[80];
-        if (elapsed_s < 60)
-            snprintf(rate_buf, sizeof(rate_buf), "%.0fs · %.1f %s/sec",
-                     elapsed_s, avg_rate, unit);
-        else
-            snprintf(rate_buf, sizeof(rate_buf), "%.1fm · %.1f %s/sec",
-                     elapsed_s / 60.0, avg_rate, unit);
-        gtk_label_set_text(GTK_LABEL(ph->rate_label), rate_buf);
-        gtk_widget_set_visible(ph->rate_label, TRUE);
-    } else {
-        gtk_widget_set_visible(ph->rate_label, FALSE);
+            char rate_buf[80];
+            if (elapsed_s < 60)
+                snprintf(rate_buf, sizeof(rate_buf), "%.0fs · %.1f %s/sec",
+                         elapsed_s, avg_rate, unit);
+            else
+                snprintf(rate_buf, sizeof(rate_buf), "%.1fm · %.1f %s/sec",
+                         elapsed_s / 60.0, avg_rate, unit);
+            gtk_label_set_text(GTK_LABEL(ph->rate_label), rate_buf);
+            gtk_widget_set_visible(ph->rate_label, TRUE);
+        } else {
+            gtk_widget_set_visible(ph->rate_label, FALSE);
+        }
     }
 }
 
@@ -123,29 +134,43 @@ static void phase_skip(PhaseRow *ph) {
         return;
     ph->state = PHASE_SKIPPED;
     set_phase_css(ph, "progress-phase-skipped");
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 0.0);
-    gtk_label_set_text(GTK_LABEL(ph->label), "Up to date");
-    gtk_widget_set_visible(ph->rate_label, FALSE);
+    if (ph->bar)
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 0.0);
+    if (ph->label) {
+        gtk_label_set_text(GTK_LABEL(ph->label), "Up to date");
+        gtk_widget_set_visible(ph->label, TRUE);
+    }
+    if (ph->rate_label)
+        gtk_widget_set_visible(ph->rate_label, FALSE);
 }
 
 static void phase_error(PhaseRow *ph, const char *msg) {
     ph->state = PHASE_ERROR;
     set_phase_css(ph, "progress-phase-error");
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 1.0);
-    gtk_label_set_text(GTK_LABEL(ph->label), msg ? msg : "Error");
-    gtk_widget_set_visible(ph->rate_label, FALSE);
+    if (ph->bar)
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 1.0);
+    if (ph->label) {
+        gtk_label_set_text(GTK_LABEL(ph->label), msg ? msg : "Error");
+        gtk_widget_set_visible(ph->label, TRUE);
+    }
+    if (ph->rate_label)
+        gtk_widget_set_visible(ph->rate_label, FALSE);
 }
 
 static void phase_update(PhaseRow *ph, size_t processed, size_t total,
                           const char *unit) {
     if (ph->state != PHASE_ACTIVE) return;
 
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar),
-        total > 0 ? (double)processed / total : 0.0);
+    if (ph->bar)
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar),
+            total > 0 ? (double)processed / total : 0.0);
 
-    char buf[128];
-    snprintf(buf, sizeof(buf), "%zu/%zu", processed, total);
-    gtk_label_set_text(GTK_LABEL(ph->label), buf);
+    if (ph->label) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%zu/%zu", processed, total);
+        gtk_label_set_text(GTK_LABEL(ph->label), buf);
+        gtk_widget_set_visible(ph->label, TRUE);
+    }
 
     /* Cumulative average rate: total_processed / total_elapsed.
      * More stable than EMA for bursty batch workloads (e.g. MB resolver
@@ -157,10 +182,12 @@ static void phase_update(PhaseRow *ph, size_t processed, size_t total,
     ph->prev_count = processed;
     ph->prev_time  = now;
 
-    char rate_buf[128];
-    format_rate_eta(ph->rate_ema, processed, total, unit, rate_buf, sizeof(rate_buf));
-    gtk_label_set_text(GTK_LABEL(ph->rate_label), rate_buf);
-    gtk_widget_set_visible(ph->rate_label, TRUE);
+    if (ph->rate_label) {
+        char rate_buf[128];
+        format_rate_eta(ph->rate_ema, processed, total, unit, rate_buf, sizeof(rate_buf));
+        gtk_label_set_text(GTK_LABEL(ph->rate_label), rate_buf);
+        gtk_widget_set_visible(ph->rate_label, TRUE);
+    }
 }
 
 /* Safety net: finalize a phase that may still be WAITING/ACTIVE when
@@ -323,10 +350,11 @@ void update_card_stats_labels(LibEntry *e) {
 /* Per-card pulse timer — pulses scan phase (always) + any STARTUP phases */
 static gboolean on_card_pulse(gpointer data) {
     LibEntry *e = (LibEntry *)data;
-    if (e->phases[0].state == PHASE_ACTIVE || e->phases[0].state == PHASE_STARTUP)
+    if ((e->phases[0].state == PHASE_ACTIVE || e->phases[0].state == PHASE_STARTUP)
+        && e->phases[0].bar)
         gtk_progress_bar_pulse(GTK_PROGRESS_BAR(e->phases[0].bar));
     for (int i = 1; i < 7; i++) {
-        if (e->phases[i].state == PHASE_STARTUP)
+        if (e->phases[i].state == PHASE_STARTUP && e->phases[i].bar)
             gtk_progress_bar_pulse(GTK_PROGRESS_BAR(e->phases[i].bar));
     }
     return G_SOURCE_CONTINUE;
@@ -359,10 +387,11 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
         } else {
             snprintf(buf, sizeof(buf), "%zu dirs scanned", p->dirs_scanned);
         }
-        gtk_label_set_text(GTK_LABEL(ph[0].label), buf);
+        if (ph[0].label)
+            gtk_label_set_text(GTK_LABEL(ph[0].label), buf);
 
         /* Live elapsed + dirs/sec in the scan phase rate label */
-        if (ph[0].start_us > 0 && p->dirs_scanned > 0) {
+        if (ph[0].rate_label && ph[0].start_us > 0 && p->dirs_scanned > 0) {
             int64_t elapsed_us = g_get_monotonic_time() - ph[0].start_us;
             double elapsed_s   = elapsed_us / 1e6;
             double dirs_sec    = elapsed_s > 0.0 ? (double)p->dirs_scanned / elapsed_s : 0.0;
@@ -453,9 +482,12 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
         if (p->albums_total > 0) {
             phase_update(&ph[4], p->albums_processed, p->albums_total, "albums");
         } else {
-            gtk_progress_bar_pulse(GTK_PROGRESS_BAR(ph[4].bar));
-            gtk_label_set_text(GTK_LABEL(ph[4].label), "Resolving...");
-            gtk_widget_set_visible(ph[4].rate_label, FALSE);
+            if (ph[4].bar)
+                gtk_progress_bar_pulse(GTK_PROGRESS_BAR(ph[4].bar));
+            if (ph[4].label)
+                gtk_label_set_text(GTK_LABEL(ph[4].label), "Resolving...");
+            if (ph[4].rate_label)
+                gtk_widget_set_visible(ph[4].rate_label, FALSE);
         }
         break;
 
@@ -563,6 +595,9 @@ void on_indexer_progress(IndexerController *idx, const char *library_path,
  * Adding a new library-dependent view? Add it here.
  */
 void refresh_library_views(UiWindow *w) {
+    /* Rebuild search view genre popover from warm cache */
+    filter_bar_rebuild_genre_popover(&w->search_filter_bar);
+
     library_view_refresh(w->artists_view);
     library_view_refresh(w->albums_view);
     if (w->detail_view) {

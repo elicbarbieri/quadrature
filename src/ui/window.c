@@ -236,6 +236,8 @@ static int64_t get_current_view_selected_track(UiWindow *w) {
         return get_selected_track_id(w->search_results_list);
     } else if (strcmp(w->current_view, "detail") == 0) {
         return get_selected_track_id(library_unified_detail_get_track_list(w->detail_view));
+    } else if (strcmp(w->current_view, "albums") == 0 && w->albums_view) {
+        return library_view_get_selected_track_id(w->albums_view);
     }
     return 0;
 }
@@ -377,6 +379,19 @@ static void on_action_filter_tracks(GSimpleAction *action, GVariant *param, gpoi
     focus_search_entry(w);
 }
 
+/* Action: Toggle metadata search mode (Ctrl+M) */
+static void on_action_toggle_metadata(GSimpleAction *action, GVariant *param, gpointer data) {
+    (void)action; (void)param;
+    UiWindow *w = UI_WINDOW(data);
+    /* In search view: toggle the metadata button */
+    if (w->filter_metadata_btn && strcmp(w->current_view, "search") == 0) {
+        gboolean active = gtk_toggle_button_get_active(
+            GTK_TOGGLE_BUTTON(w->filter_metadata_btn));
+        gtk_toggle_button_set_active(
+            GTK_TOGGLE_BUTTON(w->filter_metadata_btn), !active);
+    }
+}
+
 /* Action: Clear filters in current view (Ctrl+R) */
 static void on_action_clear_filters(GSimpleAction *action, GVariant *param, gpointer data) {
     (void)action; (void)param;
@@ -438,6 +453,7 @@ static void setup_keyboard_actions(UiWindow *w) {
         { "filter-artists", on_action_filter_artists, NULL, NULL, NULL, {0} },
         { "filter-albums", on_action_filter_albums, NULL, NULL, NULL, {0} },
         { "filter-tracks", on_action_filter_tracks, NULL, NULL, NULL, {0} },
+        { "toggle-metadata", on_action_toggle_metadata, NULL, NULL, NULL, {0} },
         { "clear-filters", on_action_clear_filters, NULL, NULL, NULL, {0} },
         { "close-errors", on_action_close_errors, NULL, NULL, NULL, {0} },
     };
@@ -464,6 +480,7 @@ static void setup_keyboard_actions(UiWindow *w) {
     gtk_application_set_accels_for_action(app, "win.filter-artists", (const char*[]){"<Control>a", NULL});
     gtk_application_set_accels_for_action(app, "win.filter-albums", (const char*[]){"<Control>b", NULL});
     gtk_application_set_accels_for_action(app, "win.filter-tracks", (const char*[]){"<Control>t", NULL});
+    gtk_application_set_accels_for_action(app, "win.toggle-metadata", (const char*[]){"<Control>m", NULL});
     gtk_application_set_accels_for_action(app, "win.clear-filters", (const char*[]){"<Control>r", NULL});
     gtk_application_set_accels_for_action(app, "win.close-errors", (const char*[]){"Escape", NULL});
 
@@ -893,7 +910,6 @@ static void build_ui(UiWindow *w) {
     GtkBuilder *nav_builder = gtk_builder_new_from_resource("/org/quadrature/ui/nav_bar.ui");
     w->nav_bar = GTK_WIDGET(gtk_builder_get_object(nav_builder, "nav_bar"));
     gtk_widget_set_size_request(w->nav_bar, 56, -1);
-    gtk_widget_set_hexpand(w->nav_bar, FALSE);
     gtk_box_prepend(GTK_BOX(w->main_box), w->nav_bar);
     g_object_unref(nav_builder);
 
@@ -976,7 +992,6 @@ static void build_ui(UiWindow *w) {
 
     /* Set fixed width on channels panel - CSS min/max-width alone isn't reliable */
     gtk_widget_set_size_request(w->channel_strips_box, 720, -1);
-    gtk_widget_set_hexpand(w->channel_strips_box, FALSE);
 
     /* Setup keyboard shortcut actions */
     setup_keyboard_actions(w);
@@ -1043,6 +1058,7 @@ static void ui_window_dispose(GObject *obj) {
 
     if (w->update_tick_id) { gtk_widget_remove_tick_callback(GTK_WIDGET(w), w->update_tick_id); w->update_tick_id = 0; }
     if (w->search_debounce_timer) { g_source_remove(w->search_debounce_timer); w->search_debounce_timer = 0; }
+    if (w->credit_search_cancel) { g_cancellable_cancel(w->credit_search_cancel); g_clear_object(&w->credit_search_cancel); }
     if (w->toast_timer) { g_source_remove(w->toast_timer); w->toast_timer = 0; }
     if (w->device_hotplug_timer_id) { g_source_remove(w->device_hotplug_timer_id); w->device_hotplug_timer_id = 0; }
     if (w->device_rebuild_idle_id) { g_source_remove(w->device_rebuild_idle_id); w->device_rebuild_idle_id = 0; }
@@ -1073,6 +1089,7 @@ static void ui_window_dispose(GObject *obj) {
     for (int i = 0; i < MAX_CHANNELS; i++)
         g_clear_object(&w->device_models[i]);
     g_clear_object(&w->format_model);
+    g_clear_object(&w->quantum_model);
 
     libs_free(w);
     g_clear_object(&w->indexer);
@@ -1182,14 +1199,25 @@ static gboolean init_devices_idle(gpointer data) {
  * ============================================================================= */
 
 static void on_library_availability_changed(LibraryMonitor *mon,
-                                             int            lib_idx,
+                                             int            bitmap_idx,
                                              gboolean       available,
                                              gpointer       data) {
     (void)mon;
     UiWindow *w = UI_WINDOW(data);
 
+    /* Map bitmap_index → settings array index */
+    int si = -1;
+    if (w->settings) {
+        for (int i = 0; i < w->settings->library_count; i++) {
+            if (w->settings->libraries[i].library_index == bitmap_idx) {
+                si = i;
+                break;
+            }
+        }
+    }
+
     /* 1. Toast notification */
-    char *name = app_settings_get_library_name(w->settings, lib_idx);
+    char *name = (si >= 0) ? app_settings_get_library_name(w->settings, si) : NULL;
     char *msg = g_strdup_printf("Library \"%s\" %s",
                                 name ? name : "Unknown",
                                 available ? "reconnected" : "disconnected");
@@ -1201,28 +1229,27 @@ static void on_library_availability_changed(LibraryMonitor *mon,
 
     if (available) {
         /* Rewarm slot (data may have changed while disconnected) */
-        library_cache_clear_slot(w->library_cache, lib_idx);
-        library_cache_warm_slot(w->library_cache, lib_idx);
+        library_cache_clear_slot(w->library_cache, bitmap_idx);
+        library_cache_warm_slot(w->library_cache, bitmap_idx);
         /* on_cache_ready fires refresh_library_views when warming completes */
 
         /* Auto-rescan to detect file changes */
-        if (w->indexer && w->settings && w->settings->auto_scan_on_startup &&
-            lib_idx < w->settings->library_count) {
-            const char *paths[] = { w->settings->libraries[lib_idx].path };
-            const char *dp = app_settings_get_library_data_path(w->settings, lib_idx);
+        if (w->indexer && si >= 0 && w->settings->auto_scan_on_startup) {
+            const char *paths[] = { w->settings->libraries[si].path };
+            const char *dp = app_settings_get_library_data_path(w->settings, si);
             const char *dpaths[] = { dp };
             indexer_controller_start(w->indexer, paths, dpaths, 1);
         }
     } else {
         /* Cancel any running indexer for this library */
-        if (w->indexer && w->settings && lib_idx < w->settings->library_count)
+        if (w->indexer && si >= 0)
             indexer_controller_cancel_library(w->indexer,
-                                              w->settings->libraries[lib_idx].path);
+                                              w->settings->libraries[si].path);
 
         /* If detail view is showing entity from this library, navigate back */
         if (w->current_view && strcmp(w->current_view, "detail") == 0 && w->detail_view) {
             int64_t eid = library_unified_detail_get_current_entity_id(w->detail_view);
-            if (eid > 0 && LIBRARY_GLOBAL_ID_LIB(eid) == lib_idx) {
+            if (eid > 0 && LIBRARY_GLOBAL_ID_LIB(eid) == bitmap_idx) {
                 const char *back_to = w->previous_view ? w->previous_view : "artists";
                 gtk_stack_set_visible_child_name(GTK_STACK(w->stack), back_to);
                 w->current_view = back_to;
@@ -1230,8 +1257,9 @@ static void on_library_availability_changed(LibraryMonitor *mon,
         }
     }
 
-    /* Update library card state */
-    update_lib_card_availability(w, lib_idx, available);
+    /* Update library card state (libs[] is parallel to settings array) */
+    if (si >= 0)
+        update_lib_card_availability(w, si, available);
 
     /* Refresh all browse/search views */
     refresh_library_views(w);

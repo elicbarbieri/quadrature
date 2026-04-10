@@ -1,9 +1,6 @@
 #include <criterion/criterion.h>
-#include "quadrature/database.h"
-#include "../../src/database/internal.h"
-#include <unistd.h>
+#include "test_helpers.h"
 #include <pthread.h>
-#include <string.h>
 
 #define TEST_DB_FILE "test_database.db"
 
@@ -484,9 +481,9 @@ Test(database, mb_resolved_album_artist_not_clobbered_on_reindex) {
     cr_assert_eq(album_id2, album_id); /* same album row */
 
     /* ── Assert: MB-resolved artist must survive the re-index ── */
-    // TODO: read albums.artist_id back and assert it equals mb_artist_id, not filetag_artist_id
-    // Hint: query "SELECT artist_id FROM albums WHERE id = ?" using db->db directly (see helper pattern above)
-    // ~5 lines: prepare stmt, bind album_id, step, read int64, finalize, then cr_assert_eq
+    int64_t actual_artist = test_read_int64(db, "SELECT artist_id FROM albums WHERE id = ?", album_id);
+    cr_assert_eq(actual_artist, mb_artist_id,
+        "MB-resolved artist_id must survive re-index (got filetag artist instead)");
 
     db_close(db);
 }
@@ -512,7 +509,9 @@ Test(database, unresolved_album_artist_updated_on_reindex) {
     cr_assert_eq(album_id2, album_id);
 
     /* ── Assert: artist_id must be updated to artist_v2 ── */
-    // TODO: same pattern — read artist_id back and assert it equals artist_v2
+    int64_t actual_artist = test_read_int64(db, "SELECT artist_id FROM albums WHERE id = ?", album_id);
+    cr_assert_eq(actual_artist, artist_v2,
+        "Unresolved album artist_id must be updated on re-index");
 
     db_close(db);
 }
@@ -670,6 +669,346 @@ Test(database, log_error_legacy_wrapper_defaults) {
     cr_assert_eq(sqlite3_column_int(stmt, 2), 2);  /* INDEXER_SEV_ERROR */
     sqlite3_finalize(stmt);
     db_unlock(db);
+
+    db_close(db);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Album mtime batch with sizes
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * db_prune_orphan_albums: full cascade (tracks, track_artists, FTS)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Build a test library for pruning tests:
+ *   Daft Punk (MBID) → Discovery (3 tracks), RAM (2 tracks)
+ *   Golden Features (no MBID) → SECT (2 tracks, track 7 features Daft Punk)
+ *   Indexer error on Discovery path.
+ *
+ * Returns album IDs via out params.
+ */
+static void build_prune_fixture(quadrature_db_t *db,
+                                int64_t *disc_out, int64_t *ram_out,
+                                int64_t *sect_out) {
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+
+    int64_t dp = db_get_or_create_artist_mb(db, "Daft Punk", "Daft Punk",
+        "056e4f3e-d505-4dad-8ec1-d04f521cbb56");
+    int64_t gf = db_get_or_create_artist(db, "Golden Features");
+
+    int64_t disc_id = 0, ram_id = 0, sect_id = 0;
+    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/Discovery",
+        "Discovery", dp, 2001, &disc_id), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, disc_id, "Discovery",
+        "d073287b-d1bd-4f11-a933-a4386f8cf701",
+        "cc001111-1111-1111-1111-111111111111",
+        2001, MB_STATUS_RESOLVED), QUADRATURE_OK);
+
+    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/RAM",
+        "Random Access Memories", dp, 2013, &ram_id), QUADRATURE_OK);
+    cr_assert_eq(db_update_album_mb(db, ram_id, "Random Access Memories",
+        "8ecfafd1-89a8-423a-968f-3fff47f0b0f9",
+        "aa997ea0-2936-40bd-884d-3af8a0e064dc",
+        2013, MB_STATUS_RESOLVED), QUADRATURE_OK);
+
+    cr_assert_eq(db_upsert_folder_album(db, "GoldenFeatures/SECT",
+        "SECT", gf, 2021, &sect_id), QUADRATURE_OK);
+
+    test_create_track(db, disc_id, "One More Time", 1, 1);
+    test_create_track(db, disc_id, "Aerodynamic", 2, 1);
+    test_create_track(db, disc_id, "Digital Love", 3, 1);
+    test_create_track(db, ram_id, "Get Lucky", 1, 1);
+    test_create_track(db, ram_id, "Lose Yourself to Dance", 2, 1);
+    test_create_track(db, sect_id, "Ariana", 1, 1);
+    test_create_track(db, sect_id, "Touch feat. Daft Punk", 2, 1);
+
+    db_track_artist_t ta_dp = { .artist_id = dp, .position = 0, .join_phrase = "" };
+    for (int64_t tid = 1; tid <= 5; tid++)
+        db_set_track_artists(db, tid, &ta_dp, 1);
+
+    db_track_artist_t ta_gf = { .artist_id = gf, .position = 0, .join_phrase = "" };
+    db_set_track_artists(db, 6, &ta_gf, 1);
+
+    db_track_artist_t ta_feat[2] = {
+        { .artist_id = gf, .position = 0, .join_phrase = "" },
+        { .artist_id = dp, .position = 1, .join_phrase = " feat. " },
+    };
+    db_set_track_artists(db, 7, ta_feat, 2);
+
+    db_sync_album_fts(db, disc_id);
+    db_sync_album_fts(db, ram_id);
+    db_sync_album_fts(db, sect_id);
+
+    db_lock(db);
+    sqlite3_exec(db->db,
+        "INSERT INTO indexer_errors(path, error_code, phase, message) "
+        "VALUES('DaftPunk/Discovery/cover.jpg', 3, 3, 'artwork extraction failed')",
+        NULL, NULL, NULL);
+    db_unlock(db);
+
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    *disc_out = disc_id;
+    *ram_out = ram_id;
+    *sect_out = sect_id;
+}
+
+Test(database, prune_orphan_albums_cascades_tracks_and_fts) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+
+    int64_t disc_id, ram_id, sect_id;
+    build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
+
+    /* Prune Discovery — 3 tracks + FTS entries should cascade */
+    int64_t orphan[] = { disc_id };
+    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM albums"), 2);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM tracks"), 4);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM track_artists"), 5);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM albums_fts"), 2);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM tracks_fts"), 4);
+
+    db_close(db);
+}
+
+Test(database, prune_orphan_albums_full_wipe) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+
+    int64_t disc_id, ram_id, sect_id;
+    build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
+
+    int64_t all[] = { disc_id, ram_id, sect_id };
+    cr_assert_eq(db_prune_orphan_albums(db, all, 3), QUADRATURE_OK);
+    cr_assert_eq(db_prune_orphan_artists(db), QUADRATURE_OK);
+
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM albums"), 0);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM tracks"), 0);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM track_artists"), 0);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM artists"), 0);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM albums_fts"), 0);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM tracks_fts"), 0);
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM artists_fts"), 0);
+
+    db_close(db);
+}
+
+Test(database, prune_orphan_artist_after_album_deletion) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+
+    int64_t disc_id, ram_id, sect_id;
+    build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
+
+    /* Delete SECT → Golden Features becomes orphaned */
+    int64_t orphan[] = { sect_id };
+    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+    cr_assert_eq(db_prune_orphan_artists(db), QUADRATURE_OK);
+
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM artists"), 1,
+        "Golden Features should be pruned — only Daft Punk remains");
+
+    char *survivor = test_read_text(db, "SELECT name FROM artists WHERE id = ?", 1);
+    cr_assert_not_null(survivor);
+    cr_assert_str_eq(survivor, "Daft Punk");
+    free(survivor);
+
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM artists_fts"), 1);
+
+    db_close(db);
+}
+
+Test(database, featured_artist_survives_album_deletion) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+
+    int64_t disc_id, ram_id, sect_id;
+    build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
+
+    /* Delete SECT — Daft Punk's featured credit on track 7 goes away,
+     * but Daft Punk survives via own albums. */
+    int64_t orphan[] = { sect_id };
+    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+    cr_assert_eq(db_prune_orphan_artists(db), QUADRATURE_OK);
+
+    /* Track 7 completely gone */
+    cr_assert_eq(test_count_rows_param(db,
+        "SELECT COUNT(*) FROM track_artists WHERE track_id = ?", 7), 0);
+
+    /* Daft Punk retains 5 credits from Discovery (3) + RAM (2) */
+    cr_assert_eq(test_count_rows_param(db,
+        "SELECT COUNT(*) FROM track_artists WHERE artist_id = ?", 1), 5);
+
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM artists"), 1);
+
+    db_close(db);
+}
+
+Test(database, prune_orphan_errors_removes_stale_paths) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+
+    int64_t disc_id, ram_id, sect_id;
+    build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
+
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM indexer_errors"), 1);
+
+    /* After pruning Discovery album, the error for its path should be cleaned */
+    int64_t orphan[] = { disc_id };
+    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+    cr_assert_eq(db_prune_orphan_errors(db, "/music"), QUADRATURE_OK);
+
+    cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM indexer_errors"), 0,
+        "Error for deleted album path should be cleaned");
+
+    db_close(db);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * mb_status guards: resolved data protected from re-index clobber
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+Test(database, mb_resolved_title_not_clobbered_on_reindex) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+
+    int64_t aid = db_get_or_create_artist(db, "Daft Punk");
+    int64_t album_id = 0;
+    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/RAM",
+        "Random Access Memories", aid, 2013, &album_id), QUADRATURE_OK);
+
+    /* MB resolution corrects title */
+    cr_assert_eq(db_update_album_mb(db, album_id,
+        "Random Access Memories (10th Anniversary Edition)",
+        "8ecfafd1-89a8-423a-968f-3fff47f0b0f9",
+        "aa997ea0-2936-40bd-884d-3af8a0e064dc",
+        2013, MB_STATUS_RESOLVED), QUADRATURE_OK);
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    /* Re-index: file tags still say original title */
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+    int64_t id2 = 0;
+    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/RAM",
+        "Random Access Memories", aid, 2013, &id2), QUADRATURE_OK);
+    cr_assert_eq(id2, album_id);
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    /* Title must be the MB-corrected version */
+    char *title = test_read_text(db,
+        "SELECT title FROM albums WHERE id = ?", album_id);
+    cr_assert_str_eq(title, "Random Access Memories (10th Anniversary Edition)",
+        "MB-resolved title must survive re-index, got '%s'", title);
+    free(title);
+
+    db_close(db);
+}
+
+/**
+ * db_set_album_release_id_from_tags gates on mb_status != RESOLVED.
+ * Per METADATA.md: "updates regardless of current status — as long as not
+ * already RESOLVED." Status 0, 1, 3, 4 all allow update; only 2 blocks it.
+ */
+Test(database, release_id_from_tags_gated_on_not_resolved) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+
+    int64_t aid = db_get_or_create_artist(db, "ODESZA");
+    int64_t album_id = 0;
+    cr_assert_eq(db_upsert_folder_album(db, "ODESZA/LG",
+        "The Last Goodbye", aid, 2022, &album_id), QUADRATURE_OK);
+
+    /* Phase 2: first tag sets release_id (status 0 → 1) */
+    cr_assert_eq(db_set_album_release_id_from_tags(db, album_id,
+        "aaaa1111-1111-1111-1111-111111111111"), QUADRATURE_OK);
+
+    /* Phase 2 again with different tag: status=1 → update allowed per spec */
+    cr_assert_eq(db_set_album_release_id_from_tags(db, album_id,
+        "bbbb2222-2222-2222-2222-222222222222"), QUADRATURE_OK);
+
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    /* Should have the SECOND release_id (update allowed on status=1) */
+    char *rid = test_read_text(db,
+        "SELECT musicbrainz_release_id FROM albums WHERE id = ?", album_id);
+    cr_assert_str_eq(rid, "bbbb2222-2222-2222-2222-222222222222",
+        "Re-tag should update release_id when status=HAS_RELEASE_ID");
+    free(rid);
+
+    /* Now resolve fully — after RESOLVED, tags should NOT overwrite */
+    cr_assert_eq(db_update_album_mb(db, album_id, "The Last Goodbye",
+        "cccc3333-3333-3333-3333-333333333333",
+        "dddd4444-4444-4444-4444-444444444444",
+        2022, MB_STATUS_RESOLVED), QUADRATURE_OK);
+
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+    db_set_album_release_id_from_tags(db, album_id,
+        "eeee5555-5555-5555-5555-555555555555");
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    /* Should still have the RESOLVED release_id, not the tag override */
+    char *rid2 = test_read_text(db,
+        "SELECT musicbrainz_release_id FROM albums WHERE id = ?", album_id);
+    cr_assert_str_eq(rid2, "cccc3333-3333-3333-3333-333333333333",
+        "RESOLVED album must reject tag-sourced release_id override");
+    free(rid2);
+
+    db_close(db);
+}
+
+Test(database, full_mb_lifecycle_immutable_after_resolved) {
+    quadrature_db_t *db = NULL;
+    db_open_memory(&db);
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+
+    int64_t aid = db_get_or_create_artist(db, "BRONSON");
+    int64_t album_id = 0;
+    cr_assert_eq(db_upsert_folder_album(db, "BRONSON/BRONSON",
+        "BRONSON", aid, 2020, &album_id), QUADRATURE_OK);
+
+    /* Phase 2 → HAS_RELEASE_ID */
+    db_set_album_release_id_from_tags(db, album_id,
+        "5ed617d7-898f-4e05-82a1-bfc586a4b013");
+
+    /* Phase 6 → RESOLVED with different data */
+    db_update_album_mb(db, album_id, "BRONSON (Deluxe)",
+        "aaaa1111-1111-1111-1111-111111111111",
+        "d95b8366-994d-448d-8689-422b20b6cabb",
+        2020, MB_STATUS_RESOLVED);
+
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    /* Re-index: Phase 2 tries to overwrite */
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+    int64_t id2 = 0;
+    db_upsert_folder_album(db, "BRONSON/BRONSON", "BRONSON", aid, 2020, &id2);
+    db_set_album_release_id_from_tags(db, album_id,
+        "5ed617d7-898f-4e05-82a1-bfc586a4b013");
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    /* Everything must be preserved */
+    char *title = test_read_text(db, "SELECT title FROM albums WHERE id = ?", album_id);
+    cr_assert_str_eq(title, "BRONSON (Deluxe)");
+    free(title);
+
+    char *rid = test_read_text(db,
+        "SELECT musicbrainz_release_id FROM albums WHERE id = ?", album_id);
+    cr_assert_str_eq(rid, "aaaa1111-1111-1111-1111-111111111111");
+    free(rid);
+
+    char *rgid = test_read_text(db,
+        "SELECT musicbrainz_release_group_id FROM albums WHERE id = ?", album_id);
+    cr_assert_str_eq(rgid, "d95b8366-994d-448d-8689-422b20b6cabb");
+    free(rgid);
+
+    int64_t status = test_read_int64(db,
+        "SELECT mb_status FROM albums WHERE id = ?", album_id);
+    cr_assert_eq(status, MB_STATUS_RESOLVED);
 
     db_close(db);
 }

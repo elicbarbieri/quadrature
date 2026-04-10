@@ -3,121 +3,183 @@
   Unified Filter/Sort Bar Template
 
   Shared across Artists, Albums, and Search views.
+  Two-row layout:
+    Row 1: [Genre][Year] ...padding... [Clear][Sort]
+    Row 2: [Search][Search Mode]
+
   C code controls visibility of individual children:
-  - filter_search: hidden in Search view (has its own primary search bar)
-  - sort_dropdown: GtkDropDown, hidden by default; shown with view-specific sort options
-  - advanced_toggle: always visible
+  - filter_search_row: hidden in Search view (has its own primary search bar)
+  - sort_box: hidden by default; shown with view-specific sort options
+  - genre_box/year_box: hidden when metadata mode swaps them for role selector
 -->
 <interface>
   <object class="GtkBox" id="filter_sort_bar">
-    <property name="orientation">horizontal</property>
+    <property name="orientation">vertical</property>
     <property name="spacing">8</property>
-    <property name="margin-end">16</property>
     <style>
       <class name="filter-bar"/>
     </style>
 
-    <!-- Genre filter -->
+    <!-- Row 1: Facet filters + Clear + Sort -->
     <child>
-      <object class="GtkBox">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">0</property>
+      <object class="GtkBox" id="filter_row_1">
+        <property name="spacing">8</property>
 
-        <style>
-          <class name="filter-field"/>
-        </style>
+        <!-- Genre filter -->
         <child>
-          <object class="GtkLabel">
-            <property name="label">Genre</property>
+          <object class="GtkBox" id="genre_box">
+            <style>
+              <class name="filter-field"/>
+            </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Genre</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="filter_genre">
+                <property name="label">All</property>
+              </object>
+            </child>
           </object>
         </child>
+
+        <!-- Year filter -->
         <child>
-          <object class="GtkMenuButton" id="filter_genre">
-            <property name="label">All</property>
+          <object class="GtkBox" id="year_box">
+            <style>
+              <class name="filter-field"/>
+            </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Year</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="filter_year">
+                <property name="label">All</property>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Role filter (hidden by default, shown in metadata mode) -->
+        <child>
+          <object class="GtkBox" id="role_box">
+            <property name="visible">false</property>
+            <style>
+              <class name="filter-field"/>
+            </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Role</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="filter_role">
+                <property name="label">All Roles</property>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Show Featuring toggle (hidden by default, shown for Artists view) -->
+        <child>
+          <object class="GtkToggleButton" id="show_featuring_toggle">
+            <property name="label">Show Feat.</property>
+            <property name="active">true</property>
+            <property name="visible">false</property>
+            <property name="focusable">false</property>
+            <property name="tooltip-text">Show artists who only appear as featuring/credited</property>
+            <style>
+              <class name="filter-toggle-btn"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Spacer -->
+        <child>
+          <object class="GtkBox">
+            <property name="hexpand">true</property>
+          </object>
+        </child>
+
+        <!-- Clear button -->
+        <child>
+          <object class="GtkButton" id="filter_clear">
+            <property name="label">Clear</property>
+            <property name="focusable">false</property>
+            <style>
+              <class name="filter-btn"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- Sort (hidden by default, shown for Artists/Albums) -->
+        <child>
+          <object class="GtkBox" id="sort_box">
+            <property name="visible">false</property>
+            <style>
+              <class name="filter-field"/>
+            </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Sort</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="sort_dropdown">
+              </object>
+            </child>
           </object>
         </child>
       </object>
     </child>
 
-    <!-- Year filter -->
+    <!-- Row 2: Search + Search Mode (hidden in Search view) -->
     <child>
-      <object class="GtkBox">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">0</property>
+      <object class="GtkBox" id="filter_search_row">
+        <property name="spacing">8</property>
 
-        <style>
-          <class name="filter-field"/>
-        </style>
+        <!-- Search filter -->
         <child>
-          <object class="GtkLabel">
-            <property name="label">Year</property>
+          <object class="GtkBox" id="filter_search_box">
+            <property name="hexpand">true</property>
+            <style>
+              <class name="filter-field"/>
+            </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Search</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkSearchEntry" id="filter_search">
+                <property name="placeholder-text">Filter...</property>
+                <property name="hexpand">true</property>
+              </object>
+            </child>
           </object>
         </child>
+
+        <!-- Search mode selector (Default / Metadata) -->
         <child>
-          <object class="GtkMenuButton" id="filter_year">
-            <property name="label">All</property>
+          <object class="GtkBox" id="search_mode_box">
+            <style>
+              <class name="filter-field"/>
+            </style>
+            <child>
+              <object class="GtkLabel">
+                <property name="label">Mode</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkMenuButton" id="search_mode_dropdown">
+                <property name="label">Default</property>
+              </object>
+            </child>
           </object>
         </child>
-      </object>
-    </child>
-
-    <!-- Search filter -->
-    <child>
-      <object class="GtkBox" id="filter_search_box">
-        <property name="orientation">horizontal</property>
-        <property name="spacing">0</property>
-
-        <style>
-          <class name="filter-field"/>
-        </style>
-        <child>
-          <object class="GtkLabel">
-            <property name="label">Search</property>
-          </object>
-        </child>
-        <child>
-          <object class="GtkSearchEntry" id="filter_search">
-            <property name="placeholder-text">Filter...</property>
-            <property name="width-request">150</property>
-          </object>
-        </child>
-      </object>
-    </child>
-
-    <!-- Advanced toggle -->
-    <child>
-      <object class="GtkToggleButton" id="advanced_toggle">
-        <property name="label">Adv</property>
-        <property name="focusable">false</property>
-        <property name="tooltip-text">Advanced credit search</property>
-
-        <style>
-          <class name="filter-chip"/>
-        </style>
-      </object>
-    </child>
-
-    <!-- Clear button -->
-    <child>
-      <object class="GtkButton" id="filter_clear">
-        <property name="label">Clear</property>
-        <property name="focusable">false</property>
-
-        <style>
-          <class name="filter-chip"/>
-        </style>
-      </object>
-    </child>
-
-    <!-- Sort dropdown (hidden by default, shown for Artists/Albums) -->
-    <child>
-      <object class="GtkDropDown" id="sort_dropdown">
-        <property name="visible">false</property>
-        <property name="halign">end</property>
-        <property name="hexpand">true</property>
-        <style>
-          <class name="filter-field"/>
-        </style>
       </object>
     </child>
   </object>

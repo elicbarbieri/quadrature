@@ -14,7 +14,6 @@
     <child>
       <object class="GtkBox" id="errors_content">
         <property name="orientation">vertical</property>
-        <property name="spacing">0</property>
         <style><class name="errors-content"/></style>
       </object>
     </child>

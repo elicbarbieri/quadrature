@@ -12,8 +12,6 @@
 -->
 <interface>
   <object class="GtkBox" id="library_card">
-    <property name="orientation">horizontal</property>
-    <property name="spacing">0</property>
     <style>
       <class name="library-card"/>
     </style>
@@ -22,7 +20,6 @@
     <child>
       <object class="GtkBox" id="reorder_box">
         <property name="orientation">vertical</property>
-        <property name="spacing">0</property>
         <property name="valign">center</property>
         <property name="margin-end">12</property>
         <style>
@@ -69,13 +66,11 @@
     <child>
       <object class="GtkBox">
         <property name="orientation">vertical</property>
-        <property name="spacing">0</property>
         <property name="hexpand">true</property>
 
         <!-- Header: name/path (left) + action buttons (right) -->
         <child>
           <object class="GtkBox">
-            <property name="orientation">horizontal</property>
             <property name="spacing">8</property>
             <property name="margin-bottom">8</property>
             <style>
@@ -123,7 +118,6 @@
 
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">4</property>
                 <property name="valign">center</property>
 
@@ -162,7 +156,6 @@
 
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">16</property>
                 <child>
                   <object class="GtkLabel" id="stat_tracks">
@@ -187,7 +180,6 @@
 
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">8</property>
 
                 <child>
@@ -267,7 +259,6 @@
                 <!-- MusicBrainz toggle -->
                 <child>
                   <object class="GtkBox">
-                    <property name="orientation">horizontal</property>
                     <property name="spacing">8</property>
                     <child>
                       <object class="GtkLabel">
@@ -278,8 +269,6 @@
                     </child>
                     <child>
                       <object class="GtkBox" id="mb_toggle_box">
-                        <property name="orientation">horizontal</property>
-                        <property name="spacing">0</property>
                         <style><class name="linked"/></style>
                         <child>
                           <object class="GtkToggleButton" id="mb_default_btn">
@@ -308,7 +297,6 @@
                 <!-- AcoustID toggle -->
                 <child>
                   <object class="GtkBox">
-                    <property name="orientation">horizontal</property>
                     <property name="spacing">8</property>
                     <child>
                       <object class="GtkLabel">
@@ -319,8 +307,6 @@
                     </child>
                     <child>
                       <object class="GtkBox" id="acoustid_toggle_box">
-                        <property name="orientation">horizontal</property>
-                        <property name="spacing">0</property>
                         <style><class name="linked"/></style>
                         <child>
                           <object class="GtkToggleButton" id="acoustid_default_btn">
@@ -349,7 +335,6 @@
                 <!-- fanart.tv toggle -->
                 <child>
                   <object class="GtkBox">
-                    <property name="orientation">horizontal</property>
                     <property name="spacing">8</property>
                     <child>
                       <object class="GtkLabel">
@@ -360,8 +345,6 @@
                     </child>
                     <child>
                       <object class="GtkBox" id="fanart_toggle_box">
-                        <property name="orientation">horizontal</property>
-                        <property name="spacing">0</property>
                         <style><class name="linked"/></style>
                         <child>
                           <object class="GtkToggleButton" id="fanart_default_btn">
@@ -390,7 +373,6 @@
                 <!-- Wikipedia toggle -->
                 <child>
                   <object class="GtkBox">
-                    <property name="orientation">horizontal</property>
                     <property name="spacing">8</property>
                     <child>
                       <object class="GtkLabel">
@@ -401,8 +383,6 @@
                     </child>
                     <child>
                       <object class="GtkBox" id="wikipedia_toggle_box">
-                        <property name="orientation">horizontal</property>
-                        <property name="spacing">0</property>
                         <style><class name="linked"/></style>
                         <child>
                           <object class="GtkToggleButton" id="wikipedia_default_btn">
@@ -431,7 +411,6 @@
                 <!-- Action row: Remove + Done -->
                 <child>
                   <object class="GtkBox">
-                    <property name="orientation">horizontal</property>
                     <property name="spacing">8</property>
                     <property name="margin-top">8</property>
                     <child>
@@ -470,7 +449,6 @@
             <child>
               <object class="GtkBox">
                 <property name="orientation">vertical</property>
-                <property name="spacing">0</property>
                 <style>
                   <class name="library-card-progress"/>
                 </style>
@@ -482,8 +460,9 @@
                     <property name="spacing">4</property>
                     <style><class name="progress-phase"/><class name="progress-phase-dim"/></style>
                     <child><object class="GtkLabel" id="phase_0_title"><property name="label">Scanning directories</property><property name="xalign">0</property><style><class name="progress-phase-title"/></style></object></child>
-                    <child><object class="GtkBox"><property name="orientation">horizontal</property><child><object class="GtkLabel" id="phase_0_status"><property name="label">Waiting</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="progress-phase-label"/></style></object></child><child><object class="GtkLabel" id="phase_0_rate"><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child></object></child>
                     <child><object class="GtkProgressBar" id="phase_0_bar"><style><class name="progress-phase-bar"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_0_status"><property name="label"></property><property name="xalign">0</property><property name="visible">false</property><style><class name="progress-phase-label"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_0_rate"><property name="label"></property><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child>
                   </object>
                 </child>
 
@@ -493,8 +472,9 @@
                     <property name="spacing">4</property>
                     <style><class name="progress-phase"/><class name="progress-phase-dim"/></style>
                     <child><object class="GtkLabel" id="phase_1_title"><property name="label">Extracting metadata</property><property name="xalign">0</property><style><class name="progress-phase-title"/></style></object></child>
-                    <child><object class="GtkBox"><property name="orientation">horizontal</property><child><object class="GtkLabel" id="phase_1_status"><property name="label">Waiting</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="progress-phase-label"/></style></object></child><child><object class="GtkLabel" id="phase_1_rate"><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child></object></child>
                     <child><object class="GtkProgressBar" id="phase_1_bar"><style><class name="progress-phase-bar"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_1_status"><property name="label"></property><property name="xalign">0</property><property name="visible">false</property><style><class name="progress-phase-label"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_1_rate"><property name="label"></property><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child>
                   </object>
                 </child>
 
@@ -504,8 +484,9 @@
                     <property name="spacing">4</property>
                     <style><class name="progress-phase"/><class name="progress-phase-dim"/></style>
                     <child><object class="GtkLabel" id="phase_2_title"><property name="label">Processing artwork</property><property name="xalign">0</property><style><class name="progress-phase-title"/></style></object></child>
-                    <child><object class="GtkBox"><property name="orientation">horizontal</property><child><object class="GtkLabel" id="phase_2_status"><property name="label">Waiting</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="progress-phase-label"/></style></object></child><child><object class="GtkLabel" id="phase_2_rate"><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child></object></child>
                     <child><object class="GtkProgressBar" id="phase_2_bar"><style><class name="progress-phase-bar"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_2_status"><property name="label"></property><property name="xalign">0</property><property name="visible">false</property><style><class name="progress-phase-label"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_2_rate"><property name="label"></property><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child>
                   </object>
                 </child>
 
@@ -515,8 +496,9 @@
                     <property name="spacing">4</property>
                     <style><class name="progress-phase"/><class name="progress-phase-dim"/></style>
                     <child><object class="GtkLabel" id="phase_3_title"><property name="label">Acoustid fingerprinting</property><property name="xalign">0</property><style><class name="progress-phase-title"/></style></object></child>
-                    <child><object class="GtkBox"><property name="orientation">horizontal</property><child><object class="GtkLabel" id="phase_3_status"><property name="label">Waiting</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="progress-phase-label"/></style></object></child><child><object class="GtkLabel" id="phase_3_rate"><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child></object></child>
                     <child><object class="GtkProgressBar" id="phase_3_bar"><style><class name="progress-phase-bar"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_3_status"><property name="label"></property><property name="xalign">0</property><property name="visible">false</property><style><class name="progress-phase-label"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_3_rate"><property name="label"></property><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child>
                   </object>
                 </child>
 
@@ -526,8 +508,9 @@
                     <property name="spacing">4</property>
                     <style><class name="progress-phase"/><class name="progress-phase-dim"/></style>
                     <child><object class="GtkLabel" id="phase_4_title"><property name="label">MusicBrainz resolution</property><property name="xalign">0</property><style><class name="progress-phase-title"/></style></object></child>
-                    <child><object class="GtkBox"><property name="orientation">horizontal</property><child><object class="GtkLabel" id="phase_4_status"><property name="label">Waiting</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="progress-phase-label"/></style></object></child><child><object class="GtkLabel" id="phase_4_rate"><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child></object></child>
                     <child><object class="GtkProgressBar" id="phase_4_bar"><style><class name="progress-phase-bar"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_4_status"><property name="label"></property><property name="xalign">0</property><property name="visible">false</property><style><class name="progress-phase-label"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_4_rate"><property name="label"></property><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child>
                   </object>
                 </child>
 
@@ -537,8 +520,9 @@
                     <property name="spacing">4</property>
                     <style><class name="progress-phase"/><class name="progress-phase-dim"/></style>
                     <child><object class="GtkLabel" id="phase_5_title"><property name="label">Fetching artist images</property><property name="xalign">0</property><style><class name="progress-phase-title"/></style></object></child>
-                    <child><object class="GtkBox"><property name="orientation">horizontal</property><child><object class="GtkLabel" id="phase_5_status"><property name="label">Waiting</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="progress-phase-label"/></style></object></child><child><object class="GtkLabel" id="phase_5_rate"><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child></object></child>
                     <child><object class="GtkProgressBar" id="phase_5_bar"><style><class name="progress-phase-bar"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_5_status"><property name="label"></property><property name="xalign">0</property><property name="visible">false</property><style><class name="progress-phase-label"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_5_rate"><property name="label"></property><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child>
                   </object>
                 </child>
 
@@ -548,8 +532,9 @@
                     <property name="spacing">4</property>
                     <style><class name="progress-phase"/><class name="progress-phase-dim"/></style>
                     <child><object class="GtkLabel" id="phase_6_title"><property name="label">Fetching artist bios</property><property name="xalign">0</property><style><class name="progress-phase-title"/></style></object></child>
-                    <child><object class="GtkBox"><property name="orientation">horizontal</property><child><object class="GtkLabel" id="phase_6_status"><property name="label">Waiting</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="progress-phase-label"/></style></object></child><child><object class="GtkLabel" id="phase_6_rate"><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child></object></child>
                     <child><object class="GtkProgressBar" id="phase_6_bar"><style><class name="progress-phase-bar"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_6_status"><property name="label"></property><property name="xalign">0</property><property name="visible">false</property><style><class name="progress-phase-label"/></style></object></child>
+                    <child><object class="GtkLabel" id="phase_6_rate"><property name="label"></property><property name="xalign">1</property><property name="visible">false</property><style><class name="progress-phase-rate"/></style></object></child>
                   </object>
                 </child>
 

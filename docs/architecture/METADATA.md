@@ -33,6 +33,12 @@ Resolution runs once per album. Phase 6 queries `WHERE mb_status IN (0, 1)`.
 To retry NO_MATCH/FAILED albums: reset `mb_status = 0` (via UI or manual SQL),
 then run the indexer with `force_resolve = true`.
 
+**Tag-sourced MBID override:** When Phase 2 re-processes an album (user re-tagged with
+Picard) and finds a `MUSICBRAINZ_ALBUMID` tag, `db_set_album_release_id_from_tags()`
+updates `mb_status` to `HAS_RELEASE_ID` regardless of the current status — as long as it
+is not already `RESOLVED`. This ensures Picard tags are never silently dropped after a
+previous failed resolution attempt.
+
 ______________________________________________________________________
 
 ## Field Provenance

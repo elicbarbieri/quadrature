@@ -467,11 +467,13 @@ typedef struct {
 void ui_overflow_box_setup(const UiOverflowBoxParams *params);
 
 /** Pure layout planner — no GTK dependency (overflow_plan.c).
- *  Returns how many items to show. Sets *needs_overflow if not all fit. */
+ *  Returns how many items to show. Sets *needs_overflow if not all fit.
+ *  spacing: gap between each item (same as GtkBox spacing). */
 guint ui_overflow_box_plan_layout(int budget,
                                   const int *item_widths,
                                   guint item_count,
                                   int overflow_width,
+                                  int spacing,
                                   gboolean *needs_overflow);
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -486,6 +488,11 @@ double ui_log_pct_norm(double pct);
 
 /** Fill LUT with bell-curve weights: lut[i] = exp(-(d²)/(2σ²)). */
 void ui_bell_curve_lut(float *lut, int n, double sigma);
+
+/** Attach smooth-scroll interceptor to a GtkScrolledWindow.
+ *  Converts discrete mouse-wheel events into animated ease-out scrolling.
+ *  Touchpad/smooth-scroll input passes through unmodified. */
+void ui_smooth_scroll_attach(GtkScrolledWindow *sw);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Row Helpers (row_helpers.c)
@@ -546,6 +553,10 @@ void ui_list_box_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer us
 
 /* Format duration in milliseconds to "M:SS" string */
 void ui_format_duration(uint32_t ms, char *buf, size_t len);
+
+/* Format a release date ("YYYY-MM-DD", "YYYY-MM", or "YYYY") to human-readable.
+ * Returns a newly allocated string (caller must g_free), or NULL on invalid input. */
+char *ui_format_release_date(const char *date);
 
 /* ── Shell / Rebind for GtkListView factory recycling ──
  * Shell creates the widget tree once (factory setup).
@@ -648,8 +659,9 @@ GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
  * separator line — bypasses GTK4 CSS cascade issues in header contexts. */
 GtkWidget *ui_make_section_header(const char *title);
 
-/* Create album detail card for artist detail view.
- * Contains: album art, metadata, preview track list with automatic disc headers.
+/* Create album detail card (used in both album and artist detail views).
+ * Contains: album art, metadata (incl. MusicBrainz label/date), genre pills,
+ * and track list with automatic disc headers.
  * Stores: "album-id" on the card widget.
  * max_preview_tracks: limit of tracks to show (0 for all)
  * track_cbs: optional callbacks for track rows (NULL to skip handler attachment)
@@ -660,8 +672,7 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
                                         ArtworkManager *art_mgr,
                                         guint max_preview_tracks,
                                         RowCallbacks *track_cbs,
-                                        RowCallbacks *artist_cbs,
-                                        const db_meta_release_t *meta_release);
+                                        RowCallbacks *artist_cbs);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * List View Loading States
@@ -800,9 +811,11 @@ struct _UiWindow {
 
     /* Search */
     GtkWidget *search_entry;
-    GtkWidget *filter_btns[4];
+    GtkWidget *filter_btns[4];       /* All/Artists/Albums/Songs (radio group) */
+    GtkWidget *filter_metadata_btn;  /* Metadata mode toggle (Ctrl+M), independent */
     int filter_active;
     guint search_debounce_timer;
+    GCancellable *credit_search_cancel;  /* cancels in-flight async credit search */
     char *last_search_query;
     GtkWidget *search_results_list;  /* Unified GtkListBox for keyboard nav */
     GtkWidget *search_empty_label;

@@ -41,8 +41,6 @@
 
             <child>
               <object class="GtkBox" id="type_toggles">
-                <property name="orientation">horizontal</property>
-                <property name="halign">fill</property>
                 <property name="homogeneous">true</property>
                 <style>
                   <class name="linked"/>
@@ -53,7 +51,7 @@
                     <property name="label">Local Folder</property>
                     <property name="active">true</property>
                     <style>
-                      <class name="toggle-btn"/>
+                      <class name="library-toggle-btn"/>
                     </style>
                   </object>
                 </child>
@@ -61,7 +59,7 @@
                   <object class="GtkToggleButton" id="type_usb_btn">
                     <property name="label">USB Drive</property>
                     <style>
-                      <class name="toggle-btn"/>
+                      <class name="library-toggle-btn"/>
                     </style>
                   </object>
                 </child>
@@ -69,7 +67,7 @@
                   <object class="GtkToggleButton" id="type_network_btn">
                     <property name="label">Network Share</property>
                     <style>
-                      <class name="toggle-btn"/>
+                      <class name="library-toggle-btn"/>
                     </style>
                   </object>
                 </child>
@@ -94,7 +92,6 @@
         <!-- Separator -->
         <child>
           <object class="GtkSeparator">
-            <property name="orientation">horizontal</property>
           </object>
         </child>
 
@@ -114,7 +111,6 @@
             </child>
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">8</property>
                 <child>
                   <object class="GtkLabel" id="music_path_label">
@@ -152,7 +148,6 @@
             </child>
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">8</property>
                 <child>
                   <object class="GtkLabel" id="data_path_label">
@@ -190,7 +185,6 @@
         <!-- Separator -->
         <child>
           <object class="GtkSeparator">
-            <property name="orientation">horizontal</property>
           </object>
         </child>
 
@@ -213,7 +207,6 @@
             <!-- MusicBrainz toggle row -->
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">12</property>
                 <child>
                   <object class="GtkBox">
@@ -250,7 +243,6 @@
             <!-- AcoustID toggle row -->
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">12</property>
                 <child>
                   <object class="GtkBox">
@@ -287,7 +279,6 @@
             <!-- fanart.tv toggle row -->
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">12</property>
                 <child>
                   <object class="GtkBox">
@@ -324,7 +315,6 @@
             <!-- Wikipedia bios toggle row -->
             <child>
               <object class="GtkBox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">12</property>
                 <child>
                   <object class="GtkBox">
@@ -363,7 +353,6 @@
         <!-- Action buttons -->
         <child>
           <object class="GtkBox">
-            <property name="orientation">horizontal</property>
             <property name="spacing">8</property>
             <property name="halign">end</property>
             <property name="margin-top">4</property>

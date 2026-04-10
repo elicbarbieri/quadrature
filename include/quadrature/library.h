@@ -37,18 +37,12 @@ extern "C" {
 
 #define LIBRARY_MASK_ALL  UINT32_MAX
 
-/**
- * Compute new mask after a left-click toggle on a library pill.
- *
- * @param current_mask  Current library_mask before GTK flips the button.
- * @param lib_idx       Index of the clicked library (0–31).
- * @param now_active    Button state AFTER GTK toggled it (TRUE = was OFF, now ON).
- * @return              New mask (never 0 — falls back to LIBRARY_MASK_ALL).
- */
-/** Simple toggle: flip a single library bit on/off. */
+/** Simple toggle: flip a single library bit on/off.
+ *  Never returns 0 — falls back to LIBRARY_MASK_ALL. */
 static inline uint32_t library_mask_after_toggle(uint32_t current_mask,
                                                   int lib_idx) {
-    return current_mask ^ (1u << lib_idx);
+    uint32_t toggled = current_mask ^ (1u << lib_idx);
+    return toggled ? toggled : LIBRARY_MASK_ALL;
 }
 
 /** Solo: enable only this library, disable all others. */

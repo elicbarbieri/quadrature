@@ -281,12 +281,17 @@ static void overflow_box_relayout(OverflowBoxData *obd) {
     gboolean width_unknown = obd->constraint_widget && raw_width <= 0;
 
     /* Measure pinned children's accumulated width */
+    int sp = gtk_box_get_spacing(box);
     int pinned_width = 0;
     child = gtk_widget_get_first_child(obd->box);
     for (int i = 0; i < skip && child; i++) {
         pinned_width += measure_natural_width(child);
         child = gtk_widget_get_next_sibling(child);
     }
+    /* Budget for items: subtract pinned width + gap between pinned and first item */
+    int items_budget = max_width - pinned_width;
+    if (skip > 0 && obd->item_count > 0)
+        items_budget -= sp;
 
     /* ── Measure everything upfront ── */
     GtkWidget **items = g_newa(GtkWidget *, obd->item_count);
@@ -305,13 +310,16 @@ static void overflow_box_relayout(OverflowBoxData *obd) {
     gboolean needs_overflow = FALSE;
     guint show_count;
     if (width_unknown) {
-        /* Show all — let parent clip until real width is known */
+        /* Width not yet known — show all items without overflow planning.
+         * The real constraint will apply once notify::width fires with an
+         * actual allocation.  ProportionalBox's flexible slots have min_width=0
+         * so this won't inflate the parent's minimum. */
         show_count = obd->item_count;
         needs_overflow = FALSE;
     } else {
         show_count = ui_overflow_box_plan_layout(
-            max_width - pinned_width, item_widths, obd->item_count,
-            overflow_w, &needs_overflow);
+            items_budget, item_widths, obd->item_count,
+            overflow_w, sp, &needs_overflow);
     }
 
     /* ── Execute: append only what the plan selected ── */

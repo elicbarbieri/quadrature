@@ -73,6 +73,12 @@ GtkWidget* create_artist_button(int64_t artist_id, const char* name, RowCallback
 
     g_object_set_data(G_OBJECT(btn), "artist-id", GSIZE_TO_POINTER((gsize)artist_id));
 
+    /* Suppress: dim + non-interactive when viewing this artist's own page */
+    if (callbacks && callbacks->suppress_id > 0 && callbacks->suppress_id == artist_id) {
+        gtk_widget_set_sensitive(btn, FALSE);
+        return btn;
+    }
+
     if (callbacks) {
         RowCallbacks *cbs_copy = g_new0(RowCallbacks, 1);
         *cbs_copy = *callbacks;

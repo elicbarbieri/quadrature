@@ -831,6 +831,31 @@ static double release_type_score(const char* type) {
 // Lucene escaping + Solr preprocessing
 // --------------------------------------------------------------------------
 
+// Strip trailing parenthetical edition text for SOLR queries.
+// "Random Access Memories (10th Anniversary Edition)" → "Random Access Memories"
+// Only strips if parenthetical content contains a known edition keyword.
+static char* strip_edition_suffix(const char* title) {
+    if (!title) return g_strdup("");
+    char* copy = g_strdup(title);
+    char* paren = strrchr(copy, '(');
+    if (paren && paren > copy && *(paren - 1) == ' ') {
+        static const char* keywords[] = {
+            "edition", "deluxe", "remaster", "anniversary", "bonus",
+            "expanded", "special", "limited", "version", NULL
+        };
+        char* lower = g_ascii_strdown(paren, -1);
+        for (const char** kw = keywords; *kw; kw++) {
+            if (strstr(lower, *kw)) {
+                *(paren - 1) = '\0';
+                g_free(lower);
+                return copy;
+            }
+        }
+        g_free(lower);
+    }
+    return copy;
+}
+
 // Escape Lucene special characters — exact port of Picard's escape_lucene_query():
 //   re.sub(r'([+\-&|!(){}\[\]\^"~*?:\\/])', r'\\\1', text)
 static char* escape_lucene(const char* input) {
@@ -863,7 +888,8 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
     // - fl=mbid,score: request Solr relevance score for each result.
     //   Picard multiplies similarity by get_score(release) — we do the same.
     // - rows=25: matches Picard's default query_limit.
-    char* lucene_album = escape_lucene(album_title);
+    char* clean_album = strip_edition_suffix(album_title);
+    char* lucene_album = escape_lucene(clean_album);
     char* lucene_artist = escape_lucene(artist_name);
     char* escaped_album = g_uri_escape_string(lucene_album, NULL, FALSE);
     char* escaped_artist = g_uri_escape_string(lucene_artist, NULL, FALSE);
@@ -888,6 +914,7 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
     if (!msg) {
         g_warning("mb_solr_search: invalid URL for '%s' by '%s'",
                   album_title, artist_name);
+        g_free(clean_album);
         return NULL;
     }
 
@@ -907,6 +934,7 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
             g_error_free(error);
         }
         if (body) g_bytes_unref(body);
+        g_free(clean_album);
         return NULL;
     }
 
@@ -919,6 +947,7 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
         g_warning("mb_solr_search: failed to parse JSON response");
         g_object_unref(parser);
         g_bytes_unref(body);
+        g_free(clean_album);
         return NULL;
     }
 
@@ -928,6 +957,7 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
     if (!response_obj) {
         g_object_unref(parser);
         g_bytes_unref(body);
+        g_free(clean_album);
         return NULL;
     }
 
@@ -935,6 +965,7 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
     if (!docs || json_array_get_length(docs) == 0) {
         g_object_unref(parser);
         g_bytes_unref(body);
+        g_free(clean_album);
         return NULL;
     }
 
@@ -1004,7 +1035,8 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
         const char* mb_artist = PQgetisnull(info_res, 0, 4) ? "" : PQgetvalue(info_res, 0, 4);
 
         // 1. Album title similarity (weight 17) — Picard similarity2()
-        double title_sim = similarity2(album_title, mb_title);
+        // Use clean_album (edition text stripped) for fair comparison against MB title
+        double title_sim = similarity2(clean_album, mb_title);
 
         // 2. Artist similarity (weight 6) — Picard similarity2()
         double artist_sim = similarity2(artist_name, mb_artist);
@@ -1052,6 +1084,8 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
 
     g_object_unref(parser);
     g_bytes_unref(body);
+
+    g_free(clean_album);
 
     // Reject if best score is below threshold
     if (best_release_id && best_score < SOLR_MATCH_THRESHOLD) {

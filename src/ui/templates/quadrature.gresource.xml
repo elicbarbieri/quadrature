@@ -41,7 +41,6 @@
     
     <!-- Shared filter/sort bar -->
     <file>filter_sort_bar.ui</file>
-    <file>advanced_search_bar.ui</file>
 
     <!-- Button/widget templates -->
     <file>album_button.ui</file>

@@ -45,7 +45,6 @@
         </child>
         <child>
           <object class="GtkBox" id="primary_artists_box">
-            <property name="orientation">horizontal</property>
             <style>
               <class name="library-row-subtitle"/>
             </style>
@@ -54,7 +53,6 @@
         <!-- library badges: populated dynamically by row_helpers.c -->
         <child>
           <object class="GtkBox" id="library_badges">
-            <property name="orientation">horizontal</property>
             <property name="spacing">4</property>
             <property name="visible">false</property>
           </object>
@@ -71,13 +69,11 @@
         <property name="valign">center</property>
         <child>
           <object class="GtkBox" id="album_box">
-            <property name="orientation">horizontal</property>
           </object>
         </child>
         <!-- Featuring artists -->
         <child>
           <object class="GtkBox" id="secondary_artists_box">
-            <property name="orientation">horizontal</property>
             <property name="hexpand">true</property>
             <style>
               <class name="library-row-subtitle"/>
@@ -87,7 +83,6 @@
         <!-- credit annotation: hidden unless credit data is set dynamically -->
         <child>
           <object class="GtkBox" id="credit_annotation">
-            <property name="orientation">horizontal</property>
             <property name="spacing">6</property>
             <property name="visible">false</property>
             <child>

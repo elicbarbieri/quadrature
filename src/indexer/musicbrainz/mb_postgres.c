@@ -483,7 +483,6 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
     }
 
     int nrows = PQntuples(res);
-
     /* Output containers */
     GHashTable* releases = g_hash_table_new_full(
         g_str_hash, g_str_equal, NULL, batch_release_free);
@@ -516,6 +515,14 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
                     prev->artists = flatten_artists(cur_album_artists);
                     cur_album_artists = NULL;
                 }
+            }
+
+            /* Deduplicate: LEFT JOIN release_country can produce multiple
+             * section=1 rows per release (one per country). Skip if already seen. */
+            if (g_hash_table_contains(releases, rel_gid)) {
+                g_free(cur_album_gid);
+                cur_album_gid = NULL;
+                break;
             }
 
             mb_release_t* r = g_new0(mb_release_t, 1);

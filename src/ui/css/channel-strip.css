@@ -96,7 +96,7 @@ channel-strip.channel-strip-focused .channel-number {
 }
 
 .display-panel-large {
-    font-size: 21px;
+    font-size: 22px;
     font-weight: 500;
     color: #e0e0e0;
 }
@@ -261,7 +261,7 @@ channel-strip.channel-strip-focused .channel-number {
 .channel-shuttle-scale trough {
     min-height: 6px;
     border-radius: 3px;
-    background: linear-gradient(to right, #ff6b6b, #333333 45%, #333333 55%, #4ecdc4);
+    background: linear-gradient(to right, @red_1, #333333 45%, #333333 55%, #4ecdc4);
 }
 
 .channel-shuttle-scale highlight { background: transparent; }
@@ -353,7 +353,7 @@ transport-bar {
 .shuttle-scale trough {
     min-height: 8px;
     border-radius: 4px;
-    background: linear-gradient(to right, #ff6b6b, #333333 45%, #333333 55%, #4ecdc4);
+    background: linear-gradient(to right, @red_1, #333333 45%, #333333 55%, #4ecdc4);
 }
 
 .shuttle-scale highlight { background: transparent; }

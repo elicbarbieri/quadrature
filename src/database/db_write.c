@@ -598,9 +598,31 @@ quadrature_result_t db_set_album_release_id_from_tags(quadrature_db_t* db,
     sqlite3_bind_text(db->set_album_release_id, 1, musicbrainz_release_id, -1, SQLITE_STATIC);
     sqlite3_bind_int(db->set_album_release_id, 2, MB_STATUS_HAS_RELEASE_ID);
     sqlite3_bind_int64(db->set_album_release_id, 3, album_id);
-    sqlite3_bind_int(db->set_album_release_id, 4, MB_STATUS_NOT_ATTEMPTED);
     int rc = sqlite3_step(db->set_album_release_id);
     sqlite3_reset(db->set_album_release_id);
+
+    return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
+}
+
+quadrature_result_t db_set_album_release_group_id_from_tags(quadrature_db_t* db,
+    int64_t album_id, const char* musicbrainz_release_group_id) {
+    if (!db || album_id <= 0 || !musicbrainz_release_group_id || !musicbrainz_release_group_id[0])
+        return QUADRATURE_ERROR_INVALID_PARAM;
+
+    db_lock(db);
+    sqlite3_stmt* stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->db,
+        "UPDATE albums SET musicbrainz_release_group_id = ? "
+        "WHERE id = ? AND (musicbrainz_release_group_id IS NULL OR musicbrainz_release_group_id = '') "
+        "AND mb_status != 2",
+        -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, musicbrainz_release_group_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 2, album_id);
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    db_unlock(db);
 
     return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
 }
@@ -914,6 +936,66 @@ quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db) {
 
     if (changes > 0)
         g_message("db_prune_orphan_artists: removed %d orphan artist(s)", changes);
+
+    db_unlock(db);
+    return QUADRATURE_OK;
+}
+
+quadrature_result_t db_prune_orphan_albums(quadrature_db_t* db,
+                                            const int64_t* album_ids,
+                                            size_t count) {
+    if (!db || !album_ids || count == 0) return QUADRATURE_OK;
+
+    db_lock(db);
+
+    char* err = NULL;
+    sqlite3_exec(db->db, "BEGIN", NULL, NULL, &err);
+    if (err) { sqlite3_free(err); err = NULL; }
+
+    sqlite3_exec(db->db,
+        "CREATE TEMP TABLE IF NOT EXISTS _orphan_ids(id INTEGER PRIMARY KEY)",
+        NULL, NULL, NULL);
+    sqlite3_exec(db->db, "DELETE FROM _orphan_ids", NULL, NULL, NULL);
+
+    sqlite3_stmt* ins;
+    sqlite3_prepare_v2(db->db, "INSERT INTO _orphan_ids VALUES(?)", -1, &ins, NULL);
+    for (size_t i = 0; i < count; i++) {
+        sqlite3_bind_int64(ins, 1, album_ids[i]);
+        sqlite3_step(ins);
+        sqlite3_reset(ins);
+    }
+    sqlite3_finalize(ins);
+
+    // Delete tracks first (track_artists cascade via ON DELETE CASCADE)
+    sqlite3_exec(db->db,
+        "DELETE FROM tracks WHERE album_id IN (SELECT id FROM _orphan_ids)",
+        NULL, NULL, NULL);
+    int track_changes = sqlite3_changes(db->db);
+
+    // Clean tracks FTS
+    sqlite3_exec(db->db,
+        "DELETE FROM tracks_fts WHERE rowid NOT IN (SELECT id FROM tracks)",
+        NULL, NULL, NULL);
+
+    // Delete albums
+    sqlite3_exec(db->db,
+        "DELETE FROM albums WHERE id IN (SELECT id FROM _orphan_ids)",
+        NULL, NULL, NULL);
+    int album_changes = sqlite3_changes(db->db);
+
+    // Clean albums FTS
+    sqlite3_exec(db->db,
+        "DELETE FROM albums_fts WHERE rowid NOT IN (SELECT id FROM albums)",
+        NULL, NULL, NULL);
+
+    sqlite3_exec(db->db, "DROP TABLE _orphan_ids", NULL, NULL, NULL);
+
+    sqlite3_exec(db->db, "COMMIT", NULL, NULL, &err);
+    if (err) sqlite3_free(err);
+
+    if (album_changes > 0)
+        g_message("db_prune_orphan_albums: removed %d album(s), %d track(s)",
+                  album_changes, track_changes);
 
     db_unlock(db);
     return QUADRATURE_OK;

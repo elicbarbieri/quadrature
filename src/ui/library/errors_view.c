@@ -491,6 +491,7 @@ GtkWidget *errors_view_new(quadrature_db_t *db) {
                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), vd->list_view);
+    ui_smooth_scroll_attach(GTK_SCROLLED_WINDOW(scroll));
     gtk_box_append(GTK_BOX(container), scroll);
 
     return container;

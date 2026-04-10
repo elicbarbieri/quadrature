@@ -122,9 +122,10 @@ Self-contained album card for artist detail view. Shows album header with large 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │ ┌──────────┐  Album Title                                                            │
-│ │  250px   │  Artist A, Artist B  (primary artists shown here)                      │
-│ │   art    │  2024 · 12 tracks · 45:32                                               │
-│ └──────────┘                                                                         │
+│ │  250px   │  Artist A, Artist B                                                    │
+│ │   art    │  Album · January 15, 2024                                              │
+│ │          │  Label: Columbia Records                                                │
+│ └──────────┘  12 tracks · 45:32                                                     │
 │  1. Track One                                                                   3:02 │
 │  2. Track Two                         feat. Artist C...                         4:15 │
 │  3. Track Three                                                                 3:45 │
@@ -135,7 +136,9 @@ Self-contained album card for artist detail view. Shows album header with large 
 - **Album art:** 250x250px
 - **Title:** Bold, natural case (no forced uppercase)
 - **Artists:** All primary artists, comma-separated. Shown in header only, not repeated in track list.
-- **Stats:** Year, track count, and total duration separated by centered dot
+- **Release info:** Release type and full date (from MusicBrainz metadata DB), separated by centered dot. Falls back to year-only from tags when metadata DB has no entry. Hidden when no date is available.
+- **Label:** Prefixed with "Label:" followed by record label name. Hidden when no label data exists.
+- **Stats:** Track count and total duration separated by centered dot
 - **Track list:** Compact track items without primary artist names (only featuring artists shown inline). No info button in card context.
 - **See all:** Shows when more than 5 preview tracks
 
@@ -150,10 +153,10 @@ Full-page album view with header (artwork + metadata) and track list. Primary ar
 │  <- Back to Artists                                                                  │
 │                                                                                      │
 │  ┌─────────┐  Album Title Here (Natural Case)                                       │
-│  │ 250x250 │  [Primary Artists] [Year]  <- Artist button navigates to artist        │
-│  │  album  │  12 tracks - 45:32                                                     │
-│  │   art   │                                                                        │
-│  └─────────┘                                                                        │
+│  │ 250x250 │  [Primary Artists]         <- Artist button navigates to artist        │
+│  │  album  │  Album · January 15, 2024                                              │
+│  │   art   │  Label: Columbia Records                                               │
+│  └─────────┘  12 tracks - 45:32                                                     │
 │                                                                                      │
 │   1  Track Title One                                                          3:45  │
 │   2  Track Title Two              feat. Artist X                              4:12  │
@@ -166,7 +169,8 @@ Full-page album view with header (artwork + metadata) and track list. Primary ar
 - **Album art:** 250x250px (left side)
 - **Album title:** 36px, bold, natural case, ellipsizes if too long, selectable
 - **Primary artists:** 16px, clickable button (navigates to artist detail)
-- **Year:** 16px, selectable
+- **Release info:** Release type and full date separated by centered dot. Falls back to year-only when metadata DB has no entry. Hidden when no date available.
+- **Label:** "Label:" prefix followed by record label name. Hidden when no label data exists.
 - **Stats:** 16px, selectable (track count and duration)
 
 **Track list:**

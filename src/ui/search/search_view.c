@@ -62,20 +62,29 @@ void do_search(UiWindow *w);
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 void set_search_filter(UiWindow *w, int idx) {
-    for (int i = 0; i < 4; i++)
-        ui_toggle_css(w->filter_btns[i], "filter-chip--on", i == idx);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w->filter_btns[idx]), TRUE);
     w->filter_active = idx;
     do_search(w);
 }
 
-static void on_filter_clicked(GtkButton *btn, gpointer data) {
+static void on_filter_toggled(GtkToggleButton *btn, gpointer data) {
+    if (!gtk_toggle_button_get_active(btn))
+        return;
     UiWindow *w = UI_WINDOW(data);
     for (int i = 0; i < 4; i++) {
         if (GTK_WIDGET(btn) == w->filter_btns[i]) {
-            set_search_filter(w, i);
+            w->filter_active = i;
+            do_search(w);
             return;
         }
     }
+}
+
+static void on_metadata_toggled(GtkToggleButton *btn, gpointer data) {
+    UiWindow *w = UI_WINDOW(data);
+    gboolean active = gtk_toggle_button_get_active(btn);
+    filter_bar_set_metadata_mode(&w->search_filter_bar, active);
+    do_search(w);
 }
 
 /* Helper: Focus search entry and select all text */
@@ -84,16 +93,16 @@ void focus_search_entry(UiWindow *w) {
     gtk_editable_select_region(GTK_EDITABLE(w->search_entry), 0, -1);
 }
 
-/* ── Credit search helpers ── */
+/* ── Metadata search helpers ── */
 
 /**
- * Check if credit search is active (advanced panel visible + non-empty credit text OR role set).
+ * Check if metadata/credit search is active (metadata mode toggle on in search view,
+ * or search mode set to Metadata in list views).
  */
-static gboolean credit_search_active(UiWindow *w) {
-    const char *ct = filter_bar_get_credit_text(&w->search_filter_bar);
-    gboolean has_credit_text = ct != NULL;
-    gboolean has_role_filter = filter_bar_get_role_index(&w->search_filter_bar) > 0;
-    return has_credit_text || has_role_filter;
+static gboolean metadata_search_active(UiWindow *w) {
+    if (w->filter_metadata_btn)
+        return gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->filter_metadata_btn));
+    return filter_bar_get_search_mode(&w->search_filter_bar) == FILTER_SEARCH_METADATA;
 }
 
 /* Credit info stored per track in the credit search hash table */
@@ -114,35 +123,63 @@ static void credit_track_info_free(gpointer data) {
     g_free(info);
 }
 
+/* ── Async Credit Search (GTask-based) ─────────────────────────────────── */
+
+/* Input parameters for background credit search (copied from UI state) */
+typedef struct {
+    library_cache_t *cache;
+    char *credit_text;
+    char *role_gid;       /* first selected role GID, or NULL */
+} CreditSearchInput;
+
+/* Output from background credit search */
+typedef struct {
+    GHashTable *track_set;      /* int64_t* → CreditTrackInfo* */
+    GPtrArray  *meta_artists;   /* "mbid\tname\ttype" packed strings */
+} CreditSearchResult;
+
+static void credit_search_input_free(CreditSearchInput *in) {
+    if (!in) return;
+    g_free(in->credit_text);
+    g_free(in->role_gid);
+    g_free(in);
+}
+
+static void credit_search_result_free(CreditSearchResult *r) {
+    if (!r) return;
+    if (r->track_set) g_hash_table_unref(r->track_set);
+    if (r->meta_artists) g_ptr_array_unref(r->meta_artists);
+    g_free(r);
+}
+
 /**
  * Build map of global track_ids → CreditTrackInfo matched by credit search.
+ * Thread-safe: accesses only library_cache and DB handles (no GTK widgets).
  *
  * For each library: search metadata artists matching credit text, then for each
- * matching artist get their credits (optionally filtered by role), resolve via
- * positional bridge to track_ids.
+ * matching artist get their credits (optionally filtered by role), batch-resolve
+ * via positional bridge to track_ids.
  *
- * Returns a GHashTable<int64_t*, CreditTrackInfo*> — caller must unref.
- * Also populates meta_artists_out (if non-NULL) with matched artist results
- * for potential display as search result headers.
+ * Returns a CreditSearchResult (caller must free with credit_search_result_free).
  */
-static GHashTable *build_credit_track_set(UiWindow *w,
-                                           GPtrArray **meta_artists_out) {
-    GHashTable *track_set = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                                   g_free, credit_track_info_free);
+static CreditSearchResult *build_credit_track_set(library_cache_t *cache,
+                                                    const char *credit_text,
+                                                    const char *role_gid) {
+    CreditSearchResult *result = g_new0(CreditSearchResult, 1);
+    result->track_set = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                               g_free, credit_track_info_free);
+    result->meta_artists = g_ptr_array_new_with_free_func(g_free);
 
-    const char *credit_text = filter_bar_get_credit_text(&w->search_filter_bar);
-    gboolean has_credit_text = credit_text != NULL;
-    const char *role_gid = filter_bar_get_role_gid(&w->search_filter_bar);
+    gboolean has_credit_text = credit_text && *credit_text;
 
     /* Deduplicate meta artists across libraries by MBID */
     GHashTable *seen_mbids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    GPtrArray *meta_artists = g_ptr_array_new_with_free_func(g_free);
 
-    int lib_count = library_cache_get_library_count(w->library_cache);
+    int lib_count = library_cache_get_library_count(cache);
     for (int li = 0; li < lib_count; li++) {
-        int bi = library_cache_get_bitmap_index(w->library_cache, li);
-        if (!library_cache_get_available(w->library_cache, bi)) continue;
-        library_cache_dbs_t dbs = library_cache_get_dbs(w->library_cache, bi);
+        int bi = library_cache_get_bitmap_index(cache, li);
+        if (!library_cache_get_available(cache, bi)) continue;
+        library_cache_dbs_t dbs = library_cache_get_dbs(cache, bi);
         if (!dbs.meta) continue;
 
         /* Find matching artists in this library's metadata DB */
@@ -166,7 +203,7 @@ static GHashTable *build_credit_track_set(UiWindow *w,
                     if (!g_hash_table_contains(seen_mbids, artists[i].artist_mbid)) {
                         g_hash_table_add(seen_mbids, g_strdup(artists[i].artist_mbid));
                         /* Store as "mbid\tname\ttype" packed string */
-                        g_ptr_array_add(meta_artists,
+                        g_ptr_array_add(result->meta_artists,
                             g_strdup_printf("%s\t%s\t%s",
                                 artists[i].artist_mbid,
                                 artists[i].name ? artists[i].name : "",
@@ -189,7 +226,7 @@ static GHashTable *build_credit_track_set(UiWindow *w,
             continue;
         }
 
-        /* For each matched artist, get their credits and resolve to track_ids */
+        /* For each matched artist, get their credits and batch-resolve to track_ids */
         gboolean have_lib_db = (dbs.db != NULL);
 
         for (guint ai = 0; ai < artist_mbids_to_query->len; ai++) {
@@ -201,49 +238,61 @@ static GHashTable *build_credit_track_set(UiWindow *w,
                 dbs.meta, artist_mbid, role_gid, &credits, &credit_count);
 
             if (res == QUADRATURE_OK && credit_count > 0 && have_lib_db) {
+                /* Batch-resolve all credit positions at once */
+                db_track_position_t *positions = g_new0(db_track_position_t, credit_count);
+                int64_t *track_ids = g_new0(int64_t, credit_count);
+
+                for (size_t ci = 0; ci < credit_count; ci++) {
+                    positions[ci].release_mbid = credits[ci].release_mbid;
+                    positions[ci].disc_num = credits[ci].disc_num;
+                    positions[ci].track_num = credits[ci].track_num;
+                }
+
+                db_resolve_track_positions_batch(dbs.db, positions, credit_count, track_ids);
+
                 const char *artist_name = g_hash_table_lookup(mbid_to_name, artist_mbid);
                 for (size_t ci = 0; ci < credit_count; ci++) {
+                    if (track_ids[ci] == 0) continue;
+
+                    int64_t global_id = LIBRARY_MAKE_GLOBAL_ID(bi, track_ids[ci]);
                     db_meta_artist_credit_t *c = &credits[ci];
-                    if (!c->release_mbid) continue;
 
-                    int64_t local_track_id = 0;
-                    if (db_get_track_by_position(dbs.db, c->release_mbid,
-                            c->disc_num, c->track_num, &local_track_id) == QUADRATURE_OK) {
-                        int64_t global_id = LIBRARY_MAKE_GLOBAL_ID(li, local_track_id);
-                        /* Format role for this credit */
-                        char *role = NULL;
-                        if (c->attributes && c->attributes[0]) {
-                            role = g_strdup(c->attributes);
+                    /* Format role for this credit */
+                    char *role = NULL;
+                    if (c->attributes && c->attributes[0]) {
+                        role = g_strdup(c->attributes);
+                        role[0] = g_ascii_toupper(role[0]);
+                    } else {
+                        role = g_strdup(c->link_type_name ? c->link_type_name : "Credit");
+                        if (role[0])
                             role[0] = g_ascii_toupper(role[0]);
-                        } else {
-                            role = g_strdup(c->link_type_name ? c->link_type_name : "Credit");
-                            if (role[0])
-                                role[0] = g_ascii_toupper(role[0]);
-                        }
-
-                        /* Accumulate roles per track */
-                        int64_t *lookup_key = g_new(int64_t, 1);
-                        *lookup_key = global_id;
-                        CreditTrackInfo *info = g_hash_table_lookup(track_set, lookup_key);
-                        if (!info) {
-                            info = g_new0(CreditTrackInfo, 1);
-                            info->roles = g_ptr_array_new_with_free_func(g_free);
-                            info->role_set = g_hash_table_new(g_str_hash, g_str_equal);
-                            info->artist_name = g_strdup(artist_name ? artist_name : "");
-                            info->artist_mbid = g_strdup(artist_mbid);
-                            g_hash_table_insert(track_set, lookup_key, info);
-                        } else {
-                            g_free(lookup_key);
-                        }
-                        /* Add role if unique — roles array owns, role_set borrows */
-                        if (!g_hash_table_contains(info->role_set, role)) {
-                            char *owned = g_strdup(role);
-                            g_ptr_array_add(info->roles, owned);
-                            g_hash_table_add(info->role_set, owned);
-                        }
-                        g_free(role);
                     }
+
+                    /* Accumulate roles per track */
+                    int64_t *lookup_key = g_new(int64_t, 1);
+                    *lookup_key = global_id;
+                    CreditTrackInfo *info = g_hash_table_lookup(result->track_set, lookup_key);
+                    if (!info) {
+                        info = g_new0(CreditTrackInfo, 1);
+                        info->roles = g_ptr_array_new_with_free_func(g_free);
+                        info->role_set = g_hash_table_new(g_str_hash, g_str_equal);
+                        info->artist_name = g_strdup(artist_name ? artist_name : "");
+                        info->artist_mbid = g_strdup(artist_mbid);
+                        g_hash_table_insert(result->track_set, lookup_key, info);
+                    } else {
+                        g_free(lookup_key);
+                    }
+                    /* Add role if unique — roles array owns, role_set borrows */
+                    if (!g_hash_table_contains(info->role_set, role)) {
+                        char *owned = g_strdup(role);
+                        g_ptr_array_add(info->roles, owned);
+                        g_hash_table_add(info->role_set, owned);
+                    }
+                    g_free(role);
                 }
+
+                g_free(positions);
+                g_free(track_ids);
             }
             db_meta_artist_credits_free(credits, credit_count);
         }
@@ -253,13 +302,26 @@ static GHashTable *build_credit_track_set(UiWindow *w,
     }
 
     g_hash_table_unref(seen_mbids);
+    return result;
+}
 
-    if (meta_artists_out)
-        *meta_artists_out = meta_artists;
-    else
-        g_ptr_array_unref(meta_artists);
+/* GTask worker thread: runs the credit search off the main thread */
+static void credit_search_thread(GTask *task, gpointer src,
+                                  gpointer data, GCancellable *cancel) {
+    (void)src;
+    CreditSearchInput *in = data;
 
-    return track_set;
+    if (g_cancellable_is_cancelled(cancel)) return;
+
+    CreditSearchResult *result = build_credit_track_set(
+        in->cache, in->credit_text, in->role_gid);
+
+    if (g_cancellable_is_cancelled(cancel)) {
+        credit_search_result_free(result);
+        return;
+    }
+
+    g_task_return_pointer(task, result, (GDestroyNotify)credit_search_result_free);
 }
 
 /* ── Display helpers for search results ── */
@@ -376,12 +438,103 @@ static void populate_search_tracks(UiWindow *w, GPtrArray *tracks,
     g_object_unref(track_groups.col1);
 }
 
+/**
+ * Apply credit search results to the UI (main thread only).
+ *
+ * When metadata mode is active, the search text drives ONLY the credit search.
+ * Credit-matched tracks are displayed directly — no intersection with
+ * library_cache_search, which would filter out session musicians who don't
+ * appear as main library entities.
+ */
+static void apply_search_with_credits(UiWindow *w, GHashTable *credit_tracks,
+                                       GPtrArray *meta_artists G_GNUC_UNUSED) {
+    if (g_hash_table_size(credit_tracks) == 0) {
+        clear_search_results(w->search_results_list);
+        gtk_widget_set_visible(w->search_results_list, FALSE);
+        gtk_widget_set_visible(w->search_empty_label, TRUE);
+        gtk_label_set_text(GTK_LABEL(w->search_empty_label), "No credit matches found");
+        return;
+    }
+
+    /* Resolve credit track_ids to library_track_info_t for display */
+    GPtrArray *tracks = g_ptr_array_new();
+    GHashTableIter iter;
+    gpointer key;
+    g_hash_table_iter_init(&iter, credit_tracks);
+    while (g_hash_table_iter_next(&iter, &key, NULL)) {
+        int64_t track_id = *(int64_t *)key;
+        const library_track_info_t *info = library_cache_get_track(
+            w->library_cache, track_id);
+        if (info)
+            g_ptr_array_add(tracks, (gpointer)info);
+    }
+
+    if (tracks->len == 0) {
+        g_ptr_array_unref(tracks);
+        clear_search_results(w->search_results_list);
+        gtk_widget_set_visible(w->search_results_list, FALSE);
+        gtk_widget_set_visible(w->search_empty_label, TRUE);
+        gtk_label_set_text(GTK_LABEL(w->search_empty_label), "No credit matches found");
+        return;
+    }
+
+    /* Derive albums from credit-matched tracks for album section */
+    GHashTable *seen_albums = g_hash_table_new(g_int64_hash, g_int64_equal);
+    GPtrArray *albums = g_ptr_array_new();
+    for (guint i = 0; i < tracks->len; i++) {
+        const library_track_info_t *t = g_ptr_array_index(tracks, i);
+        if (!g_hash_table_contains(seen_albums, &t->album_id)) {
+            g_hash_table_add(seen_albums, (gpointer)&t->album_id);
+            const library_album_info_t *album =
+                library_cache_get_album(w->library_cache, t->album_id, w->library_mask);
+            if (album)
+                g_ptr_array_add(albums, (gpointer)album);
+        }
+    }
+    g_hash_table_unref(seen_albums);
+
+    gtk_widget_set_visible(w->search_empty_label, FALSE);
+    gtk_widget_set_visible(w->search_results_list, TRUE);
+    clear_search_results(w->search_results_list);
+
+    populate_search_albums(w, albums);
+    populate_search_tracks(w, tracks, credit_tracks);
+
+    g_ptr_array_unref(albums);
+    g_ptr_array_unref(tracks);
+}
+
+/* GTask completion callback: credit search finished, apply results on main thread */
+static void on_credit_search_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    UiWindow *w = UI_WINDOW(data);
+    GError *error = NULL;
+    CreditSearchResult *result = g_task_propagate_pointer(G_TASK(res), &error);
+
+    if (!result) {
+        /* Cancelled or failed — don't touch UI if cancelled (superseded by newer search) */
+        if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+            g_warning("credit search failed: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+
+    apply_search_with_credits(w, result->track_set, result->meta_artists);
+    credit_search_result_free(result);
+}
+
 void do_search(UiWindow *w) {
     if (!w->library_cache) return;
 
+    /* Cancel any in-flight credit search */
+    if (w->credit_search_cancel) {
+        g_cancellable_cancel(w->credit_search_cancel);
+        g_clear_object(&w->credit_search_cancel);
+    }
+
     const char *query = gtk_editable_get_text(GTK_EDITABLE(w->search_entry));
     gboolean has_main_query = query && strlen(query) >= 1;
-    gboolean has_credit = credit_search_active(w);
+    gboolean has_credit = metadata_search_active(w);
 
     if (!has_main_query && !has_credit) {
         clear_search_results(w->search_results_list);
@@ -391,151 +544,81 @@ void do_search(UiWindow *w) {
         return;
     }
 
-    /* Build credit track set if credit filter is active */
-    GHashTable *credit_tracks = NULL;
-    GPtrArray *meta_artists = NULL;
     if (has_credit) {
-        credit_tracks = build_credit_track_set(w, &meta_artists);
-        /* Credit-only with no matches → show empty */
-        if (!has_main_query && g_hash_table_size(credit_tracks) == 0) {
-            g_hash_table_unref(credit_tracks);
-            g_ptr_array_unref(meta_artists);
-            clear_search_results(w->search_results_list);
-            gtk_widget_set_visible(w->search_results_list, FALSE);
-            gtk_widget_set_visible(w->search_empty_label, TRUE);
-            gtk_label_set_text(GTK_LABEL(w->search_empty_label), "No credit matches found");
-            return;
-        }
+        /* ── Async credit search: dispatch to worker thread ── */
+        int role_count = 0;
+        const char **role_gids = filter_bar_get_selected_role_gids(
+            &w->search_filter_bar, &role_count);
+
+        CreditSearchInput *input = g_new0(CreditSearchInput, 1);
+        input->cache = w->library_cache;
+        input->credit_text = g_strdup(query);
+        input->role_gid = (role_gids && role_count > 0) ? g_strdup(role_gids[0]) : NULL;
+        g_free(role_gids);
+
+        /* Show searching indicator */
+        gtk_label_set_text(GTK_LABEL(w->search_empty_label), "Searching credits...");
+        gtk_widget_set_visible(w->search_empty_label, TRUE);
+
+        w->credit_search_cancel = g_cancellable_new();
+        GTask *task = g_task_new(NULL, w->credit_search_cancel,
+                                  on_credit_search_done, w);
+        g_task_set_task_data(task, input, (GDestroyNotify)credit_search_input_free);
+        g_task_run_in_thread(task, credit_search_thread);
+        g_object_unref(task);
+        return;
     }
 
-    if (has_main_query) {
-        /* ── Main search (with optional credit intersection) ── */
+    /* ── Non-credit search: runs synchronously (library_cache_search is fast) ── */
 
-        library_search_filter_t filter = LIBRARY_SEARCH_FILTER_ALL;
-        size_t limit = 0;
-        switch (w->filter_active) {
-            case 1: filter = LIBRARY_SEARCH_FILTER_ARTISTS; break;
-            case 2: filter = LIBRARY_SEARCH_FILTER_ALBUMS; break;
-            case 3: filter = LIBRARY_SEARCH_FILTER_TRACKS; break;
-        }
+    library_search_filter_t filter = LIBRARY_SEARCH_FILTER_ALL;
+    size_t limit = 0;
+    switch (w->filter_active) {
+        case 1: filter = LIBRARY_SEARCH_FILTER_ARTISTS; break;
+        case 2: filter = LIBRARY_SEARCH_FILTER_ALBUMS; break;
+        case 3: filter = LIBRARY_SEARCH_FILTER_TRACKS; break;
+    }
 
-        const char **genre_arr = NULL;
-        size_t genre_count = 0;
-        db_search_opts_t search_opts = filter_bar_build_search_opts(
-            &w->search_filter_bar, &genre_arr, &genre_count);
-        const db_search_opts_t *opts_ptr = (genre_count > 0 || search_opts.year_mask) ? &search_opts : NULL;
+    const char **genre_arr = NULL;
+    size_t genre_count = 0;
+    db_search_opts_t search_opts = filter_bar_build_search_opts(
+        &w->search_filter_bar, &genre_arr, &genre_count);
+    const db_search_opts_t *opts_ptr = (genre_count > 0 || search_opts.year_mask) ? &search_opts : NULL;
 
-        library_search_results_t *results = library_cache_search(
-            w->library_cache, query, filter, limit, opts_ptr,
-            w->library_mask);
-        g_free(genre_arr);
+    library_search_results_t *results = library_cache_search(
+        w->library_cache, query, filter, limit, opts_ptr,
+        w->library_mask);
+    g_free(genre_arr);
 
-        if (!results) {
-            if (credit_tracks) g_hash_table_unref(credit_tracks);
-            if (meta_artists) g_ptr_array_unref(meta_artists);
-            gtk_widget_set_visible(w->search_results_list, FALSE);
-            gtk_widget_set_visible(w->search_empty_label, TRUE);
-            gtk_label_set_text(GTK_LABEL(w->search_empty_label), "Search failed");
-            return;
-        }
+    if (!results) {
+        gtk_widget_set_visible(w->search_results_list, FALSE);
+        gtk_widget_set_visible(w->search_empty_label, TRUE);
+        gtk_label_set_text(GTK_LABEL(w->search_empty_label), "Search failed");
+        return;
+    }
 
-        /* If credit filter active, intersect: keep only tracks in the credit set.
-         * For albums, keep if ANY of their tracks are in the credit set.
-         * Artists pass through unfiltered (credit filter is track-level). */
-        if (credit_tracks) {
-            /* Filter tracks */
-            if (results->tracks) {
-                for (guint i = results->tracks->len; i > 0; i--) {
-                    const library_track_info_t *track = g_ptr_array_index(results->tracks, i - 1);
-                    if (!g_hash_table_contains(credit_tracks, &track->track_id))
-                        g_ptr_array_remove_index(results->tracks, i - 1);
-                }
-            }
-            /* Filter albums: keep if any album track is in credit set */
-            if (results->albums) {
-                for (guint i = results->albums->len; i > 0; i--) {
-                    const library_album_info_t *album = g_ptr_array_index(results->albums, i - 1);
-                    GPtrArray *atracks = library_cache_get_tracks_by_album(
-                        w->library_cache, album->album_id, LIBRARY_MASK_ALL);
-                    gboolean keep = FALSE;
-                    if (atracks) {
-                        for (guint t = 0; t < atracks->len; t++) {
-                            const library_track_info_t *at = g_ptr_array_index(atracks, t);
-                            if (g_hash_table_contains(credit_tracks, &at->track_id)) {
-                                keep = TRUE;
-                                break;
-                            }
-                        }
-                        g_ptr_array_unref(atracks);
-                    }
-                    if (!keep)
-                        g_ptr_array_remove_index(results->albums, i - 1);
-                }
-            }
-        }
+    gboolean has_artists = results->artists && results->artists->len > 0;
+    gboolean has_albums = results->albums && results->albums->len > 0;
+    gboolean has_tracks = results->tracks && results->tracks->len > 0;
 
-        gboolean has_artists = results->artists && results->artists->len > 0;
-        gboolean has_albums = results->albums && results->albums->len > 0;
-        gboolean has_tracks = results->tracks && results->tracks->len > 0;
-
-        if (!has_artists && !has_albums && !has_tracks) {
-            library_search_results_free(results);
-            if (credit_tracks) g_hash_table_unref(credit_tracks);
-            if (meta_artists) g_ptr_array_unref(meta_artists);
-            clear_search_results(w->search_results_list);
-            gtk_widget_set_visible(w->search_results_list, FALSE);
-            gtk_widget_set_visible(w->search_empty_label, TRUE);
-            gtk_label_set_text(GTK_LABEL(w->search_empty_label), "No results found");
-            return;
-        }
-
-        gtk_widget_set_visible(w->search_empty_label, FALSE);
-        gtk_widget_set_visible(w->search_results_list, TRUE);
-        clear_search_results(w->search_results_list);
-
-        populate_search_artists(w, results->artists);
-        populate_search_albums(w, results->albums);
-        populate_search_tracks(w, results->tracks, credit_tracks);
-
+    if (!has_artists && !has_albums && !has_tracks) {
         library_search_results_free(results);
-    } else {
-        /* ── Credit-only search (no main query text) ── */
-
-        /* Resolve credit track_ids to library_track_info_t for display */
-        GPtrArray *tracks = g_ptr_array_new();
-        GHashTableIter iter;
-        gpointer key;
-        g_hash_table_iter_init(&iter, credit_tracks);
-        while (g_hash_table_iter_next(&iter, &key, NULL)) {
-            int64_t track_id = *(int64_t *)key;
-            const library_track_info_t *info = library_cache_get_track(
-                w->library_cache, track_id);
-            if (info)
-                g_ptr_array_add(tracks, (gpointer)info);
-        }
-
-        if (tracks->len == 0) {
-            g_ptr_array_unref(tracks);
-            if (credit_tracks) g_hash_table_unref(credit_tracks);
-            if (meta_artists) g_ptr_array_unref(meta_artists);
-            clear_search_results(w->search_results_list);
-            gtk_widget_set_visible(w->search_results_list, FALSE);
-            gtk_widget_set_visible(w->search_empty_label, TRUE);
-            gtk_label_set_text(GTK_LABEL(w->search_empty_label), "No credit matches found");
-            return;
-        }
-
-        gtk_widget_set_visible(w->search_empty_label, FALSE);
-        gtk_widget_set_visible(w->search_results_list, TRUE);
         clear_search_results(w->search_results_list);
-
-        populate_search_tracks(w, tracks, credit_tracks);
-
-        g_ptr_array_unref(tracks);
+        gtk_widget_set_visible(w->search_results_list, FALSE);
+        gtk_widget_set_visible(w->search_empty_label, TRUE);
+        gtk_label_set_text(GTK_LABEL(w->search_empty_label), "No results found");
+        return;
     }
 
-    if (credit_tracks) g_hash_table_unref(credit_tracks);
-    if (meta_artists) g_ptr_array_unref(meta_artists);
+    gtk_widget_set_visible(w->search_empty_label, FALSE);
+    gtk_widget_set_visible(w->search_results_list, TRUE);
+    clear_search_results(w->search_results_list);
+
+    populate_search_artists(w, results->artists);
+    populate_search_albums(w, results->albums);
+    populate_search_tracks(w, results->tracks, NULL);
+
+    library_search_results_free(results);
 }
 
 static gboolean on_search_debounce(gpointer data) {
@@ -701,6 +784,8 @@ void clear_search_view_filters(UiWindow *w) {
         g_source_remove(w->search_debounce_timer);
         w->search_debounce_timer = 0;
     }
+    if (w->filter_metadata_btn)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w->filter_metadata_btn), FALSE);
     filter_bar_clear(&w->search_filter_bar);
     focus_search_entry(w);
 }
@@ -727,10 +812,16 @@ GtkWidget *make_search_view(UiWindow *w) {
     w->filter_btns[1] = GTK_WIDGET(gtk_builder_get_object(builder, "filter_artists"));
     w->filter_btns[2] = GTK_WIDGET(gtk_builder_get_object(builder, "filter_albums"));
     w->filter_btns[3] = GTK_WIDGET(gtk_builder_get_object(builder, "filter_songs"));
+    w->filter_metadata_btn = GTK_WIDGET(gtk_builder_get_object(builder, "filter_metadata"));
     w->search_empty_label = GTK_WIDGET(gtk_builder_get_object(builder, "search_empty_label"));
     w->search_results_list = GTK_WIDGET(gtk_builder_get_object(builder, "search_results_list"));
     gtk_list_box_set_header_func(GTK_LIST_BOX(w->search_results_list),
                                  search_section_header_func, NULL, NULL);
+
+    /* Smooth scroll for search results */
+    GtkWidget *search_scroll = GTK_WIDGET(gtk_builder_get_object(builder, "search_scroll"));
+    if (search_scroll)
+        ui_smooth_scroll_attach(GTK_SCROLLED_WINDOW(search_scroll));
 
     /* Initialize shared filter bar (no sort dropdown for search view) */
     GtkWidget *filter_bar_widget = filter_bar_init(&w->search_filter_bar,
@@ -739,23 +830,25 @@ GtkWidget *make_search_view(UiWindow *w) {
                                                      on_search_filter_bar_changed, w);
     filter_bar_hide_search(&w->search_filter_bar);
 
-    /* Insert filter bar into the search view box (after the advanced_toggle row) */
-    /* The search_view.ui now only has: search_top_row, scrollable results.
-     * We insert the filter bar between the top row and the results. */
+    /* Insert filter bar between top row and results.
+     * Search view hides the filter bar's own search row (it has its own search entry). */
     GtkWidget *search_top_row = GTK_WIDGET(gtk_builder_get_object(builder, "search_top_row"));
     gtk_box_insert_child_after(GTK_BOX(view), filter_bar_widget, search_top_row);
-
-    /* Attach advanced credit search panel */
-    filter_bar_attach_advanced(&w->search_filter_bar, view);
 
     /* Connect signals */
     g_signal_connect(w->search_entry, "search-changed", G_CALLBACK(on_search_changed), w);
     g_signal_connect(w->search_entry, "activate", G_CALLBACK(on_search_activate), w);
     g_signal_connect(w->search_results_list, "row-activated", G_CALLBACK(ui_list_box_row_activated), NULL);
 
-    for (int i = 0; i < 4; i++) {
-        g_signal_connect(w->filter_btns[i], "clicked", G_CALLBACK(on_filter_clicked), w);
-    }
+    /* Group search-type toggles so only one can be active (indices 0-3) */
+    for (int i = 1; i < 4; i++)
+        gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(w->filter_btns[i]),
+                                    GTK_TOGGLE_BUTTON(w->filter_btns[0]));
+    for (int i = 0; i < 4; i++)
+        g_signal_connect(w->filter_btns[i], "toggled", G_CALLBACK(on_filter_toggled), w);
+
+    /* Metadata toggle (independent, not in radio group) */
+    g_signal_connect(w->filter_metadata_btn, "toggled", G_CALLBACK(on_metadata_toggled), w);
 
     /* Key controller: Down arrow in search entry moves to results */
     GtkEventController *entry_key_ctl = gtk_event_controller_key_new();

@@ -3,7 +3,6 @@
   <template class="UiChannelStrip" parent="GtkWidget">
     <child>
       <object class="GtkBox" id="main_box">
-        <property name="orientation">horizontal</property>
         <property name="spacing">8</property>
 
         <!-- Channel number badge (fixed left anchor, top-aligned) -->
@@ -28,14 +27,12 @@
             <!-- Top section: display panel + right column -->
             <child>
               <object class="GtkBox" id="content_hbox">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">8</property>
                 <property name="vexpand">true</property>
 
                 <!-- Display panel: inset "LCD module" with song info + time -->
                 <child>
                   <object class="GtkBox" id="display_panel">
-                    <property name="orientation">horizontal</property>
                     <property name="spacing">12</property>
                     <property name="hexpand">true</property>
                     <property name="vexpand">true</property>
@@ -47,7 +44,6 @@
                         <child>
                           <object class="GtkBox" id="info_box">
                             <property name="orientation">vertical</property>
-                            <property name="spacing">0</property>
                             <property name="hexpand">true</property>
                             <property name="vexpand">true</property>
                             <style>
@@ -171,7 +167,6 @@
                         <child>
                           <object class="GtkBox" id="metrics_column">
                             <property name="orientation">vertical</property>
-                            <property name="spacing">0</property>
                             <property name="halign">end</property>
                             <property name="vexpand">true</property>
                             <style>
@@ -273,7 +268,6 @@
                         <!-- Top row: Repeat, Autoplay -->
                         <child>
                           <object class="GtkBox" id="transport_row_1">
-                            <property name="orientation">horizontal</property>
                             <property name="spacing">2</property>
                             <property name="homogeneous">true</property>
                             <child>
@@ -305,7 +299,6 @@
                         <!-- Bottom row: Preview, Queue -->
                         <child>
                           <object class="GtkBox" id="transport_row_2">
-                            <property name="orientation">horizontal</property>
                             <property name="spacing">2</property>
                             <property name="homogeneous">true</property>
                             <child>
@@ -342,7 +335,6 @@
             <!-- Skip/Shuttle row (full width, above seek bar) -->
             <child>
               <object class="GtkBox" id="skip_shuttle_row">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">8</property>
                 <style>
                   <class name="skip-shuttle-row"/>
@@ -363,7 +355,6 @@
                 <!-- Skip buttons (linked group) with play/pause in center -->
                 <child>
                   <object class="GtkBox" id="skip_box">
-                    <property name="orientation">horizontal</property>
                     <style>
                       <class name="linked"/>
                     </style>
@@ -445,7 +436,6 @@
                 <!-- Shuttle container -->
                 <child>
                   <object class="GtkBox" id="shuttle_box">
-                    <property name="orientation">horizontal</property>
                     <property name="spacing">6</property>
                     <property name="hexpand">true</property>
                     <style>
@@ -453,7 +443,6 @@
                     </style>
                     <child>
                       <object class="GtkScale" id="shuttle_scale">
-                        <property name="orientation">horizontal</property>
                         <property name="hexpand">true</property>
                         <property name="draw-value">false</property>
                         <property name="tooltip-text">Shuttle: drag to change speed, release to return to normal</property>
@@ -511,7 +500,6 @@
             <child>
               <object class="GtkBox" id="seek_row">
                 <property name="orientation">vertical</property>
-                <property name="spacing">0</property>
                 <property name="hexpand">true</property>
                 <property name="valign">end</property>
                 <style>

@@ -727,6 +727,51 @@ quadrature_result_t db_get_track_by_position(
     return res;
 }
 
+quadrature_result_t db_resolve_track_positions_batch(
+    quadrature_db_t *db,
+    const db_track_position_t *positions, size_t count,
+    int64_t *track_ids_out) {
+
+    if (!db || !positions || !track_ids_out)
+        return QUADRATURE_ERROR_INVALID_PARAM;
+
+    memset(track_ids_out, 0, count * sizeof(int64_t));
+    if (count == 0) return QUADRATURE_OK;
+
+    db_lock(db);
+
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db->db,
+        "SELECT t.id FROM tracks t"
+        " JOIN albums al ON t.album_id = al.id"
+        " WHERE al.musicbrainz_release_id = ? AND t.disc_num = ? AND t.track_num = ?"
+        " LIMIT 1",
+        -1, &stmt, NULL);
+
+    if (rc != SQLITE_OK) {
+        db_unlock(db);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        if (!positions[i].release_mbid) continue;
+
+        sqlite3_bind_text(stmt, 1, positions[i].release_mbid, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, positions[i].disc_num);
+        sqlite3_bind_int(stmt, 3, positions[i].track_num);
+
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            track_ids_out[i] = sqlite3_column_int64(stmt, 0);
+
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
+
+    sqlite3_finalize(stmt);
+    db_unlock(db);
+    return QUADRATURE_OK;
+}
+
 quadrature_result_t db_get_artist_by_mbid(
     quadrature_db_t *db, const char *musicbrainz_id, int64_t *artist_id_out) {
 

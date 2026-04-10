@@ -424,6 +424,14 @@ quadrature_result_t db_set_album_release_id_from_tags(quadrature_db_t* db,
     int64_t album_id, const char* musicbrainz_release_id);
 
 /**
+ * Store MUSICBRAINZ_RELEASEGROUPID read from file tags during Phase 2.
+ * Only writes if the album's release_group_id is currently NULL/empty and
+ * mb_status != RESOLVED (never overwrite Phase 6 data).
+ */
+quadrature_result_t db_set_album_release_group_id_from_tags(quadrature_db_t* db,
+    int64_t album_id, const char* musicbrainz_release_group_id);
+
+/**
  * Get musicbrainz_release_id for an album (stored by Phase 2 from file tags).
  * Returns NULL if not set. Caller must g_free().
  */
@@ -468,6 +476,13 @@ quadrature_result_t db_checkpoint(quadrature_db_t* db);
  * Called from the indexer finalize phase.
  */
 quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db);
+
+/**
+ * Delete albums (and their tracks, track_artists, FTS entries) by ID.
+ * Called from the scan phase after detecting directories deleted from disk.
+ */
+quadrature_result_t db_prune_orphan_albums(quadrature_db_t* db,
+    const int64_t* album_ids, size_t count);
 
 /* =============================================================================
  * Folder-Based Album Operations
@@ -573,6 +588,24 @@ void db_free_album_mtimes(db_album_mtime_t* albums, size_t count);
 quadrature_result_t db_get_track_by_position(
     quadrature_db_t *db, const char *release_mbid,
     int disc_num, int track_num, int64_t *track_id_out);
+
+/**
+ * Batch-resolve an array of positional coordinates to track_ids.
+ * Prepares the lookup statement once and reuses it for all entries.
+ * track_ids_out must be pre-allocated with `count` elements; unresolved
+ * positions are set to 0. Returns QUADRATURE_OK on success (even if some
+ * positions didn't resolve).
+ */
+typedef struct {
+    const char *release_mbid;
+    int disc_num;
+    int track_num;
+} db_track_position_t;
+
+quadrature_result_t db_resolve_track_positions_batch(
+    quadrature_db_t *db,
+    const db_track_position_t *positions, size_t count,
+    int64_t *track_ids_out);
 
 /**
  * Find a main DB artist by MusicBrainz ID (bidirectional bridge).

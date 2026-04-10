@@ -18,6 +18,7 @@
 #include "internal.h"
 #include "quadrature/library.h"
 
+#include <adwaita.h>
 #include <errno.h>
 #include <glib-unix.h>
 #include <libpq-fe.h>
@@ -233,6 +234,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    adw_init();
     data.app = gtk_application_new("org.quadrature.player", G_APPLICATION_NON_UNIQUE);
     g_signal_connect(data.app, "activate", G_CALLBACK(on_activate), &data);
     g_signal_connect(data.app, "shutdown", G_CALLBACK(on_shutdown), &data);

@@ -37,7 +37,7 @@ struct quadrature_db {
     sqlite3_stmt* update_album_by_id;
     sqlite3_stmt* insert_folder_album;
     sqlite3_stmt* update_track_artist_display; /* UPDATE tracks SET artist_display=? WHERE id=? */
-    sqlite3_stmt* set_album_release_id;        /* UPDATE albums SET mb_release_id=?,mb_status=? WHERE id=? AND mb_status=? */
+    sqlite3_stmt* set_album_release_id;        /* UPDATE albums SET mb_release_id=?,mb_status=? WHERE id=? AND mb_status!=RESOLVED */
     sqlite3_stmt* sync_album_tracks_fts;       /* Bulk INSERT OR REPLACE INTO tracks_fts for all tracks in an album */
     /* MB artist statements -- used in db_get_or_create_artist_mb() */
     sqlite3_stmt* select_artist_by_mb_id;

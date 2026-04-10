@@ -12,11 +12,9 @@
     <!-- Artist button: occupies the 40% left slot, left-aligned, no expand -->
     <child type="left">
       <object class="GtkBox" id="credit_artist_cell">
-        <property name="orientation">horizontal</property>
         <child>
           <object class="GtkButton" id="credit_artist_btn">
             <property name="has-frame">false</property>
-            <property name="hexpand">false</property>
             <property name="halign">start</property>
             <style><class name="artist-btn"/></style>
             <child>

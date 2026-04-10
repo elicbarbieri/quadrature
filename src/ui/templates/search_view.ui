@@ -10,7 +10,6 @@
     <!-- Top row: Search entry + filter toggles -->
     <child>
       <object class="GtkBox" id="search_top_row">
-        <property name="orientation">horizontal</property>
         <property name="spacing">8</property>
         <child>
           <object class="GtkSearchEntry" id="search_entry">
@@ -23,42 +22,51 @@
         </child>
         <child>
           <object class="GtkBox" id="search_filters">
-            <property name="orientation">horizontal</property>
             <property name="spacing">4</property>
             <child>
-              <object class="GtkButton" id="filter_all">
+              <object class="GtkToggleButton" id="filter_all">
                 <property name="label">All</property>
                 <property name="focusable">false</property>
+                <property name="active">true</property>
                 <style>
-                  <class name="search-type-chip"/>
-                  <class name="filter-chip--on"/>
+                  <class name="filter-toggle-btn"/>
                 </style>
               </object>
             </child>
             <child>
-              <object class="GtkButton" id="filter_artists">
+              <object class="GtkToggleButton" id="filter_artists">
                 <property name="label">Artists</property>
                 <property name="focusable">false</property>
                 <style>
-                  <class name="search-type-chip"/>
+                  <class name="filter-toggle-btn"/>
                 </style>
               </object>
             </child>
             <child>
-              <object class="GtkButton" id="filter_albums">
+              <object class="GtkToggleButton" id="filter_albums">
                 <property name="label">Albums</property>
                 <property name="focusable">false</property>
                 <style>
-                  <class name="search-type-chip"/>
+                  <class name="filter-toggle-btn"/>
                 </style>
               </object>
             </child>
             <child>
-              <object class="GtkButton" id="filter_songs">
+              <object class="GtkToggleButton" id="filter_songs">
                 <property name="label">Songs</property>
                 <property name="focusable">false</property>
                 <style>
-                  <class name="search-type-chip"/>
+                  <class name="filter-toggle-btn"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkToggleButton" id="filter_metadata">
+                <property name="label">Metadata</property>
+                <property name="focusable">false</property>
+                <property name="tooltip-text">Search credits and metadata (Ctrl+M)</property>
+                <style>
+                  <class name="filter-toggle-btn"/>
                 </style>
               </object>
             </child>
@@ -71,12 +79,11 @@
 
     <!-- Scrollable results area -->
     <child>
-      <object class="GtkScrolledWindow">
+      <object class="GtkScrolledWindow" id="search_scroll">
         <property name="vexpand">true</property>
         <child>
           <object class="GtkBox" id="search_content">
             <property name="orientation">vertical</property>
-            <property name="spacing">0</property>
 
             <!-- Empty state label -->
             <child>

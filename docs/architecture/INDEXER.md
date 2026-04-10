@@ -57,10 +57,13 @@ ______________________________________________________________________
        hit + mtime match + size match → skip (enqueue as unchanged)
        hit + mtime OR size differs    → queue for Phase 2
        miss                           → queue for Phase 2 (new album)
+   - remove matched entry from hashmap (mark as "seen")
 3. Detect disc subdirectories (CD1/, Disc 1/, etc.) → work_queue_push_multi_disc()
+4. Orphan detection: entries remaining in hashmap after walk = albums deleted from disk
+   → db_prune_orphan_albums() deletes albums, tracks, track_artists (CASCADE), FTS entries
 ```
 
-No FFmpeg. No SQLite writes. Completes in < 1 s for unchanged libraries.
+No FFmpeg. No SQLite writes (except orphan pruning). Completes in < 1 s for unchanged libraries.
 
 **Two-factor delta detection:** mtime is the fast path, but unreliable on NFS/SMB (clock
 skew), FAT32 (2-second granularity), and `rsync --archive` (preserved mtime). The scan
@@ -147,14 +150,17 @@ ______________________________________________________________________
 
 ## Phase 3 — FINALIZE (Metadata)
 
-**Goal:** flush mtime data and checkpoint WAL so the library is immediately usable.
+**Goal:** flush mtime data, prune orphans, and checkpoint WAL so the library is immediately usable.
 
 ```
 db_set_album_mtimes_batch()      ← bulk UPDATE albums SET last_updated_at=?
+db_prune_orphan_artists()        ← remove artists with no remaining track/album refs
 db_prune_orphan_errors()         ← remove errors for directories that no longer exist
 db_checkpoint(PASSIVE)           ← WAL flush
 → INDEXER_LIBRARY_UPDATED fires
 ```
+
+**Note:** Orphan *album* pruning happens in Phase 1 (scan), not Phase 3. Phase 1 detects deleted directories via mark-and-sweep on the album_mtimes hash table and calls `db_prune_orphan_albums()` immediately, which cascades to tracks → track_artists → FTS cleanup. Phase 3's `db_prune_orphan_artists()` then cleans up any artists left without references.
 
 Running the mtime batch before the library-updated signal ensures Phase 1 correctly skips unchanged albums on the next run, even if the process is killed before Phase 6 completes.
 
@@ -220,6 +226,14 @@ Step 2: find_release_by_fingerprint()   [only for untagged albums]
         Fallback chain:
         a) ISRC lookup: batch query ISRCs from file tags against MB PG
         b) Solr text search: album title + artist name → duration validation
+           - Folder-path fallback: if file tags have no album/artist, extract
+             from album_path (grandparent = artist, parent = album). Strips
+             year suffixes like "(2020)". Same heuristic as Picard's
+             album_artist_from_path().
+           - Edition stripping: parenthetical edition text like
+             "(10th Anniversary Edition)" is stripped from the SOLR query to
+             improve recall. Post-scoring via similarity2() uses the original
+             title for accurate matching.
         c) AcoustID fingerprint: query local AcoustID PG via acoustid_compare2()
            → consensus vote (best_count / fingerprinted >= 80%)
 
@@ -290,6 +304,13 @@ ______________________________________________________________________
 - Scans other libraries' artwork directories to avoid re-downloading already-cached images
 - Tracks artists with no available artwork (no-art UUIDs) to skip them on future runs
 
+**Multi-library deduplication:** each library run loads the existing global atlas, scans its
+own MBID set, copies already-downloaded art from other libraries' `artwork/` dirs
+(`copy_art_from_other_library`), fetches only the remainder from fanart.tv, and writes
+a merged atlas. Net effect: library N only downloads art for artists not already covered
+by libraries 1…N-1. The atlas and all UI lookups are MBID-keyed and library-mask-agnostic —
+art is available regardless of which library filter is active.
+
 ______________________________________________________________________
 
 ## Phase 8 — ARTIST_BIO (Wikipedia)
@@ -301,6 +322,10 @@ ______________________________________________________________________
   the metadata DB (to force MB re-resolve) doesn't destroy expensive-to-refetch bios
 - Rate-limited at 250ms between requests
 - Auto-migrates existing bios from `quadrature-metadata.sqlite` on first open (one-time)
+
+Bios are stored per-library (each library's `quadrature-bios.sqlite`), but the UI queries
+all libraries' bio DBs by MBID regardless of the active library filter — same
+library-mask-agnostic principle as artist art.
 
 After Phase 8 completes: `INDEXER_COMPLETED` fires.
 

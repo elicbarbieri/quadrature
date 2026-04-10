@@ -116,6 +116,11 @@ GListModel *lazy_list_get_filtered_model(LazyList *ll) {
     return G_LIST_MODEL(ll->filtered);
 }
 
+GObject *lazy_list_get_selected_item(LazyList *ll) {
+    g_assert(ll != NULL);
+    return gtk_single_selection_get_selected_item(ll->selection);
+}
+
 void lazy_list_set_filter(LazyList *ll, GtkFilter *filter) {
     g_assert(ll != NULL);
     gtk_filter_list_model_set_filter(ll->filtered, filter);

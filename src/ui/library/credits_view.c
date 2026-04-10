@@ -119,17 +119,22 @@ static void on_popover_credit_navigate(GtkButton *btn, gpointer data) {
 
     /* Check MBID bridge: does this artist exist in any library's main DB? */
     int64_t found_artist_id = 0;
+    int found_bi = 0;
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int i = 0; i < lib_count && found_artist_id == 0; i++) {
         int bi = library_cache_get_bitmap_index(ud->cache, i);
         if (!library_cache_get_available(ud->cache, bi)) continue;
         quadrature_db_t *lib_db = library_cache_get_dbs(ud->cache, bi).db;
-        if (lib_db)
+        if (lib_db) {
             db_get_artist_by_mbid(lib_db, artist_mbid, &found_artist_id);
+            if (found_artist_id > 0)
+                found_bi = bi;
+        }
     }
 
     if (found_artist_id > 0) {
-        library_unified_detail_navigate_to_artist(ud->container, found_artist_id, NULL);
+        int64_t global_id = LIBRARY_MAKE_GLOBAL_ID(found_bi, found_artist_id);
+        library_unified_detail_navigate_to_artist(ud->container, global_id, NULL);
     } else {
         library_unified_detail_navigate_to_meta_artist(
             ud->container, artist_mbid, artist_name, artist_type);
@@ -235,7 +240,7 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
                 g_free(role);
                 continue;
             }
-            int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(li, local_tid);
+            int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(bi, local_tid);
 
             /* Skip tracks from own albums */
             if (skip_track_ids &&
@@ -380,7 +385,7 @@ guint append_credit_rows(UnifiedDetailData *ud,
                 g_free(role);
                 continue;
             }
-            int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(li, local_tid);
+            int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(bi, local_tid);
 
             /* Skip tracks from own albums or already shown */
             if (skip_track_ids &&
@@ -628,8 +633,14 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                                 g_object_set_data_full(G_OBJECT(btn), "artist-type",
                                                        g_strdup(link->artist_type), g_free);
 
-                            g_signal_connect(btn, "clicked",
-                                             G_CALLBACK(on_popover_credit_navigate), ud);
+                            /* Suppress if this credit is the artist we're viewing */
+                            if (link->artist_mbid && ud->meta_artist_mbid &&
+                                g_strcmp0(link->artist_mbid, ud->meta_artist_mbid) == 0) {
+                                gtk_widget_set_sensitive(btn, FALSE);
+                            } else {
+                                g_signal_connect(btn, "clicked",
+                                                 G_CALLBACK(on_popover_credit_navigate), ud);
+                            }
 
                             /* Add button to size group for column alignment */
                             gtk_size_group_add_widget(sg, btn);

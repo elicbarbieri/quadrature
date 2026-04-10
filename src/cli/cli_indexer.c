@@ -172,7 +172,9 @@ static int cmd_start(int argc, char** argv) {
         .mb_solr_url     = mb_solr_url,
         .acoustid_pg_conninfo = acoustid_pg_conninfo,
         .acoustid_index_url   = acoustid_index_url,
-        .fanart_api_key  = fanart_api_key,
+        .fetch_artist_art  = true,
+        .fanart_api_key    = fanart_api_key,
+        .fetch_artist_bios = true,
     };
 
     indexer_t* indexer = NULL;

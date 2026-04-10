@@ -158,9 +158,11 @@ void db_prepare_stmts(quadrature_db_t* db) {
     sqlite3_prepare_v2(db->db,
         "UPDATE tracks SET artist_display = ? WHERE id = ?",
         -1, &db->update_track_artist_display, NULL);
+    // Allow tag-sourced release IDs to override NO_MATCH/FAILED status (user re-tagged
+    // with Picard). Only RESOLVED (2) is preserved — it already has full MB data.
     sqlite3_prepare_v2(db->db,
         "UPDATE albums SET musicbrainz_release_id = ?, mb_status = ? "
-        "WHERE id = ? AND mb_status = ?",
+        "WHERE id = ? AND mb_status != 2",
         -1, &db->set_album_release_id, NULL);
     sqlite3_prepare_v2(db->db,
         "INSERT OR REPLACE INTO tracks_fts(rowid, title, artist, album) "

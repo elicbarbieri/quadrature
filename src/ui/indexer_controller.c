@@ -213,9 +213,11 @@ static indexer_t* create_indexer_for_scan(IndexerController* self, ScanCallbackD
         .mb_solr_url = self->mb_solr_url,
         .acoustid_pg_conninfo = self->acoustid_pg_conninfo,
         .acoustid_index_url = self->acoustid_index_url,
+        .fetch_artist_art = true,
         .fanart_api_key = self->fanart_api_key,
         .other_library_roots = (const char* const*)others->pdata,
         .other_library_roots_count = others->len,
+        .fetch_artist_bios = true,
     };
 
     indexer_t* indexer = NULL;

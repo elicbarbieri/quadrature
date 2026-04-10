@@ -68,7 +68,6 @@
                 <style>
                   <class name="settings-card"/>
                 </style>
-                <property name="orientation">horizontal</property>
                 <property name="spacing">16</property>
                 <child>
                   <object class="GtkCheckButton" id="spectrum_checkbox">

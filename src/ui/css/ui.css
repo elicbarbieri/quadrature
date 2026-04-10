@@ -185,14 +185,14 @@
 /* Toast variant: warning */
 .toast-warning {
     border-color: #7a6020;
-    border-left-color: #fbbf24;
+    border-left-color: @yellow_4;
     background-color: #332b14;
 }
 
 /* Toast variant: error */
 .toast-error {
     border-color: #7a2d2d;
-    border-left-color: #f87171;
+    border-left-color: @red_1;
     background-color: #331a1a;
 }
 
@@ -261,12 +261,12 @@
 }
 
 .errors-error-row image {
-    color: #ff6b6b;
+    color: @red_1;
 }
 
 .error-badge {
     background-color: rgba(255, 107, 107, 0.15);
-    color: #ff6b6b;
+    color: @red_1;
     font-size: 11px;
     font-weight: 600;
     padding: 1px 8px;
@@ -351,17 +351,17 @@
 }
 
 .perf-channel-warn {
-    color: #fbbf24;
+    color: @yellow_4;
     font-weight: 600;
 }
 
 .perf-channel-error {
-    color: #f87171;
+    color: @red_1;
     font-weight: 600;
 }
 
 .perf-channel-error-border {
-    border-color: #f87171;
+    border-color: @red_1;
     border-width: 2px;
 }
 

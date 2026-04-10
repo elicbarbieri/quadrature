@@ -5,7 +5,6 @@
 -->
 <interface>
   <object class="GtkBox" id="cell">
-    <property name="orientation">horizontal</property>
     <property name="spacing">6</property>
     <property name="hexpand">true</property>
     <style><class name="perf-channel-row"/></style>

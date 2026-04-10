@@ -32,10 +32,10 @@ Test(library_mask, toggle_off) {
     cr_assert_eq(result, LIB(1), "expected lib 1 only, got 0x%x", result);
 }
 
-Test(library_mask, toggle_last_produces_zero) {
-    /* Only lib 1 on, toggle 1 → all disabled */
+Test(library_mask, toggle_last_falls_back_to_all) {
+    /* Only lib 1 on, toggle 1 → falls back to LIBRARY_MASK_ALL (never 0) */
     uint32_t result = library_mask_after_toggle(LIB(1), 1);
-    cr_assert_eq(result, 0u, "expected 0 (all disabled), got 0x%x", result);
+    cr_assert_eq(result, ALL, "expected ALL (fallback), got 0x%x", result);
 }
 
 Test(library_mask, toggle_from_all) {
@@ -99,9 +99,9 @@ Test(library_mask, full_workflow) {
     mask = library_mask_after_toggle(mask, 0);
     cr_assert_eq(mask, LIB(2), "step 4");
 
-    /* Step 5: toggle lib 2 off → all disabled */
+    /* Step 5: toggle lib 2 off → falls back to LIBRARY_MASK_ALL */
     mask = library_mask_after_toggle(mask, 2);
-    cr_assert_eq(mask, 0u, "step 5");
+    cr_assert_eq(mask, ALL, "step 5");
 
     /* Step 6: right-click → all on */
     mask = LIBRARY_MASK_ALL;

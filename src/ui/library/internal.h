@@ -135,6 +135,10 @@ typedef struct {
     char  *label;    /* "A", "2019", "#", etc. */
     guint  position; /* first item index in GListStore */
     guint  count;    /* number of items in this bucket */
+    int    label_w;  /* cached Pango pixel width  (set by quad_scrubber_set_buckets) */
+    int    label_h;  /* cached Pango pixel height (set by quad_scrubber_set_buckets) */
+    int    label_w_bold; /* cached bold-face pixel width  */
+    int    label_h_bold; /* cached bold-face pixel height */
 } ScrubberBucket;
 
 void scrubber_bucket_free(ScrubberBucket *bucket);
@@ -194,6 +198,8 @@ typedef struct {
     void (*on_secondary)(int64_t entity_id, gpointer data); /* secondary: right-click */
     void (*on_mbid_navigate)(const char *mbid, const char *name, const char *type, gpointer data);
     gpointer user_data;
+    int64_t suppress_id;        /* Artist ID to render inactive (0 = none) */
+    const char *suppress_mbid;  /* MBID to render inactive (NULL = none) */
 } RowCallbacks;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -239,6 +245,7 @@ GListStore *lazy_list_get_store(LazyList *ll);
 
 /* Get the filtered model (GtkFilterListModel output — the visible item sequence) */
 GListModel *lazy_list_get_filtered_model(LazyList *ll);
+GObject *lazy_list_get_selected_item(LazyList *ll);
 
 /* Set/replace the filter (NULL = no filtering). Caller retains ownership. */
 void lazy_list_set_filter(LazyList *ll, GtkFilter *filter);
@@ -253,10 +260,16 @@ void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll);
  * Unified Filter Bar
  *
  * Shared filter/sort UI used by Artists, Albums, and Search views.
- * Loads filter_sort_bar.ui + optionally advanced_search_bar.ui.
+ * Loads filter_sort_bar.ui (two-row layout with integrated role filter).
  * Owns genre/year/credit filter state and sort selection.
  * Notifies the consumer via on_changed callback when any filter changes.
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Search mode for the filter bar search field */
+typedef enum {
+    FILTER_SEARCH_DEFAULT,     /* Plaintext search across names/titles */
+    FILTER_SEARCH_METADATA,    /* Search credits, labels, metadata fields */
+} FilterSearchMode;
 
 /* Sort option descriptor for the sort dropdown */
 typedef struct {
@@ -272,26 +285,28 @@ typedef struct {
     GtkWidget *bar_widget;         /* Top-level GtkBox from filter_sort_bar.ui */
     GtkWidget *filter_genre;       /* GtkMenuButton */
     GtkWidget *filter_year;        /* GtkMenuButton */
+    GtkWidget *filter_role;        /* GtkMenuButton (metadata mode facet) */
+    GtkWidget *genre_box;          /* Container box for genre (swapped with role) */
+    GtkWidget *year_box;           /* Container box for year (swapped with role) */
+    GtkWidget *role_box;           /* Container box for role (hidden by default) */
     GtkWidget *filter_search;      /* GtkSearchEntry (NULL if hidden) */
-    GtkWidget *filter_search_box;  /* Container box for search (hidden in search view) */
+    GtkWidget *filter_search_row;  /* Row 2 container (hidden in search view) */
+    GtkWidget *filter_search_box;  /* Container box for search entry */
     GtkWidget *filter_clear;       /* GtkButton */
-    GtkWidget *advanced_toggle;    /* GtkToggleButton */
-    GtkWidget *sort_dropdown;      /* GtkDropDown (hidden when no sort options) */
+    GtkWidget *show_featuring_toggle; /* GtkToggleButton (Artists view only) */
+    GtkWidget *sort_box;           /* Container box (hidden when no sort options) */
+    GtkWidget *sort_dropdown;      /* GtkMenuButton */
+    GtkWidget *search_mode_dropdown; /* GtkMenuButton (Default/Metadata) */
 
-    /* Advanced panel (NULL until filter_bar_attach_advanced) */
-    GtkWidget *advanced_revealer;  /* GtkRevealer */
-    GtkWidget *credit_search_entry;/* GtkSearchEntry */
-    GtkWidget *filter_role;        /* GtkDropDown */
-
-    /* Year filter action group (GSimpleActionGroup with boolean stateful actions) */
-    GSimpleActionGroup *year_actions;
+    /* Action groups for popover menus */
+    GSimpleActionGroup *sort_actions;
 
     /* Filter state */
     GHashTable *selected_genres;   /* Set of selected genre strings (owned) */
     uint16_t selected_years_mask;  /* Bitmask: bit 0=2020s .. bit 7=Pre-1960 */
+    uint32_t selected_roles_mask;  /* Bitmask: bit 0=All .. bit N=role N */
     guint filter_debounce_timer;
-    guint credit_debounce_timer;
-    int selected_role_index;       /* 0 = All Roles */
+    FilterSearchMode search_mode;  /* Current search mode */
 
     /* Sort state */
     const FilterBarSortOption *sort_options; /* Array of options (static, not owned) */
@@ -320,19 +335,13 @@ GtkWidget *filter_bar_init(FilterBarState *fb, library_cache_t *cache,
                             const FilterBarSortOption *sort_options, int sort_count,
                             filter_bar_changed_cb on_changed, gpointer user_data);
 
-/**
- * Load advanced_search_bar.ui and insert the revealer into parent_box
- * right after the filter bar widget.
- */
-void filter_bar_attach_advanced(FilterBarState *fb, GtkWidget *parent_box);
-
 /** Reset all filter state to defaults and invoke on_changed. */
 void filter_bar_clear(FilterBarState *fb);
 
 /** Free owned resources (hash tables, genre list, timers). */
 void filter_bar_destroy(FilterBarState *fb);
 
-/** Check if any filter is active (genre, year, search text, or credit search). */
+/** Check if any filter is active (genre, year, search text, role, or search mode). */
 gboolean filter_bar_is_active(const FilterBarState *fb);
 
 /** Get the current sort enum value. */
@@ -341,21 +350,30 @@ library_sort_t filter_bar_get_sort(const FilterBarState *fb);
 /** Get search text (NULL if empty or search field is hidden). */
 const char *filter_bar_get_search_text(const FilterBarState *fb);
 
-/** Get credit search text (NULL if advanced panel closed or empty). */
-const char *filter_bar_get_credit_text(const FilterBarState *fb);
+/** Get current search mode (Default or Metadata). */
+FilterSearchMode filter_bar_get_search_mode(const FilterBarState *fb);
 
-/** Get selected role index (0 = All Roles). */
-int filter_bar_get_role_index(const FilterBarState *fb);
+/** Get selected roles bitmask (0 = no filter / all roles). */
+uint32_t filter_bar_get_selected_roles_mask(const FilterBarState *fb);
 
-/** Get selected role's MusicBrainz link_type GID (NULL for "All Roles"). */
-const char *filter_bar_get_role_gid(const FilterBarState *fb);
+/**
+ * Get GIDs of all selected roles as a NULL-terminated array.
+ * Caller must g_free the returned array (not the strings — they are static).
+ * Returns NULL if no roles selected.
+ */
+const char **filter_bar_get_selected_role_gids(const FilterBarState *fb, int *count_out);
 
 /** Build db_search_opts_t from current genre/year state. Caller must g_free returned genres array. */
 db_search_opts_t filter_bar_build_search_opts(const FilterBarState *fb, const char ***genres_out, size_t *genre_count_out);
 
-/** Hide the search field (for search view which has its own primary search bar). */
+/** Whether the "Show Featuring" toggle is active (TRUE = show all, default). */
+gboolean filter_bar_get_show_featuring(const FilterBarState *fb);
+
+/** Hide the search row (for search view which has its own primary search bar). */
 void filter_bar_hide_search(FilterBarState *fb);
 
+/** Set metadata mode — swaps Genre/Year for Role selector. */
+void filter_bar_set_metadata_mode(FilterBarState *fb, gboolean metadata);
 
 /** Rebuild genre popover from library cache (call after cache warming). */
 void filter_bar_rebuild_genre_popover(FilterBarState *fb);
@@ -450,7 +468,9 @@ typedef struct {
     GtkWidget *back_label;
     GtkWidget *header_artist_name;
     GtkWidget *content_stack;
-    GtkSizeGroup *header_height_group;
+    GtkWidget *album_header_spacer;
+    GtkWidget *artist_header_spacer;
+    gulong     header_height_signal;
 
     GtkWidget *album_card_container;
     GtkWidget *album_card_inner;
@@ -544,6 +564,9 @@ GtkWidget *library_unified_detail_get_track_list(GtkWidget *view);
 
 /* Refresh current view data */
 void library_view_refresh(GtkWidget *view);
+
+/* Get first_track_id of the selected album in a library view (0 if none) */
+int64_t library_view_get_selected_track_id(GtkWidget *view);
 
 /* Clear all filters (genre/year/search text) and repopulate */
 void library_view_clear_filters(GtkWidget *view);

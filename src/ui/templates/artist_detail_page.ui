@@ -16,7 +16,6 @@
     <child>
       <object class="GtkBox" id="artist_page_content">
         <property name="orientation">vertical</property>
-        <property name="spacing">0</property>
         <property name="margin-bottom">24</property>
 
         <!-- ═══════════════════════════════════════════════════════════════════
@@ -39,7 +38,6 @@
             <child type="overlay">
               <object class="QuadGradientFade" id="artist_banner_fade_bottom">
                 <property name="valign">end</property>
-                <property name="halign">fill</property>
                 <property name="hexpand">true</property>
                 <property name="height-request">40</property>
                 <property name="can-target">false</property>
@@ -54,7 +52,6 @@
         <child>
           <object class="GtkBox" id="artist_header">
             <property name="orientation">vertical</property>
-            <property name="spacing">0</property>
             <property name="margin-start">24</property>
             <property name="margin-end">24</property>
             <property name="margin-top">16</property>
@@ -94,7 +91,6 @@
             <!-- Library Toggle Buttons (hidden for single-library artists) -->
             <child>
               <object class="GtkBox" id="artist_library_toggles">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">4</property>
                 <property name="margin-top">8</property>
                 <property name="visible">false</property>
@@ -109,13 +105,11 @@
         <child>
           <object class="GtkBox" id="albums_section">
             <property name="orientation">vertical</property>
-            <property name="spacing">0</property>
             <property name="margin-start">24</property>
             <property name="margin-end">24</property>
 
             <child>
               <object class="GtkBox" id="albums_section_header_box">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">8</property>
                 <property name="margin-top">8</property>
                 <property name="margin-bottom">12</property>
@@ -131,7 +125,6 @@
                 </child>
                 <child>
                   <object class="GtkSeparator">
-                    <property name="orientation">horizontal</property>
                     <property name="hexpand">true</property>
                     <property name="valign">center</property>
                     <style>
@@ -146,7 +139,6 @@
             <child>
               <object class="GtkBox" id="artist_albums_container">
                 <property name="orientation">vertical</property>
-                <property name="spacing">0</property>
                 <style>
                   <class name="artist-albums-container"/>
                 </style>
@@ -162,7 +154,6 @@
         <child>
           <object class="GtkBox" id="appears_on_section">
             <property name="orientation">vertical</property>
-            <property name="spacing">0</property>
             <property name="margin-start">24</property>
             <property name="margin-end">24</property>
             <property name="margin-top">24</property>
@@ -174,7 +165,6 @@
             <!-- Section Header with Toggle Buttons -->
             <child>
               <object class="GtkBox" id="appears_on_header">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">12</property>
                 <property name="margin-bottom">12</property>
 
@@ -191,7 +181,6 @@
                 </child>
                 <child>
                   <object class="GtkSeparator">
-                    <property name="orientation">horizontal</property>
                     <property name="hexpand">true</property>
                     <property name="valign">center</property>
                     <style>
@@ -203,8 +192,6 @@
                 <!-- Toggle Buttons (Albums/Tracks) -->
                 <child>
                   <object class="GtkBox" id="appears_on_toggles">
-                    <property name="orientation">horizontal</property>
-                    <property name="spacing">0</property>
                     <style>
                       <class name="linked"/>
                     </style>
@@ -214,7 +201,7 @@
                         <property name="label">Albums</property>
                         <property name="active">true</property>
                         <style>
-                          <class name="toggle-btn"/>
+                          <class name="filter-toggle-btn"/>
                         </style>
                       </object>
                     </child>
@@ -223,7 +210,7 @@
                       <object class="GtkToggleButton" id="toggle_tracks_btn">
                         <property name="label">Tracks</property>
                         <style>
-                          <class name="toggle-btn"/>
+                          <class name="filter-toggle-btn"/>
                         </style>
                       </object>
                     </child>
@@ -286,7 +273,6 @@
         <child>
           <object class="GtkBox" id="about_section">
             <property name="orientation">vertical</property>
-            <property name="spacing">0</property>
             <property name="margin-top">32</property>
             <property name="visible">false</property>
             <style>
@@ -296,7 +282,6 @@
             <!-- Section Header -->
             <child>
               <object class="GtkBox" id="about_section_header_box">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">8</property>
                 <property name="margin-start">24</property>
                 <property name="margin-bottom">12</property>
@@ -312,7 +297,6 @@
                 </child>
                 <child>
                   <object class="GtkSeparator">
-                    <property name="orientation">horizontal</property>
                     <property name="hexpand">true</property>
                     <property name="valign">center</property>
                     <style>
@@ -337,7 +321,6 @@
                 <child type="overlay">
                   <object class="QuadGradientFade" id="about_fade_top">
                     <property name="valign">start</property>
-                    <property name="halign">fill</property>
                     <property name="hexpand">true</property>
                     <property name="height-request">40</property>
                     <property name="can-target">false</property>
@@ -346,7 +329,6 @@
                 <child type="overlay">
                   <object class="QuadGradientFade" id="about_fade_bottom">
                     <property name="valign">end</property>
-                    <property name="halign">fill</property>
                     <property name="hexpand">true</property>
                     <property name="height-request">50</property>
                     <property name="can-target">false</property>
@@ -373,7 +355,6 @@
             <!-- Wikipedia attribution -->
             <child>
               <object class="GtkBox" id="about_attribution_box">
-                <property name="orientation">horizontal</property>
                 <property name="spacing">4</property>
                 <property name="halign">start</property>
 

@@ -33,7 +33,10 @@ typedef struct {
     char* album_artist;      // Album artist (owned, may be NULL — from ALBUMARTIST tag)
     char* album;             // Album title (owned, may be NULL)
     char* genre;             // Genre (owned, may be NULL)
-    char* mb_release_id;     // MUSICBRAINZ_ALBUMID tag (owned, may be NULL)
+    char* mb_release_id;         // MUSICBRAINZ_ALBUMID tag (owned, may be NULL)
+    char* mb_release_group_id;   // MUSICBRAINZ_RELEASEGROUPID tag (owned, may be NULL)
+    char* mb_artist_id;          // MUSICBRAINZ_ARTISTID tag (owned, may be NULL)
+    char* mb_album_artist_id;    // MUSICBRAINZ_ALBUMARTISTID tag (owned, may be NULL)
     uint32_t duration_ms;
     uint16_t track_num;
     uint16_t disc_num;       // From disc/discnumber tag (0 = unset)
@@ -184,7 +187,9 @@ typedef struct {
     char* album_rel_path;       // Relative to library_root (owned)
     char* folder_name;          // Last path component / album title (owned)
     char* album_artist;         // Best album artist name (owned)
-    char* album_mb_release_id;  // MUSICBRAINZ_ALBUMID tag (owned, may be NULL)
+    char* album_mb_release_id;       // MUSICBRAINZ_ALBUMID tag (owned, may be NULL)
+    char* album_mb_release_group_id; // MUSICBRAINZ_RELEASEGROUPID tag (owned, may be NULL)
+    char* album_mb_artist_id;        // MUSICBRAINZ_ALBUMARTISTID tag (owned, may be NULL)
     int64_t dir_mtime;          // For finalize phase
     int64_t dir_size;           // Size fingerprint for two-factor delta detection
     bool mb_resolved;           // Cached from scan phase

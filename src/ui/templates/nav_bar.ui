@@ -125,7 +125,6 @@
 
     <child>
       <object class="GtkSeparator">
-        <property name="orientation">horizontal</property>
         <property name="vexpand">true</property>
         <property name="valign">end</property>
         <style><class name="nav-separator"/></style>

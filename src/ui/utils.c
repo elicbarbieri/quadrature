@@ -453,8 +453,10 @@ static void quad_overflow_box_measure(GtkWidget *widget, GtkOrientation orientat
             }
             if (rows > self->max_rows) rows = self->max_rows;
         } else {
-            /* No width hint — report max possible height to prevent overlap */
-            rows = self->max_rows;
+            /* No width hint — report 1-row height (achievable at natural width).
+             * GTK requires measure(V,-1).min <= measure(V,W).min for all W;
+             * returning max_rows here violates that when a wide W needs fewer rows. */
+            rows = 1;
         }
     }
 
@@ -563,12 +565,16 @@ static void quad_overflow_box_size_allocate(GtkWidget *widget, int width,
         child = next;
     }
 
-    /* Hide unpopulated pre-allocated slots */
+    /* Hide unpopulated pre-allocated slots — allocate at natural width
+     * to avoid "Allocation width too small" warnings from GTK. */
     for (; child && child != overflow_widget;) {
         GtkWidget *next = gtk_widget_get_next_sibling(child);
+        int cnat;
+        gtk_widget_measure(child, GTK_ORIENTATION_HORIZONTAL, -1,
+                           NULL, &cnat, NULL, NULL);
         gtk_widget_set_child_visible(child, FALSE);
         gtk_widget_size_allocate(child,
-            &(GtkAllocation){0, 0, 1, row_h > 0 ? row_h : 1}, baseline);
+            &(GtkAllocation){0, 0, MAX(cnat, 1), row_h > 0 ? row_h : 1}, baseline);
         child = next;
     }
 
@@ -651,4 +657,195 @@ void quad_overflow_box_append(QuadOverflowBox *self, GtkWidget *child) {
 void quad_overflow_box_set_item_count(QuadOverflowBox *self, guint count) {
     self->item_count = count;
     gtk_widget_queue_allocate(GTK_WIDGET(self));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Smooth Scroll — Critically-Damped Spring (Firefox MSD Model)
+ *
+ * Converts discrete mouse-wheel events into physically-simulated scroll.
+ * Each wheel notch moves the spring's REST POSITION further.  The spring
+ * carries the viewport smoothly to the new target — rapid notches push
+ * the target ahead and the spring naturally accelerates.
+ *
+ * Physics:  x'' = -k*(x - dest) - 2*ζ*√k * x'
+ *   k     = spring constant (stiffness)
+ *   ζ     = 1.0 (critically damped — no oscillation, fastest convergence)
+ *   dest  = target scroll position (updated by each wheel event)
+ *
+ * Integrated via semi-implicit Euler at 120 Hz with wall-clock dt.
+ * Frame-rate independent: same feel at 30, 60, 144 Hz.
+ *
+ * Constants derived from Firefox's MSD physics prefs and Chrome's
+ * InverseDelta timing model.  See Chromium scroll_offset_animation_curve.cc
+ * and Firefox AxisPhysicsMSDModel.cpp for reference.
+ *
+ * Attach with: ui_smooth_scroll_attach(scrolled_window)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Pixels per discrete wheel notch.  This is the distance the spring target
+ * advances per notch.  ~1.5 rows at 64px row height. */
+#define SS_PIXELS_PER_NOTCH     96.0
+
+/* Spring constant (px/s², since ζ=1 and mass=1).
+ * Firefox defaults: 1000 (regular), 1250 (begin), 2000 (settle).
+ * We use the regular constant — the spring model with target accumulation
+ * gives natural acceleration on rapid input without needing the adaptive
+ * stiffness that Firefox uses for its velocity-based model. */
+#define SS_SPRING_K            1000.0    /* regular scrolling */
+
+/* Damping ratio — 1.0 = critically damped (no bounce, fastest settle).
+ * damping coefficient = 2 * ζ * √k */
+#define SS_DAMPING_RATIO         1.0
+
+/* Simulation timestep: 120 Hz for smooth sub-frame integration.
+ * Higher than display rate avoids temporal aliasing. */
+#define SS_SIMULATION_DT        (1.0 / 120.0)
+
+/* Stop threshold: when |distance to target| < this AND |velocity| < this,
+ * snap to target and stop the tick callback. */
+#define SS_POSITION_EPSILON      0.5    /* px */
+#define SS_VELOCITY_EPSILON      0.5    /* px/s */
+
+/* Max accumulated distance ahead of current position.
+ * Prevents runaway target from very fast wheel spinning.
+ * ~8 screen-heights at 1080p would be extreme; this caps it. */
+#define SS_MAX_LEAD           4000.0    /* px */
+
+typedef struct {
+    GtkAdjustment *vadj;
+
+    /* Spring simulation state (in scroll-position space, px) */
+    double position;      /* current animated position */
+    double velocity;      /* current velocity (px/s) */
+    double target;        /* where the spring is pulling toward */
+
+    /* Precomputed damping coefficient: 2 * ζ * √k */
+    double damping_coeff;
+    double spring_k;
+
+    /* Frame clock tracking */
+    gint64 last_time_us;  /* monotonic µs of last tick */
+    guint  tick_id;
+} SmoothScrollState;
+
+static void ss_step(SmoothScrollState *ss, double dt) {
+    /* Semi-implicit Euler integration (symplectic — stable, no energy gain).
+     * Update velocity first, then position. */
+    double displacement = ss->position - ss->target;
+    double spring_force = -ss->spring_k * displacement;
+    double damping_force = -ss->damping_coeff * ss->velocity;
+    double accel = spring_force + damping_force;
+
+    ss->velocity += accel * dt;
+    ss->position += ss->velocity * dt;
+}
+
+static gboolean smooth_scroll_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer data) {
+    (void)widget;
+    SmoothScrollState *ss = data;
+
+    gint64 now_us = gdk_frame_clock_get_frame_time(clock);
+    double dt_s = (double)(now_us - ss->last_time_us) / 1e6;
+    ss->last_time_us = now_us;
+
+    /* Clamp dt to avoid spiral of death after a stall (e.g. window drag) */
+    if (dt_s > 0.05) dt_s = 0.05;  /* max 50ms = 20fps floor */
+
+    /* Integrate at fixed 120 Hz timestep for stability */
+    double remaining = dt_s;
+    while (remaining > 0.0001) {
+        double step = (remaining > SS_SIMULATION_DT) ? SS_SIMULATION_DT : remaining;
+        ss_step(ss, step);
+        remaining -= step;
+    }
+
+    /* Apply to adjustment */
+    double upper    = gtk_adjustment_get_upper(ss->vadj);
+    double page     = gtk_adjustment_get_page_size(ss->vadj);
+    double max_val  = upper - page;
+    double clamped  = CLAMP(ss->position, 0.0, max_val);
+
+    gtk_adjustment_set_value(ss->vadj, clamped);
+
+    /* Boundary: if we hit the edge, kill velocity and snap target */
+    if ((clamped <= 0.0 && ss->velocity < 0.0) ||
+        (clamped >= max_val && ss->velocity > 0.0)) {
+        ss->velocity = 0.0;
+        ss->position = clamped;
+        ss->target = clamped;
+    }
+
+    /* Converged? */
+    if (fabs(ss->position - ss->target) < SS_POSITION_EPSILON &&
+        fabs(ss->velocity) < SS_VELOCITY_EPSILON) {
+        ss->position = ss->target;
+        gtk_adjustment_set_value(ss->vadj, CLAMP(ss->position, 0.0, max_val));
+        ss->tick_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean smooth_scroll_event(GtkEventControllerScroll *ctrl,
+                                     double dx, double dy,
+                                     gpointer data) {
+    (void)ctrl; (void)dx;
+    SmoothScrollState *ss = data;
+
+    /* Each wheel notch advances the spring target.
+     * Rapid notches push the target further ahead — the spring naturally
+     * accelerates to keep up, giving momentum without explicit velocity
+     * accumulation. */
+    double delta = dy * SS_PIXELS_PER_NOTCH;
+
+    /* Cap lead distance to prevent runaway */
+    double current_lead = ss->target - ss->position;
+    if (fabs(current_lead + delta) < SS_MAX_LEAD)
+        ss->target += delta;
+    else
+        ss->target = ss->position + copysign(SS_MAX_LEAD, current_lead + delta);
+
+    /* Start animation if not running */
+    if (!ss->tick_id) {
+        /* Sync position with current adjustment value (in case something
+         * else scrolled while we were idle — e.g. keyboard, programmatic) */
+        ss->position = gtk_adjustment_get_value(ss->vadj);
+        ss->target = ss->position + delta;
+        ss->velocity = 0.0;
+        ss->last_time_us = g_get_monotonic_time();
+
+        GtkWidget *sw = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(ctrl));
+        ss->tick_id = gtk_widget_add_tick_callback(sw, smooth_scroll_tick, ss, NULL);
+    }
+
+    return TRUE;  /* consume — prevent GtkScrolledWindow's default discrete jump */
+}
+
+static void smooth_scroll_state_free(gpointer data) {
+    SmoothScrollState *ss = data;
+    /* tick_id is auto-removed when widget is destroyed */
+    g_free(ss);
+}
+
+void ui_smooth_scroll_attach(GtkScrolledWindow *sw) {
+    g_assert(GTK_IS_SCROLLED_WINDOW(sw));
+
+    SmoothScrollState *ss = g_new0(SmoothScrollState, 1);
+    ss->vadj = gtk_scrolled_window_get_vadjustment(sw);
+    ss->spring_k = SS_SPRING_K;
+    ss->damping_coeff = 2.0 * SS_DAMPING_RATIO * sqrt(SS_SPRING_K);
+    ss->position = gtk_adjustment_get_value(ss->vadj);
+    ss->target = ss->position;
+
+    GtkEventControllerScroll *ctrl = GTK_EVENT_CONTROLLER_SCROLL(
+        gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL |
+                                         GTK_EVENT_CONTROLLER_SCROLL_DISCRETE));
+    g_signal_connect(ctrl, "scroll", G_CALLBACK(smooth_scroll_event), ss);
+
+    /* Store state on the widget so it's freed with the widget */
+    g_object_set_data_full(G_OBJECT(sw), "smooth-scroll-state", ss,
+                           smooth_scroll_state_free);
+
+    gtk_widget_add_controller(GTK_WIDGET(sw), GTK_EVENT_CONTROLLER(ctrl));
 }

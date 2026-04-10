@@ -1,13 +1,14 @@
 /* Quadrature - Base Styles */
 
 /*
- * Color Palette Reference (GTK4 doesn't support CSS variables)
+ * Color Palette Reference
  *
  * Backgrounds (dark → light):
  *   #141414 (channels panel), #1a1a1a (display panel/LCD), #1e1e1e (nav bar, channel strip),
  *   #121212 (window base/library content), #282828 (elevated cards), #2a2a2a (input),
  *   #3a3a3a (button), #4a4a4a (hover)
- * Accents: #00d4ff (cyan), #e5a640 (amber), #ff9500 (orange), #ff3333 (red), #33cc33 (green), #ffcc00 (yellow)
+ * Accents: #00d4ff (cyan), @yellow_5 (amber), #ff9500 (orange), @red_1 (error), @green_3 (success)
+ * Adwaita named colors: @blue_2..5, @green_1..5, @yellow_1..5, @red_1..5 (via libadwaita)
  * Text: #e0e0e0 (primary), #aaaaaa (secondary), #888888 (muted), #666666 (dim)
  * Borders: #555555 (default), #444444 (subtle), #333333 (muted)
  */

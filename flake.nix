@@ -57,6 +57,7 @@
 
         uiDeps = with pkgs; [
           gtk4
+          libadwaita
           gsettings-desktop-schemas
           glib
         ];

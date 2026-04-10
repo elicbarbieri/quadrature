@@ -67,6 +67,11 @@
     text-decoration: underline;
 }
 
+.album-detail-artist:disabled {
+    color: rgba(0, 212, 255, 0.4);
+    background: transparent;
+}
+
 /* Album Track Row Wrapper — selection handled by .library-list in library.css */
 
 /* Album Detail Track Grid */
@@ -119,6 +124,14 @@
     opacity: 1.0;
     color: #00d4ff;
     background-color: rgba(0, 212, 255, 0.12);
+}
+
+/* Missing track — not present in the currently selected library version */
+.missing-track {
+    opacity: 0.35;
+}
+.missing-track .album-detail-track-title {
+    font-style: italic;
 }
 
 /* Disc headers now use ui_make_section_header() via header_func —
