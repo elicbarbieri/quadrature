@@ -303,7 +303,7 @@ static void proportional_box_init(ProportionalBox *self) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * QuadOverflowBox Widget
+ * QuadratureOverflowBox Widget
  *
  * Horizontal container that shows as many children as fit within the
  * allocated width.  The LAST child is treated as the overflow indicator
@@ -314,11 +314,12 @@ static void proportional_box_init(ProportionalBox *self) {
  * allocation.  No queue_resize, no deferred correction, no clipping.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-struct _QuadOverflowBox {
+struct _QuadratureOverflowBox {
     GtkWidget parent_instance;
     int       spacing;
     int       row_spacing;
-    guint     item_count;   /* Number of populated items (excludes overflow indicator) */
+    guint     pinned_count; /* First N children always visible, never overflowed */
+    guint     item_count;   /* Next M children are items; may overflow to indicator */
     guint     max_rows;     /* Max visible rows (1 = single-row, default) */
 };
 
@@ -326,13 +327,15 @@ enum {
     OFB_PROP_0,
     OFB_PROP_SPACING,
     OFB_PROP_ROW_SPACING,
+    OFB_PROP_PINNED_COUNT,
+    OFB_PROP_ITEM_COUNT,
     OFB_PROP_MAX_ROWS,
     OFB_N_PROPS
 };
 
 static GParamSpec *ofb_props[OFB_N_PROPS];
 
-G_DEFINE_TYPE(QuadOverflowBox, quad_overflow_box, GTK_TYPE_WIDGET)
+G_DEFINE_TYPE(QuadratureOverflowBox, quadrature_overflow_box, GTK_TYPE_WIDGET)
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -355,52 +358,56 @@ static GtkWidget *ofb_nth_child(GtkWidget *widget, guint n) {
 
 /* ── GObject ─────────────────────────────────────────────────────────── */
 
-static void quad_overflow_box_get_property(GObject *obj, guint id,
+static void quadrature_overflow_box_get_property(GObject *obj, guint id,
     GValue *val, GParamSpec *pspec)
 {
-    QuadOverflowBox *self = QUADRATURE_OVERFLOW_BOX(obj);
+    QuadratureOverflowBox *self = QUADRATURE_OVERFLOW_BOX(obj);
     switch (id) {
-    case OFB_PROP_SPACING:     g_value_set_int(val, self->spacing);     break;
-    case OFB_PROP_ROW_SPACING: g_value_set_int(val, self->row_spacing); break;
-    case OFB_PROP_MAX_ROWS:    g_value_set_uint(val, self->max_rows);   break;
+    case OFB_PROP_SPACING:      g_value_set_int(val, self->spacing);      break;
+    case OFB_PROP_ROW_SPACING:  g_value_set_int(val, self->row_spacing);  break;
+    case OFB_PROP_PINNED_COUNT: g_value_set_uint(val, self->pinned_count); break;
+    case OFB_PROP_ITEM_COUNT:   g_value_set_uint(val, self->item_count);  break;
+    case OFB_PROP_MAX_ROWS:     g_value_set_uint(val, self->max_rows);    break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(obj, id, pspec);
     }
 }
 
-static void quad_overflow_box_set_property(GObject *obj, guint id,
+static void quadrature_overflow_box_set_property(GObject *obj, guint id,
     const GValue *val, GParamSpec *pspec)
 {
-    QuadOverflowBox *self = QUADRATURE_OVERFLOW_BOX(obj);
+    QuadratureOverflowBox *self = QUADRATURE_OVERFLOW_BOX(obj);
     switch (id) {
-    case OFB_PROP_SPACING:     self->spacing = g_value_get_int(val);       break;
-    case OFB_PROP_ROW_SPACING: self->row_spacing = g_value_get_int(val);   break;
-    case OFB_PROP_MAX_ROWS:    self->max_rows = g_value_get_uint(val);     break;
+    case OFB_PROP_SPACING:      self->spacing      = g_value_get_int(val);  break;
+    case OFB_PROP_ROW_SPACING:  self->row_spacing  = g_value_get_int(val);  break;
+    case OFB_PROP_PINNED_COUNT: self->pinned_count = g_value_get_uint(val); break;
+    case OFB_PROP_ITEM_COUNT:   self->item_count   = g_value_get_uint(val); break;
+    case OFB_PROP_MAX_ROWS:     self->max_rows     = g_value_get_uint(val); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(obj, id, pspec); return;
     }
     gtk_widget_queue_resize(GTK_WIDGET(obj));
 }
 
-static void quad_overflow_box_dispose(GObject *obj) {
+static void quadrature_overflow_box_dispose(GObject *obj) {
     GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(obj));
     while (child) {
         GtkWidget *next = gtk_widget_get_next_sibling(child);
         gtk_widget_unparent(child);
         child = next;
     }
-    G_OBJECT_CLASS(quad_overflow_box_parent_class)->dispose(obj);
+    G_OBJECT_CLASS(quadrature_overflow_box_parent_class)->dispose(obj);
 }
 
 /* ── Measure ─────────────────────────────────────────────────────────── */
 
-static GtkSizeRequestMode quad_overflow_box_get_request_mode(GtkWidget *widget) {
+static GtkSizeRequestMode quadrature_overflow_box_get_request_mode(GtkWidget *widget) {
     (void)widget;
     return GTK_SIZE_REQUEST_HEIGHT_FOR_WIDTH;
 }
 
-static void quad_overflow_box_measure(GtkWidget *widget, GtkOrientation orientation,
+static void quadrature_overflow_box_measure(GtkWidget *widget, GtkOrientation orientation,
     int for_size, int *minimum, int *natural, int *min_baseline, int *nat_baseline)
 {
-    QuadOverflowBox *self = QUADRATURE_OVERFLOW_BOX(widget);
+    QuadratureOverflowBox *self = QUADRATURE_OVERFLOW_BOX(widget);
     if (min_baseline) *min_baseline = -1;
     if (nat_baseline) *nat_baseline = -1;
 
@@ -437,8 +444,9 @@ static void quad_overflow_box_measure(GtkWidget *widget, GtkOrientation orientat
         if (for_size > 0) {
             /* Simulate flow to count rows given available width */
             int x = 0;
+            guint flow = self->pinned_count + self->item_count;
             GtkWidget *c = gtk_widget_get_first_child(widget);
-            for (guint i = 0; i < self->item_count && c; i++) {
+            for (guint i = 0; i < flow && c; i++) {
                 int cnat;
                 gtk_widget_measure(c, GTK_ORIENTATION_HORIZONTAL, -1,
                                    NULL, &cnat, NULL, NULL);
@@ -467,109 +475,162 @@ static void quad_overflow_box_measure(GtkWidget *widget, GtkOrientation orientat
 
 /* ── Size Allocate — the overflow planning happens HERE ──────────── */
 
-static void quad_overflow_box_size_allocate(GtkWidget *widget, int width,
+static void quadrature_overflow_box_size_allocate(GtkWidget *widget, int width,
     int height, int baseline)
 {
-    QuadOverflowBox *self = QUADRATURE_OVERFLOW_BOX(widget);
+    QuadratureOverflowBox *self = QUADRATURE_OVERFLOW_BOX(widget);
     guint total = ofb_child_count(widget);
     if (total == 0) return;
 
-    guint item_count = self->item_count;
-    guint max_rows   = self->max_rows;
-    GtkWidget *overflow_widget = ofb_nth_child(widget, total - 1);
+    guint pinned_count = self->pinned_count;
+    guint item_count   = self->item_count;
+    guint max_rows     = self->max_rows;
+    guint non_overflow = pinned_count + item_count;
 
-    /* ── Measure all items ─────────────────────────────────────────── */
-    int item_nat_w[item_count > 0 ? item_count : 1];
+    /* The overflow indicator is the LAST child when the caller has reserved
+     * more children than pinned+items (e.g. pre-allocated pill slots +
+     * overflow indicator). Any children between non_overflow and total-1
+     * are reserved-but-unused slots that should be hidden. */
+    gboolean has_overflow_child = (total > non_overflow);
+    GtkWidget *overflow_widget =
+        has_overflow_child ? ofb_nth_child(widget, total - 1) : NULL;
+
+    guint flow_n = non_overflow;
+
+    /* ── Measure all flowed children (pinned + items) ──────────────── */
+    int nat_w[flow_n > 0 ? flow_n : 1];
     int row_h = 0;
     GtkWidget *child = gtk_widget_get_first_child(widget);
-    for (guint i = 0; i < item_count && child; i++) {
-        int nat_w = 0, nat_h = 0;
-        gtk_widget_measure(child, GTK_ORIENTATION_HORIZONTAL, -1,
-                           NULL, &nat_w, NULL, NULL);
-        gtk_widget_measure(child, GTK_ORIENTATION_VERTICAL, -1,
-                           NULL, &nat_h, NULL, NULL);
-        item_nat_w[i] = nat_w;
-        row_h = MAX(row_h, nat_h);
+    for (guint i = 0; i < flow_n && child; i++) {
+        int w = 0, h = 0;
+        gtk_widget_measure(child, GTK_ORIENTATION_HORIZONTAL, -1, NULL, &w, NULL, NULL);
+        gtk_widget_measure(child, GTK_ORIENTATION_VERTICAL,   -1, NULL, &h, NULL, NULL);
+        nat_w[i] = w;
+        row_h = MAX(row_h, h);
         child = gtk_widget_get_next_sibling(child);
     }
 
     int overflow_nat_w = 0;
     if (overflow_widget) {
-        int nat_h = 0;
+        int h = 0;
         gtk_widget_measure(overflow_widget, GTK_ORIENTATION_HORIZONTAL, -1,
                            NULL, &overflow_nat_w, NULL, NULL);
         gtk_widget_measure(overflow_widget, GTK_ORIENTATION_VERTICAL, -1,
-                           NULL, &nat_h, NULL, NULL);
-        row_h = MAX(row_h, nat_h);
+                           NULL, &h, NULL, NULL);
+        row_h = MAX(row_h, h);
     }
     if (row_h == 0) row_h = height;
 
-    /* ── Phase 1: flow items into rows (unlimited) ─────────────────── */
-    guint item_row[item_count > 0 ? item_count : 1];
-    int   item_x[item_count > 0 ? item_count : 1];
+    /* ── Phase 1: flow everything onto rows (unlimited) ────────────── */
+    guint row_of[flow_n > 0 ? flow_n : 1];
+    int   x_of  [flow_n > 0 ? flow_n : 1];
     int x = 0;
     guint row = 0;
 
-    for (guint i = 0; i < item_count; i++) {
-        int w = item_nat_w[i];
+    for (guint i = 0; i < flow_n; i++) {
+        int w = nat_w[i];
         int needed = (x > 0) ? self->spacing + w : w;
         if (x > 0 && x + needed > width) {
-            /* wrap to next row */
             row++;
             x = 0;
             needed = w;
         }
-        item_row[i] = row;
-        item_x[i]   = x;
+        row_of[i] = row;
+        x_of[i]   = x;
         x += needed;
     }
     guint total_rows = row + 1;
 
-    /* ── Phase 2: apply max_rows constraint ────────────────────────── */
+    /* ── Phase 2: apply max_rows constraint (pinned always shown) ──── */
     gboolean needs_overflow = FALSE;
-    guint show = item_count;
+    guint show = flow_n;  /* how many flowed children to render */
 
     if (max_rows > 0 && total_rows > max_rows) {
         needs_overflow = TRUE;
         guint last_row = max_rows - 1;
 
-        /* Find first item beyond the last allowed row */
-        show = item_count;
-        for (guint i = 0; i < item_count; i++) {
-            if (item_row[i] > last_row) { show = i; break; }
+        /* Drop everything past the last allowed row */
+        show = flow_n;
+        for (guint i = 0; i < flow_n; i++) {
+            if (row_of[i] > last_row) { show = i; break; }
         }
 
-        /* On the last row, remove items from right until "…" fits */
-        while (show > 0 && item_row[show - 1] == last_row) {
-            int end_x = item_x[show - 1] + item_nat_w[show - 1];
+        /* Never hide pinned children */
+        if (show < pinned_count) show = pinned_count;
+
+        /* On the last row, drop ITEMS from right until the indicator fits.
+         * Pinned children on the last row are preserved even if this
+         * causes visual overflow — they're pinned for a reason. */
+        while (show > pinned_count && row_of[show - 1] == last_row) {
+            int end_x = x_of[show - 1] + nat_w[show - 1];
             if (end_x + self->spacing + overflow_nat_w <= width) break;
             show--;
         }
     }
 
-    /* ── Phase 3: allocate visible items ───────────────────────────── */
+    /* ── Phase 2.5: per-row horizontal alignment ───────────────────────
+     * Honor halign=END / GTK_ALIGN_CENTER by shifting each row to the
+     * right edge / center of the available width. The default GTK_ALIGN_FILL
+     * (and START) leaves rows left-aligned. Multi-row mode aligns each row
+     * independently, since each row's used width may differ. */
+    GtkAlign halign = gtk_widget_get_halign(widget);
+    guint align_rows = (max_rows > 0 && total_rows > max_rows)
+        ? max_rows : total_rows;
+    int row_shift[align_rows > 0 ? align_rows : 1];
+    for (guint r = 0; r < align_rows; r++) row_shift[r] = 0;
+
+    if (halign == GTK_ALIGN_END || halign == GTK_ALIGN_CENTER) {
+        /* Find the rightmost edge of visible content on each row */
+        int row_end[align_rows > 0 ? align_rows : 1];
+        for (guint r = 0; r < align_rows; r++) row_end[r] = 0;
+        for (guint i = 0; i < show; i++) {
+            guint r = row_of[i];
+            if (r >= align_rows) continue;
+            int end_x = x_of[i] + nat_w[i];
+            if (end_x > row_end[r]) row_end[r] = end_x;
+        }
+        if (needs_overflow && overflow_widget) {
+            guint ov_row = (show > 0) ? row_of[show - 1]
+                                       : (max_rows > 0 ? max_rows - 1 : 0);
+            if (ov_row < align_rows) {
+                int ov_end_x = (show > 0)
+                    ? x_of[show - 1] + nat_w[show - 1] + self->spacing + overflow_nat_w
+                    : overflow_nat_w;
+                if (ov_end_x > row_end[ov_row]) row_end[ov_row] = ov_end_x;
+            }
+        }
+        for (guint r = 0; r < align_rows; r++) {
+            int slack = width - row_end[r];
+            if (slack < 0) slack = 0;
+            row_shift[r] = (halign == GTK_ALIGN_CENTER) ? slack / 2 : slack;
+        }
+    }
+
+    /* ── Phase 3: allocate flowed children ─────────────────────────── */
     child = gtk_widget_get_first_child(widget);
-    for (guint i = 0; i < item_count && child; i++) {
+    for (guint i = 0; i < flow_n && child; i++) {
         GtkWidget *next = gtk_widget_get_next_sibling(child);
         if (i < show) {
-            int y = (int)item_row[i] * (row_h + self->row_spacing);
+            int y = (int)row_of[i] * (row_h + self->row_spacing);
+            int shift = (row_of[i] < align_rows) ? row_shift[row_of[i]] : 0;
             gtk_widget_set_child_visible(child, TRUE);
             gtk_widget_size_allocate(child,
-                &(GtkAllocation){item_x[i], y, item_nat_w[i], row_h}, baseline);
+                &(GtkAllocation){x_of[i] + shift, y, nat_w[i], row_h}, baseline);
         } else {
             gtk_widget_set_child_visible(child, FALSE);
-            /* Use natural size to avoid GTK allocation warnings */
             gtk_widget_size_allocate(child,
-                &(GtkAllocation){0, 0, item_nat_w[i], row_h}, baseline);
+                &(GtkAllocation){0, 0, nat_w[i], row_h}, baseline);
         }
         child = next;
     }
 
-    /* Hide unpopulated pre-allocated slots — allocate at natural width
-     * to avoid "Allocation width too small" warnings from GTK. */
+    /* Hide reserved-but-unused slots between flow_n and overflow_widget.
+     * Occurs only when callers pre-allocate more children than they use
+     * (e.g. genre pill pool). Allocate at natural width to avoid GTK
+     * "allocation width too small" warnings. */
     for (; child && child != overflow_widget;) {
         GtkWidget *next = gtk_widget_get_next_sibling(child);
-        int cnat;
+        int cnat = 0;
         gtk_widget_measure(child, GTK_ORIENTATION_HORIZONTAL, -1,
                            NULL, &cnat, NULL, NULL);
         gtk_widget_set_child_visible(child, FALSE);
@@ -584,15 +645,16 @@ static void quad_overflow_box_size_allocate(GtkWidget *widget, int width,
             int ov_x = 0;
             guint ov_row = 0;
             if (show > 0) {
-                ov_row = item_row[show - 1];
-                ov_x = item_x[show - 1] + item_nat_w[show - 1] + self->spacing;
+                ov_row = row_of[show - 1];
+                ov_x = x_of[show - 1] + nat_w[show - 1] + self->spacing;
             } else if (max_rows > 0) {
                 ov_row = max_rows - 1;
             }
             int y = (int)ov_row * (row_h + self->row_spacing);
+            int shift = (ov_row < align_rows) ? row_shift[ov_row] : 0;
             gtk_widget_set_child_visible(overflow_widget, TRUE);
             gtk_widget_size_allocate(overflow_widget,
-                &(GtkAllocation){ov_x, y, overflow_nat_w, row_h}, baseline);
+                &(GtkAllocation){ov_x + shift, y, overflow_nat_w, row_h}, baseline);
         } else {
             gtk_widget_set_child_visible(overflow_widget, FALSE);
             gtk_widget_size_allocate(overflow_widget,
@@ -604,7 +666,7 @@ static void quad_overflow_box_size_allocate(GtkWidget *widget, int width,
 
 /* ── Snapshot ────────────────────────────────────────────────────────── */
 
-static void quad_overflow_box_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
+static void quadrature_overflow_box_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     for (GtkWidget *c = gtk_widget_get_first_child(widget); c;
          c = gtk_widget_get_next_sibling(c)) {
         if (gtk_widget_get_child_visible(c))
@@ -614,18 +676,18 @@ static void quad_overflow_box_snapshot(GtkWidget *widget, GtkSnapshot *snapshot)
 
 /* ── Class / instance init ───────────────────────────────────────────── */
 
-static void quad_overflow_box_class_init(QuadOverflowBoxClass *klass) {
+static void quadrature_overflow_box_class_init(QuadratureOverflowBoxClass *klass) {
     GObjectClass   *obj_class    = G_OBJECT_CLASS(klass);
     GtkWidgetClass *widget_class = GTK_WIDGET_CLASS(klass);
 
-    obj_class->dispose      = quad_overflow_box_dispose;
-    obj_class->get_property = quad_overflow_box_get_property;
-    obj_class->set_property = quad_overflow_box_set_property;
+    obj_class->dispose      = quadrature_overflow_box_dispose;
+    obj_class->get_property = quadrature_overflow_box_get_property;
+    obj_class->set_property = quadrature_overflow_box_set_property;
 
-    widget_class->get_request_mode = quad_overflow_box_get_request_mode;
-    widget_class->measure          = quad_overflow_box_measure;
-    widget_class->size_allocate    = quad_overflow_box_size_allocate;
-    widget_class->snapshot         = quad_overflow_box_snapshot;
+    widget_class->get_request_mode = quadrature_overflow_box_get_request_mode;
+    widget_class->measure          = quadrature_overflow_box_measure;
+    widget_class->size_allocate    = quadrature_overflow_box_size_allocate;
+    widget_class->snapshot         = quadrature_overflow_box_snapshot;
 
     gtk_widget_class_set_css_name(widget_class, "overflow-box");
 
@@ -637,6 +699,16 @@ static void quad_overflow_box_class_init(QuadOverflowBoxClass *klass) {
         "row-spacing", "Row Spacing", "Vertical gap between rows in pixels",
         0, G_MAXINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    ofb_props[OFB_PROP_PINNED_COUNT] = g_param_spec_uint(
+        "pinned-count", "Pinned Count",
+        "Number of leading children that are always visible (never overflowed)",
+        0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    ofb_props[OFB_PROP_ITEM_COUNT] = g_param_spec_uint(
+        "item-count", "Item Count",
+        "Number of overflowable item children (after pinned, before indicator)",
+        0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     ofb_props[OFB_PROP_MAX_ROWS] = g_param_spec_uint(
         "max-rows", "Max Rows", "Maximum visible rows (1 = single-row)",
         1, G_MAXUINT, 1, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
@@ -644,19 +716,54 @@ static void quad_overflow_box_class_init(QuadOverflowBoxClass *klass) {
     g_object_class_install_properties(obj_class, OFB_N_PROPS, ofb_props);
 }
 
-static void quad_overflow_box_init(QuadOverflowBox *self) {
+static void quadrature_overflow_box_init(QuadratureOverflowBox *self) {
     self->spacing     = 0;
     self->row_spacing = 0;
     self->max_rows    = 1;
 }
 
-void quad_overflow_box_append(QuadOverflowBox *self, GtkWidget *child) {
+void quadrature_overflow_box_append(QuadratureOverflowBox *self, GtkWidget *child) {
     gtk_widget_set_parent(child, GTK_WIDGET(self));
 }
 
-void quad_overflow_box_set_item_count(QuadOverflowBox *self, guint count) {
+void quadrature_overflow_box_set_item_count(QuadratureOverflowBox *self, guint count) {
     self->item_count = count;
-    gtk_widget_queue_allocate(GTK_WIDGET(self));
+    gtk_widget_queue_resize(GTK_WIDGET(self));
+}
+
+void quadrature_overflow_box_set_pinned_count(QuadratureOverflowBox *self, guint count) {
+    self->pinned_count = count;
+    gtk_widget_queue_resize(GTK_WIDGET(self));
+}
+
+/** Remove all children beyond the first `pinned_count`.
+ *  Lets a caller clear items + overflow indicator while preserving any
+ *  template-declared pinned children. Resets item_count to 0. */
+void quadrature_overflow_box_clear_items(QuadratureOverflowBox *self) {
+    guint skip = self->pinned_count;
+    GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(self));
+    for (guint i = 0; i < skip && child; i++)
+        child = gtk_widget_get_next_sibling(child);
+    while (child) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_widget_unparent(child);
+        child = next;
+    }
+    self->item_count = 0;
+    gtk_widget_queue_resize(GTK_WIDGET(self));
+}
+
+/** Remove all children regardless of pinned_count. Resets both counts. */
+void quadrature_overflow_box_clear_all(QuadratureOverflowBox *self) {
+    GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(self));
+    while (child) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_widget_unparent(child);
+        child = next;
+    }
+    self->pinned_count = 0;
+    self->item_count = 0;
+    gtk_widget_queue_resize(GTK_WIDGET(self));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

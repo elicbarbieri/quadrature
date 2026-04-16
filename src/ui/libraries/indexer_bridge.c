@@ -639,9 +639,10 @@ int find_lib_idx(UiWindow *w, const char *library_path) {
  * We debounce per bitmap_index (500ms) so only one COW rebuild runs. */
 
 typedef struct {
-    UiWindow         *w;
-    int               bitmap_index;
-    guint             source_id;
+    UiWindow                  *w;
+    int                        bitmap_index;
+    guint                      source_id;
+    library_cache_changeset_t *changeset;  /* owned; merged across debounced signals */
 } PendingRefresh;
 
 /* bitmap_index (GINT_TO_POINTER) → PendingRefresh*.  Lazily created. */
@@ -657,29 +658,47 @@ static gboolean debounced_refresh_cb(gpointer user_data) {
         g_hash_table_remove(pending_refreshes, GINT_TO_POINTER(bitmap));
 
     if (w->library_cache) {
-        library_cache_refresh_slot(w->library_cache, bitmap, NULL, 0);
+        library_cache_refresh_slot(w->library_cache, bitmap, pr->changeset);
         g_message("library-updated: debounced COW refresh fired for bitmap_index=%d", bitmap);
     }
 
+    library_cache_changeset_free(pr->changeset);
     g_free(pr);
     return G_SOURCE_REMOVE;
 }
 
-static void schedule_debounced_refresh(UiWindow *w, int bitmap_index) {
+static void schedule_debounced_refresh(UiWindow *w, int bitmap_index,
+                                       const library_cache_changeset_t *changeset) {
     if (!pending_refreshes)
         pending_refreshes = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     gpointer key = GINT_TO_POINTER(bitmap_index);
     PendingRefresh *existing = g_hash_table_lookup(pending_refreshes, key);
     if (existing) {
+        /* Coalesce: MERGE the new changeset into the pending one rather than
+         * dropping it. Dropping it would silently lose Phase 3's row list
+         * when Phase 6's signal arrives within the debounce window. */
         g_source_remove(existing->source_id);
-        g_hash_table_remove(pending_refreshes, key);
-        g_free(existing);
+        if (changeset) {
+            if (!existing->changeset)
+                existing->changeset = library_cache_changeset_copy(changeset);
+            else
+                library_cache_changeset_merge(existing->changeset, changeset);
+        } else {
+            /* NULL means "unknown"; clear the accumulated set so the refresh
+             * treats this as a full rebuild. */
+            library_cache_changeset_free(existing->changeset);
+            existing->changeset = NULL;
+        }
+        existing->source_id = g_timeout_add(500, debounced_refresh_cb, existing);
+        g_message("library-updated: coalesced debounced refresh for bitmap_index=%d", bitmap_index);
+        return;
     }
 
     PendingRefresh *pr = g_new0(PendingRefresh, 1);
     pr->w = w;
     pr->bitmap_index = bitmap_index;
+    pr->changeset = library_cache_changeset_copy(changeset);
     pr->source_id = g_timeout_add(500, debounced_refresh_cb, pr);
 
     g_hash_table_insert(pending_refreshes, key, pr);
@@ -694,6 +713,7 @@ void indexer_bridge_cancel_pending_refreshes(void) {
     while (g_hash_table_iter_next(&iter, &key, &value)) {
         PendingRefresh *pr = value;
         g_source_remove(pr->source_id);
+        library_cache_changeset_free(pr->changeset);
         g_free(pr);
     }
     g_hash_table_destroy(pending_refreshes);
@@ -703,8 +723,11 @@ void indexer_bridge_cancel_pending_refreshes(void) {
 /* Called whenever SQLite metadata changes and the library cache must be reloaded.
  * Fired after: phases 1-3 (initial scan), phase 6 (MB enrichment). */
 void on_indexer_library_updated(IndexerController *idx, const char *library_path,
-                                indexer_progress_t *p, gpointer data) {
+                                indexer_progress_t *p,
+                                library_cache_changeset_t *changeset,
+                                gpointer data) {
     (void)idx;
+    (void)p;
     UiWindow *w = UI_WINDOW(data);
 
     int lib_idx = find_lib_idx(w, library_path);
@@ -715,7 +738,7 @@ void on_indexer_library_updated(IndexerController *idx, const char *library_path
      * LIBRARY_UPDATED signals from consecutive indexer phases. */
     if (w->library_cache && lib_idx >= 0) {
         int bitmap = w->settings->libraries[lib_idx].library_index;
-        schedule_debounced_refresh(w, bitmap);
+        schedule_debounced_refresh(w, bitmap, changeset);
     }
 
     LibEntry *e = find_lib_entry(w, library_path);

@@ -130,6 +130,7 @@ static void on_activate(GtkApplication *gtkapp, gpointer data) {
     g_type_ensure(UI_TYPE_SPECTRUM);
     g_type_ensure(UI_TYPE_CHANNEL_STRIP);
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
+    g_type_ensure(QUADRATURE_TYPE_OVERFLOW_BOX);
 
     GtkWidget *win = ui_window_new(gtkapp, d->pipeline, d->library_cache, d->settings);
     gtk_window_present(GTK_WINDOW(win));

@@ -31,6 +31,7 @@
 #include "quadrature/database.h"
 #include "quadrature/library.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -221,6 +222,40 @@ static void build_lib_a(const char *root) {
         cr_assert_eq(create_flac(fpath, tags, odesza_tracks[i].dur), 0);
     }
 
+    /* ODESZA — A Moment Apart (2017) — tag-less, feat. credits only as
+     * plain strings. Matches prod elicb_music pattern: each track with a
+     * "/"-delimited artist needs Phase 6 to canonicalize the secondary
+     * credit against MB recording data. Track titles + durations from
+     * MB release b989c328 so SOLR scores a clean match. */
+    snprintf(path, sizeof(path), "%s/ODESZA/A Moment Apart (2017)", root);
+    mkdirs(path);
+    {
+        struct { int num; const char *title; const char *artist; int dur; } ama[] = {
+            { 1, "Intro",                 "Odesza",                50  },
+            { 2, "A Moment Apart",        "Odesza",                258 },
+            { 3, "Higher Ground",         "Odesza/Naomi Wild",     239 },
+            { 4, "Boy",                   "Odesza",                222 },
+            { 5, "Line of Sight",         "Odesza/WYNNE/Mansionair", 249 },
+            { 6, "Late Night",            "Odesza",                258 },
+        };
+        for (size_t i = 0; i < sizeof(ama)/sizeof(ama[0]); i++) {
+            char fpath[1024];
+            snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
+                     path, ama[i].num, ama[i].title);
+            snprintf(tracknum, sizeof(tracknum), "track=%d", ama[i].num);
+            snprintf(title_tag, sizeof(title_tag), "title=%s", ama[i].title);
+            char artist_tag[256], aa_tag[256];
+            snprintf(artist_tag, sizeof(artist_tag), "artist=%s", ama[i].artist);
+            snprintf(aa_tag, sizeof(aa_tag), "album_artist=%s", ama[i].artist);
+            const char *tags[] = {
+                title_tag, artist_tag, aa_tag,
+                "album=A Moment Apart", tracknum,
+                "date=2017", "genre=Electronic", NULL
+            };
+            cr_assert_eq(create_flac(fpath, tags, ama[i].dur), 0);
+        }
+    }
+
     /* Daft Punk — basic tags, multi-disc, no MB */
     snprintf(path, sizeof(path),
              "%s/Daft Punk/Random Access Memories (2013)/CD 01", root);
@@ -295,53 +330,241 @@ static void build_lib_b(const char *root) {
  * Indexer helpers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-typedef struct {
-    int started, progress, completed, library_updated;
-    bool success;
-} test_tracker_t;
+/* (Legacy `test_tracker_t` / `test_callback` / `index_library` helpers
+ * removed — all stories now use the prod-parity harness
+ * (run_prod_indexers) defined after this block.) */
 
-static void test_callback(indexer_event_t event, const indexer_progress_t *progress,
+typedef struct {
+    library_cache_t *cache;
+    int              bitmap_index;       /* Which slot to refresh */
+    atomic_int       lib_updated;        /* Count of INDEXER_LIBRARY_UPDATED */
+    atomic_int       completed;          /* 1 once COMPLETED/CANCELLED/ERROR */
+    atomic_int       errored;
+} ProdParityTracker;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Shared fixture state — referenced by prod-parity helpers below AND by
+ * every story setup. Declared here so the helpers compile against them.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static char lib_a_root[256];
+static char lib_b_root[256];
+static char lib_a_data[256];
+static char lib_b_data[256];
+static library_cache_t *cache = NULL;
+
+#define MASK_A (1u << 0)
+#define MASK_B (1u << 1)
+
+/* Forward declaration — rm_rf is defined further down alongside other
+ * shell-wrapping fs helpers but is needed by story_common_paths_init. */
+static void rm_rf(const char *path);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Prod-parity async indexer + cache refresh harness
+ *
+ * Mirrors src/ui/main.c:207 → src/ui/window.c:1341-1367 →
+ * src/ui/libraries/indexer_bridge.c:705-718:
+ *   1. library_cache_create_multi on empty DB schemas
+ *   2. library_cache_warm_slot (non-blocking) kicks off async warm
+ *   3. indexer_scan (non-blocking) runs concurrently
+ *   4. INDEXER_LIBRARY_UPDATED fires twice per library (post-Phase-3,
+ *      post-Phase-6). Each firing triggers library_cache_refresh_slot
+ *      on the slot's bitmap_index — same call indexer_bridge.c:660 makes
+ *      after its 500ms debounce window. No debounce here (tests drive
+ *      one event at a time; the refresh semantics under test are
+ *      identical).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* (ProdParityTracker typedef is up with the shared fixture state so
+ *  story_teardown can reach it.) */
+
+static void prod_parity_cb(indexer_event_t event,
+                           const indexer_progress_t *progress,
+                           const library_cache_changeset_t *changeset,
                            void *user_data) {
     (void)progress;
-    test_tracker_t *t = user_data;
+    (void)changeset;
+    ProdParityTracker *t = user_data;
     switch (event) {
-        case INDEXER_STARTED:         t->started++; break;
-        case INDEXER_PROGRESS:        t->progress++; break;
-        case INDEXER_COMPLETED:       t->completed++; t->success = true; break;
-        case INDEXER_LIBRARY_UPDATED: t->library_updated++; break;
-        case INDEXER_CANCELLED:       t->completed++; break;
-        case INDEXER_ERROR:           t->completed++; break;
-        case INDEXER_ARTWORK_UPDATED: break;
+        case INDEXER_LIBRARY_UPDATED:
+            atomic_fetch_add(&t->lib_updated, 1);
+            break;
+        case INDEXER_COMPLETED:
+            atomic_store(&t->completed, 1);
+            break;
+        case INDEXER_CANCELLED:
+            atomic_store(&t->completed, 1);
+            break;
+        case INDEXER_ERROR:
+            atomic_store(&t->errored, 1);
+            atomic_store(&t->completed, 1);
+            break;
+        default: break;
     }
 }
 
-static void index_library(const char *library_root, const char *data_root,
-                           const char *pg, const char *solr) {
-    test_tracker_t tracker = {0};
-    indexer_config_t config = {
-        .thread_count        = 2,
-        .process_artwork     = false,
-        .mb_resolve          = true,
-        .pg_conninfo         = pg,
-        .mb_solr_url         = solr,
-        .acoustid_pg_conninfo = NULL,
-        .acoustid_index_url   = NULL,
-        .fetch_artist_art    = false,
-        .fanart_api_key      = NULL,
-        .fetch_artist_bios   = false,
-        .callback            = test_callback,
-        .user_data           = &tracker,
+/* Create a fresh DB file with the current schema (empty rows). Mirrors
+ * what prod does implicitly on first app launch after `make db-clean`:
+ * library_cache_create_multi must see a valid schema even though no
+ * indexing has written any data yet. */
+static void bootstrap_empty_db(const char *data_dir) {
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", data_dir);
+    quadrature_db_t *db = NULL;
+    cr_assert_eq(db_open(db_path, &db), QUADRATURE_OK,
+        "bootstrap_empty_db: failed to create schema at %s", db_path);
+    db_close(db);
+}
+
+/* Drive the same "INDEXER_LIBRARY_UPDATED → library_cache_refresh_slot"
+ * chain prod's indexer_bridge.c wires up. Observe the tracker's event
+ * counter; every increment above the last-seen value triggers a fresh
+ * refresh + await on that library's slot. Blocks until both indexers
+ * have emitted COMPLETED and all generated refreshes have drained. */
+static void pump_until_indexers_done(library_cache_t *cache,
+                                      ProdParityTracker *trackers,
+                                      int tracker_count) {
+    int *seen = g_new0(int, tracker_count);
+
+    for (;;) {
+        int all_done = 1;
+        for (int i = 0; i < tracker_count; i++) {
+            int cur_evs = atomic_load(&trackers[i].lib_updated);
+            while (seen[i] < cur_evs) {
+                library_cache_refresh_slot(cache, trackers[i].bitmap_index, NULL);
+                library_cache_await_slot(cache, trackers[i].bitmap_index);
+                seen[i]++;
+            }
+            if (!atomic_load(&trackers[i].completed)) all_done = 0;
+        }
+        if (all_done) {
+            /* Drain any straggler events that landed after the completion
+             * store (indexer emits LIBRARY_UPDATED then COMPLETED, usually
+             * in that order, but the atomic stores aren't sequenced from
+             * the test's viewpoint). */
+            int pending = 0;
+            for (int i = 0; i < tracker_count; i++) {
+                int cur_evs = atomic_load(&trackers[i].lib_updated);
+                while (seen[i] < cur_evs) {
+                    library_cache_refresh_slot(cache, trackers[i].bitmap_index, NULL);
+                    library_cache_await_slot(cache, trackers[i].bitmap_index);
+                    seen[i]++;
+                    pending++;
+                }
+            }
+            if (!pending) break;
+        }
+        g_usleep(10000); /* 10 ms — keep CPU load low */
+    }
+    g_free(seen);
+}
+
+/* ── Reusable story scaffolding ────────────────────────────────────────────
+ * Every story that tests indexer → cache interactions should share the
+ * same production-parity sequence. Two helpers cover the full life cycle:
+ *
+ *   setup_prod_cache()        bootstraps empty DB schemas at lib_a_data /
+ *                             lib_b_data, calls library_cache_create_multi,
+ *                             and awaits the initial async warm on both
+ *                             slots. Safe to call once per story, before
+ *                             any indexing.
+ *
+ *   run_prod_indexers(a, b)   kicks off concurrent indexers for the
+ *                             selected libraries and drives the refresh
+ *                             chain. Safe to call multiple times in the
+ *                             same story (e.g., retag + re-scan flows) —
+ *                             each call reuses the existing cache and
+ *                             cumulatively refreshes its slots.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+static void setup_prod_cache(void) {
+    bootstrap_empty_db(lib_a_data);
+    bootstrap_empty_db(lib_b_data);
+
+    char db_a[512], db_b[512];
+    snprintf(db_a, sizeof(db_a), "%s/quadrature.sqlite", lib_a_data);
+    snprintf(db_b, sizeof(db_b), "%s/quadrature.sqlite", lib_b_data);
+    library_cache_source_t sources[2] = {
+        { .db_path = db_a, .music_base = lib_a_root,
+          .display_name = "Elicb", .bitmap_index = 0 },
+        { .db_path = db_b, .music_base = lib_b_root,
+          .display_name = "Music", .bitmap_index = 1 },
+    };
+    cr_assert_eq(library_cache_create_multi(sources, 2, &cache), QUADRATURE_OK);
+    library_cache_warm_slot(cache, 0);
+    library_cache_warm_slot(cache, 1);
+    library_cache_await_slot(cache, 0);
+    library_cache_await_slot(cache, 1);
+}
+
+static void run_prod_indexers(bool scan_a, bool scan_b,
+                               const char *pg, const char *solr) {
+    cr_assert(cache != NULL,
+        "run_prod_indexers: cache not created — call setup_prod_cache() first");
+    cr_assert(scan_a || scan_b, "run_prod_indexers: nothing to scan");
+
+    ProdParityTracker trackers[2] = {0};
+    trackers[0].cache = cache; trackers[0].bitmap_index = 0;
+    trackers[1].cache = cache; trackers[1].bitmap_index = 1;
+    /* If a slot is not scanned this round, mark its tracker completed so
+     * pump_until_indexers_done doesn't wait for it. lib_updated stays 0
+     * → no spurious refresh fires for the idle slot. */
+    if (!scan_a) atomic_store(&trackers[0].completed, 1);
+    if (!scan_b) atomic_store(&trackers[1].completed, 1);
+
+    indexer_config_t cfg = {
+        .thread_count = 2, .process_artwork = false, .mb_resolve = true,
+        .pg_conninfo = pg, .mb_solr_url = solr,
+        .acoustid_pg_conninfo = NULL, .acoustid_index_url = NULL,
+        .fetch_artist_art = false, .fanart_api_key = NULL,
+        .fetch_artist_bios = false,
+        .callback = prod_parity_cb,
     };
 
-    indexer_t *indexer = NULL;
-    cr_assert_eq(indexer_create(&indexer, &config), QUADRATURE_OK);
-    cr_assert_eq(indexer_scan(indexer, library_root, data_root), QUADRATURE_OK);
-    indexer_wait(indexer);
+    indexer_t *ia = NULL, *ib = NULL;
+    if (scan_a) {
+        cfg.user_data = &trackers[0];
+        cr_assert_eq(indexer_create(&ia, &cfg), QUADRATURE_OK);
+        cr_assert_eq(indexer_scan(ia, lib_a_root, lib_a_data), QUADRATURE_OK);
+    }
+    if (scan_b) {
+        cfg.user_data = &trackers[1];
+        cr_assert_eq(indexer_create(&ib, &cfg), QUADRATURE_OK);
+        cr_assert_eq(indexer_scan(ib, lib_b_root, lib_b_data), QUADRATURE_OK);
+    }
 
-    cr_assert(tracker.completed > 0, "Indexer did not complete for %s", library_root);
-    cr_assert(tracker.success, "Indexer failed for %s", library_root);
+    pump_until_indexers_done(cache, trackers, 2);
 
-    indexer_destroy(indexer);
+    if (scan_a) {
+        cr_assert(!atomic_load(&trackers[0].errored),
+            "lib_a indexer reported INDEXER_ERROR");
+        cr_assert(atomic_load(&trackers[0].lib_updated) >= 1,
+            "lib_a indexer emitted no LIBRARY_UPDATED events");
+    }
+    if (scan_b) {
+        cr_assert(!atomic_load(&trackers[1].errored),
+            "lib_b indexer reported INDEXER_ERROR");
+        cr_assert(atomic_load(&trackers[1].lib_updated) >= 1,
+            "lib_b indexer emitted no LIBRARY_UPDATED events");
+    }
+
+    if (ia) indexer_destroy(ia);
+    if (ib) indexer_destroy(ib);
+}
+
+/* Convenience: shared common prologue for every story — resolve tmp paths,
+ * scrub them, recreate data dirs. Does NOT build libs or cache (caller
+ * chooses build_lib_a/build_lib_b and the indexer sequence). */
+static void story_common_paths_init(void) {
+    pid_t pid = getpid();
+    snprintf(lib_a_root, sizeof(lib_a_root), "/tmp/quad_e2e_%d_lib_a", pid);
+    snprintf(lib_b_root, sizeof(lib_b_root), "/tmp/quad_e2e_%d_lib_b", pid);
+    snprintf(lib_a_data, sizeof(lib_a_data), "/tmp/quad_e2e_%d_data_a", pid);
+    snprintf(lib_b_data, sizeof(lib_b_data), "/tmp/quad_e2e_%d_data_b", pid);
+    rm_rf(lib_a_root); rm_rf(lib_b_root);
+    rm_rf(lib_a_data); rm_rf(lib_b_data);
+    mkdirs(lib_a_data); mkdirs(lib_b_data);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -408,18 +631,8 @@ static void rm_rf(const char *path) {
     (void)system(cmd);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Shared fixture state
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-static char lib_a_root[256];
-static char lib_b_root[256];
-static char lib_a_data[256];
-static char lib_b_data[256];
-static library_cache_t *cache = NULL;
-
-#define MASK_A (1u << 0)
-#define MASK_B (1u << 1)
+/* (Shared fixture state + MASK_A/MASK_B moved up alongside the prod-parity
+ *  harness so the helpers can reference them at compile time.) */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * STORY 1: User imports two messy libraries
@@ -438,35 +651,15 @@ static void story_import_setup(void) {
     if (!pg)   cr_skip("MB_PG_PASSWORD not set");
     if (!solr) cr_skip("MB_SOLR_URL not set");
 
-    pid_t pid = getpid();
-    snprintf(lib_a_root, sizeof(lib_a_root), "/tmp/quad_e2e_%d_lib_a", pid);
-    snprintf(lib_b_root, sizeof(lib_b_root), "/tmp/quad_e2e_%d_lib_b", pid);
-    snprintf(lib_a_data, sizeof(lib_a_data), "/tmp/quad_e2e_%d_data_a", pid);
-    snprintf(lib_b_data, sizeof(lib_b_data), "/tmp/quad_e2e_%d_data_b", pid);
-    rm_rf(lib_a_root); rm_rf(lib_b_root);
-    rm_rf(lib_a_data); rm_rf(lib_b_data);
-    mkdirs(lib_a_data); mkdirs(lib_b_data);
-
+    story_common_paths_init();
     build_lib_a(lib_a_root);
     build_lib_b(lib_b_root);
 
-    index_library(lib_a_root, lib_a_data, pg, solr);
-    index_library(lib_b_root, lib_b_data, pg, solr);
-
-    char db_a[512], db_b[512];
-    snprintf(db_a, sizeof(db_a), "%s/quadrature.sqlite", lib_a_data);
-
-    snprintf(db_b, sizeof(db_b), "%s/quadrature.sqlite", lib_b_data);
-
-    library_cache_source_t sources[2] = {
-        { .db_path = db_a, .music_base = lib_a_root,
-          .display_name = "Elicb Music", .bitmap_index = 0 },
-        { .db_path = db_b, .music_base = lib_b_root,
-          .display_name = "Music", .bitmap_index = 1 },
-    };
-    cr_assert_eq(library_cache_create_multi(sources, 2, &cache), QUADRATURE_OK);
-    library_cache_warm_slot_blocking(cache, 0);
-    library_cache_warm_slot_blocking(cache, 1);
+    /* Prod parity: empty-DB cache first, then concurrent indexers with
+     * INDEXER_LIBRARY_UPDATED-driven refresh (matches main.c:207 +
+     * indexer_bridge.c:660). */
+    setup_prod_cache();
+    run_prod_indexers(true, true, pg, solr);
 }
 
 static void story_teardown(void) {
@@ -746,22 +939,19 @@ static void story_picard_setup(void) {
     if (!pg)   cr_skip("MB_PG_PASSWORD not set");
     if (!solr) cr_skip("MB_SOLR_URL not set");
 
-    pid_t pid = getpid();
-    snprintf(lib_a_root, sizeof(lib_a_root), "/tmp/quad_e2e_%d_lib_a", pid);
-    snprintf(lib_b_root, sizeof(lib_b_root), "/tmp/quad_e2e_%d_lib_b", pid);
-    snprintf(lib_a_data, sizeof(lib_a_data), "/tmp/quad_e2e_%d_data_a", pid);
-    snprintf(lib_b_data, sizeof(lib_b_data), "/tmp/quad_e2e_%d_data_b", pid);
-    rm_rf(lib_a_root); rm_rf(lib_b_root);
-    rm_rf(lib_a_data); rm_rf(lib_b_data);
-    mkdirs(lib_a_data); mkdirs(lib_b_data);
-
+    story_common_paths_init();
     build_lib_a(lib_a_root);
     build_lib_b(lib_b_root);
 
-    /* First index: lib_a is messy (BRONSON has no tags) */
-    index_library(lib_a_root, lib_a_data, pg, solr);
+    /* Prod-parity cache + initial scan of lib_a only. lib_a is messy
+     * (BRONSON tag-less). lib_b is left for later so the retag-then-scan
+     * cycle happens against the initial state, mirroring: "user tags
+     * their elicb library with Picard, Quadrature is already running
+     * and watching lib_a's folder". */
+    setup_prod_cache();
+    run_prod_indexers(/*scan_a=*/true, /*scan_b=*/false, pg, solr);
 
-    /* Simulate Picard: overwrite BRONSON FLACs with Picard-tagged versions */
+    /* Simulate Picard: overwrite BRONSON FLACs with Picard-tagged versions. */
     char path[1024];
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON (2020)", lib_a_root);
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
@@ -782,25 +972,9 @@ static void story_picard_setup(void) {
         cr_assert_eq(create_flac(fpath, tags, BRONSON_DURATIONS[i]), 0);
     }
 
-    /* Re-index lib_a (should pick up new tags) */
-    index_library(lib_a_root, lib_a_data, pg, solr);
-
-    /* Index lib_b */
-    index_library(lib_b_root, lib_b_data, pg, solr);
-
-    /* Build cache */
-    char db_a[512], db_b[512];
-    snprintf(db_a, sizeof(db_a), "%s/quadrature.sqlite", lib_a_data);
-    snprintf(db_b, sizeof(db_b), "%s/quadrature.sqlite", lib_b_data);
-    library_cache_source_t sources[2] = {
-        { .db_path = db_a, .music_base = lib_a_root,
-          .display_name = "Elicb Music", .bitmap_index = 0 },
-        { .db_path = db_b, .music_base = lib_b_root,
-          .display_name = "Music", .bitmap_index = 1 },
-    };
-    cr_assert_eq(library_cache_create_multi(sources, 2, &cache), QUADRATURE_OK);
-    library_cache_warm_slot_blocking(cache, 0);
-    library_cache_warm_slot_blocking(cache, 1);
+    /* Re-scan lib_a (picks up new tags) and scan lib_b — both with the
+     * refresh pump so the cache sees every library-updated event. */
+    run_prod_indexers(/*scan_a=*/true, /*scan_b=*/true, pg, solr);
 }
 
 Test(e2e, user_tags_library_with_picard,
@@ -884,11 +1058,11 @@ Test(e2e, user_moves_album_between_libraries,
     snprintf(bronson_dir, sizeof(bronson_dir), "%s/BRONSON", lib_a_root);
     rm_rf(bronson_dir);
 
-    /* Re-index lib_a */
-    index_library(lib_a_root, lib_a_data, pg, solr);
-
-    /* Refresh cache slot 0 */
-    library_cache_refresh_slot(cache, 0, NULL, 0);
+    /* Re-scan lib_a with prod parity — pump_until_indexers_done wires
+     * INDEXER_LIBRARY_UPDATED → library_cache_refresh_slot (same chain
+     * indexer_bridge.c:660 runs in the UI). No separate refresh_slot
+     * call needed; the pump handles it. */
+    run_prod_indexers(/*scan_a=*/true, /*scan_b=*/false, pg, solr);
 
     /* ── Orphan BRONSON album should be gone from lib_a ────────────── */
 
@@ -972,9 +1146,8 @@ Test(e2e, user_deletes_album_folder,
     snprintf(odesza_dir, sizeof(odesza_dir), "%s/ODESZA", lib_a_root);
     rm_rf(odesza_dir);
 
-    /* Re-index + refresh */
-    index_library(lib_a_root, lib_a_data, pg, solr);
-    library_cache_refresh_slot(cache, 0, NULL, 0);
+    /* Re-scan lib_a with prod-parity refresh pump. */
+    run_prod_indexers(/*scan_a=*/true, /*scan_b=*/false, pg, solr);
 
     /* ── ODESZA album should be gone from lib_a ────────────────────── */
 
@@ -1107,23 +1280,16 @@ static void story_mb_credits_setup(void) {
     if (!pg)   cr_skip("MB_PG_PASSWORD not set");
     if (!solr) cr_skip("MB_SOLR_URL not set");
 
-    pid_t pid = getpid();
-    snprintf(lib_a_root, sizeof(lib_a_root), "/tmp/quad_e2e_%d_lib_a", pid);
-    snprintf(lib_b_root, sizeof(lib_b_root), "/tmp/quad_e2e_%d_lib_b", pid);
-    snprintf(lib_a_data, sizeof(lib_a_data), "/tmp/quad_e2e_%d_data_a", pid);
-    snprintf(lib_b_data, sizeof(lib_b_data), "/tmp/quad_e2e_%d_data_b", pid);
-    rm_rf(lib_a_root); rm_rf(lib_b_root);
-    rm_rf(lib_a_data); rm_rf(lib_b_data);
-    mkdirs(lib_a_data); mkdirs(lib_b_data);
-
+    story_common_paths_init();
     build_lib_a(lib_a_root);
     build_lib_b(lib_b_root);
 
-    /* First index: lib_a is messy, ODESZA has "Bronson/Odesza" credits */
-    index_library(lib_a_root, lib_a_data, pg, solr);
-    index_library(lib_b_root, lib_b_data, pg, solr);
+    /* Round 1: prod-parity cache + initial concurrent scan. lib_a's ODESZA
+     * album is tag-less; Phase 5/6 must resolve it via SOLR. */
+    setup_prod_cache();
+    run_prod_indexers(/*scan_a=*/true, /*scan_b=*/true, pg, solr);
 
-    /* Simulate Picard: add MB tags to ODESZA album files */
+    /* Simulate Picard retagging the ODESZA album in lib_a. */
     char path[1024];
     snprintf(path, sizeof(path), "%s/ODESZA/The Last Goodbye Tour Live", lib_a_root);
 
@@ -1159,23 +1325,11 @@ static void story_mb_credits_setup(void) {
         cr_assert_eq(create_flac(fpath, tags, odesza_tracks[i].dur), 0);
     }
 
-    /* Re-index lib_a — Phase 2 picks up MUSICBRAINZ_ALBUMID,
-     * Phase 6 fetches from PG and rewrites track credits with MBIDs */
-    index_library(lib_a_root, lib_a_data, pg, solr);
-
-    /* Build cache */
-    char db_a[512], db_b[512];
-    snprintf(db_a, sizeof(db_a), "%s/quadrature.sqlite", lib_a_data);
-    snprintf(db_b, sizeof(db_b), "%s/quadrature.sqlite", lib_b_data);
-    library_cache_source_t sources[2] = {
-        { .db_path = db_a, .music_base = lib_a_root,
-          .display_name = "Elicb Music", .bitmap_index = 0 },
-        { .db_path = db_b, .music_base = lib_b_root,
-          .display_name = "Music", .bitmap_index = 1 },
-    };
-    cr_assert_eq(library_cache_create_multi(sources, 2, &cache), QUADRATURE_OK);
-    library_cache_warm_slot_blocking(cache, 0);
-    library_cache_warm_slot_blocking(cache, 1);
+    /* Round 2: re-scan lib_a only. Phase 2 picks up the new MUSICBRAINZ_*
+     * tags, Phase 6 fetches canonical credits from PG. Each
+     * LIBRARY_UPDATED event fires another library_cache_refresh_slot via
+     * pump_until_indexers_done. */
+    run_prod_indexers(/*scan_a=*/true, /*scan_b=*/false, pg, solr);
 }
 
 Test(e2e, mb_resolution_updates_featured_credits,
@@ -1271,4 +1425,228 @@ Test(e2e, mb_resolution_updates_featured_credits,
         "Search 'Bronson' should return 1 artist after MB credit resolution, "
         "got %d (Phase 2 'Bronson' orphan leaking)", search_artists);
     library_search_results_free(results);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * STORY 7: Fresh `make db-clean && make debug` — cross-library MBID merge
+ *
+ * PROD REPRO captured 2026-04-16 against the live repo state:
+ *
+ *   $ sqlite3 ~/Music/quadrature.sqlite \
+ *       "SELECT id, name, musicbrainz_id FROM artists WHERE name LIKE '%bronson%' COLLATE NOCASE"
+ *     → 2028 | BRONSON | 887b5b46-3f15-4475-b2bd-4d026c2b2031
+ *
+ *   $ sqlite3 ~/elicb_music/quadrature.sqlite \
+ *       "SELECT id, name, musicbrainz_id FROM artists WHERE name LIKE '%bronson%' COLLATE NOCASE"
+ *     → 98   | BRONSON | 887b5b46-3f15-4475-b2bd-4d026c2b2031
+ *
+ *   Elicb DB: ODESZA/The Last Goodbye Tour Live (album_id=46, mb_status=2),
+ *   tracks 616 (TENSE) and 617 (KEEP MOVING) correctly linked via
+ *   track_artists → artists.id=98 → mbid 887b5b46… The indexer resolved
+ *   everything correctly; both DBs have one BRONSON row with the same MBID.
+ *
+ *   UI SHOWS (screenshot): two artist cards for "Bronson" search:
+ *     1. "BRONSON" (uppercase, Music badge only, 1 album, has artwork)
+ *     2. "Bronson" (case-variant, Elicb badge only, 1 album · appears on
+ *        2 tracks, no artwork)
+ *
+ *   Expected: ONE merged entity, MBID-attached, both library badges,
+ *   1+1 albums, 2 appearances.
+ *
+ * This story reproduces the above. It SHOULD FAIL today on the search-result
+ * and filtered-list assertions (library_cache cross-library MBID dedup bug).
+ * When fixed, the merged entity must also expose the 2 appearance tracks
+ * AND be reachable from both library masks.
+ *
+ * Difference from story 6: no retag-then-reindex shortcut. Single fresh
+ * index of each library — the only path that matches `make db-clean &&
+ * make debug`.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* (prod_trackers / prod_indexer_a / prod_indexer_b declared near top-level
+ *  fixture statics so story_teardown can reach them.) */
+
+static void story_fresh_db_clean_setup(void) {
+    const char *pg = mb_pg_conninfo();
+    const char *solr = mb_solr_url();
+    if (!pg)   cr_skip("MB_PG_PASSWORD not set");
+    if (!solr) cr_skip("MB_SOLR_URL not set");
+
+    story_common_paths_init();
+    build_lib_a(lib_a_root);
+    build_lib_b(lib_b_root);
+
+    /* Prod-parity sequence — bootstrap empty DBs, create cache, warm async,
+     * then run concurrent indexers with INDEXER_LIBRARY_UPDATED →
+     * library_cache_refresh_slot pumping. Exactly the chain prod runs on
+     * `make db-clean && make debug`. */
+    setup_prod_cache();
+    run_prod_indexers(/*scan_a=*/true, /*scan_b=*/true, pg, solr);
+
+    /* ── COW-refresh bug repro ─────────────────────────────────────────────
+     * After the two-refresh sequence, every MB-resolved artist in the cache
+     * must carry its canonical MBID — matching what Phase 6 wrote to the DB.
+     *
+     * Any artist found here with NULL musicbrainz_id is a stale entity:
+     * Phase 2 created the row with no MBID, the first COW refresh captured
+     * it, Phase 6 renamed-in-place in the DB (same row id, new name/MBID),
+     * and the second COW refresh then:
+     *   - SEED (library_cache.c:1742-1746) blindly RC_ACQUIRE'd the stale
+     *     entity from the old slot into the shadow, and
+     *   - DELTA's on_warm_artist (library_cache.c:468) short-circuited the
+     *     DB re-read because the shadow already had an entity at that id.
+     * The fresh DB row never reached the cache — the zombie survives. */
+    for (int slot_idx = 0; slot_idx < 2; slot_idx++) {
+        GPtrArray *a = library_cache_get_artists_filtered(
+            cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, (1u << slot_idx));
+        cr_assert_not_null(a);
+
+        /* Dump every artist visible in this slot so the failing assertion
+         * below has the full picture in the test log. */
+        g_printerr("=== slot %d (%s): %u artists ===\n",
+            slot_idx, slot_idx == 0 ? "Elicb" : "Music", a->len);
+        int stale_count = 0;
+        const library_artist_info_t *first_stale = NULL;
+        for (guint i = 0; i < a->len; i++) {
+            const library_artist_info_t *x = g_ptr_array_index(a, i);
+            bool has_mbid = x->musicbrainz_id && x->musicbrainz_id[0];
+            g_printerr("  [gid=%" G_GINT64_FORMAT "] name='%s' mbid='%s'\n",
+                x->artist_id, x->name,
+                has_mbid ? x->musicbrainz_id : "(NULL — STALE)");
+            /* The MB-resolved tag-less libraries here (ODESZA's A Moment
+             * Apart, The Last Goodbye Tour Live, BRONSON) pull every artist
+             * from MB recording data — which always carries an MBID. So
+             * any NULL mbid on an album_count>0 or track_count>0 entity
+             * is the zombie we're hunting for. album_count/track_count
+             * both zero would be a harmless ghost (no DB references left). */
+            if (!has_mbid && (x->album_count > 0 || x->track_count > 0)) {
+                stale_count++;
+                if (!first_stale) first_stale = x;
+            }
+        }
+        g_ptr_array_unref(a);
+
+        cr_assert_eq(stale_count, 0,
+            "BUG REPRO — slot %d has %d stale artist entities with NULL MBID "
+            "but live album/track references. First stale: "
+            "name='%s' gid=%" G_GINT64_FORMAT ". "
+            "Root cause: library_cache.c:1742-1746 seeds artists from the old "
+            "slot unconditionally via RC_ACQUIRE (no change-set gate for "
+            "artists); library_cache.c:468 then skips the DB re-read because "
+            "the shadow is already populated. When Phase 6 renames an artist "
+            "in place (db_write.c:278 rename_artist_inplace), the DB row gets "
+            "the canonical name + MBID but the cache entity retains the "
+            "Phase-2 name/NULL-MBID forever. This is the cross-library merge "
+            "failure from the prod screenshot, reproduced via the full "
+            "indexer_scan → INDEXER_LIBRARY_UPDATED → library_cache_refresh_slot "
+            "chain the UI runs.",
+            slot_idx, stale_count,
+            first_stale ? first_stale->name : "(none)",
+            first_stale ? first_stale->artist_id : 0);
+    }
+}
+
+Test(e2e, fresh_db_clean_reindex_merges_cross_library_artists,
+     .init = story_fresh_db_clean_setup, .fini = story_teardown, .timeout = 300) {
+
+    /* ── Precondition sanity: both DBs resolved BRONSON with the same MBID ── */
+
+    quadrature_db_t *db_a = NULL, *db_b = NULL;
+    char db_a_path[512], db_b_path[512];
+    snprintf(db_a_path, sizeof(db_a_path), "%s/quadrature.sqlite", lib_a_data);
+    snprintf(db_b_path, sizeof(db_b_path), "%s/quadrature.sqlite", lib_b_data);
+    cr_assert_eq(db_open_readonly(db_a_path, &db_a), QUADRATURE_OK);
+    cr_assert_eq(db_open_readonly(db_b_path, &db_b), QUADRATURE_OK);
+
+    /* If this precondition fails, the indexer (not the cache) is the culprit
+     * and the cache assertions below are moot. */
+    /* [Precondition assertions via direct sqlite would require a helper; rely
+     * on the cache-backed library_artist_info_t check instead — both slots
+     * should expose exactly one BRONSON row with MBID populated.] */
+
+    db_close(db_a);
+    db_close(db_b);
+
+    /* ── BUG REPRO #1: cross-library MBID dedup in filtered artist list ── */
+
+    GPtrArray *artists = library_cache_get_artists_filtered(
+        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+    cr_assert_not_null(artists);
+
+    int bronson_entities = 0;
+    const library_artist_info_t *first_bronson = NULL;
+    for (guint i = 0; i < artists->len; i++) {
+        const library_artist_info_t *a = g_ptr_array_index(artists, i);
+        if (g_ascii_strcasecmp(a->name, "BRONSON") == 0 ||
+            g_ascii_strcasecmp(a->name, "Bronson") == 0) {
+            bronson_entities++;
+            if (!first_bronson) first_bronson = a;
+        }
+    }
+
+    cr_assert_eq(bronson_entities, 1,
+        "BUG REPRO: library_cache_get_artists_filtered(MASK_ALL) returned %d "
+        "BRONSON entities. Prod shows two cards (\"BRONSON\" uppercase + "
+        "\"Bronson\" case-variant) even though both library DBs hold a single "
+        "artists row with the same MBID 887b5b46…. MBID dedup in the cache "
+        "merge path is not firing for this pair.",
+        bronson_entities);
+
+    cr_assert_not_null(first_bronson, "BRONSON entity missing from cache");
+    cr_assert(first_bronson->musicbrainz_id && first_bronson->musicbrainz_id[0],
+        "Merged BRONSON entity must carry the MBID — without it, artist "
+        "artwork lookup (keyed by UUID) returns the no-art sentinel and "
+        "the UI renders a blank placeholder (as seen in the screenshot).");
+    cr_assert_str_eq(first_bronson->musicbrainz_id, MBID_BRONSON_ARTIST);
+
+    g_ptr_array_unref(artists);
+
+    /* ── BUG REPRO #2: same bug surfaced through library_cache_search ── */
+
+    /* The search view is what the screenshot shows — typing "BRONSON" into
+     * the top search bar. library_cache_search must apply the same
+     * cross-library MBID dedup. */
+    library_search_results_t *results = library_cache_search(
+        cache, "BRONSON", LIBRARY_SEARCH_FILTER_ARTISTS, 0, NULL, LIBRARY_MASK_ALL);
+    cr_assert_not_null(results);
+    cr_assert_not_null(results->artists);
+
+    int search_bronson = 0;
+    for (guint i = 0; i < results->artists->len; i++) {
+        const library_artist_info_t *a = g_ptr_array_index(results->artists, i);
+        if (g_ascii_strcasecmp(a->name, "BRONSON") == 0 ||
+            g_ascii_strcasecmp(a->name, "Bronson") == 0)
+            search_bronson++;
+    }
+
+    cr_assert_eq(search_bronson, 1,
+        "BUG REPRO: library_cache_search(\"BRONSON\", MASK_ALL) returned "
+        "%d BRONSON results. Screenshot case: search should collapse the "
+        "two per-library BRONSON rows into one entity via MBID dedup.",
+        search_bronson);
+
+    library_search_results_free(results);
+
+    /* ── Downstream expectations once the merge works ──────────────── */
+    /* When the bug is fixed, the merged BRONSON entity must expose the
+     * cross-library appearance credit (ODESZA's TENSE + KEEP MOVING tracks
+     * from lib_a, while lib_b's Picard-tagged BRONSON contributes the album
+     * ownership). Using the first_bronson artist_id captured above: */
+
+    artists = library_cache_get_artists_filtered(
+        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+    const library_artist_info_t *bronson = find_artist(artists, "BRONSON");
+    if (!bronson) bronson = find_artist(artists, "Bronson");
+    cr_assert_not_null(bronson);
+    int64_t bronson_gid = bronson->artist_id;
+    g_ptr_array_unref(artists);
+
+    GPtrArray *appearances = library_cache_get_artist_appearance_tracks(
+        cache, bronson_gid, LIBRARY_MASK_ALL);
+    cr_assert_not_null(appearances,
+        "Merged BRONSON entity should expose 2 appearance tracks "
+        "(ODESZA TENSE + KEEP MOVING from lib_a, via track_artists).");
+    cr_assert(appearances->len >= 2,
+        "Expected >= 2 appearances on merged BRONSON, got %u", appearances->len);
+    g_ptr_array_unref(appearances);
 }

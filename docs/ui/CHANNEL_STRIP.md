@@ -6,17 +6,18 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│       ┌─────────────────────────────────────────────────┐ [rpt][>>]  │
-│  [1]  │  Album Name                            -3:42:00 │ [P][Q]     │
-│       │  Song Title (marquee)                           │ spectrum   │
-│       │  Artist                           3/12          │ spectrum   │
-│       │  Next: Next Track Title                         │            │
-│       └─────────────────────────────────────────────────┘            │
-│       [<<][-15][-5][>][stop][+5][+15][>>]  [======*==========] 1.0x │
-│                                                               [KEY]  │
-│       [=============================*============================]   │
+│  ┌─────────────────────────────────────────────────────┐ [rpt][>>]   │
+│  │  Album Name                            -3:42:00     │ [P][Q]      │
+│  │  Song Title (marquee)                               │ spectrum    │
+│  │  Artist                           3/12              │ spectrum    │
+│  │  Next: Next Track Title                             │             │
+│  └─────────────────────────────────────────────────────┘             │
+│  [<<][-15][-5][>][stop][+5][+15][>>]  [======*==========] 1.0x [KEY] │
+│  [=============================*=================================]   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+Clicking the channel-strip background (border, display panel empty space, etc.) toggles FOCUSED on/off. Interactive children — transport buttons, album/artist labels — handle their own clicks and are unaffected.
 
 ## Display Panel
 
@@ -92,13 +93,13 @@ Right-click shuttle slider resets to 1.0x.
 
 Requires DEVICE_STATE_VALID.
 
-| Mode    | Styling              | Description                            |
-| ------- | -------------------- | -------------------------------------- |
-| IDLE    | Gray `#555555`       | Normal operation                       |
-| PREVIEW | Orange `#ff9500`     | PFL active                             |
-| QUEUED  | Green `#00cc66` pulse| Ready for air                          |
-| ON_AIR  | Green `#00cc66` solid| Live, controls locked                  |
-| FOCUSED | Cyan number `#00d4ff`| Target for track loading               |
+| Mode    | Styling                        | Description                  |
+| ------- | ------------------------------ | ---------------------------- |
+| IDLE    | Gray `#555555`                 | Normal operation             |
+| PREVIEW | Orange `#ff9500`               | PFL active                   |
+| QUEUED  | Green `#00cc66` pulse          | Ready for air                |
+| ON_AIR  | Green `#00cc66` solid          | Live, controls locked        |
+| FOCUSED | Cyan `#00d4ff` display border  | Target for track loading     |
 
 **Focus rules:**
 - Only one channel focused at a time

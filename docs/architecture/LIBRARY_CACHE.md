@@ -307,9 +307,11 @@ void library_cache_set_ready_callback(library_cache_t* cache,
 void library_cache_start_warming(library_cache_t* cache);
 library_cache_state_t library_cache_get_state(library_cache_t* cache);
 
-// Refresh a single library slot after indexing (old data stays live during rebuild)
+// Refresh a single library slot after indexing (old data stays live during rebuild).
+// `changes` carries the rowids that have been mutated in the DB since the last
+// warming (see "COW Refresh Invariants"). Pass NULL for a full rebuild.
 void library_cache_refresh_slot(library_cache_t* cache, int bitmap_index,
-                                 const char* new_db_path, int flags);
+                                 const library_cache_changeset_t* changes);
 ```
 
 `start_warming()` spawns a per-slot background thread. `ready_cb` fires on the main thread via `g_idle_add` when all slots finish warming. `refresh_slot()` triggers a background rebuild for one slot — old data stays live until the new data is ready, then swaps atomically.
@@ -496,17 +498,23 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track, ...) {
 ### Post-Reindex Lifecycle
 
 ```
-Indexer thread: completes phase → fires INDEXER_LIBRARY_UPDATED
+Indexer thread: completes phase → snapshots ChangeTracker (artists/albums/tracks/track_artists rowids)
+              → fires INDEXER_LIBRARY_UPDATED with library_cache_changeset_t
 
 Main thread (on_indexer_library_updated):
-  debounce: if refresh already pending for this slot within 500ms, skip
-  library_cache_refresh_slot(cache, bitmap_index)
-    → spawns background warm thread for that slot
+  debounce: if a refresh is already pending for this slot within 500ms,
+            merge the new changeset into the pending one and reset the timer
+  library_cache_refresh_slot(cache, bitmap_index, changeset)
+    → spawns a COW refresh thread for that slot
     → OLD slot data stays live (no invalidation yet)
 
-Warming thread: rebuilds shadow arrays for that slot under cache->lock
-  → rebuild_merged_artists() if multi-library
-  → atomic swap: old arrays freed, new arrays installed
+COW refresh thread: builds shadow arrays for that slot
+  → SEED:   acquire rc refs on old entities NOT listed in the changeset
+  → DELTA:  re-iterate full DB; callbacks install fresh entities,
+            releasing any seed they overwrite (callbacks are authoritative)
+  → REBUILD: rebuild relationship arrays, genres, counts in shadow
+  → SWAP:   atomic pointer swap under cache->lock + build_mbid_indices()
+  → DRAIN:  release old arrays (unchanged entities survive via rc; stale ones freed)
   → g_idle_add(ready_cb)
 
 Main thread (on_cache_ready):
@@ -514,12 +522,80 @@ Main thread (on_cache_ready):
 ```
 
 **Signal debouncing:** `INDEXER_LIBRARY_UPDATED` fires after both Phase 3 and Phase 6. If
-they arrive within 500ms, only one `refresh_slot()` executes. This avoids redundant
-`rebuild_merged_artists()` passes — O(total_artists) across all slots under the cache mutex.
+they arrive within 500ms, only one `refresh_slot()` executes; the two changesets are
+**merged** so no row-level invalidation is lost.
 
 During refresh, old slot data stays live — `library_cache_get_*` calls continue to work against stale but valid data. After the swap, all new queries use the refreshed arrays.
 
 For full cache rebuild (e.g. library added/removed), `library_cache_clear()` joins all warming threads and frees all slot arrays, followed by `start_warming()` to rebuild from scratch.
+
+## COW Refresh Invariants
+
+The COW refresh in `library_cache_refresh_slot()` MUST satisfy these invariants. Any
+future modification must preserve all of them together; violating any one of them
+produces silent, hard-to-reproduce staleness bugs.
+
+### I1 — The DB is the single source of truth
+
+After a refresh completes, every entity in the slot's arrays must be bit-identical
+to what a fresh `library_cache_create_multi()` + `library_cache_start_warming()` would
+have produced from the current DB state. No "optimization" may defer, skip, or
+approximate a DB read.
+
+### I2 — Callbacks are authoritative and idempotent
+
+`on_warm_artist`, `on_warm_album`, `on_warm_track`, `on_bulk_track_artist` are the
+sole channel through which DB rows become cache entities. They must:
+
+- Always install a fresh entity built from the row they were handed.
+- Release any prior entity in that slot position before installing.
+- Never short-circuit based on "this slot is already populated" — that check
+  conflates *presence* with *freshness*, which is how staleness creeps in.
+
+### I3 — SEED is an allocation/refcount optimization only
+
+Phase 1 SEED `g_atomic_rc_box_acquire`s old entity pointers into the shadow
+arrays. This is a performance optimization — it lets unchanged entities share
+heap allocations between the old and new slot. SEED is **never** load-bearing
+for correctness:
+
+- Phase 2 DELTA always runs and always replaces rows returned by the DB.
+- Seeded entities that the DB no longer returns are dropped during SWAP.
+- Seeded entities the DB *does* return are released and replaced by DELTA.
+
+A reader of the code should be able to delete Phase 1 SEED wholesale and
+observe only a performance regression, never a correctness regression.
+
+### I4 — The changeset controls what SEED skips, nothing more
+
+`library_cache_changeset_t` carries the set of rowids that have been mutated in
+the DB since the last warming. SEED uses it as a *skip list*: do not acquire
+an rc ref for an entity that is known to have changed (so the old string
+buffers get freed promptly in DRAIN).
+
+Because of I2, feeding a `NULL` changeset (= "unknown, rebuild everything")
+produces correct output — just with more re-allocation. Feeding a *wrong*
+changeset (missing rowids, stale rowids, wrong table) also produces correct
+output, because I2 means the callbacks will rewrite whatever SEED put down.
+
+The changeset can be optimistic, pessimistic, or absent. It cannot be wrong
+in a way that affects correctness.
+
+### I5 — `track_artists` is rebuilt as a whole or not at all
+
+Unlike artist/album/track rows, `track_artists` rows are keyed by a synthetic
+PK, not by track_id. `sqlite3_update_hook` reports the mutated row's own rowid,
+which does not map to a track_id without joining. Rather than pay that cost,
+the changeset carries a single `track_artists_dirty` flag. When set, SEED
+skips track_artist arrays entirely and DELTA rebuilds them from scratch via
+`db_iter_all_track_artists()`. The cost is bounded by track count.
+
+### I6 — The MBID indices are rebuilt under cache->lock
+
+`build_mbid_indices()` reads every slot's artist/album arrays. It must run
+**after** the new arrays are installed and **under** `cache->lock`, in the
+same critical section as the pointer swap, so that no UI read can observe
+the new arrays with the old indices (or vice versa).
 
 ## Thread Safety
 

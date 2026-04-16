@@ -54,7 +54,7 @@
         </child>
         <!-- library badges: populated dynamically by row_helpers.c -->
         <child>
-          <object class="GtkBox" id="library_badges">
+          <object class="QuadratureOverflowBox" id="library_badges">
             <property name="spacing">4</property>
             <property name="visible">false</property>
           </object>
@@ -75,12 +75,13 @@
             <property name="halign">start</property>
           </object>
         </child>
-        <!-- credit annotation: hidden unless credit data is set dynamically -->
+        <!-- credit annotation: hidden unless credit data is set dynamically.
+             credit_artist_btn is appended first (as pinned[0]) by C,
+             then role pills as items, then "…" overflow indicator last. -->
         <child>
-          <object class="GtkBox" id="credit_annotation">
+          <object class="QuadratureOverflowBox" id="credit_annotation">
             <property name="spacing">6</property>
             <property name="visible">false</property>
-            <!-- credit_artist_btn + role pills added dynamically by row_helpers.c -->
           </object>
         </child>
       </object>

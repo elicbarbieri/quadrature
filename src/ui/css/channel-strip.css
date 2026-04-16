@@ -27,18 +27,22 @@ channel-strip.channel-strip-preview {
     outline-offset: 1px;
 }
 
-/* Queued state — static border (no infinite animation) */
+/* Queued state — pulsing border to signal "cued, awaiting play" */
+@keyframes channel-strip-queued-pulse {
+    0%, 100% { border-color: #00cc66; }
+    50%      { border-color: #1a4d33; }
+}
+
 channel-strip.channel-strip-queued {
     border-width: 3px;
     border-color: #00cc66;
+    animation: channel-strip-queued-pulse 1.4s ease-in-out infinite;
 }
 
 /* On-Air state */
 channel-strip.channel-strip-on-air {
     border-color: #00cc66;
     border-width: 3px;
-    outline: 2px solid rgba(0, 204, 102, 0.5);
-    outline-offset: 1px;
 }
 
 /* Unconfigured channel */
@@ -50,10 +54,6 @@ channel-strip.channel-strip-unconfigured {
     opacity: 0.7;
 }
 
-channel-strip.channel-strip-unconfigured .channel-number {
-    color: #888888;
-}
-
 /* Invalid device state */
 channel-strip.channel-strip-invalid {
     border-color: #993333;
@@ -62,20 +62,9 @@ channel-strip.channel-strip-invalid {
     outline-offset: 1px;
 }
 
-.channel-number {
-    font-size: 24px;
-    font-weight: bold;
-    min-width: 48px;
-    color: #ffffff;
-    padding-top: 4px;
-    transition: color 200ms ease-out;
-}
-
-/* Focused channel — static glow (no infinite animation; text-shadow blur is expensive) */
-channel-strip.channel-strip-focused .channel-number {
-    color: #00d4ff;
-    text-shadow: 0 0 10px rgba(0, 212, 255, 0.7),
-                 0 0 20px rgba(0, 212, 255, 0.45);
+/* Focused channel — indicated by display-panel border color */
+channel-strip.channel-strip-focused .display-panel {
+    border-color: #00d4ff;
 }
 
 .channel-status {
@@ -90,7 +79,7 @@ channel-strip.channel-strip-focused .channel-number {
 /* Display Panel (GtkBox — was GtkFrame+GtkBox, now flattened) */
 .display-panel {
     background-color: #1a1a1a;
-    border: 1px solid #333333;
+    border: 2px solid #333333;
     border-radius: 4px;
     padding: 6px 10px;
 }

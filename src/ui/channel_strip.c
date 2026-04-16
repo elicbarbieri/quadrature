@@ -48,7 +48,6 @@ struct _UiChannelStrip {
 
     /* Template children */
     GtkWidget *main_box;
-    GtkWidget *channel_label;
     GtkWidget *display_panel;
     GtkWidget *title_scroll;
     GtkWidget *title_label;
@@ -1278,7 +1277,6 @@ static void ui_channel_strip_class_init(UiChannelStripClass *klass) {
 
     /* Bind template children */
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, main_box);
-    gtk_widget_class_bind_template_child(wc, UiChannelStrip, channel_label);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, display_panel);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, title_scroll);
     gtk_widget_class_bind_template_child(wc, UiChannelStrip, title_label);
@@ -1379,11 +1377,13 @@ static void ui_channel_strip_init(UiChannelStrip *s) {
     s->waveform_track_id = 0;
     g_signal_connect(s->waveform, "seek", G_CALLBACK(on_seek), s);
 
-    /* Add click gesture to channel label for selection */
+    /* Click gesture on the outer widget — clicks on interactive children (buttons,
+     * album/artist labels) claim the sequence in bubble phase; background clicks
+     * (including the border) bubble up here to toggle focus. */
     s->channel_click_gesture = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(s->channel_click_gesture), GDK_BUTTON_PRIMARY);
     g_signal_connect(s->channel_click_gesture, "released", G_CALLBACK(on_channel_clicked), s);
-    gtk_widget_add_controller(s->channel_label, GTK_EVENT_CONTROLLER(s->channel_click_gesture));
+    gtk_widget_add_controller(GTK_WIDGET(s), GTK_EVENT_CONTROLLER(s->channel_click_gesture));
 
     /* Shuttle scale gestures:
      * 1. Click gesture in CAPTURE phase - handles right-click reset only
@@ -1443,11 +1443,6 @@ GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, libr
     s->channel_id = channel_id;
     s->pipeline = pipeline;
     s->library = library;
-
-    /* Update channel label */
-    char badge[4];
-    snprintf(badge, sizeof(badge), "%d", channel_id + 1);
-    gtk_label_set_text(GTK_LABEL(s->channel_label), badge);
 
     /* Set skip amounts on skip buttons */
     g_object_set_data(G_OBJECT(s->skip_back_15), "skip-seconds", GINT_TO_POINTER(-15));

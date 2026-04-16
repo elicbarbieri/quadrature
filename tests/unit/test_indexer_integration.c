@@ -25,6 +25,7 @@
 
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <libavformat/avformat.h>
 
 ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
@@ -84,6 +85,25 @@ static void rm_rf(const char *path) {
     (void)system(cmd);
 }
 
+/**
+ * Advance a FILE's mtime to the future so Phase 1 sees the album as dirty.
+ *
+ * Phase 1's delta detection uses max(file.mtime) + sum(file.size) across
+ * the album directory (src/indexer/indexer.c:627,722) — the directory's
+ * own mtime is ignored. So to simulate "user touched a file" or to guard
+ * against sub-second mtime granularity after an ffmpeg rewrite, this
+ * helper must target a FILE path, not the containing directory.
+ */
+static void bump_mtime_future(const char *path) {
+    struct stat st;
+    cr_assert_eq(stat(path, &st), 0, "stat(%s) failed", path);
+    struct timeval times[2] = {
+        { .tv_sec = st.st_atime,           .tv_usec = 0 },
+        { .tv_sec = st.st_mtime + 3600,    .tv_usec = 0 },
+    };
+    cr_assert_eq(utimes(path, times), 0, "utimes(%s) failed", path);
+}
+
 static bool ffmpeg_available(void) {
     return system("ffmpeg -version > /dev/null 2>&1") == 0;
 }
@@ -100,7 +120,9 @@ typedef struct {
 
 static void tracker_callback(indexer_event_t event,
                              const indexer_progress_t *progress,
+                             const library_cache_changeset_t *changeset,
                              void *user_data) {
+    (void)changeset;
     test_tracker_t *t = user_data;
     switch (event) {
         case INDEXER_STARTED:         t->started++; break;
@@ -119,18 +141,60 @@ static void tracker_callback(indexer_event_t event,
     }
 }
 
-static void run_indexer(const char *library_root, const char *data_root,
-                        test_tracker_t *tracker) {
-    indexer_config_t config = {
+/**
+ * Build libpq conninfo for the self-hosted MusicBrainz PG from env vars.
+ * Returns NULL (caller should cr_skip) when MB_PG_PASSWORD is unset.
+ * Mirrors the pattern in test_mb_resolve.c.
+ */
+static const char *test_mb_pg_conninfo(void) {
+    const char *pw = getenv("MB_PG_PASSWORD");
+    if (!pw || !pw[0]) return NULL;
+    static char buf[512];
+    const char *host    = getenv("MB_HOST");
+    const char *dbname  = getenv("MB_DBNAME");
+    const char *user    = getenv("MB_USER");
+    const char *timeout = getenv("MB_PG_CONNECT_TIMEOUT");
+    snprintf(buf, sizeof(buf),
+             "host=%s dbname=%s user=%s password=%s connect_timeout=%s",
+             (host    && host[0])    ? host    : "localhost",
+             (dbname  && dbname[0])  ? dbname  : "musicbrainz_db",
+             (user    && user[0])    ? user    : "musicbrainz",
+             pw,
+             (timeout && timeout[0]) ? timeout : "5");
+    return buf;
+}
+
+/**
+ * Default config: Phase 1+2 only, no MB, no artwork, no fingerprinting.
+ * Used by stories that test core scan/upsert behavior in isolation.
+ */
+static indexer_config_t test_config_basic(test_tracker_t *tracker) {
+    return (indexer_config_t){
         .thread_count    = 2,
         .process_artwork = false,
         .mb_resolve      = false,
         .callback        = tracker_callback,
         .user_data       = tracker,
     };
+}
 
+/**
+ * MB-enabled config for Phase 6 tests. Caller is responsible for passing
+ * pg_conninfo from test_mb_pg_conninfo() and cr_skip'ing when it's NULL.
+ */
+static indexer_config_t test_config_mb(test_tracker_t *tracker,
+                                       const char *pg_conninfo) {
+    indexer_config_t c = test_config_basic(tracker);
+    c.mb_resolve  = true;
+    c.pg_conninfo = pg_conninfo;
+    return c;
+}
+
+static void run_indexer_cfg(const char *library_root, const char *data_root,
+                            test_tracker_t *tracker,
+                            const indexer_config_t *config) {
     indexer_t *indexer = NULL;
-    cr_assert_eq(indexer_create(&indexer, &config), QUADRATURE_OK);
+    cr_assert_eq(indexer_create(&indexer, config), QUADRATURE_OK);
     cr_assert_eq(indexer_scan(indexer, library_root, data_root), QUADRATURE_OK);
     indexer_wait(indexer);
 
@@ -138,6 +202,12 @@ static void run_indexer(const char *library_root, const char *data_root,
     cr_assert(tracker->success, "Indexer failed for %s", library_root);
 
     indexer_destroy(indexer);
+}
+
+static void run_indexer(const char *library_root, const char *data_root,
+                        test_tracker_t *tracker) {
+    indexer_config_t c = test_config_basic(tracker);
+    run_indexer_cfg(library_root, data_root, tracker, &c);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -363,10 +433,12 @@ Test(indexer, fresh_library_scan,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * STORY 2: Re-scan unchanged library
+ * STORY 2: Re-scan with mtime delta detection
  *
- * "I re-index without changing any files. The indexer should detect that
- *  mtimes haven't changed and skip all directories. Zero new files."
+ * "I re-index without changing files — the indexer must skip every directory.
+ *  Then I bump Discovery's mtime (e.g. `touch` from a sync tool) — the indexer
+ *  must re-process Discovery but skip RAM. No tracks are newly inserted, and
+ *  the library cache remains consistent."
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static char s2_lib[256], s2_data[256];
@@ -389,18 +461,80 @@ static void story2_teardown(void) {
 Test(indexer, rescan_skips_unchanged,
      .init = story2_setup, .fini = story2_teardown, .timeout = 60) {
 
-    /* First index */
+    /* ── First index ── */
     test_tracker_t t1 = {0};
     run_indexer(s2_lib, s2_data, &t1);
     cr_assert_eq(t1.last_progress.files_new, 5, "First scan: all 5 files new");
 
-    /* Second index — unchanged */
+    /* ── Second index (unchanged) — mtime skip ── */
     test_tracker_t t2 = {0};
     run_indexer(s2_lib, s2_data, &t2);
     cr_assert_eq(t2.last_progress.files_new, 0,
         "Re-scan of unchanged library should find 0 new files");
     cr_assert_eq(t2.last_progress.files_total, 0,
-        "Re-scan should not process any files (all skipped by mtime)");
+        "Re-scan should not queue any files (all skipped by mtime)");
+
+    /* ── Third index after touching a file's mtime inside Discovery ──
+     *
+     * Models a backup/sync tool bumping a single file's timestamp (or any
+     * workflow that updates mtime without touching content). Phase 1
+     * computes max(file.mtime) per album (not dir mtime), so bumping ONE
+     * file's mtime is enough to invalidate Discovery's cached fingerprint
+     * and requeue the whole album. Phase 2 upserts existing rows (files_new
+     * stays at 0); RAM's fingerprint is unchanged, so it stays in the
+     * files_unchanged bucket. */
+    char disc_track1[1280];
+    snprintf(disc_track1, sizeof(disc_track1),
+             "%s/Daft Punk/Discovery/01 - One More Time.flac", s2_lib);
+    bump_mtime_future(disc_track1);
+
+    test_tracker_t t3 = {0};
+    run_indexer(s2_lib, s2_data, &t3);
+
+    /* Note: `files_new` is incremented per successful upsert (not per
+     * INSERT), so we cannot use it to distinguish edit from initial-scan.
+     * The meaningful signals are files_total (queued by Phase 1) and
+     * files_unchanged (bulk-skipped albums). */
+    cr_assert_eq(t3.last_progress.files_total, 3,
+        "Phase 1 should queue only Discovery's 3 files, not RAM's 2");
+    cr_assert_eq(t3.last_progress.files_processed, 3,
+        "Phase 2 should process the 3 re-queued files");
+    cr_assert_eq(t3.last_progress.files_unchanged, 2,
+        "RAM's 2 files should be bulk-skipped via mtime+size match");
+
+    /* ── Verify library cache remains consistent after the touch rescan ──
+     *
+     * The touch-and-rescan cycle must not duplicate tracks, lose titles,
+     * or alter the album shape. This is the end-to-end guarantee that
+     * Phase 2's upsert path is idempotent for unchanged content. */
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", s2_data);
+
+    library_cache_source_t src = {
+        .db_path = db_path, .music_base = s2_lib,
+        .display_name = "Test", .bitmap_index = 0,
+    };
+    library_cache_t *cache = NULL;
+    cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+    library_cache_warm_slot_blocking(cache, 0);
+
+    GPtrArray *albums = library_cache_get_albums_filtered(
+        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+    cr_assert_eq(albums->len, 2, "Touch rescan must not duplicate albums");
+
+    const library_album_info_t *disc = test_find_album(albums, "Discovery");
+    cr_assert_not_null(disc, "Discovery must still exist after touch rescan");
+
+    GPtrArray *disc_tracks = library_cache_get_tracks_by_album(
+        cache, disc->album_id, LIBRARY_MASK_ALL);
+    cr_assert_eq(disc_tracks->len, 3, "Discovery must still have exactly 3 tracks");
+    cr_assert_str_eq(
+        ((const library_track_info_t *)g_ptr_array_index(disc_tracks, 0))->title,
+        "One More Time");
+    g_ptr_array_unref(disc_tracks);
+    g_ptr_array_unref(albums);
+
+    library_cache_destroy(cache);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1060,3 +1194,575 @@ Test(indexer, untagged_track_credit_not_merged_without_mb_resolution,
 
     library_cache_destroy(cache);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Fictitious library builder (for stories that must not collide with real
+ * MusicBrainz data). "Quadrature Test Artists — Integration Test Compilation"
+ * is carefully chosen so Phase 6 cannot find a match under any resolution
+ * strategy (no MB tag, unique artist name, unique release title).
+ *
+ *   Quadrature Test Artists/
+ *     Integration Test Compilation 2025/
+ *       01 - Quadrature Mashup.flac
+ *       02 - Fictional Interlude.flac
+ *       03 - Synthetic Finale.flac
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void build_fictitious_compilation(const char *root) {
+    char path[1024], fpath[1024];
+    snprintf(path, sizeof(path),
+        "%s/Quadrature Test Artists/Integration Test Compilation 2025", root);
+    mkdirs(path);
+
+    struct { int num; const char *title; int dur; } tracks[] = {
+        { 1, "Quadrature Mashup",   120 },
+        { 2, "Fictional Interlude", 180 },
+        { 3, "Synthetic Finale",    150 },
+    };
+    for (int i = 0; i < 3; i++) {
+        char tracknum[16], title_tag[256];
+        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
+                 path, tracks[i].num, tracks[i].title);
+        snprintf(tracknum, sizeof(tracknum), "track=%d", tracks[i].num);
+        snprintf(title_tag, sizeof(title_tag), "title=%s", tracks[i].title);
+        const char *tags[] = {
+            title_tag,
+            "artist=Quadrature Test Artists",
+            "album=Integration Test Compilation 2025",
+            "album_artist=Quadrature Test Artists",
+            tracknum, "date=2025", NULL
+        };
+        cr_assert_eq(create_flac(fpath, tags, tracks[i].dur), 0);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * STORY 8a: Non-MB-matched album — file tags remain authoritative
+ *
+ * "I have a fictitious compilation with no MusicBrainz IDs. Phase 6 runs
+ *  against the live MB Postgres, finds no matching release (NO_MATCH), and
+ *  the album stays writable. When I edit a track title in the file, the
+ *  next scan propagates the edit to the library cache."
+ *
+ * Proves: Phase 2's upsert CASE statement writes file title when the album
+ * is NOT MB-locked (mb_status != RESOLVED).
+ *
+ * Requires: MB_PG_PASSWORD env var (tests Phase 6 actually running).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static char s8a_lib[256], s8a_data[256];
+
+static void story8a_setup(void) {
+    if (!ffmpeg_available()) cr_skip("ffmpeg not in PATH");
+    pid_t pid = getpid();
+    snprintf(s8a_lib,  sizeof(s8a_lib),  "/tmp/quad_integ_%d_s8a_lib",  pid);
+    snprintf(s8a_data, sizeof(s8a_data), "/tmp/quad_integ_%d_s8a_data", pid);
+    rm_rf(s8a_lib); rm_rf(s8a_data);
+    mkdirs(s8a_data);
+
+    build_fictitious_compilation(s8a_lib);
+}
+
+static void story8a_teardown(void) {
+    rm_rf(s8a_lib); rm_rf(s8a_data);
+}
+
+Test(indexer, non_mb_album_tag_edit_propagates,
+     .init = story8a_setup, .fini = story8a_teardown, .timeout = 120) {
+
+    const char *pg_conninfo = test_mb_pg_conninfo();
+    if (!pg_conninfo) cr_skip("MB_PG_PASSWORD not set — Phase 6 cannot run");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", s8a_data);
+
+    /* ── First scan: Phase 6 runs, finds no match ── */
+    test_tracker_t t1 = {0};
+    indexer_config_t cfg = test_config_mb(&t1, pg_conninfo);
+    run_indexer_cfg(s8a_lib, s8a_data, &t1, &cfg);
+
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s8a_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *albums = library_cache_get_albums_filtered(
+            cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+        const library_album_info_t *comp = test_find_album(
+            albums, "Integration Test Compilation 2025");
+        cr_assert_not_null(comp, "Fictitious compilation must be indexed");
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, comp->album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 3);
+        cr_assert_str_eq(
+            ((const library_track_info_t *)g_ptr_array_index(tracks, 0))->title,
+            "Quadrature Mashup",
+            "Phase 2 must write the file tag when no MB match");
+        g_ptr_array_unref(tracks);
+        g_ptr_array_unref(albums);
+        library_cache_destroy(cache);
+    }
+
+    /* ── Edit track 1's title and re-scan ── */
+    char album_dir[1024], track1_path[1280];
+    snprintf(album_dir, sizeof(album_dir),
+        "%s/Quadrature Test Artists/Integration Test Compilation 2025", s8a_lib);
+    snprintf(track1_path, sizeof(track1_path),
+        "%s/01 - Quadrature Mashup.flac", album_dir);
+
+    const char *edited[] = {
+        "title=Quadrature Mashup (Remastered)",
+        "artist=Quadrature Test Artists",
+        "album=Integration Test Compilation 2025",
+        "album_artist=Quadrature Test Artists",
+        "track=1", "date=2025", NULL
+    };
+    cr_assert_eq(create_flac(track1_path, edited, 120), 0);
+    bump_mtime_future(track1_path);
+
+    test_tracker_t t2 = {0};
+    indexer_config_t cfg2 = test_config_mb(&t2, pg_conninfo);
+    run_indexer_cfg(s8a_lib, s8a_data, &t2, &cfg2);
+
+    /* ── Verify cache shows edited title ── */
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s8a_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *albums = library_cache_get_albums_filtered(
+            cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+        const library_album_info_t *comp = test_find_album(
+            albums, "Integration Test Compilation 2025");
+        cr_assert_not_null(comp);
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, comp->album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 3, "Track count preserved across edit");
+        cr_assert_str_eq(
+            ((const library_track_info_t *)g_ptr_array_index(tracks, 0))->title,
+            "Quadrature Mashup (Remastered)",
+            "Edit must propagate for non-MB-locked album");
+        g_ptr_array_unref(tracks);
+        g_ptr_array_unref(albums);
+        library_cache_destroy(cache);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * STORY 8b: MB-tagged album — MusicBrainz owns the metadata
+ *
+ * "My library has files tagged by Picard with full MusicBrainz IDs. Phase 6
+ *  resolves them to canonical MB titles. If I later:
+ *    (1) edit a track title in the file, the edit must be IGNORED — MB owns
+ *        the field and the DB upsert must preserve the MB title.
+ *    (2) strip the MUSICBRAINZ_ALBUMID tag, the album's MBID must STAY in
+ *        the DB — once resolved, the association is permanent until a user
+ *        action explicitly unresolves it."
+ *
+ * Proves the two halves of the "MB is authoritative for MB-tagged files"
+ * invariant, enforced at the SQL layer via mb_status-gated upsert.
+ *
+ * Requires: MB_PG_PASSWORD set AND the Daft Punk RAM release resolvable
+ * (it is, in any standard MB replica).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static char s8b_lib[256], s8b_data[256];
+
+static void story8b_setup(void) {
+    if (!ffmpeg_available()) cr_skip("ffmpeg not in PATH");
+    pid_t pid = getpid();
+    snprintf(s8b_lib,  sizeof(s8b_lib),  "/tmp/quad_integ_%d_s8b_lib",  pid);
+    snprintf(s8b_data, sizeof(s8b_data), "/tmp/quad_integ_%d_s8b_data", pid);
+    rm_rf(s8b_lib); rm_rf(s8b_data);
+    mkdirs(s8b_data);
+
+    build_picard_tagged_library(s8b_lib);
+}
+
+static void story8b_teardown(void) {
+    rm_rf(s8b_lib); rm_rf(s8b_data);
+}
+
+Test(indexer, mb_tagged_album_edits_are_ignored,
+     .init = story8b_setup, .fini = story8b_teardown, .timeout = 180) {
+
+    const char *pg_conninfo = test_mb_pg_conninfo();
+    if (!pg_conninfo) cr_skip("MB_PG_PASSWORD not set — Phase 6 cannot run");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", s8b_data);
+
+    /* ── First scan with Phase 6: RAM gets resolved, mb_status=2 ── */
+    test_tracker_t t1 = {0};
+    indexer_config_t cfg = test_config_mb(&t1, pg_conninfo);
+    run_indexer_cfg(s8b_lib, s8b_data, &t1, &cfg);
+
+    /* Snapshot the MB-canonical title + MBID for later comparison. */
+    char *mb_canonical_title = NULL;
+    char *mb_release_id      = NULL;
+    int64_t album_id         = 0;
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s8b_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *albums = library_cache_get_albums_filtered(
+            cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+        cr_assert_eq(albums->len, 1);
+        const library_album_info_t *ram = g_ptr_array_index(albums, 0);
+        cr_assert_not_null(ram->musicbrainz_release_id,
+            "Phase 6 must populate musicbrainz_release_id after resolve");
+        cr_assert_str_eq(ram->musicbrainz_release_id, MBID_RAM_RELEASE,
+            "Resolved MBID must match the one from the file's Picard tags");
+
+        album_id            = ram->album_id;
+        mb_release_id       = g_strdup(ram->musicbrainz_release_id);
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, ram->album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 3);
+        const library_track_info_t *t0 = g_ptr_array_index(tracks, 0);
+        mb_canonical_title = g_strdup(t0->title);
+        g_ptr_array_unref(tracks);
+        g_ptr_array_unref(albums);
+        library_cache_destroy(cache);
+    }
+
+    /* ── Part 1: Edit track 1's title, keep MB tags intact.
+     *
+     * Phase 2's upsert must see mb_status=RESOLVED and use the CASE to
+     * preserve the MB title (db_write.c:121). Any new tag written to the
+     * file is ignored for MB-owned fields. */
+    char album_dir[1024], track1_path[1280];
+    snprintf(album_dir, sizeof(album_dir),
+        "%s/Daft Punk/Random Access Memories", s8b_lib);
+    snprintf(track1_path, sizeof(track1_path),
+        "%s/01 - Give Life Back to Music.flac", album_dir);
+
+    const char *edited_with_mb[] = {
+        "title=TOTALLY WRONG TITLE FROM USER EDIT",
+        "artist=Daft Punk",
+        "album=Random Access Memories",
+        "album_artist=Daft Punk",
+        "track=1", "date=2013",
+        "MUSICBRAINZ_ALBUMID=" MBID_RAM_RELEASE,
+        "MUSICBRAINZ_RELEASEGROUPID=" MBID_RAM_RELEASE_GROUP,
+        "MUSICBRAINZ_ARTISTID=" MBID_DAFT_PUNK_ARTIST,
+        "MUSICBRAINZ_ALBUMARTISTID=" MBID_DAFT_PUNK_ARTIST,
+        NULL
+    };
+    cr_assert_eq(create_flac(track1_path, edited_with_mb, 274), 0);
+    bump_mtime_future(track1_path);
+
+    test_tracker_t t2 = {0};
+    indexer_config_t cfg2 = test_config_mb(&t2, pg_conninfo);
+    run_indexer_cfg(s8b_lib, s8b_data, &t2, &cfg2);
+
+    /* Edit must be rejected by the DB: cache still shows MB title. */
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s8b_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 3);
+        const library_track_info_t *t0 = g_ptr_array_index(tracks, 0);
+        cr_assert_str_eq(t0->title, mb_canonical_title,
+            "MB-locked track title must survive a file-tag edit "
+            "(db_write.c:121 CASE preserves when mb_status=RESOLVED)");
+        cr_assert(strstr(t0->title, "TOTALLY WRONG") == NULL,
+            "User's invalid edit leaked into the cache");
+        g_ptr_array_unref(tracks);
+        library_cache_destroy(cache);
+    }
+
+    /* ── Part 2: Strip ALL MusicBrainz tags from a file, keep basic tags.
+     *
+     * The album's mb_status is still RESOLVED in the DB, so the upsert
+     * must continue to preserve MB fields. The album's MBID in the albums
+     * table MUST stay — Phase 6 resolution is sticky. */
+    const char *stripped[] = {
+        "title=Give Life Back to Music",
+        "artist=Daft Punk",
+        "album=Random Access Memories",
+        "album_artist=Daft Punk",
+        "track=1", "date=2013",
+        /* NO MUSICBRAINZ_* tags */
+        NULL
+    };
+    cr_assert_eq(create_flac(track1_path, stripped, 274), 0);
+    bump_mtime_future(track1_path);
+
+    test_tracker_t t3 = {0};
+    indexer_config_t cfg3 = test_config_mb(&t3, pg_conninfo);
+    run_indexer_cfg(s8b_lib, s8b_data, &t3, &cfg3);
+
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s8b_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *albums = library_cache_get_albums_filtered(
+            cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+        cr_assert_eq(albums->len, 1);
+        const library_album_info_t *ram = g_ptr_array_index(albums, 0);
+        cr_assert_not_null(ram->musicbrainz_release_id,
+            "Stripping the Picard tag from a file must NOT null the album's MBID");
+        cr_assert_str_eq(ram->musicbrainz_release_id, mb_release_id,
+            "Album MBID must persist across re-scan with stripped file tags");
+        g_ptr_array_unref(albums);
+        library_cache_destroy(cache);
+    }
+
+    g_free(mb_canonical_title);
+    g_free(mb_release_id);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * STORY 9: No-MusicBrainz mode — full user lifecycle
+ *
+ * "I use quadrature without MusicBrainz. No PG, no fingerprinting. My library
+ *  is my source of truth. I expect every basic lifecycle operation to work:
+ *    - initial scan builds the cache from file tags
+ *    - editing a tag in place updates the cache on re-scan
+ *    - deleting a file removes the track from the cache
+ *    - renaming a file keeps the track without duplication or loss"
+ *
+ * Proves the non-MB happy path is a first-class, tested mode — not just
+ * an accidental side-effect of Phase 6 being off.
+ *
+ * Does NOT require PG. Uses the fictitious compilation so results are
+ * deterministic regardless of any environment.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static char s9_lib[256], s9_data[256];
+
+static void story9_setup(void) {
+    if (!ffmpeg_available()) cr_skip("ffmpeg not in PATH");
+    pid_t pid = getpid();
+    snprintf(s9_lib,  sizeof(s9_lib),  "/tmp/quad_integ_%d_s9_lib",  pid);
+    snprintf(s9_data, sizeof(s9_data), "/tmp/quad_integ_%d_s9_data", pid);
+    rm_rf(s9_lib); rm_rf(s9_data);
+    mkdirs(s9_data);
+
+    build_fictitious_compilation(s9_lib);
+}
+
+static void story9_teardown(void) {
+    rm_rf(s9_lib); rm_rf(s9_data);
+}
+
+Test(indexer, no_mb_mode_full_lifecycle,
+     .init = story9_setup, .fini = story9_teardown, .timeout = 90) {
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", s9_data);
+
+    char album_dir[1024];
+    snprintf(album_dir, sizeof(album_dir),
+        "%s/Quadrature Test Artists/Integration Test Compilation 2025", s9_lib);
+
+    /* ══════════════════════════════════════════════════════════════════
+     * PHASE A — Initial scan: cache has all three tracks
+     * ══════════════════════════════════════════════════════════════════ */
+    {
+        test_tracker_t t = {0};
+        run_indexer(s9_lib, s9_data, &t);
+        cr_assert_eq(t.last_progress.files_new, 3,
+            "No-MB initial scan must insert 3 tracks");
+    }
+
+    int64_t album_id = 0;
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s9_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *albums = library_cache_get_albums_filtered(
+            cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
+        const library_album_info_t *comp = test_find_album(
+            albums, "Integration Test Compilation 2025");
+        cr_assert_not_null(comp);
+        album_id = comp->album_id;
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 3);
+        cr_assert_str_eq(
+            ((const library_track_info_t *)g_ptr_array_index(tracks, 0))->title,
+            "Quadrature Mashup");
+        g_ptr_array_unref(tracks);
+        g_ptr_array_unref(albums);
+        library_cache_destroy(cache);
+    }
+
+    /* ══════════════════════════════════════════════════════════════════
+     * PHASE B — Tag edit: rewrite track 2's title, expect cache update
+     * ══════════════════════════════════════════════════════════════════ */
+    char track2_path[1280];
+    snprintf(track2_path, sizeof(track2_path),
+        "%s/02 - Fictional Interlude.flac", album_dir);
+    const char *edited[] = {
+        "title=Fictional Interlude (Director's Cut)",
+        "artist=Quadrature Test Artists",
+        "album=Integration Test Compilation 2025",
+        "album_artist=Quadrature Test Artists",
+        "track=2", "date=2025", NULL
+    };
+    cr_assert_eq(create_flac(track2_path, edited, 180), 0);
+    bump_mtime_future(track2_path);
+
+    {
+        test_tracker_t t = {0};
+        run_indexer(s9_lib, s9_data, &t);
+        /* Note: files_new is misnamed — it increments on every successful
+         * upsert. Use files_unchanged + library_cache state to verify. */
+        cr_assert_eq(t.last_progress.files_unchanged, 0,
+            "The album was touched; no files should bulk-skip");
+    }
+
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s9_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 3, "Track count must stay at 3 after edit");
+        cr_assert_str_eq(
+            ((const library_track_info_t *)g_ptr_array_index(tracks, 1))->title,
+            "Fictional Interlude (Director's Cut)",
+            "No-MB mode: file tag edit must propagate to cache");
+        g_ptr_array_unref(tracks);
+        library_cache_destroy(cache);
+    }
+
+    /* ══════════════════════════════════════════════════════════════════
+     * PHASE C — Delete a file: orphan track must be pruned
+     * ══════════════════════════════════════════════════════════════════ */
+    char track3_path[1280];
+    snprintf(track3_path, sizeof(track3_path),
+        "%s/03 - Synthetic Finale.flac", album_dir);
+    cr_assert_eq(unlink(track3_path), 0, "unlink track 3 failed");
+    /* Delete shrinks total_dir_size — Phase 1's size-delta check triggers
+     * re-processing without needing an mtime bump. */
+
+    {
+        test_tracker_t t = {0};
+        run_indexer(s9_lib, s9_data, &t);
+    }
+
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s9_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 2,
+            "Delete must prune the orphan track (was 3, now 2)");
+        for (guint i = 0; i < tracks->len; i++) {
+            const library_track_info_t *t = g_ptr_array_index(tracks, i);
+            cr_assert_str_neq(t->title, "Synthetic Finale",
+                "Deleted track must not be in cache");
+        }
+        g_ptr_array_unref(tracks);
+        library_cache_destroy(cache);
+    }
+
+    /* ══════════════════════════════════════════════════════════════════
+     * PHASE D — Rename a file: track count stays, no duplicates
+     *
+     * Important nuance: `mv` within the same directory preserves both the
+     * inode's mtime AND the file's size, so Phase 1's max(file.mtime) +
+     * sum(file.size) fingerprint is unchanged and the album would NOT be
+     * re-processed by a plain rename. A realistic file-manager workflow
+     * almost always accompanies a rename with some metadata edit (e.g. a
+     * tag fix) that bumps the file's mtime. We simulate that second step
+     * explicitly with bump_mtime_future on the renamed file.
+     *
+     * The invariant under test: once Phase 1 is triggered, rename is
+     * handled without duplicates or loss.
+     * ══════════════════════════════════════════════════════════════════ */
+    char track2_new_path[1280];
+    snprintf(track2_new_path, sizeof(track2_new_path),
+        "%s/02 - Fictional Interlude Renamed.flac", album_dir);
+    {
+        char cmd[2600];
+        snprintf(cmd, sizeof(cmd), "mv '%s' '%s'", track2_path, track2_new_path);
+        cr_assert_eq(system(cmd), 0, "mv failed");
+    }
+    bump_mtime_future(track2_new_path);
+
+    {
+        test_tracker_t t = {0};
+        run_indexer(s9_lib, s9_data, &t);
+    }
+
+    {
+        library_cache_source_t src = {
+            .db_path = db_path, .music_base = s9_lib,
+            .display_name = "Test", .bitmap_index = 0,
+        };
+        library_cache_t *cache = NULL;
+        cr_assert_eq(library_cache_create_multi(&src, 1, &cache), QUADRATURE_OK);
+        library_cache_warm_slot_blocking(cache, 0);
+
+        GPtrArray *tracks = library_cache_get_tracks_by_album(
+            cache, album_id, LIBRARY_MASK_ALL);
+        cr_assert_eq(tracks->len, 2,
+            "Rename must not change track count (no duplicate, no loss)");
+
+        /* Resolve the renamed track's path — it must match the new filename. */
+        bool found_new_path = false;
+        for (guint i = 0; i < tracks->len; i++) {
+            const library_track_info_t *tk = g_ptr_array_index(tracks, i);
+            char *path = library_cache_resolve_track_path(cache, tk->track_id);
+            if (path && strstr(path, "Fictional Interlude Renamed")) {
+                found_new_path = true;
+            }
+            g_free(path);
+        }
+        cr_assert(found_new_path,
+            "Cache must resolve the renamed track to its new filesystem path");
+
+        g_ptr_array_unref(tracks);
+        library_cache_destroy(cache);
+    }
+}
+

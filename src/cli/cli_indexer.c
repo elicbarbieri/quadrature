@@ -44,8 +44,10 @@ static void install_signal_handlers(void) {
 
 static void indexer_progress_callback(indexer_event_t event,
                                        const indexer_progress_t* progress,
+                                       const library_cache_changeset_t* changeset,
                                        void* user_data) {
     (void)user_data;
+    (void)changeset;
 
     switch (event) {
         case INDEXER_STARTED:
@@ -68,12 +70,12 @@ static void indexer_progress_callback(indexer_event_t event,
             fflush(stdout);
             break;
 
-        case INDEXER_LIBRARY_READY:
-            printf("\nLibrary ready (metadata indexed, browsable)\n");
+        case INDEXER_LIBRARY_UPDATED:
+            printf("\nLibrary updated (cache refresh available)\n");
             break;
 
-        case INDEXER_ARTWORK_READY:
-            printf("\nArtwork processing complete\n");
+        case INDEXER_ARTWORK_UPDATED:
+            printf("\nArtwork updated\n");
             break;
 
         case INDEXER_COMPLETED:
@@ -104,6 +106,8 @@ static void print_start_help(void) {
            "  -i, --acoustid-index-url <url>   AcoustID index HTTP URL (e.g. http://host:8081)\n"
            "  -S, --mb-solr-url <url>          MusicBrainz Solr URL (e.g. http://host:8983)\n"
            "  -F, --fanart-api-key <key>       fanart.tv API key for artist artwork\n"
+           "  -d, --data-dir <path>            Write quadrature.sqlite + artwork to <path>\n"
+           "                                    instead of the music dir (useful for diagnostics)\n"
            "  -v, --verbose                    Verbose output\n"
            "  -h, --help                       Show help\n");
 }
@@ -117,6 +121,7 @@ static int cmd_start(int argc, char** argv) {
     const char* acoustid_index_url = NULL;
     const char* mb_solr_url = NULL;
     const char* fanart_api_key = NULL;
+    const char* data_dir = NULL;
 
     static struct option long_options[] = {
         {"verbose",               no_argument,       0, 'v'},
@@ -127,12 +132,13 @@ static int cmd_start(int argc, char** argv) {
         {"acoustid-index-url",    required_argument, 0, 'i'},
         {"mb-solr-url",           required_argument, 0, 'S'},
         {"fanart-api-key",        required_argument, 0, 'F'},
+        {"data-dir",              required_argument, 0, 'd'},
         {0, 0, 0, 0}
     };
 
     optind = 1; /* reset getopt for subcommand parsing */
     int opt;
-    while ((opt = getopt_long(argc, argv, "vhRp:a:i:S:F:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhRp:a:i:S:F:d:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'v': verbose = true;                  break;
             case 'h': print_start_help();              return 0;
@@ -142,6 +148,7 @@ static int cmd_start(int argc, char** argv) {
             case 'i': acoustid_index_url = optarg;     break;
             case 'S': mb_solr_url = optarg;            break;
             case 'F': fanart_api_key = optarg;         break;
+            case 'd': data_dir = optarg;               break;
             default:  print_start_help();              return 1;
         }
     }
@@ -187,7 +194,7 @@ static int cmd_start(int argc, char** argv) {
     g_indexer = indexer;
     install_signal_handlers();
 
-    result = indexer_scan(indexer, music_path, NULL);
+    result = indexer_scan(indexer, music_path, data_dir);
     if (result != QUADRATURE_OK) {
         fprintf(stderr, "Failed to start indexing: %d\n", result);
         indexer_destroy(indexer);

@@ -941,61 +941,97 @@ quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db) {
     return QUADRATURE_OK;
 }
 
-quadrature_result_t db_prune_orphan_albums(quadrature_db_t* db,
-                                            const int64_t* album_ids,
-                                            size_t count) {
-    if (!db || !album_ids || count == 0) return QUADRATURE_OK;
+quadrature_result_t db_reconcile_album_tracks(quadrature_db_t* db,
+                                                int64_t album_id,
+                                                const char* const* current_paths,
+                                                size_t current_path_count) {
+    if (!db || album_id <= 0) return QUADRATURE_ERROR_INVALID_PARAM;
+    if (!db->in_transaction) return QUADRATURE_ERROR_INTERNAL;
 
     db_lock(db);
 
-    char* err = NULL;
-    sqlite3_exec(db->db, "BEGIN", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
-
+    /* Build a TEMP set of current paths. When current_path_count == 0 the
+     * table stays empty, so every track for the album matches the "not in
+     * current" predicate and gets pruned — that's the whole-album delete
+     * flow used by Phase 1's orphan sweep. Safe to reuse across successive
+     * calls within the same transaction (DELETE clears prior rows). */
     sqlite3_exec(db->db,
-        "CREATE TEMP TABLE IF NOT EXISTS _orphan_ids(id INTEGER PRIMARY KEY)",
+        "CREATE TEMP TABLE IF NOT EXISTS _current_track_paths(path TEXT PRIMARY KEY)",
         NULL, NULL, NULL);
-    sqlite3_exec(db->db, "DELETE FROM _orphan_ids", NULL, NULL, NULL);
+    sqlite3_exec(db->db, "DELETE FROM _current_track_paths", NULL, NULL, NULL);
 
-    sqlite3_stmt* ins;
-    sqlite3_prepare_v2(db->db, "INSERT INTO _orphan_ids VALUES(?)", -1, &ins, NULL);
-    for (size_t i = 0; i < count; i++) {
-        sqlite3_bind_int64(ins, 1, album_ids[i]);
-        sqlite3_step(ins);
-        sqlite3_reset(ins);
+    if (current_path_count > 0 && current_paths) {
+        sqlite3_stmt* ins = NULL;
+        if (sqlite3_prepare_v2(db->db,
+                "INSERT OR IGNORE INTO _current_track_paths(path) VALUES(?)",
+                -1, &ins, NULL) != SQLITE_OK) {
+            db_unlock(db);
+            return QUADRATURE_ERROR_INTERNAL;
+        }
+        for (size_t i = 0; i < current_path_count; i++) {
+            if (!current_paths[i]) continue;
+            sqlite3_bind_text(ins, 1, current_paths[i], -1, SQLITE_STATIC);
+            sqlite3_step(ins);
+            sqlite3_reset(ins);
+        }
+        sqlite3_finalize(ins);
     }
-    sqlite3_finalize(ins);
 
-    // Delete tracks first (track_artists cascade via ON DELETE CASCADE)
-    sqlite3_exec(db->db,
-        "DELETE FROM tracks WHERE album_id IN (SELECT id FROM _orphan_ids)",
-        NULL, NULL, NULL);
-    int track_changes = sqlite3_changes(db->db);
+    /* Prune tracks not in the current set (track_artists cascades via FK). */
+    sqlite3_stmt* del_tracks = NULL;
+    if (sqlite3_prepare_v2(db->db,
+            "DELETE FROM tracks "
+            "WHERE album_id = ? "
+            "  AND path NOT IN (SELECT path FROM _current_track_paths)",
+            -1, &del_tracks, NULL) != SQLITE_OK) {
+        db_unlock(db);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+    sqlite3_bind_int64(del_tracks, 1, album_id);
+    sqlite3_step(del_tracks);
+    int tracks_pruned = sqlite3_changes(db->db);
+    sqlite3_finalize(del_tracks);
 
-    // Clean tracks FTS
-    sqlite3_exec(db->db,
-        "DELETE FROM tracks_fts WHERE rowid NOT IN (SELECT id FROM tracks)",
-        NULL, NULL, NULL);
+    if (tracks_pruned > 0) {
+        sqlite3_exec(db->db,
+            "DELETE FROM tracks_fts WHERE rowid NOT IN (SELECT id FROM tracks)",
+            NULL, NULL, NULL);
+    }
 
-    // Delete albums
-    sqlite3_exec(db->db,
-        "DELETE FROM albums WHERE id IN (SELECT id FROM _orphan_ids)",
-        NULL, NULL, NULL);
-    int album_changes = sqlite3_changes(db->db);
+    /* If the album now has no tracks, delete it too. This collapses the
+     * "whole album gone" and "some tracks gone" cases into one operation. */
+    sqlite3_stmt* count_stmt = NULL;
+    sqlite3_prepare_v2(db->db,
+        "SELECT COUNT(*) FROM tracks WHERE album_id = ?",
+        -1, &count_stmt, NULL);
+    sqlite3_bind_int64(count_stmt, 1, album_id);
+    int remaining = (sqlite3_step(count_stmt) == SQLITE_ROW)
+        ? sqlite3_column_int(count_stmt, 0) : -1;
+    sqlite3_finalize(count_stmt);
 
-    // Clean albums FTS
-    sqlite3_exec(db->db,
-        "DELETE FROM albums_fts WHERE rowid NOT IN (SELECT id FROM albums)",
-        NULL, NULL, NULL);
+    int album_deleted = 0;
+    if (remaining == 0) {
+        sqlite3_stmt* del_album = NULL;
+        sqlite3_prepare_v2(db->db,
+            "DELETE FROM albums WHERE id = ?", -1, &del_album, NULL);
+        sqlite3_bind_int64(del_album, 1, album_id);
+        sqlite3_step(del_album);
+        album_deleted = sqlite3_changes(db->db);
+        sqlite3_finalize(del_album);
 
-    sqlite3_exec(db->db, "DROP TABLE _orphan_ids", NULL, NULL, NULL);
+        if (album_deleted > 0) {
+            sqlite3_exec(db->db,
+                "DELETE FROM albums_fts WHERE rowid NOT IN (SELECT id FROM albums)",
+                NULL, NULL, NULL);
+        }
+    }
 
-    sqlite3_exec(db->db, "COMMIT", NULL, NULL, &err);
-    if (err) sqlite3_free(err);
-
-    if (album_changes > 0)
-        g_message("db_prune_orphan_albums: removed %d album(s), %d track(s)",
-                  album_changes, track_changes);
+    if (tracks_pruned > 0 || album_deleted > 0) {
+        g_debug("db_reconcile_album_tracks: album %" G_GINT64_FORMAT
+                " — pruned %d track(s)%s",
+                album_id, tracks_pruned,
+                album_deleted ? ", album deleted" : "");
+    }
 
     db_unlock(db);
     return QUADRATURE_OK;

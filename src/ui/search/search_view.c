@@ -456,8 +456,20 @@ static void apply_search_with_credits(UiWindow *w, GHashTable *credit_tracks,
         return;
     }
 
-    /* Resolve credit track_ids to library_track_info_t for display */
+    /* Resolve credit track_ids to library_track_info_t for display.
+     *
+     * Two physical libraries can both contain the same recording (e.g. CD
+     * rip + vinyl rip of the same release; or Music + elicb_music both
+     * holding RAM). They produce different global track ids — but the
+     * recording MBID is identical, so collapsing by (release_group_mbid,
+     * disc_num, track_num) gives one row per unique recording.
+     *
+     * Same idea for albums: dedup by release_group_mbid (the cross-edition
+     * identifier the rest of the cache already uses) instead of raw
+     * global album_id. */
     GPtrArray *tracks = g_ptr_array_new();
+    GHashTable *seen_tracks = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
     GHashTableIter iter;
     gpointer key;
     g_hash_table_iter_init(&iter, credit_tracks);
@@ -465,9 +477,27 @@ static void apply_search_with_credits(UiWindow *w, GHashTable *credit_tracks,
         int64_t track_id = *(int64_t *)key;
         const library_track_info_t *info = library_cache_get_track(
             w->library_cache, track_id);
-        if (info)
-            g_ptr_array_add(tracks, (gpointer)info);
+        if (!info) continue;
+
+        /* Build dedup key (release_group_mbid|disc|track). Albums without
+         * an RGID can't be cross-library-merged anyway — fall back to the
+         * raw album_id so each still appears at most once. */
+        const library_album_info_t *a =
+            library_cache_get_album(w->library_cache, info->album_id, w->library_mask);
+        char *dedup_key = (a && a->musicbrainz_release_group_id && a->musicbrainz_release_group_id[0])
+            ? g_strdup_printf("%s|%d|%d",
+                              a->musicbrainz_release_group_id,
+                              info->disc_num, info->track_num)
+            : g_strdup_printf("@%" G_GINT64_FORMAT, info->album_id);
+
+        if (g_hash_table_contains(seen_tracks, dedup_key)) {
+            g_free(dedup_key);
+            continue;
+        }
+        g_hash_table_add(seen_tracks, dedup_key);  /* takes ownership */
+        g_ptr_array_add(tracks, (gpointer)info);
     }
+    g_hash_table_unref(seen_tracks);
 
     if (tracks->len == 0) {
         g_ptr_array_unref(tracks);
@@ -478,18 +508,28 @@ static void apply_search_with_credits(UiWindow *w, GHashTable *credit_tracks,
         return;
     }
 
-    /* Derive albums from credit-matched tracks for album section */
-    GHashTable *seen_albums = g_hash_table_new(g_int64_hash, g_int64_equal);
+    /* Derive albums from credit-matched tracks for album section.
+     * Dedup by release_group_mbid (collapses RGID twins across editions
+     * AND across libraries). Albums without an RGID dedup by album_id. */
+    GHashTable *seen_albums = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     GPtrArray *albums = g_ptr_array_new();
     for (guint i = 0; i < tracks->len; i++) {
         const library_track_info_t *t = g_ptr_array_index(tracks, i);
-        if (!g_hash_table_contains(seen_albums, &t->album_id)) {
-            g_hash_table_add(seen_albums, (gpointer)&t->album_id);
-            const library_album_info_t *album =
-                library_cache_get_album(w->library_cache, t->album_id, w->library_mask);
-            if (album)
-                g_ptr_array_add(albums, (gpointer)album);
+        const library_album_info_t *album =
+            library_cache_get_album(w->library_cache, t->album_id, w->library_mask);
+        if (!album) continue;
+
+        char *album_key = (album->musicbrainz_release_group_id
+                           && album->musicbrainz_release_group_id[0])
+            ? g_strdup(album->musicbrainz_release_group_id)
+            : g_strdup_printf("@%" G_GINT64_FORMAT, t->album_id);
+
+        if (g_hash_table_contains(seen_albums, album_key)) {
+            g_free(album_key);
+            continue;
         }
+        g_hash_table_add(seen_albums, album_key);  /* takes ownership */
+        g_ptr_array_add(albums, (gpointer)album);
     }
     g_hash_table_unref(seen_albums);
 

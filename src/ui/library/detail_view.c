@@ -949,14 +949,20 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     gtk_list_box_remove_all(GTK_LIST_BOX(ud->appears_on_albums));
     gtk_list_box_remove_all(GTK_LIST_BOX(ud->appears_on_tracks));
 
-    /* Build skip sets for credit dedup */
+    /* Build skip sets for credit dedup.
+     * Albums are tracked by MBID, not global album_id: credits only exist
+     * for MB-tagged releases, and a single logical album can have distinct
+     * global IDs per library. Keying by MBID flows MB→globals (the canonical
+     * direction) and avoids duplicate rows across libraries. */
     GHashTable *skip_track_ids = g_hash_table_new(g_direct_hash, g_direct_equal);
-    GHashTable *skip_album_ids = g_hash_table_new(g_direct_hash, g_direct_equal);
+    GHashTable *skip_album_mbids = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                          g_free, NULL);
 
     /* Skip all tracks from own albums */
     for (guint i = 0; i < album_count; i++) {
         const library_album_info_t *album = g_ptr_array_index(albums, i);
-        g_hash_table_add(skip_album_ids, GSIZE_TO_POINTER((gsize)album->album_id));
+        if (album->musicbrainz_release_id)
+            g_hash_table_add(skip_album_mbids, g_strdup(album->musicbrainz_release_id));
         GPtrArray *atracks = library_cache_get_tracks_by_album(ud->cache, album->album_id, LIBRARY_MASK_ALL);
         if (atracks) {
             for (guint j = 0; j < atracks->len; j++) {
@@ -977,7 +983,8 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     if (appearance_albums) {
         for (guint i = 0; i < appearance_albums->len; i++) {
             const library_album_info_t *a = g_ptr_array_index(appearance_albums, i);
-            g_hash_table_add(skip_album_ids, GSIZE_TO_POINTER((gsize)a->album_id));
+            if (a->musicbrainz_release_id)
+                g_hash_table_add(skip_album_mbids, g_strdup(a->musicbrainz_release_id));
         }
     }
 
@@ -1006,10 +1013,9 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
         for (guint i = 0; i < appearance_albums->len; i++) {
             const library_album_info_t *album = g_ptr_array_index(appearance_albums, i);
 
-            /* Look up credit roles for this album */
-            GPtrArray *roles = credit_album_roles
-                ? g_hash_table_lookup(credit_album_roles,
-                                      GSIZE_TO_POINTER((gsize)album->album_id))
+            /* Look up credit roles for this album by MBID (canonical key) */
+            GPtrArray *roles = (credit_album_roles && album->musicbrainz_release_id)
+                ? g_hash_table_lookup(credit_album_roles, album->musicbrainz_release_id)
                 : NULL;
 
             /* Build credit annotation if roles found */
@@ -1054,7 +1060,7 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     if (artist_info && artist_info->musicbrainz_id && ud->settings) {
         credit_count = append_credit_rows(ud, artist_info->musicbrainz_id,
                                            artist_name ? artist_name : "Unknown Artist",
-                                           artist_id, skip_track_ids, skip_album_ids,
+                                           artist_id, skip_track_ids, skip_album_mbids,
                                            &track_groups, &album_groups);
     }
 
@@ -1064,7 +1070,7 @@ static void load_artist_state(UnifiedDetailData *ud, int64_t artist_id) {
     g_object_unref(album_groups.col1);
     g_object_unref(album_groups.col2);
     g_hash_table_destroy(skip_track_ids);
-    g_hash_table_destroy(skip_album_ids);
+    g_hash_table_destroy(skip_album_mbids);
 
     gboolean has_appear_tracks = (appearance_tracks && appearance_tracks->len > 0) ||
                                   credit_count > 0;

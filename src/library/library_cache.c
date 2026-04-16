@@ -224,19 +224,30 @@ static inline library_track_info_t *slot_get_track(LibrarySlot *slot, int64_t lo
     return slot->tracks[local_id];
 }
 
+/* slot_set_* always *replaces*: if an entity already lives at local_id it is
+ * released before the new one is installed. This is what makes the warming
+ * callbacks authoritative under COW refresh (see LIBRARY_CACHE.md
+ * → "COW Refresh Invariants" → I2). */
+
 static inline void slot_set_artist(LibrarySlot *slot, int64_t local_id, library_artist_info_t *info) {
     if (local_id <= 0 || (size_t)local_id >= slot->artists_capacity) return;
+    library_artist_info_t *old = slot->artists[local_id];
     slot->artists[local_id] = info;
+    if (old) release_artist_info(old);
 }
 
 static inline void slot_set_album(LibrarySlot *slot, int64_t local_id, library_album_info_t *info) {
     if (local_id <= 0 || (size_t)local_id >= slot->albums_capacity) return;
+    library_album_info_t *old = slot->albums[local_id];
     slot->albums[local_id] = info;
+    if (old) release_album_info(old);
 }
 
 static inline void slot_set_track(LibrarySlot *slot, int64_t local_id, library_track_info_t *info) {
     if (local_id <= 0 || (size_t)local_id >= slot->tracks_capacity) return;
+    library_track_info_t *old = slot->tracks[local_id];
     slot->tracks[local_id] = info;
+    if (old) release_track_info(old);
 }
 
 /* =============================================================================
@@ -465,8 +476,9 @@ static gint cmp_track_disc_num(gconstpointer a, gconstpointer b) {
 static bool on_warm_artist(const db_artist_t *a, void *data) {
     LibrarySlot *slot = data;
     if (atomic_load(&slot->warm_cancel)) return false;
-    if (slot_get_artist(slot, a->id)) return true;
 
+    /* Callback is authoritative: always install fresh, replacing any prior
+     * occupant. See LIBRARY_CACHE.md → "COW Refresh Invariants" → I2. */
     library_artist_info_t *info = g_atomic_rc_box_alloc0(sizeof(library_artist_info_t));
     info->artist_id      = LIBRARY_MAKE_GLOBAL_ID(slot->bitmap_index, a->id);
     info->library_index  = slot->bitmap_index;
@@ -480,8 +492,8 @@ static bool on_warm_artist(const db_artist_t *a, void *data) {
 static bool on_warm_album(const db_album_t *a, void *data) {
     LibrarySlot *slot = data;
     if (atomic_load(&slot->warm_cancel)) return false;
-    if (slot_get_album(slot, a->id)) return true;
 
+    /* Authoritative — replaces any prior occupant (see I2). */
     library_album_info_t *info = g_atomic_rc_box_alloc0(sizeof(library_album_info_t));
     info->album_id      = LIBRARY_MAKE_GLOBAL_ID(slot->bitmap_index, a->id);
     info->artist_id     = LIBRARY_MAKE_GLOBAL_ID(slot->bitmap_index, a->artist_id);
@@ -525,28 +537,27 @@ static bool on_warm_track(const db_track_lean_t *t, void *data) {
         g_array_append_val(slot->album_tracks[t->album_id], global_tid);
     }
 
-    if (!slot_get_track(slot, local_tid)) {
-        library_track_info_t *info = g_atomic_rc_box_alloc0(sizeof(library_track_info_t));
-        info->track_id      = global_tid;
-        info->album_id      = LIBRARY_MAKE_GLOBAL_ID(slot->bitmap_index, t->album_id);
-        info->library_index = slot->bitmap_index;
-        info->path          = g_strdup(t->path ? t->path : "");
-        info->title         = g_strdup(t->title);
-        info->genre         = t->genre ? g_strdup(t->genre) : NULL;
-        info->duration_ms   = t->duration_ms;
-        info->track_num     = t->track_num;
-        info->disc_num      = t->disc_num;
-        info->year          = t->year;
+    /* Authoritative — replaces any prior occupant (see I2). */
+    library_track_info_t *info = g_atomic_rc_box_alloc0(sizeof(library_track_info_t));
+    info->track_id      = global_tid;
+    info->album_id      = LIBRARY_MAKE_GLOBAL_ID(slot->bitmap_index, t->album_id);
+    info->library_index = slot->bitmap_index;
+    info->path          = g_strdup(t->path ? t->path : "");
+    info->title         = g_strdup(t->title);
+    info->genre         = t->genre ? g_strdup(t->genre) : NULL;
+    info->duration_ms   = t->duration_ms;
+    info->track_num     = t->track_num;
+    info->disc_num      = t->disc_num;
+    info->year          = t->year;
 
-        /* Resolve from already-loaded Phase 1-2 data (no JOINs in track query) */
-        info->artist_display = t->artist_display ? g_strdup(t->artist_display) : NULL;
-        library_album_info_t *album = slot_get_album(slot, t->album_id);
-        info->album_title = g_strdup(album ? album->title : "Unknown Album");
+    /* Resolve from already-loaded Phase 1-2 data (no JOINs in track query) */
+    info->artist_display = t->artist_display ? g_strdup(t->artist_display) : NULL;
+    library_album_info_t *album = slot_get_album(slot, t->album_id);
+    info->album_title = g_strdup(album ? album->title : "Unknown Album");
 
-        /* artist_id set to 0 here — resolved in Phase 3.5 for position=0 entry */
-        slot_set_track(slot, local_tid, info);
-        ctx->loaded++;
-    }
+    /* artist_id set to 0 here — resolved in Phase 3.5 for position=0 entry */
+    slot_set_track(slot, local_tid, info);
+    ctx->loaded++;
 
     return true;
 }
@@ -571,8 +582,11 @@ typedef struct {
 static void bulk_ta_flush(BulkTrackArtistCtx *ctx) {
     if (ctx->cur_list && ctx->prev_tid > 0
         && (size_t)ctx->prev_tid < ctx->slot->track_artists_capacity) {
+        /* Authoritative: release any prior list for this track before install. */
+        GPtrArray *old = ctx->slot->track_artists[ctx->prev_tid];
         ctx->slot->track_artists[ctx->prev_tid] = ctx->cur_list;
         ctx->cur_list = NULL;
+        if (old) g_ptr_array_unref(old);
     } else if (ctx->cur_list) {
         g_ptr_array_unref(ctx->cur_list);
         ctx->cur_list = NULL;
@@ -586,9 +600,6 @@ static bool on_bulk_track_artist(int64_t track_id, int64_t artist_id,
     if (track_id != c->prev_tid) {
         bulk_ta_flush(c);
         c->prev_tid = track_id;
-        if ((size_t)track_id < c->slot->track_artists_capacity
-            && c->slot->track_artists[track_id])
-            return true;
         c->cur_list = g_ptr_array_new_with_free_func(release_track_artist);
     }
     if (!c->cur_list) return true;
@@ -988,6 +999,68 @@ int library_cache_get_album_libraries(library_cache_t *cache,
 
     /* Fallback: source library only */
     out_libs[0] = a->library_index;
+    return 1;
+}
+
+int library_cache_get_track_libraries(library_cache_t *cache,
+                                      int64_t track_global_id,
+                                      int *out_libs, int max_libs) {
+    if (!cache || !out_libs || max_libs <= 0) return 0;
+
+    int64_t local_track_id;
+    LibrarySlot *src_slot = decode_slot(cache, track_global_id, &local_track_id);
+    if (!src_slot) return 0;
+
+    library_track_info_t *t = slot_get_track(src_slot, local_track_id);
+    if (!t) return 0;
+
+    /* Resolve the source album to get the release-group MBID. */
+    int64_t src_local_album = LIBRARY_GLOBAL_ID_LOCAL(t->album_id);
+    library_album_info_t *src_album = slot_get_album(src_slot, src_local_album);
+
+    if (src_album && src_album->musicbrainz_release_group_id &&
+        src_album->musicbrainz_release_group_id[0]) {
+        const struct mbrid_album_entry *entry =
+            mbrid_album_lookup(cache, src_album->musicbrainz_release_group_id);
+        if (entry) {
+            int n = 0;
+            uint16_t want_disc  = t->disc_num;
+            uint16_t want_track = t->track_num;
+
+            for (uint8_t i = 0; i < entry->count && n < max_libs; i++) {
+                int64_t global_album_id = entry->global_ids[i];
+                int64_t local_album_id;
+                LibrarySlot *slot = decode_slot(cache, global_album_id, &local_album_id);
+                if (!slot) continue;
+                if (local_album_id <= 0 ||
+                    (size_t)local_album_id >= slot->album_tracks_ptrs_capacity)
+                    continue;
+                const GPtrArray *tracks = slot->album_tracks_ptrs[local_album_id];
+                if (!tracks) continue;
+
+                /* Strict (disc, track) match within this release. */
+                bool found = false;
+                for (guint k = 0; k < tracks->len; k++) {
+                    const library_track_info_t *ti = g_ptr_array_index(tracks, k);
+                    if (ti->disc_num == want_disc && ti->track_num == want_track) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) continue;
+
+                int lib = slot->bitmap_index;
+                bool dup = false;
+                for (int j = 0; j < n; j++)
+                    if (out_libs[j] == lib) { dup = true; break; }
+                if (!dup) out_libs[n++] = lib;
+            }
+            if (n > 0) return n;
+        }
+    }
+
+    /* Fallback: source library only */
+    out_libs[0] = t->library_index;
     return 1;
 }
 
@@ -1611,27 +1684,25 @@ void library_cache_clear_slot(library_cache_t *cache, int bitmap_index) {
 /* =============================================================================
  * COW Slot Refresh
  *
- * Build a new version of a slot's entity arrays by seeding from the old slot
- * (acquiring refs on shared entities) and re-reading only changed data from DB.
- * Then atomically swap the bitmap_map pointer and drain the old slot.
+ * Build a new version of a slot's entity arrays by re-reading the entire
+ * library from the DB, then atomically swap the new arrays into the slot.
+ * UI reads against the old arrays keep working throughout — only the pointer
+ * swap is visible, and it's done under cache->lock.
+ *
+ * There is intentionally no "seed from old slot" shortcut. Callbacks are the
+ * single source of truth for entity content (see LIBRARY_CACHE.md → "COW
+ * Refresh Invariants"). The `library_cache_changeset_t` from the indexer is
+ * consumed at call time for observability and fast-path elision (empty
+ * changeset ⇒ nothing to do), not to gate per-entity work.
  * ============================================================================= */
 
 typedef struct {
     library_cache_t *cache;
-    LibrarySlot     *slot;           /* Target slot to refresh */
-    GHashTable      *changed_albums; /* Set of local album IDs that changed (NULL = full refresh) */
+    LibrarySlot     *slot;
 } CowRefreshCtx;
 
-/* Check whether a local album ID is in the changed set (or if we're doing a full refresh). */
-static inline gboolean album_is_changed(CowRefreshCtx *ctx, int64_t local_album_id) {
-    if (!ctx->changed_albums) return TRUE;  /* full refresh */
-    return g_hash_table_contains(ctx->changed_albums, &local_album_id);
-}
-
-/* Acquire a ref on an rc_box entity and return it, or NULL if src is NULL. */
-#define RC_ACQUIRE(ptr) ((ptr) ? g_atomic_rc_box_acquire(ptr) : NULL)
-
-/* Helper: free all arrays on a shadow slot (used on cancellation/error). */
+/* Free every array in a standalone (not-yet-installed) slot. Used on
+ * cancellation before SWAP. */
 static void free_shadow_arrays(LibrarySlot *shadow) {
     if (shadow->artists) {
         for (size_t i = 0; i < shadow->artists_capacity; i++)
@@ -1687,23 +1758,18 @@ static gpointer cow_refresh_thread_func(gpointer data) {
 
     gint64 start_time = g_get_monotonic_time();
 
-    /* ── Phase 0: Reopen warming DB, allocate shadow arrays ──────────────
-     * Only db_warm is reopened (warming thread's private connection).
-     * slot->db is NEVER touched — UI reads from it concurrently via WAL.
-     * Old slot arrays remain live and readable by the UI throughout. */
-
+    /* Reopen the warming connection. slot->db stays untouched — UI reads
+     * from it concurrently via WAL. */
     if (slot->db_warm) { db_close(slot->db_warm); slot->db_warm = NULL; }
     if (db_open_readonly(slot->db_path, &slot->db_warm) != QUADRATURE_OK) {
         g_warning("COW refresh [bitmap=%d]: failed to reopen db_warm", slot->bitmap_index);
         goto done;
     }
 
-    /* Shadow slot: carries the NEW arrays while callbacks read/write.
-     * Shares bitmap_index and warm_cancel with the real slot so existing
-     * callbacks (on_warm_artist, etc.) work unchanged. */
+    /* Shadow slot holds the new arrays while DELTA runs. Shares bitmap_index
+     * and warm_cancel with the real slot so callbacks work unchanged. */
     LibrarySlot shadow = {0};
     shadow.bitmap_index = slot->bitmap_index;
-    /* Point warm_cancel at real slot's cancel flag (callbacks check it) */
 
     int64_t max_artist = 0, max_album = 0, max_track = 0;
     db_get_max_ids(slot->db_warm, &max_artist, &max_album, &max_track);
@@ -1734,63 +1800,16 @@ static gpointer cow_refresh_thread_func(gpointer data) {
     shadow.album_tracks_ptrs_capacity = shadow.albums_capacity;
     shadow.album_tracks_ptrs = g_new0(GPtrArray *, shadow.album_tracks_ptrs_capacity);
 
-    /* ── Phase 1: SEED — acquire refs from live slot arrays ──────────────
-     * Safe: slot is REFRESHING (treated as READY by UI), arrays are
-     * immutable (only this thread writes, via shadow). RC_ACQUIRE is an
-     * atomic refcount increment, safe from any thread. */
-    {
-        size_t min_artists = MIN(slot->artists_capacity, shadow.artists_capacity);
-        for (size_t i = 1; i < min_artists; i++) {
-            if (slot->artists[i])
-                shadow.artists[i] = RC_ACQUIRE(slot->artists[i]);
-        }
-
-        size_t min_albums = MIN(slot->albums_capacity, shadow.albums_capacity);
-        for (size_t i = 1; i < min_albums; i++) {
-            if (slot->albums[i] && !album_is_changed(ctx, (int64_t)i))
-                shadow.albums[i] = RC_ACQUIRE(slot->albums[i]);
-        }
-
-        size_t min_tracks = MIN(slot->tracks_capacity, shadow.tracks_capacity);
-        for (size_t i = 1; i < min_tracks; i++) {
-            if (!slot->tracks[i]) continue;
-            int64_t track_album = LIBRARY_GLOBAL_ID_LOCAL(slot->tracks[i]->album_id);
-            if (!album_is_changed(ctx, track_album))
-                shadow.tracks[i] = RC_ACQUIRE(slot->tracks[i]);
-        }
-
-        size_t min_ta = MIN(slot->track_artists_capacity, shadow.track_artists_capacity);
-        for (size_t i = 1; i < min_ta; i++) {
-            if (!slot->track_artists[i]) continue;
-            if (i < slot->tracks_capacity && slot->tracks[i]) {
-                int64_t track_album = LIBRARY_GLOBAL_ID_LOCAL(slot->tracks[i]->album_id);
-                if (!album_is_changed(ctx, track_album)) {
-                    GPtrArray *new_ta = g_ptr_array_new_with_free_func(release_track_artist);
-                    for (guint j = 0; j < slot->track_artists[i]->len; j++) {
-                        gpointer ta = g_ptr_array_index(slot->track_artists[i], j);
-                        g_ptr_array_add(new_ta, g_atomic_rc_box_acquire(ta));
-                    }
-                    shadow.track_artists[i] = new_ta;
-                }
-            }
-        }
-    }
-
     if (atomic_load(&slot->warm_cancel)) goto cancel;
 
-    /* ── Phase 2: DELTA — re-read from DB into shadow arrays ─────────────
-     * Callbacks write into shadow.artists/albums/tracks etc.
-     * Unchanged entities (seeded in Phase 1) are skipped by the
-     * "if (slot_get_X(slot, id)) return true" guard in each callback. */
+    /* ── DELTA: re-read the entire library from DB into shadow arrays. */
     {
         db_begin_read(slot->db_warm);
 
         db_iter_all_artists(slot->db_warm, on_warm_artist, &shadow);
-
         if (atomic_load(&slot->warm_cancel)) { db_end_read(slot->db_warm); goto cancel; }
 
         db_iter_all_albums(slot->db_warm, on_warm_album, &shadow);
-
         if (atomic_load(&slot->warm_cancel)) { db_end_read(slot->db_warm); goto cancel; }
 
         WarmTracksCtx tctx = { .slot = &shadow, .loaded = 0 };
@@ -1805,23 +1824,20 @@ static gpointer cow_refresh_thread_func(gpointer data) {
 
     if (atomic_load(&slot->warm_cancel)) goto cancel;
 
-    /* ── Phase 3: REBUILD — relationships in shadow arrays ───────────────── */
+    /* ── REBUILD: relationship arrays and derived aggregates on the shadow. */
     {
+        /* Pass A: albums → artist_albums */
         for (size_t local_album_id = 1; local_album_id < shadow.albums_capacity; local_album_id++) {
             library_album_info_t *album = slot_get_album(&shadow, (int64_t)local_album_id);
             if (!album) continue;
-
             int64_t local_aid = LIBRARY_GLOBAL_ID_LOCAL(album->artist_id);
             if (local_aid <= 0 || (size_t)local_aid >= shadow.artist_albums_capacity) continue;
-
             if (!shadow.artist_albums[local_aid])
                 shadow.artist_albums[local_aid] = g_ptr_array_new();
             g_ptr_array_add(shadow.artist_albums[local_aid], album);
         }
 
-        /* Pass B: Reset counts, ensure artist_albums exists, set album_count.
-         * Counts must be recomputed from scratch because seeded artists may
-         * carry stale values from the old slot. */
+        /* Pass B: reset + set album_count on each artist */
         for (size_t aid = 1; aid < shadow.artists_capacity; aid++) {
             library_artist_info_t *a = slot_get_artist(&shadow, (int64_t)aid);
             if (!a) continue;
@@ -1834,7 +1850,7 @@ static gpointer cow_refresh_thread_func(gpointer data) {
             }
         }
 
-        /* Pass C: Count track_count on artists + "Appears on" from tracks */
+        /* Pass C: track_artists → "Appears on" + artist track_count */
         for (size_t tid = 1; tid < shadow.tracks_capacity; tid++) {
             library_track_info_t *track = slot_get_track(&shadow, (int64_t)tid);
             if (!track) continue;
@@ -1849,13 +1865,11 @@ static gpointer cow_refresh_thread_func(gpointer data) {
                 library_track_artist_t *credit = g_ptr_array_index(ta, j);
                 int64_t credit_local_aid = LIBRARY_GLOBAL_ID_LOCAL(credit->artist_id);
 
-                /* Count track towards artist's track_count */
                 library_artist_info_t *a = (credit_local_aid > 0 &&
                     (size_t)credit_local_aid < shadow.artists_capacity)
                     ? slot_get_artist(&shadow, credit_local_aid) : NULL;
                 if (a) a->track_count++;
 
-                /* "Appears on" — skip album's own artist */
                 if (!album || credit_local_aid == album_local_artist) continue;
                 if (credit_local_aid <= 0 ||
                     (size_t)credit_local_aid >= shadow.artist_appearances_capacity) continue;
@@ -1872,7 +1886,6 @@ static gpointer cow_refresh_thread_func(gpointer data) {
                 }
                 if (!found) g_ptr_array_add(app_albums, album);
 
-                /* Also record the track in artist_appearance_tracks */
                 if ((size_t)credit_local_aid < shadow.artist_appearance_tracks_capacity) {
                     if (!shadow.artist_appearance_tracks[credit_local_aid])
                         shadow.artist_appearance_tracks[credit_local_aid] = g_ptr_array_new();
@@ -1881,7 +1894,7 @@ static gpointer cow_refresh_thread_func(gpointer data) {
             }
         }
 
-        /* Pre-build album_tracks_ptrs — sorted by (disc_num, track_num) */
+        /* Pass D: album_tracks_ptrs, sorted; propagate first_track_id + genres */
         for (size_t aid = 1; aid < shadow.album_tracks_capacity; aid++) {
             GArray *track_ids = shadow.album_tracks[aid];
             if (!track_ids || track_ids->len == 0) continue;
@@ -1898,7 +1911,6 @@ static gpointer cow_refresh_thread_func(gpointer data) {
             g_ptr_array_sort(ptrs, cmp_track_disc_num);
             shadow.album_tracks_ptrs[aid] = ptrs;
 
-            /* Set track_count, first_track_id, and genres from sorted order */
             library_album_info_t *album = slot_get_album(&shadow, (int64_t)aid);
             if (album) {
                 album->track_count = (uint16_t)ptrs->len;
@@ -1907,7 +1919,6 @@ static gpointer cow_refresh_thread_func(gpointer data) {
                     album->first_track_id = first->track_id;
                 }
 
-                /* Collect distinct lowercase genres (matches warming Phase 4 Pass D) */
                 g_free(album->genres);
                 album->genres = NULL;
                 GHashTable *genre_set = NULL;
@@ -1936,23 +1947,19 @@ static gpointer cow_refresh_thread_func(gpointer data) {
 
     if (atomic_load(&slot->warm_cancel)) goto cancel;
 
-    /* ── Phase 4: ATOMIC SWAP — replace slot arrays under lock ───────────
-     * Old arrays saved, new arrays installed, then merge + signal.
-     * UI queries between lock acquire and release see the old OR new
-     * arrays atomically — never a partial mix. */
+    /* ── SWAP + DRAIN under cache->lock (invariant I6). */
     {
-        /* Save old arrays (to drain after unlock) */
         library_artist_info_t **old_artists         = slot->artists;
-        size_t                  old_artists_cap      = slot->artists_capacity;
-        library_album_info_t  **old_albums           = slot->albums;
-        size_t                  old_albums_cap        = slot->albums_capacity;
-        library_track_info_t  **old_tracks           = slot->tracks;
-        size_t                  old_tracks_cap        = slot->tracks_capacity;
-        GPtrArray             **old_track_artists     = slot->track_artists;
+        size_t                  old_artists_cap     = slot->artists_capacity;
+        library_album_info_t  **old_albums          = slot->albums;
+        size_t                  old_albums_cap      = slot->albums_capacity;
+        library_track_info_t  **old_tracks          = slot->tracks;
+        size_t                  old_tracks_cap      = slot->tracks_capacity;
+        GPtrArray             **old_track_artists   = slot->track_artists;
         size_t                  old_track_artists_cap = slot->track_artists_capacity;
-        GArray                **old_album_tracks      = slot->album_tracks;
-        size_t                  old_album_tracks_cap  = slot->album_tracks_capacity;
-        GPtrArray             **old_artist_albums     = slot->artist_albums;
+        GArray                **old_album_tracks    = slot->album_tracks;
+        size_t                  old_album_tracks_cap = slot->album_tracks_capacity;
+        GPtrArray             **old_artist_albums   = slot->artist_albums;
         size_t                  old_artist_albums_cap = slot->artist_albums_capacity;
         GPtrArray             **old_artist_appearances = slot->artist_appearances;
         size_t                  old_artist_appearances_cap = slot->artist_appearances_capacity;
@@ -1963,7 +1970,6 @@ static gpointer cow_refresh_thread_func(gpointer data) {
 
         g_mutex_lock(&cache->lock);
 
-        /* Install new arrays */
         slot->artists          = shadow.artists;
         slot->artists_capacity = shadow.artists_capacity;
         slot->albums           = shadow.albums;
@@ -1983,15 +1989,14 @@ static gpointer cow_refresh_thread_func(gpointer data) {
         slot->album_tracks_ptrs          = shadow.album_tracks_ptrs;
         slot->album_tracks_ptrs_capacity = shadow.album_tracks_ptrs_capacity;
 
-        /* Rebuild MBID indices with new arrays in place */
+        /* Rebuild MBID indices under the same lock (I6). */
         build_mbid_indices(cache);
 
         g_mutex_unlock(&cache->lock);
 
-        /* Shadow is now consumed — zero it so cancel path doesn't double-free */
         memset(&shadow, 0, sizeof(shadow));
 
-        /* Search vocab uses db_warm (not slot arrays), safe to call outside lock */
+        /* Search vocab reads db_warm, not slot arrays — safe outside lock. */
         build_search_vocab_slot(cache, slot->lib_idx);
 
         atomic_store(&slot->warm_state, LIBRARY_CACHE_READY);
@@ -2012,7 +2017,7 @@ static gpointer cow_refresh_thread_func(gpointer data) {
                       slot->bitmap_index, n_artists, n_albums, n_tracks, elapsed / 1000.0);
         }
 
-        /* ── Phase 5: DRAIN — release old arrays ─────────────────────────── */
+        /* DRAIN old arrays outside the lock. */
         if (old_artists) {
             for (size_t i = 0; i < old_artists_cap; i++)
                 if (old_artists[i]) release_artist_info(old_artists[i]);
@@ -2063,42 +2068,34 @@ static gpointer cow_refresh_thread_func(gpointer data) {
     }
 
 cancel:
-    /* Cancelled — free shadow arrays (slot arrays untouched) */
     free_shadow_arrays(&shadow);
 
 done:
-    if (ctx->changed_albums)
-        g_hash_table_destroy(ctx->changed_albums);
     g_free(ctx);
-
     return NULL;
 }
 
 void library_cache_refresh_slot(library_cache_t *cache,
                                 int bitmap_index,
-                                const int64_t *changed_album_local_ids,
-                                int changed_count) {
+                                const library_cache_changeset_t *changes) {
     g_assert(cache != NULL);
     LibrarySlot *slot = bitmap_to_slot(cache, bitmap_index);
     if (!slot) return;
 
-    /* Cancel any in-progress warming/refresh for this slot */
+    /* Empty changeset ⇒ nothing mutated since last warming; refresh is a no-op.
+     * NULL changeset = "don't know, rebuild" (always safe per invariant I4). */
+    if (changes && library_cache_changeset_is_empty(changes)) {
+        g_debug("library_cache_refresh_slot[bitmap=%d]: empty changeset — skipping",
+                bitmap_index);
+        return;
+    }
+
+    /* Cancel any in-progress warming/refresh for this slot. */
     cancel_and_join_slot_warming(slot);
 
-    /* Build context */
     CowRefreshCtx *ctx = g_new0(CowRefreshCtx, 1);
     ctx->cache = cache;
     ctx->slot  = slot;
-
-    if (changed_album_local_ids && changed_count > 0) {
-        ctx->changed_albums = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
-        for (int i = 0; i < changed_count; i++) {
-            int64_t *key = g_new(int64_t, 1);
-            *key = changed_album_local_ids[i];
-            g_hash_table_add(ctx->changed_albums, key);
-        }
-    }
-    /* NULL changed_albums = full refresh (all entities re-read from DB) */
 
     /* READY → REFRESHING: old data stays live, UI queries keep working.
      * Also allow from IDLE (slot was cleared but not yet warmed). */
@@ -2108,7 +2105,6 @@ void library_cache_refresh_slot(library_cache_t *cache,
         if (!atomic_compare_exchange_strong(&slot->warm_state, &expected, LIBRARY_CACHE_REFRESHING)) {
             g_warning("library_cache_refresh_slot[bitmap=%d]: unexpected state %d",
                       bitmap_index, atomic_load(&slot->warm_state));
-            if (ctx->changed_albums) g_hash_table_destroy(ctx->changed_albums);
             g_free(ctx);
             return;
         }
@@ -2117,6 +2113,115 @@ void library_cache_refresh_slot(library_cache_t *cache,
     char *thread_name = g_strdup_printf("cow-refresh-%d", bitmap_index);
     slot->warm_thread = g_thread_new(thread_name, cow_refresh_thread_func, ctx);
     g_free(thread_name);
+}
+
+/* =============================================================================
+ * library_cache_changeset_t — owned, mutable list of rowids (public API)
+ * ============================================================================= */
+
+library_cache_changeset_t *library_cache_changeset_new(void) {
+    return g_new0(library_cache_changeset_t, 1);
+}
+
+void library_cache_changeset_free(library_cache_changeset_t *cs) {
+    if (!cs) return;
+    g_free(cs->artists);
+    g_free(cs->albums);
+    g_free(cs->tracks);
+    g_free(cs);
+}
+
+/* Deep-copy an int64 array (may be NULL when count == 0). */
+static int64_t *copy_int64_array(const int64_t *src, size_t count) {
+    if (count == 0 || !src) return NULL;
+    int64_t *dst = g_new(int64_t, count);
+    memcpy(dst, src, count * sizeof(int64_t));
+    return dst;
+}
+
+library_cache_changeset_t *library_cache_changeset_copy(
+    const library_cache_changeset_t *src)
+{
+    if (!src) return NULL;
+    library_cache_changeset_t *dst = library_cache_changeset_new();
+    dst->artists       = copy_int64_array(src->artists,       src->artists_count);
+    dst->artists_count = src->artists_count;
+    dst->albums        = copy_int64_array(src->albums,        src->albums_count);
+    dst->albums_count  = src->albums_count;
+    dst->tracks        = copy_int64_array(src->tracks,        src->tracks_count);
+    dst->tracks_count  = src->tracks_count;
+    dst->track_artists_dirty = src->track_artists_dirty;
+    return dst;
+}
+
+/* Merge two int64 arrays into a newly-allocated dedup'd array.
+ * The merged output is not sorted (order-independent for our callers). */
+static int64_t *merge_int64_arrays(const int64_t *a, size_t a_count,
+                                   const int64_t *b, size_t b_count,
+                                   size_t *out_count) {
+    if (a_count == 0 && b_count == 0) { *out_count = 0; return NULL; }
+
+    /* Hash set dedup */
+    GHashTable *set = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+    for (size_t i = 0; i < a_count; i++) {
+        if (!g_hash_table_contains(set, &a[i])) {
+            int64_t *k = g_new(int64_t, 1); *k = a[i];
+            g_hash_table_add(set, k);
+        }
+    }
+    for (size_t i = 0; i < b_count; i++) {
+        if (!g_hash_table_contains(set, &b[i])) {
+            int64_t *k = g_new(int64_t, 1); *k = b[i];
+            g_hash_table_add(set, k);
+        }
+    }
+    guint n = g_hash_table_size(set);
+    int64_t *arr = n ? g_new(int64_t, n) : NULL;
+    GHashTableIter iter;
+    gpointer key;
+    guint i = 0;
+    g_hash_table_iter_init(&iter, set);
+    while (g_hash_table_iter_next(&iter, &key, NULL))
+        arr[i++] = *(int64_t *)key;
+    g_hash_table_destroy(set);
+    *out_count = n;
+    return arr;
+}
+
+void library_cache_changeset_merge(library_cache_changeset_t *dst,
+                                   const library_cache_changeset_t *src) {
+    if (!dst || !src) return;
+
+    size_t n;
+    int64_t *merged;
+
+    merged = merge_int64_arrays(dst->artists, dst->artists_count,
+                                src->artists, src->artists_count, &n);
+    g_free(dst->artists);
+    dst->artists = merged;
+    dst->artists_count = n;
+
+    merged = merge_int64_arrays(dst->albums, dst->albums_count,
+                                src->albums, src->albums_count, &n);
+    g_free(dst->albums);
+    dst->albums = merged;
+    dst->albums_count = n;
+
+    merged = merge_int64_arrays(dst->tracks, dst->tracks_count,
+                                src->tracks, src->tracks_count, &n);
+    g_free(dst->tracks);
+    dst->tracks = merged;
+    dst->tracks_count = n;
+
+    if (src->track_artists_dirty) dst->track_artists_dirty = true;
+}
+
+bool library_cache_changeset_is_empty(const library_cache_changeset_t *cs) {
+    if (!cs) return true;
+    return cs->artists_count == 0
+        && cs->albums_count == 0
+        && cs->tracks_count == 0
+        && !cs->track_artists_dirty;
 }
 
 /* =============================================================================

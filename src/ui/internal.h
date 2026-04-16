@@ -90,13 +90,13 @@ static inline void ui_set_year_label(GtkWidget *label, uint16_t year) {
 /** Format a track count (1 → "Single", N → "NN Tracks"). (ui_math.c) */
 void ui_format_track_count(char *buf, size_t len, uint32_t count);
 
-/** Create a QuadOverflowBox pre-populated with GENRE_PILL_MAX label slots
+/** Create a QuadratureOverflowBox pre-populated with GENRE_PILL_MAX label slots
  *  + 1 overflow "…" label.  Overflow planning happens inside the box's
  *  own size_allocate — no external signals or callbacks needed. */
 GtkWidget *ui_genre_pills_new(int spacing);
 
 /** Bind genre text into pre-allocated pill slots.
- *  Splits genres on semicolons, sets label text.  The QuadOverflowBox
+ *  Splits genres on semicolons, sets label text.  The QuadratureOverflowBox
  *  handles overflow during its next size_allocate automatically. */
 void ui_genre_pills_bind(GtkWidget *genres_box, const char *genres);
 
@@ -350,7 +350,7 @@ void proportional_box_set_pre_allocate(ProportionalBox *self,
                                         gpointer user_data);
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * QuadOverflowBox Widget
+ * QuadratureOverflowBox Widget
  *
  * Wrapping container that flows children left→right, wrapping to the next
  * row when they don't fit.  The LAST child is the overflow indicator ("…"),
@@ -362,15 +362,25 @@ void proportional_box_set_pre_allocate(ProportionalBox *self,
  *   max-rows     — maximum visible rows; overflow on last row (default 1)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#define QUADRATURE_TYPE_OVERFLOW_BOX (quad_overflow_box_get_type())
-G_DECLARE_FINAL_TYPE(QuadOverflowBox, quad_overflow_box,
+#define QUADRATURE_TYPE_OVERFLOW_BOX (quadrature_overflow_box_get_type())
+G_DECLARE_FINAL_TYPE(QuadratureOverflowBox, quadrature_overflow_box,
                      QUADRATURE, OVERFLOW_BOX, GtkWidget)
 
-void quad_overflow_box_append(QuadOverflowBox *self, GtkWidget *child);
+void quadrature_overflow_box_append(QuadratureOverflowBox *self, GtkWidget *child);
 
-/** Set the number of populated item children (excludes overflow indicator).
- *  Unpopulated pre-allocated slots are hidden during layout. */
-void quad_overflow_box_set_item_count(QuadOverflowBox *self, guint count);
+/** Set the number of pinned children (always visible, never overflowed).
+ *  Pinned children come first in child order, before items. */
+void quadrature_overflow_box_set_pinned_count(QuadratureOverflowBox *self, guint count);
+
+/** Set the number of item children (may be hidden if they don't fit).
+ *  Items come after pinned children, before the optional overflow indicator. */
+void quadrature_overflow_box_set_item_count(QuadratureOverflowBox *self, guint count);
+
+/** Remove all children beyond pinned_count. Resets item_count to 0. */
+void quadrature_overflow_box_clear_items(QuadratureOverflowBox *self);
+
+/** Remove all children. Resets pinned_count and item_count to 0. */
+void quadrature_overflow_box_clear_all(QuadratureOverflowBox *self);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Artist Button Helpers (artist_buttons.c)
@@ -385,35 +395,29 @@ void on_artist_button_clicked(GtkButton *button, gpointer user_data);
 void on_album_button_clicked(GtkButton *button, gpointer user_data);
 void on_credit_mbid_navigate(GtkButton *button, gpointer user_data);
 
+/* Populate a QuadratureOverflowBox with artist buttons for a single role.
+ * If add_feat_prefix is TRUE, a pinned "ft " label is added first. */
 void populate_artist_buttons(GtkWidget* box,
-                              GtkWidget* constraint_widget,
-                              double constraint_fraction,
                               library_cache_t *cache,
                               int64_t track_id,
                               library_artist_role_t role,
                               RowCallbacks* callbacks,
                               gboolean add_feat_prefix);
 
+/* Populate a QuadratureOverflowBox with primary artists (pinned) +
+ * "ft " separator (pinned) + featuring artists (items) + "…" popover. */
 void populate_artist_buttons_combined(GtkWidget *box,
-                                       GtkWidget *constraint_widget,
-                                       double constraint_fraction,
                                        library_cache_t *cache,
                                        int64_t track_id,
                                        RowCallbacks *callbacks,
                                        gboolean show_primary);
 
-/* Width-aware credit role pill layout.
- * Fills credit_annotation box with pills that fit the available width,
- * collapsing excess pills into a static "+N more" overflow indicator.
- * Roles are deep-copied; constraint_widget drives re-layout on resize.
- * first_child_width is the pre-measured width of the artist button already
- * in the box (pills are appended after it). */
+/* Append role pills + "…" overflow indicator to a QuadratureOverflowBox.
+ * The caller is responsible for the pinned[0] artist button (either via
+ * .ui template or by appending before this call). */
 void populate_credit_pills(GtkWidget *credit_annotation,
-                            GtkWidget *constraint_widget,
-                            double constraint_fraction,
                             const char *const *roles,
-                            guint role_count,
-                            int first_child_width);
+                            guint role_count);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * SelectionGroup (row_helpers.c)
@@ -431,40 +435,8 @@ void ui_selection_group_remove(SelectionGroup *group, GtkListBox *list);
 void ui_selection_group_free(SelectionGroup *group);
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Overflow Box — Generic Width-Aware Pill/Badge Layout (row_helpers.c)
- *
- * Populates a GtkBox with as many widgets as fit within a width budget,
- * collapsing the rest into a caller-provided overflow indicator.
- * Re-lays out automatically when the constraint widget resizes.
- *
- * create_item(index, user_data)  → floating GtkWidget for item #index
- * create_overflow(first_hidden_index, total_count, user_data)
- *                                → overflow indicator widget (or NULL to just stop)
+ * Overflow Plan — Pure integer planner used by QuadratureOverflowBox's allocator.
  * ═══════════════════════════════════════════════════════════════════════════ */
-
-typedef GtkWidget* (*UiOverflowCreateItem)(guint index, gpointer user_data);
-typedef GtkWidget* (*UiOverflowCreateOverflow)(guint first_hidden_index,
-                                                guint total_count,
-                                                gpointer user_data);
-
-typedef struct {
-    GtkWidget  *box;                  /* Target horizontal GtkBox */
-    GtkWidget  *constraint_widget;    /* Widget whose width constrains layout (or NULL) */
-    double      constraint_fraction;  /* Fraction of constraint width to use */
-    int         default_max_width;    /* Fallback when no constraint (default: 300) */
-    int         pinned_children;      /* Leading children to preserve (0 = clear all) */
-
-    UiOverflowCreateItem     create_item;
-    UiOverflowCreateOverflow create_overflow;  /* NULL = just stop adding */
-    guint       item_count;
-
-    gpointer       user_data;
-    GDestroyNotify user_data_destroy;  /* Frees user_data when box is destroyed */
-} UiOverflowBoxParams;
-
-/** Set up width-aware overflow layout. Wires map + notify::width signals.
- *  Stores lifecycle data as GObject data on the box. */
-void ui_overflow_box_setup(const UiOverflowBoxParams *params);
 
 /** Pure layout planner — no GTK dependency (overflow_plan.c).
  *  Returns how many items to show. Sets *needs_overflow if not all fit.

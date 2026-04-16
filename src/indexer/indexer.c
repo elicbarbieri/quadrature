@@ -391,6 +391,10 @@ struct indexer {
 
     // Artist name cache — pre-loaded before Phase 2 GThreadPool starts; NULL outside Phase 2
     artist_cache_t* artist_cache;
+
+    // Change tracker — installed on idx->db via sqlite3_update_hook; drained
+    // at each INDEXER_LIBRARY_UPDATED emission into a library_cache_changeset_t.
+    change_tracker_t* change_tracker;
 };
 
 // =============================================================================
@@ -433,14 +437,26 @@ static void notify_progress_throttled(indexer_t* idx) {
 
     indexer_progress_t p;
     indexer_get_progress(idx, &p);
-    idx->callback(INDEXER_PROGRESS, &p, idx->user_data);
+    idx->callback(INDEXER_PROGRESS, &p, NULL, idx->user_data);
 }
 
 static void notify_event(indexer_t* idx, indexer_event_t event) {
     if (!idx->callback) return;
     indexer_progress_t p;
     indexer_get_progress(idx, &p);
-    idx->callback(event, &p, idx->user_data);
+
+    /* For LIBRARY_UPDATED: drain the ChangeTracker so the UI can learn exactly
+     * which DB rows were mutated since the last emission. Caller sees a
+     * pointer valid for the duration of the call. The snapshot resets the
+     * tracker, so the next LIBRARY_UPDATED reports only *new* mutations. */
+    library_cache_changeset_t* changeset = NULL;
+    if (event == INDEXER_LIBRARY_UPDATED && idx->change_tracker) {
+        changeset = change_tracker_snapshot_and_clear(idx->change_tracker);
+    }
+
+    idx->callback(event, &p, changeset, idx->user_data);
+
+    library_cache_changeset_free(changeset);
 }
 
 // Helper to log indexer errors to the database
@@ -926,20 +942,21 @@ static void phase_scan(indexer_t* idx, work_queue_t* queue) {
               queue->count, (size_t)atomic_load(&idx->dirs_scanned));
 
     // Orphan detection: entries remaining in album_mtimes were NOT found during
-    // the directory walk — their folders have been deleted from disk.
+    // the directory walk — their folders have been deleted from disk. Each
+    // album is reconciled against an empty current-path set, which prunes
+    // every track and then deletes the album itself.
     if (g_hash_table_size(album_mtimes) > 0 && !atomic_load(&idx->cancel_flag)) {
-        GArray* orphan_ids = g_array_new(FALSE, FALSE, sizeof(int64_t));
+        g_message("Pruning %u orphan album(s) (deleted from disk)",
+                  g_hash_table_size(album_mtimes));
+        db_begin_batch(idx->db);
         GHashTableIter iter;
         gpointer key, value;
         g_hash_table_iter_init(&iter, album_mtimes);
         while (g_hash_table_iter_next(&iter, &key, &value)) {
             db_album_mtime_t* cached = value;
-            g_array_append_val(orphan_ids, cached->album_id);
+            db_reconcile_album_tracks(idx->db, cached->album_id, NULL, 0);
         }
-        g_message("Pruning %u orphan album(s) (deleted from disk)", orphan_ids->len);
-        db_prune_orphan_albums(idx->db,
-            (const int64_t*)orphan_ids->data, orphan_ids->len);
-        g_array_free(orphan_ids, TRUE);
+        db_commit_batch(idx->db);
     }
 
     // Cleanup
@@ -1538,6 +1555,19 @@ static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr)
                 "Failed to save track: %s", tr->title ? tr->title : "(unknown)");
         }
     }
+
+    /* Reconcile the DB with the filesystem: any track row for this album
+     * whose path is not in the current scan represents a file that was
+     * deleted or renamed since the last indexing. Remove the stale rows
+     * so subsequent cache warms reflect the on-disk truth.
+     *
+     * Passing mr->tracks[].rel_path matches the exact path written by
+     * db_upsert_track_with_album above (stored album-relative). */
+    const char** current_paths = g_newa(const char*, mr->track_count);
+    for (size_t t = 0; t < mr->track_count; t++) {
+        current_paths[t] = mr->tracks[t].rel_path;
+    }
+    db_reconcile_album_tracks(db, album_id, current_paths, mr->track_count);
 
     db_sync_album_fts(db, album_id);
 
@@ -2232,11 +2262,19 @@ static void* indexer_worker(void* arg) {
     }
     g_free(db_path);
 
+    /* Install the change tracker on the writer connection. Any schema
+     * migrations that just ran during db_open would register as noise —
+     * discard them before Phase 1 starts. */
+    idx->change_tracker = change_tracker_new(idx->db);
+    change_tracker_reset(idx->change_tracker);
+
     // Disk space pre-flight
     char space_msg[256];
     if (check_disk_space(dr, idx->library_root, idx->db, space_msg, sizeof(space_msg))
             != QUADRATURE_OK) {
         g_warning("indexer_worker: %s", space_msg);
+        change_tracker_destroy(idx->change_tracker);
+        idx->change_tracker = NULL;
         db_close(idx->db);
         idx->db = NULL;
         notify_event(idx, INDEXER_ERROR);
@@ -2423,6 +2461,8 @@ static void* indexer_worker(void* arg) {
 
     processed_albums_free(processed, processed_count);
     work_queue_free(&queue);
+    change_tracker_destroy(idx->change_tracker);
+    idx->change_tracker = NULL;
     db_close(idx->db);
     idx->db = NULL;
     atomic_store(&idx->running, 0);
@@ -2432,6 +2472,8 @@ cancelled:
     notify_event(idx, INDEXER_CANCELLED);
     processed_albums_free(processed, processed_count);
     work_queue_free(&queue);
+    change_tracker_destroy(idx->change_tracker);
+    idx->change_tracker = NULL;
     db_close(idx->db);
     idx->db = NULL;
     atomic_store(&idx->running, 0);

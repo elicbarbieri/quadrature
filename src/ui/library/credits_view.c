@@ -204,8 +204,9 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
                                        GHashTable *skip_track_ids) {
     if (!artist_mbid || !ud->settings) return NULL;
 
-    /* album_id (GSIZE_TO_POINTER) → CreditRoleSet* (internal, freed at end) */
-    GHashTable *album_roles = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+    /* release_mbid → CreditRoleSet* (internal, freed at end). Keying by MBID
+     * collapses the same logical album across libraries into one set. */
+    GHashTable *album_roles = g_hash_table_new_full(g_str_hash, g_str_equal,
                                                      g_free, credit_role_set_free);
 
     int lib_count = library_cache_get_library_count(ud->cache);
@@ -282,15 +283,11 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
                 }
             }
 
-            /* Accumulate per-album roles */
-            int64_t *akey = g_new(int64_t, 1);
-            *akey = track->album_id;
-            CreditRoleSet *ars = g_hash_table_lookup(album_roles, akey);
+            /* Accumulate per-album roles, keyed by MBID */
+            CreditRoleSet *ars = g_hash_table_lookup(album_roles, c->release_mbid);
             if (!ars) {
                 ars = credit_role_set_new(track->album_id);
-                g_hash_table_insert(album_roles, akey, ars);
-            } else {
-                g_free(akey);
+                g_hash_table_insert(album_roles, g_strdup(c->release_mbid), ars);
             }
             credit_role_set_add(ars, role);  /* ownership transferred */
         }
@@ -303,18 +300,19 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
         return NULL;
     }
 
-    /* Convert CreditRoleSet → GPtrArray<char*> in output table */
-    GHashTable *out = g_hash_table_new_full(g_direct_hash, g_direct_equal,
-                                             NULL, _roles_array_free);
+    /* Convert CreditRoleSet → GPtrArray<char*> in output table, keyed by MBID */
+    GHashTable *out = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                             g_free, _roles_array_free);
     GHashTableIter iter;
     gpointer k, v;
     g_hash_table_iter_init(&iter, album_roles);
     while (g_hash_table_iter_next(&iter, &k, &v)) {
+        const char *mbid = k;
         CreditRoleSet *ars = v;
         GPtrArray *roles = g_ptr_array_new_with_free_func(g_free);
         for (guint i = 0; i < ars->roles->len; i++)
             g_ptr_array_add(roles, g_strdup(g_ptr_array_index(ars->roles, i)));
-        g_hash_table_insert(out, GSIZE_TO_POINTER((gsize)ars->id), roles);
+        g_hash_table_insert(out, g_strdup(mbid), roles);
     }
 
     g_hash_table_destroy(album_roles);
@@ -334,17 +332,19 @@ guint append_credit_rows(UnifiedDetailData *ud,
                                  const char *artist_name,
                                  int64_t viewed_artist_id,
                                  GHashTable *skip_track_ids,
-                                 GHashTable *skip_album_ids,
+                                 GHashTable *skip_album_mbids,
                                  UiRowSizeGroups *track_groups,
                                  UiRowSizeGroups *album_groups) {
     if (!artist_mbid || !ud->settings) return 0;
 
-    /* Pass 1: collect all unique roles per track position + per album */
+    /* Pass 1: collect all unique roles per track position + per album.
+     * Albums are keyed by release_mbid so entries for the same logical album
+     * from multiple libraries collapse into one row. */
     /* track key "release:disc:track" → CreditRoleSet */
     GHashTable *track_roles = g_hash_table_new_full(g_str_hash, g_str_equal,
                                                      g_free, credit_role_set_free);
-    /* album_id → CreditRoleSet */
-    GHashTable *album_roles = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+    /* release_mbid → CreditRoleSet (stores a representative album_id for display) */
+    GHashTable *album_roles = g_hash_table_new_full(g_str_hash, g_str_equal,
                                                      g_free, credit_role_set_free);
 
     int lib_count = library_cache_get_library_count(ud->cache);
@@ -432,18 +432,22 @@ guint append_credit_rows(UnifiedDetailData *ud,
             }
             if (!track) { g_free(role); continue; }
 
-            /* Accumulate per-album roles */
-            if (role && track->album_id > 0) {
-                int64_t *akey = g_new(int64_t, 1);
-                *akey = track->album_id;
-                CreditRoleSet *ars = g_hash_table_lookup(album_roles, akey);
-                if (!ars) {
-                    ars = credit_role_set_new(track->album_id);
-                    g_hash_table_insert(album_roles, akey, ars);
+            /* Accumulate per-album roles (keyed by MBID, not album_id, so
+             * the same logical album in multiple libraries collapses). Also
+             * skip albums already shown as cache appearances — compared by
+             * MBID since global album_ids diverge across libraries. */
+            if (role && track->album_id > 0 && c->release_mbid) {
+                if (skip_album_mbids &&
+                    g_hash_table_contains(skip_album_mbids, c->release_mbid)) {
+                    /* already shown via appearance_albums pass */
                 } else {
-                    g_free(akey);
+                    CreditRoleSet *ars = g_hash_table_lookup(album_roles, c->release_mbid);
+                    if (!ars) {
+                        ars = credit_role_set_new(track->album_id);
+                        g_hash_table_insert(album_roles, g_strdup(c->release_mbid), ars);
+                    }
+                    credit_role_set_add(ars, g_strdup(role));
                 }
-                credit_role_set_add(ars, g_strdup(role));
             }
 
             /* Accumulate per-track roles (all unique roles, no priority) */
@@ -490,16 +494,11 @@ guint append_credit_rows(UnifiedDetailData *ud,
         added++;
     }
 
-    /* Pass 2b: create album rows with aggregated role pills */
+    /* Pass 2b: create album rows with aggregated role pills.
+     * Skip against skip_album_mbids already applied during accumulation. */
     g_hash_table_iter_init(&iter, album_roles);
     while (g_hash_table_iter_next(&iter, &k, &v)) {
         CreditRoleSet *ars = v;
-
-        /* Skip albums already in appears_on_albums */
-        if (skip_album_ids &&
-            g_hash_table_contains(skip_album_ids,
-                                  GSIZE_TO_POINTER((gsize)ars->id)))
-            continue;
 
         const library_album_info_t *album = library_cache_get_album(ud->cache, ars->id, ud->library_mask);
         if (!album) continue;

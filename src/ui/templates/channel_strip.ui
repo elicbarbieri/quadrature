@@ -5,17 +5,6 @@
       <object class="GtkBox" id="main_box">
         <property name="spacing">8</property>
 
-        <!-- Channel number badge (fixed left anchor, top-aligned) -->
-        <child>
-          <object class="GtkLabel" id="channel_label">
-            <property name="label">1</property>
-            <property name="valign">start</property>
-            <style>
-              <class name="channel-number"/>
-            </style>
-          </object>
-        </child>
-
         <!-- Main vertical container: content + seek row -->
         <child>
           <object class="GtkBox" id="main_vbox">
@@ -463,8 +452,8 @@
                     <!-- Right side: speed display + pitched toggle stacked vertically -->
                     <child>
                       <object class="GtkBox" id="shuttle_info_box">
-                        <property name="orientation">vertical</property>
-                        <property name="spacing">2</property>
+                        <property name="orientation">horizontal</property>
+                        <property name="spacing">4</property>
                         <property name="valign">center</property>
                         <style>
                           <class name="shuttle-info-box"/>

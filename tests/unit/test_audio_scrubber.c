@@ -14,6 +14,7 @@
 #include <criterion/criterion.h>
 #include <criterion/hooks.h>
 #include <pthread.h>
+#include <signal.h>
 #include <string.h>
 
 /* Include internal header for scrubber access */
@@ -49,8 +50,8 @@ Test(audio_scrubber, lifecycle_null_safety_initial_state) {
     /* Destroy null is safe */
     audio_scrubber_destroy(NULL);
 
-    /* Note: Operations on NULL scrubber are g_assert() crashes (invariant violation).
-     * Callers must ensure scrubber is non-NULL before calling setters/getters. */
+    /* Setters/getters on a NULL scrubber are g_assert() crashes — that
+     * contract is enforced by the death tests at the bottom of this file. */
 
     /* --- Create and verify initial state --- */
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
@@ -546,4 +547,31 @@ Test(audio_scrubber, position_bounds_edge_cases) {
     cr_assert_eq(audio_scrubber_get_position(scrubber), ten_hours);
 
     audio_scrubber_destroy(scrubber);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Death tests — NULL scrubber inputs MUST abort the process
+ *
+ * Every setter/getter asserts `s != NULL` (src/audio/audio_scrub.c:328 and
+ * following). These tests confirm the assertions actually fire — a regression
+ * that replaced the g_assert with a silent NULL-check would be caught here.
+ *
+ * One invariant per test. Criterion forks per test, so a surviving process
+ * would signal a missed crash immediately.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+Test(audio_scrubber, death_set_speed_null_scrubber, .signal = SIGABRT) {
+    audio_scrubber_set_speed(NULL, 1.0f);
+}
+
+Test(audio_scrubber, death_get_speed_null_scrubber, .signal = SIGABRT) {
+    (void)audio_scrubber_get_speed(NULL);
+}
+
+Test(audio_scrubber, death_flush_null_scrubber, .signal = SIGABRT) {
+    audio_scrubber_flush(NULL);
+}
+
+Test(audio_scrubber, death_set_position_null_scrubber, .signal = SIGABRT) {
+    audio_scrubber_set_position(NULL, 0);
 }

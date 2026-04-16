@@ -8,12 +8,53 @@
 
 #include "quadrature/quadrature.h"
 #include "quadrature/database.h"
+#include "quadrature/library.h"
+#include <glib.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
+
+// =============================================================================
+// Change Tracker — per-indexer set of DB rowids mutated since the last
+// INDEXER_LIBRARY_UPDATED emission. Fed by sqlite3_update_hook on the writer
+// connection, drained by change_tracker_snapshot_and_clear() just before the
+// indexer emits LIBRARY_UPDATED, and carried to the cache via
+// library_cache_changeset_t.
+//
+// See docs/architecture/INDEXER.md → "Change Tracking (update_hook)".
+// =============================================================================
+
+typedef struct change_tracker change_tracker_t;
+
+typedef struct quadrature_db quadrature_db_t;
+
+/**
+ * Create a change tracker and register a sqlite3_update_hook on the writer
+ * connection. The tracker holds a non-owning reference to db; the caller
+ * must call change_tracker_destroy() before closing the db.
+ */
+change_tracker_t *change_tracker_new(quadrature_db_t *db);
+
+/**
+ * Unregister the update_hook and free the tracker. NULL-safe.
+ */
+void change_tracker_destroy(change_tracker_t *ct);
+
+/**
+ * Drain the accumulated rowids into a fresh library_cache_changeset_t and
+ * reset the tracker to empty. Returns NULL if ct is NULL. Caller owns the
+ * returned changeset and must free with library_cache_changeset_free().
+ */
+library_cache_changeset_t *change_tracker_snapshot_and_clear(change_tracker_t *ct);
+
+/**
+ * Clear the tracker without producing a snapshot. Used at DB open to discard
+ * any noise from schema creation / migration writes.
+ */
+void change_tracker_reset(change_tracker_t *ct);
 
 // =============================================================================
 // Constants

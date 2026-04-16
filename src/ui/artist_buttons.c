@@ -140,14 +140,14 @@ GtkWidget* create_artist_overflow_button(const GPtrArray* artists, RowCallbacks*
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Artist Buttons — Width-Aware Layout via Overflow Box
+ * Artist Buttons — Width-Aware Layout via QuadratureOverflowBox
  *
  * Two modes:
  *   single-role  — one artist role per box (track rows)
  *   combined     — primary buttons pinned, featuring overflows (album detail)
  *
- * Both delegate to ui_overflow_box_setup() for measurement, backoff,
- * signal wiring, and hysteresis.
+ * Both populate a QuadratureOverflowBox directly; planning happens inside the
+ * widget's own size_allocate so there is no stale-width race.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static GPtrArray *filter_artists_by_role(const GPtrArray *track_artists,
@@ -170,78 +170,14 @@ static guint count_by_role(const GPtrArray *track_artists, library_artist_role_t
     return n;
 }
 
-static const library_track_artist_t *nth_artist_by_role(
-    const GPtrArray *track_artists, library_artist_role_t role, guint n) {
-    guint count = 0;
-    for (guint i = 0; i < track_artists->len; i++) {
-        const library_track_artist_t *a = g_ptr_array_index(track_artists, i);
-        if (a->role == role) {
-            if (count == n) return a;
-            count++;
-        }
-    }
-    return NULL;
-}
-
-/* Shared callback data for both single-role and combined modes */
-typedef struct {
-    library_cache_t       *cache;
-    int64_t                track_id;
-    library_artist_role_t  role;            /* Item role (FEATURING for combined) */
-    RowCallbacks          *callbacks;       /* Owned copy */
-    gboolean               overflow_all;   /* Overflow popover shows all roles */
-} ArtistOverflowData;
-
-static void artist_overflow_data_free(gpointer data) {
-    ArtistOverflowData *d = data;
-    g_free(d->callbacks);
-    g_free(d);
-}
-
-static GtkWidget *artist_create_item(guint index, gpointer user_data) {
-    ArtistOverflowData *d = user_data;
-    const GPtrArray *ta = library_cache_get_track_artists(d->cache, d->track_id);
-    if (!ta) return gtk_label_new("…");
-    const library_track_artist_t *a = nth_artist_by_role(ta, d->role, index);
-    if (!a) return gtk_label_new("…");
-    return create_artist_button(a->artist_id, a->name, d->callbacks);
-}
-
-static GtkWidget *artist_create_overflow(guint first_hidden, guint total,
-                                          gpointer user_data) {
-    (void)first_hidden; (void)total;
-    ArtistOverflowData *d = user_data;
-    const GPtrArray *ta = library_cache_get_track_artists(d->cache, d->track_id);
-    if (!ta) {
-        GtkWidget *btn = gtk_button_new_with_label("…");
-        gtk_widget_add_css_class(btn, "artist-btn");
-        return btn;
-    }
-
-    GPtrArray *for_popover;
-    if (d->overflow_all) {
-        /* Combined mode: popover shows all artists (primary + featuring) */
-        for_popover = g_ptr_array_new();
-        for (guint i = 0; i < ta->len; i++)
-            g_ptr_array_add(for_popover, g_ptr_array_index(ta, i));
-    } else {
-        for_popover = filter_artists_by_role(ta, d->role);
-    }
-
-    GtkWidget *btn = create_artist_overflow_button(for_popover, d->callbacks);
-    g_ptr_array_free(for_popover, TRUE);
-    return btn;
-}
-
 void populate_artist_buttons(GtkWidget *box,
-                              GtkWidget *constraint_widget,
-                              double constraint_fraction,
                               library_cache_t *cache,
                               int64_t track_id,
                               library_artist_role_t role,
                               RowCallbacks *callbacks,
                               gboolean add_feat_prefix) {
-    ui_box_clear(GTK_BOX(box));
+    QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(box);
+    quadrature_overflow_box_clear_all(ofb);
 
     const GPtrArray *ta = (cache && track_id > 0)
         ? library_cache_get_track_artists(cache, track_id) : NULL;
@@ -257,44 +193,39 @@ void populate_artist_buttons(GtkWidget *box,
     }
 
     gtk_widget_set_visible(box, TRUE);
-    int pinned = 0;
+    guint pinned = 0;
 
     if (add_feat_prefix) {
         GtkWidget *ft = gtk_label_new("ft ");
         gtk_widget_add_css_class(ft, "library-row-subtitle");
-        gtk_box_append(GTK_BOX(box), ft);
+        quadrature_overflow_box_append(ofb, ft);
         pinned = 1;
     }
 
-    ArtistOverflowData *d = g_new0(ArtistOverflowData, 1);
-    d->cache        = cache;
-    d->track_id     = track_id;
-    d->role         = role;
-    d->callbacks    = callbacks ? g_memdup2(callbacks, sizeof(RowCallbacks)) : NULL;
-    d->overflow_all = FALSE;
+    /* Items: one artist button per artist in the role */
+    GPtrArray *role_artists = filter_artists_by_role(ta, role);
+    for (guint i = 0; i < role_artists->len; i++) {
+        const library_track_artist_t *a = g_ptr_array_index(role_artists, i);
+        GtkWidget *btn = create_artist_button(a->artist_id, a->name, callbacks);
+        quadrature_overflow_box_append(ofb, btn);
+    }
 
-    ui_overflow_box_setup(&(UiOverflowBoxParams){
-        .box                = box,
-        .constraint_widget  = constraint_widget,
-        .constraint_fraction = constraint_fraction,
-        .default_max_width  = 200,
-        .pinned_children    = pinned,
-        .create_item        = artist_create_item,
-        .create_overflow    = artist_create_overflow,
-        .item_count         = count,
-        .user_data          = d,
-        .user_data_destroy  = artist_overflow_data_free,
-    });
+    /* Overflow indicator: "…" button opening a popover with all role artists */
+    GtkWidget *overflow_btn = create_artist_overflow_button(role_artists, callbacks);
+    quadrature_overflow_box_append(ofb, overflow_btn);
+    g_ptr_array_free(role_artists, TRUE);
+
+    quadrature_overflow_box_set_pinned_count(ofb, pinned);
+    quadrature_overflow_box_set_item_count(ofb, count);
 }
 
 void populate_artist_buttons_combined(GtkWidget *box,
-                                       GtkWidget *constraint_widget,
-                                       double constraint_fraction,
                                        library_cache_t *cache,
                                        int64_t track_id,
                                        RowCallbacks *callbacks,
                                        gboolean show_primary) {
-    ui_box_clear(GTK_BOX(box));
+    QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(box);
+    quadrature_overflow_box_clear_all(ofb);
 
     const GPtrArray *ta = (cache && track_id > 0)
         ? library_cache_get_track_artists(cache, track_id) : NULL;
@@ -312,110 +243,82 @@ void populate_artist_buttons_combined(GtkWidget *box,
     }
 
     gtk_widget_set_visible(box, TRUE);
-    int pinned = 0;
+    guint pinned = 0;
 
-    /* Primary buttons: always shown, never overflowed */
-    if (show_primary) {
-        for (guint i = 0; i < primary_count; i++) {
-            const library_track_artist_t *a =
-                nth_artist_by_role(ta, LIBRARY_ARTIST_ROLE_PRIMARY, i);
+    /* Primary buttons — pinned (always visible, never hidden) */
+    if (show_primary && primary_count > 0) {
+        GPtrArray *primaries = filter_artists_by_role(ta, LIBRARY_ARTIST_ROLE_PRIMARY);
+        for (guint i = 0; i < primaries->len; i++) {
+            const library_track_artist_t *a = g_ptr_array_index(primaries, i);
             GtkWidget *btn = create_artist_button(a->artist_id, a->name, callbacks);
-            gtk_box_append(GTK_BOX(box), btn);
+            quadrature_overflow_box_append(ofb, btn);
             pinned++;
         }
+        g_ptr_array_free(primaries, TRUE);
     }
 
-    if (feat_count == 0) return;
+    if (feat_count == 0) {
+        quadrature_overflow_box_set_pinned_count(ofb, pinned);
+        quadrature_overflow_box_set_item_count(ofb, 0);
+        return;
+    }
 
-    /* "ft " separator: pinned between primary and featuring */
+    /* "ft " separator: also pinned, between primaries and features */
     GtkWidget *ft = gtk_label_new("ft ");
     gtk_widget_add_css_class(ft, "library-row-subtitle");
-    gtk_box_append(GTK_BOX(box), ft);
+    quadrature_overflow_box_append(ofb, ft);
     pinned++;
 
-    ArtistOverflowData *d = g_new0(ArtistOverflowData, 1);
-    d->cache        = cache;
-    d->track_id     = track_id;
-    d->role         = LIBRARY_ARTIST_ROLE_FEATURING;
-    d->callbacks    = callbacks ? g_memdup2(callbacks, sizeof(RowCallbacks)) : NULL;
-    d->overflow_all = TRUE;
+    /* Featuring artists — items (may overflow into "…" popover) */
+    GPtrArray *feats = filter_artists_by_role(ta, LIBRARY_ARTIST_ROLE_FEATURING);
+    for (guint i = 0; i < feats->len; i++) {
+        const library_track_artist_t *a = g_ptr_array_index(feats, i);
+        GtkWidget *btn = create_artist_button(a->artist_id, a->name, callbacks);
+        quadrature_overflow_box_append(ofb, btn);
+    }
 
-    ui_overflow_box_setup(&(UiOverflowBoxParams){
-        .box                = box,
-        .constraint_widget  = constraint_widget,
-        .constraint_fraction = constraint_fraction,
-        .default_max_width  = 200,
-        .pinned_children    = pinned,
-        .create_item        = artist_create_item,
-        .create_overflow    = artist_create_overflow,
-        .item_count         = feat_count,
-        .user_data          = d,
-        .user_data_destroy  = artist_overflow_data_free,
-    });
+    /* Overflow popover shows ALL artists (primary + featuring) */
+    GPtrArray *all_artists = g_ptr_array_new();
+    for (guint i = 0; i < ta->len; i++)
+        g_ptr_array_add(all_artists, g_ptr_array_index(ta, i));
+    GtkWidget *overflow_btn = create_artist_overflow_button(all_artists, callbacks);
+    quadrature_overflow_box_append(ofb, overflow_btn);
+    g_ptr_array_free(all_artists, TRUE);
+    g_ptr_array_free(feats, TRUE);
+
+    quadrature_overflow_box_set_pinned_count(ofb, pinned);
+    quadrature_overflow_box_set_item_count(ofb, feat_count);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Credit Role Pill Layout — via Overflow Box
+ * Credit Role Pill Layout — via QuadratureOverflowBox
  *
- * Fills credit_annotation box with role pills after the artist button.
- * Excess pills collapse into "+N more".
+ * The credit_annotation QuadratureOverflowBox carries the artist button as its
+ * pinned[0] child (either declared in the .ui template for track rows, or
+ * appended by C for album rows before this function is called). We append
+ * the role pills as items and a "…" overflow indicator last.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-typedef struct {
-    char  **roles;       /* Owned deep copies */
-    guint   role_count;
-} CreditPillData;
-
-static void credit_pill_data_free(gpointer data) {
-    CreditPillData *d = data;
-    for (guint i = 0; i < d->role_count; i++)
-        g_free(d->roles[i]);
-    g_free(d->roles);
-    g_free(d);
-}
-
-static GtkWidget *credit_create_item(guint index, gpointer user_data) {
-    CreditPillData *d = user_data;
-    GtkWidget *pill = gtk_label_new(d->roles[index]);
-    gtk_widget_add_css_class(pill, "credit-role-label");
-    return pill;
-}
-
-static GtkWidget *credit_create_overflow(guint first_hidden, guint total,
-                                          gpointer user_data) {
-    (void)user_data;
-    guint remaining = total - first_hidden;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "+%u more", remaining);
-    GtkWidget *more = gtk_label_new(buf);
-    gtk_widget_add_css_class(more, "credit-role-label");
-    return more;
-}
-
 void populate_credit_pills(GtkWidget *credit_annotation,
-                            GtkWidget *constraint_widget,
-                            double constraint_fraction,
                             const char *const *roles,
-                            guint role_count,
-                            int first_child_width) {
-    (void)first_child_width;  /* Pinned child width measured by overflow box */
+                            guint role_count) {
+    QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(credit_annotation);
 
-    CreditPillData *d = g_new0(CreditPillData, 1);
-    d->role_count = role_count;
-    d->roles = g_new0(char *, role_count);
-    for (guint i = 0; i < role_count; i++)
-        d->roles[i] = g_strdup(roles[i]);
+    /* Clear any items/indicator from a previous bind, preserve pinned[0] */
+    quadrature_overflow_box_clear_items(ofb);
 
-    ui_overflow_box_setup(&(UiOverflowBoxParams){
-        .box                = credit_annotation,
-        .constraint_widget  = constraint_widget,
-        .constraint_fraction = constraint_fraction,
-        .default_max_width  = 300,
-        .pinned_children    = 1,  /* Artist button already in box */
-        .create_item        = credit_create_item,
-        .create_overflow    = credit_create_overflow,
-        .item_count         = role_count,
-        .user_data          = d,
-        .user_data_destroy  = credit_pill_data_free,
-    });
+    if (role_count == 0) return;
+
+    for (guint i = 0; i < role_count; i++) {
+        GtkWidget *pill = gtk_label_new(roles[i]);
+        gtk_widget_add_css_class(pill, "credit-role-label");
+        quadrature_overflow_box_append(ofb, pill);
+    }
+
+    /* "…" overflow indicator — shown only if items don't fit */
+    GtkWidget *more = gtk_label_new("…");
+    gtk_widget_add_css_class(more, "credit-role-label");
+    quadrature_overflow_box_append(ofb, more);
+
+    quadrature_overflow_box_set_item_count(ofb, role_count);
 }

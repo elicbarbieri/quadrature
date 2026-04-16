@@ -478,11 +478,29 @@ quadrature_result_t db_checkpoint(quadrature_db_t* db);
 quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db);
 
 /**
- * Delete albums (and their tracks, track_artists, FTS entries) by ID.
- * Called from the scan phase after detecting directories deleted from disk.
+ * Reconcile the tracks of a single album against the current filesystem.
+ *
+ * Deletes every track row for `album_id` whose path is NOT present in
+ * `current_paths`. If that leaves the album with zero surviving tracks,
+ * the album row itself is deleted — so this function covers both the
+ * "some files removed/renamed" case (Phase 2 per-album write) and the
+ * "whole album directory gone" case (Phase 1 orphan sweep).
+ *
+ * To delete an entire album, pass `current_paths = NULL, count = 0`:
+ * every track matches "not in current" and the album becomes empty,
+ * triggering deletion of the album row.
+ *
+ * `track_artists` rows cascade via FK; `tracks_fts` and `albums_fts`
+ * orphan rows are cleaned up automatically.
+ *
+ * PRECONDITION: must be called within an active transaction (a batch
+ * opened by `db_begin_batch` or an explicit `db_begin_transaction`).
+ *
+ * Paths must match exactly what `db_upsert_track_with_album` stored (the
+ * album-relative path).
  */
-quadrature_result_t db_prune_orphan_albums(quadrature_db_t* db,
-    const int64_t* album_ids, size_t count);
+quadrature_result_t db_reconcile_album_tracks(quadrature_db_t* db,
+    int64_t album_id, const char* const* current_paths, size_t current_path_count);
 
 /* =============================================================================
  * Folder-Based Album Operations

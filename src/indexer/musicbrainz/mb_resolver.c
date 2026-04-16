@@ -285,6 +285,62 @@ static void read_resolve_tags(const char* audio_path, resolve_tags_t* out) {
 // =============================================================================
 
 /**
+ * Dump full per-release vote distribution at decision time.
+ *
+ * Diagnostic only — runs at g_debug() level. Use to understand why one
+ * release MBID won over another within the same release-group, especially
+ * in the ISRC/AcoustID vote-tally path which has no Picard-style scoring
+ * (status, country, format, date) and picks purely by vote count.
+ *
+ * Output (one g_debug per line):
+ *   vote-dump album=<id> tier=<stage> release_groups=<N>
+ *     RG <rgid> votes=<n> picked_release=<rel> [WINNING_RG]
+ *     release <rel> votes=<n> [PICKED]
+ */
+static gint cmp_count_desc(gconstpointer a, gconstpointer b, gpointer counts) {
+    int va = GPOINTER_TO_INT(g_hash_table_lookup((GHashTable *)counts, a));
+    int vb = GPOINTER_TO_INT(g_hash_table_lookup((GHashTable *)counts, b));
+    return vb - va;
+}
+
+static void dump_vote_distribution(int64_t album_id, const char *stage,
+                                    GHashTable *rg_counts,
+                                    GHashTable *rg_best_release,
+                                    GHashTable *release_counts,
+                                    const char *picked_rg,
+                                    const char *picked_release) {
+    guint rg_total = g_hash_table_size(rg_counts);
+    if (rg_total == 0) return;
+
+    g_debug("vote-dump album=%" G_GINT64_FORMAT " tier=%s release_groups=%u",
+            album_id, stage, rg_total);
+
+    GList *rg_list = g_hash_table_get_keys(rg_counts);
+    rg_list = g_list_sort_with_data(rg_list, cmp_count_desc, rg_counts);
+    for (GList *r = rg_list; r; r = r->next) {
+        const char *rg = r->data;
+        int votes = GPOINTER_TO_INT(g_hash_table_lookup(rg_counts, rg));
+        const char *rg_pick = g_hash_table_lookup(rg_best_release, rg);
+        gboolean winning = (picked_rg && g_strcmp0(picked_rg, rg) == 0);
+        g_debug("  RG %s votes=%d picked_release=%s%s",
+                rg, votes, rg_pick ? rg_pick : "(none)",
+                winning ? " [WINNING_RG]" : "");
+    }
+    g_list_free(rg_list);
+
+    GList *rel_list = g_hash_table_get_keys(release_counts);
+    rel_list = g_list_sort_with_data(rel_list, cmp_count_desc, release_counts);
+    for (GList *r = rel_list; r; r = r->next) {
+        const char *rel = r->data;
+        int votes = GPOINTER_TO_INT(g_hash_table_lookup(release_counts, rel));
+        gboolean picked = (picked_release && g_strcmp0(picked_release, rel) == 0);
+        g_debug("    release %s votes=%d%s",
+                rel, votes, picked ? " [PICKED]" : "");
+    }
+    g_list_free(rel_list);
+}
+
+/**
  * Find the best-matching MusicBrainz release for an album.
  * Fallback chain: ISRC → Solr text search → AcoustID fingerprint.
  * Uses per-thread PG connections and persistent HTTP connection from the pool.
@@ -449,9 +505,13 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
 
                 double confidence = (double)best_rg_count / (double)isrc_count;
                 if (confidence >= MB_MATCH_CONFIDENCE) {
+                    const char *isrc_pick = g_hash_table_lookup(rg_best_release, best_rg);
                     g_debug("ISRC lookup resolved album %" G_GINT64_FORMAT
                             " → %s (%.0f%% confidence, %zu ISRCs)",
                             album_id, best_rg, confidence * 100, isrc_count);
+                    dump_vote_distribution(album_id, "ISRC", rg_counts,
+                                            rg_best_release, release_counts,
+                                            best_rg, isrc_pick);
                     isrc_resolved = true;
                 }
             } else if (isrc_res == QUADRATURE_OK) {
@@ -569,7 +629,12 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
                 const char* rel = g_hash_table_lookup(rg_best_release, best_rg);
                 if (rel) best_release = g_strdup(rel);
             }
-            if (best_release) tier = RESOLVE_TIER_ACOUSTID;
+            if (best_release) {
+                tier = RESOLVE_TIER_ACOUSTID;
+                dump_vote_distribution(album_id, "AcoustID", rg_counts,
+                                        rg_best_release, release_counts,
+                                        best_rg, best_release);
+            }
         }
     }
 

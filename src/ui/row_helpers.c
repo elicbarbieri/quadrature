@@ -117,23 +117,6 @@ GtkWidget *ui_create_library_badge(library_cache_t *cache, int library_index) {
     return badge;
 }
 
-typedef struct {
-    library_cache_t *cache;
-    int             *lib_indices;   /* Owned deduplicated array */
-    guint            count;
-} LibBadgeData;
-
-static void lib_badge_data_free(gpointer data) {
-    LibBadgeData *d = data;
-    g_free(d->lib_indices);
-    g_free(d);
-}
-
-static GtkWidget *lib_badge_create_item(guint index, gpointer user_data) {
-    LibBadgeData *d = user_data;
-    return make_library_badge_label(d->cache, d->lib_indices[index], 12);
-}
-
 /* Max libraries for stack-based dedup (matches PERF_MAX_LIBRARIES) */
 #define BADGE_MAX_LIBS 8
 
@@ -142,7 +125,9 @@ void ui_populate_library_badges(GtkWidget *badges_box,
                                  int64_t entity_global_id,
                                  badge_entity_type_t entity_type,
                                  GtkWidget *constraint_widget) {
-    ui_box_clear(GTK_BOX(badges_box));
+    (void)constraint_widget;  /* QuadratureOverflowBox plans from its own allocation */
+    QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(badges_box);
+    quadrature_overflow_box_clear_all(ofb);
 
     if (!cache || library_cache_get_library_count(cache) <= 1) {
         gtk_widget_set_visible(badges_box, FALSE);
@@ -161,13 +146,10 @@ void ui_populate_library_badges(GtkWidget *badges_box,
         count = library_cache_get_album_libraries(
             cache, entity_global_id, deduped, BADGE_MAX_LIBS);
         break;
-    case BADGE_ENTITY_TRACK: {
-        int lib = LIBRARY_GLOBAL_ID_LIB(entity_global_id);
-        if (lib >= 0 && lib < library_cache_get_library_count(cache)
-            && library_cache_get_library_name(cache, lib))
-            deduped[count++] = lib;
+    case BADGE_ENTITY_TRACK:
+        count = library_cache_get_track_libraries(
+            cache, entity_global_id, deduped, BADGE_MAX_LIBS);
         break;
-    }
     }
 
     if (count == 0) {
@@ -177,232 +159,21 @@ void ui_populate_library_badges(GtkWidget *badges_box,
 
     gtk_widget_set_visible(badges_box, TRUE);
 
-    LibBadgeData *d = g_new0(LibBadgeData, 1);
-    d->cache = cache;
-    d->count = count;
-    d->lib_indices = g_memdup2(deduped, count * sizeof(int));
-
-    ui_overflow_box_setup(&(UiOverflowBoxParams){
-        .box                = badges_box,
-        .constraint_widget  = constraint_widget,
-        .constraint_fraction = constraint_widget ? 1.0 : 0.0,
-        .default_max_width  = 300,
-        .pinned_children    = 0,
-        .create_item        = lib_badge_create_item,
-        .create_overflow    = NULL,   /* Just stop — badges are small */
-        .item_count         = count,
-        .user_data          = d,
-        .user_data_destroy  = lib_badge_data_free,
-    });
+    for (int i = 0; i < count; i++) {
+        GtkWidget *badge = make_library_badge_label(cache, deduped[i], 12);
+        quadrature_overflow_box_append(ofb, badge);
+    }
+    quadrature_overflow_box_set_item_count(ofb, (guint)count);
+    /* No overflow indicator — badges are small; any hidden ones simply drop. */
 }
 
 /* ui_format_duration → ui_math.c */
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Overflow Box — Generic Width-Aware Pill/Badge Layout
+ * Genre Pills — QuadratureOverflowBox + Pre-Allocated Labels
  *
- * Populates a horizontal GtkBox with as many items as fit within a width
- * budget, collapsing the rest into a caller-provided overflow indicator.
- * Automatically re-lays out when the constraint widget resizes (10px
- * hysteresis to avoid jitter).
- *
- * Callers provide two callbacks:
- *   create_item(index, user_data) → a floating GtkWidget for item #index
- *   create_overflow(first_hidden, total, user_data) → overflow indicator widget
- *
- * The first `pinned_children` widgets already in the box are preserved
- * (their width counts toward the budget but they are never removed).
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-static int measure_natural_width(GtkWidget *w) {
-    int min_w = 0, nat_w = 0;
-    gtk_widget_measure(w, GTK_ORIENTATION_HORIZONTAL, -1, &min_w, &nat_w, NULL, NULL);
-    return nat_w;
-}
-
-typedef struct {
-    GtkWidget  *box;
-    GtkWidget  *constraint_widget;
-    double      constraint_fraction;
-    int         default_max_width;
-    int         pinned_children;
-
-    UiOverflowCreateItem     create_item;
-    UiOverflowCreateOverflow create_overflow;
-    guint       item_count;
-    gpointer    user_data;
-    GDestroyNotify user_data_destroy;
-
-    gulong      width_signal_id;
-    gulong      map_signal_id;
-    int         last_width;
-} OverflowBoxData;
-
-static void overflow_box_data_free(gpointer data) {
-    OverflowBoxData *obd = data;
-    if (obd->map_signal_id && obd->box)
-        g_signal_handler_disconnect(obd->box, obd->map_signal_id);
-    if (obd->width_signal_id && obd->constraint_widget)
-        g_signal_handler_disconnect(obd->constraint_widget, obd->width_signal_id);
-    if (obd->user_data_destroy && obd->user_data)
-        obd->user_data_destroy(obd->user_data);
-    g_free(obd);
-}
-
-static void overflow_box_relayout(OverflowBoxData *obd) {
-    GtkBox *box = GTK_BOX(obd->box);
-
-    /* Remove all children after the pinned ones */
-    int skip = obd->pinned_children;
-    GtkWidget *child = gtk_widget_get_first_child(obd->box);
-    for (int i = 0; i < skip && child; i++)
-        child = gtk_widget_get_next_sibling(child);
-    while (child) {
-        GtkWidget *next = gtk_widget_get_next_sibling(child);
-        gtk_box_remove(box, child);
-        child = next;
-    }
-
-    if (obd->item_count == 0) return;
-
-    /* Calculate width budget */
-    int raw_width = obd->constraint_widget
-        ? gtk_widget_get_width(obd->constraint_widget) : 0;
-    int max_width = (raw_width > 0)
-        ? (int)(raw_width * obd->constraint_fraction)
-        : obd->default_max_width;
-
-    /* Width unknown (pre-allocation) AND a constraint widget exists:
-     * show all items without overflow planning — the notify::width or map
-     * handler will apply the real constraint once the allocation is known.
-     * Only use the default_max_width fallback when there is NO constraint
-     * widget (the caller intentionally chose a fixed budget). */
-    gboolean width_unknown = obd->constraint_widget && raw_width <= 0;
-
-    /* Measure pinned children's accumulated width */
-    int sp = gtk_box_get_spacing(box);
-    int pinned_width = 0;
-    child = gtk_widget_get_first_child(obd->box);
-    for (int i = 0; i < skip && child; i++) {
-        pinned_width += measure_natural_width(child);
-        child = gtk_widget_get_next_sibling(child);
-    }
-    /* Budget for items: subtract pinned width + gap between pinned and first item */
-    int items_budget = max_width - pinned_width;
-    if (skip > 0 && obd->item_count > 0)
-        items_budget -= sp;
-
-    /* ── Measure everything upfront ── */
-    GtkWidget **items = g_newa(GtkWidget *, obd->item_count);
-    int *item_widths  = g_newa(int, obd->item_count);
-    for (guint i = 0; i < obd->item_count; i++) {
-        items[i] = obd->create_item(i, obd->user_data);
-        item_widths[i] = measure_natural_width(items[i]);
-    }
-
-    GtkWidget *overflow = obd->create_overflow
-        ? obd->create_overflow(0, obd->item_count, obd->user_data)
-        : NULL;
-    int overflow_w = overflow ? measure_natural_width(overflow) : 0;
-
-    /* ── Plan with pure integer math ── */
-    gboolean needs_overflow = FALSE;
-    guint show_count;
-    if (width_unknown) {
-        /* Width not yet known — show all items without overflow planning.
-         * The real constraint will apply once notify::width fires with an
-         * actual allocation.  ProportionalBox's flexible slots have min_width=0
-         * so this won't inflate the parent's minimum. */
-        show_count = obd->item_count;
-        needs_overflow = FALSE;
-    } else {
-        show_count = ui_overflow_box_plan_layout(
-            items_budget, item_widths, obd->item_count,
-            overflow_w, sp, &needs_overflow);
-    }
-
-    /* ── Execute: append only what the plan selected ── */
-    for (guint i = 0; i < show_count; i++)
-        gtk_box_append(box, items[i]);
-
-    /* Discard items that didn't make the cut */
-    for (guint i = show_count; i < obd->item_count; i++) {
-        g_object_ref_sink(items[i]);
-        g_object_unref(items[i]);
-    }
-
-    if (needs_overflow && overflow) {
-        /* Recreate with correct first_hidden index if it differs */
-        if (show_count > 0) {
-            g_object_ref_sink(overflow);
-            g_object_unref(overflow);
-            overflow = obd->create_overflow(show_count, obd->item_count,
-                                            obd->user_data);
-        }
-        if (overflow)
-            gtk_box_append(box, overflow);
-    } else if (overflow) {
-        g_object_ref_sink(overflow);
-        g_object_unref(overflow);
-    }
-}
-
-static void on_overflow_box_map(GtkWidget *widget, gpointer user_data) {
-    (void)widget;
-    overflow_box_relayout(user_data);
-}
-
-static void on_overflow_box_width_changed(GObject *object, GParamSpec *pspec,
-                                           gpointer user_data) {
-    (void)pspec;
-    OverflowBoxData *obd = user_data;
-
-    int raw_width = gtk_widget_get_width(GTK_WIDGET(object));
-    int box_width = (int)(raw_width * obd->constraint_fraction);
-    if (box_width <= 0) return;
-
-    if (abs(box_width - obd->last_width) < 10) return;
-    obd->last_width = box_width;
-
-    overflow_box_relayout(obd);
-}
-
-void ui_overflow_box_setup(const UiOverflowBoxParams *p) {
-    g_assert(p->box != NULL);
-    g_assert(p->create_item != NULL);
-
-    OverflowBoxData *obd = g_new0(OverflowBoxData, 1);
-    obd->box                = p->box;
-    obd->constraint_widget  = p->constraint_widget;
-    obd->constraint_fraction = p->constraint_fraction;
-    obd->default_max_width  = p->default_max_width > 0 ? p->default_max_width : 300;
-    obd->pinned_children    = p->pinned_children;
-    obd->create_item        = p->create_item;
-    obd->create_overflow    = p->create_overflow;
-    obd->item_count         = p->item_count;
-    obd->user_data          = p->user_data;
-    obd->user_data_destroy  = p->user_data_destroy;
-
-    g_object_set_data_full(G_OBJECT(p->box), "overflow-box-data",
-                           obd, overflow_box_data_free);
-    obd->map_signal_id = g_signal_connect(p->box, "map",
-                                           G_CALLBACK(on_overflow_box_map), obd);
-
-    if (p->constraint_widget)
-        obd->width_signal_id = g_signal_connect(
-            p->constraint_widget, "notify::width",
-            G_CALLBACK(on_overflow_box_width_changed), obd);
-
-    /* Immediate layout if already mapped */
-    overflow_box_relayout(obd);
-}
-
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Genre Pills — QuadOverflowBox + Pre-Allocated Labels
- *
- * Uses QuadOverflowBox which does overflow planning inside its own
+ * Uses QuadratureOverflowBox which does overflow planning inside its own
  * size_allocate — no signals, no deferred visibility, no clipping.
  * Pre-allocate GENRE_PILL_MAX labels + 1 "…" overflow label once at setup.
  * On bind, set label text — the overflow box handles the rest.
@@ -417,15 +188,15 @@ GtkWidget *ui_genre_pills_new(int spacing) {
     gtk_widget_add_css_class(box, "genre-pills");
 
     /* Pre-allocate pill label slots + overflow indicator (last child) */
-    QuadOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(box);
+    QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(box);
     for (int i = 0; i < GENRE_PILL_MAX; i++) {
         GtkWidget *pill = gtk_label_new("");
         gtk_widget_add_css_class(pill, "genre-pill");
-        quad_overflow_box_append(ofb, pill);
+        quadrature_overflow_box_append(ofb, pill);
     }
     GtkWidget *overflow = gtk_label_new("…");
     gtk_widget_add_css_class(overflow, "genre-pill");
-    quad_overflow_box_append(ofb, overflow);
+    quadrature_overflow_box_append(ofb, overflow);
 
     return box;
 }
@@ -450,7 +221,7 @@ void ui_genre_pills_bind(GtkWidget *genres_box, const char *genres) {
     }
 
     /* Tell the overflow box how many items are populated */
-    quad_overflow_box_set_item_count(QUADRATURE_OVERFLOW_BOX(genres_box), genre_count);
+    quadrature_overflow_box_set_item_count(QUADRATURE_OVERFLOW_BOX(genres_box), genre_count);
     gtk_widget_set_visible(genres_box, genre_count > 0);
 }
 

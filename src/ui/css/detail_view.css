@@ -68,7 +68,7 @@
 }
 
 .album-detail-artist:disabled {
-    color: rgba(0, 212, 255, 0.4);
+    color: rgba(0, 212, 255, 0.85);
     background: transparent;
 }
 

@@ -25,70 +25,6 @@
 /** Rebind pre-allocated badge labels in a badges box.
  *  Uses MBID index lookup for artists/albums to show cross-library presence.
  *  Precondition: badges_box has BADGE_SLOT_MAX children (GtkLabels). */
-static void rebind_library_badges(GtkWidget *badges_box,
-                                   library_cache_t *cache,
-                                   int64_t entity_global_id,
-                                   badge_entity_type_t entity_type) {
-    if (!badges_box) return;
-    if (!cache || library_cache_get_library_count(cache) <= 1) {
-        /* Single library — hide all badge slots */
-        GtkWidget *child = gtk_widget_get_first_child(badges_box);
-        while (child) {
-            gtk_widget_set_visible(child, FALSE);
-            child = gtk_widget_get_next_sibling(child);
-        }
-        gtk_widget_set_visible(badges_box, FALSE);
-        return;
-    }
-
-    int deduped[BADGE_SLOT_MAX];
-    int count = 0;
-
-    switch (entity_type) {
-    case BADGE_ENTITY_ARTIST:
-        count = library_cache_get_artist_libraries(
-            cache, entity_global_id, deduped, BADGE_SLOT_MAX);
-        break;
-    case BADGE_ENTITY_ALBUM:
-        count = library_cache_get_album_libraries(
-            cache, entity_global_id, deduped, BADGE_SLOT_MAX);
-        break;
-    case BADGE_ENTITY_TRACK: {
-        int lib = LIBRARY_GLOBAL_ID_LIB(entity_global_id);
-        if (lib >= 0 && lib < library_cache_get_library_count(cache)
-            && library_cache_get_library_name(cache, lib))
-            deduped[count++] = lib;
-        break;
-    }
-    }
-
-    /* Set text on pre-allocated label slots */
-    GtkWidget *child = gtk_widget_get_first_child(badges_box);
-    for (guint i = 0; i < BADGE_SLOT_MAX && child; i++) {
-        if (i < count) {
-            const char *name = library_cache_get_library_name(cache, deduped[i]);
-            gtk_label_set_text(GTK_LABEL(child), name ? name : "");
-            gtk_widget_set_visible(child, TRUE);
-        } else {
-            gtk_widget_set_visible(child, FALSE);
-        }
-        child = gtk_widget_get_next_sibling(child);
-    }
-    gtk_widget_set_visible(badges_box, count > 0);
-}
-
-/** Pre-allocate BADGE_SLOT_MAX label children in a badges box. */
-static void prealloc_badge_slots(GtkWidget *badges_box) {
-    if (!badges_box) return;
-    for (int i = 0; i < BADGE_SLOT_MAX; i++) {
-        GtkWidget *badge = gtk_label_new("");
-        gtk_label_set_ellipsize(GTK_LABEL(badge), PANGO_ELLIPSIZE_END);
-        gtk_label_set_max_width_chars(GTK_LABEL(badge), 12);
-        gtk_widget_add_css_class(badge, "library-badge");
-        gtk_widget_set_visible(badge, FALSE);
-        gtk_box_append(GTK_BOX(badges_box), badge);
-    }
-}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Art Strip Width-Aware Reflow
@@ -270,7 +206,6 @@ GtkWidget *ui_create_artist_row_shell(void) {
                       gtk_builder_get_object(builder, "title"));
     GtkWidget *badges_box = GTK_WIDGET(gtk_builder_get_object(builder, "library_badges"));
     g_object_set_data(G_OBJECT(row), "w-library-badges", badges_box);
-    prealloc_badge_slots(badges_box);
     g_object_set_data(G_OBJECT(row), "w-subtitle",
                       gtk_builder_get_object(builder, "subtitle"));
 
@@ -313,9 +248,9 @@ void ui_rebind_artist_row(GtkWidget *row,
     if (title)
         gtk_label_set_text(GTK_LABEL(title), artist->name);
 
-    /* Library badges — set text on pre-allocated labels */
-    rebind_library_badges(badges_box, cache,
-                          artist->artist_id, BADGE_ENTITY_ARTIST);
+    /* Library badges */
+    ui_populate_library_badges(badges_box, cache,
+                               artist->artist_id, BADGE_ENTITY_ARTIST, NULL);
 
     /* Subtitle: album/track counts */
     if (subtitle) {
@@ -388,7 +323,7 @@ GtkWidget *ui_create_album_row_shell(void) {
     GtkWidget *col_right = GTK_WIDGET(gtk_builder_get_object(builder, "col_right"));
     g_object_set_data(G_OBJECT(row), "w-col-right", col_right);
 
-    /* Replace template GtkBox with QuadOverflowBox for genre pills */
+    /* Replace template GtkBox with QuadratureOverflowBox for genre pills */
     GtkWidget *template_genres = GTK_WIDGET(gtk_builder_get_object(builder, "genres_box"));
     GtkWidget *genres_box = ui_genre_pills_new(4);
     if (col_right && template_genres) {
@@ -398,7 +333,6 @@ GtkWidget *ui_create_album_row_shell(void) {
     g_object_set_data(G_OBJECT(row), "w-genres", genres_box);
     GtkWidget *badges_box = GTK_WIDGET(gtk_builder_get_object(builder, "library_badges"));
     g_object_set_data(G_OBJECT(row), "w-library-badges", badges_box);
-    prealloc_badge_slots(badges_box);
     g_object_set_data(G_OBJECT(row), "w-credit-annotation",
                       gtk_builder_get_object(builder, "credit_annotation"));
 
@@ -502,15 +436,15 @@ void ui_rebind_album_row(GtkWidget *row,
     /* Genre pills — set text on pre-allocated labels */
     ui_genre_pills_bind(genres_box, album->genres);
 
-    /* Library badges — set text on pre-allocated labels */
+    /* Library badges */
     if (cache) {
-        rebind_library_badges(badges_box, cache,
-                              album->album_id, BADGE_ENTITY_ALBUM);
+        ui_populate_library_badges(badges_box, cache,
+                                   album->album_id, BADGE_ENTITY_ALBUM, NULL);
     }
 
     /* Credit annotation: clear for list rows (credits only used in detail views) */
     if (credit_annotation) {
-        ui_box_clear(GTK_BOX(credit_annotation));
+        quadrature_overflow_box_clear_all(QUADRATURE_OVERFLOW_BOX(credit_annotation));
         gtk_widget_set_visible(credit_annotation, FALSE);
     }
 
@@ -547,7 +481,7 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
 
     g_object_unref(builder);
 
-    /* Replace template GtkBox with QuadOverflowBox for genre pills */
+    /* Replace template GtkBox with QuadratureOverflowBox for genre pills */
     GtkWidget *genres_box = ui_genre_pills_new(4);
     if (col_right && template_genres) {
         gtk_box_insert_child_after(GTK_BOX(col_right), genres_box, NULL);
@@ -610,9 +544,11 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
                                     col_left);
     }
 
-    /* Credit annotation: artist button + width-aware role pills (bottom-right) */
+    /* Credit annotation: artist button (pinned) + role pills (items) + "…" */
     if (credit_annotation && credit && credit->artist_name && credit->role_count > 0) {
-        /* Artist button */
+        QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(credit_annotation);
+        quadrature_overflow_box_clear_all(ofb);
+
         GtkWidget *btn;
         if (credit->artist_id > 0 && artist_cbs) {
             btn = create_artist_button(credit->artist_id,
@@ -621,14 +557,12 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
             btn = create_artist_button(0, credit->artist_name, NULL);
             gtk_widget_set_sensitive(btn, FALSE);
         }
-        gtk_box_append(GTK_BOX(credit_annotation), btn);
+        quadrature_overflow_box_append(ofb, btn);
+        quadrature_overflow_box_set_pinned_count(ofb, 1);
 
-        /* Role pills with overflow — constrained to col_right width */
-        int btn_w = 0;
-        gtk_widget_measure(btn, GTK_ORIENTATION_HORIZONTAL, -1, &btn_w, NULL, NULL, NULL);
-        populate_credit_pills(credit_annotation, col_right, 1.0,
+        populate_credit_pills(credit_annotation,
                               (const char *const *)credit->roles,
-                              credit->role_count, btn_w);
+                              credit->role_count);
 
         gtk_widget_set_visible(credit_annotation, TRUE);
     }
@@ -659,7 +593,6 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
 
     GtkWidget *art = GTK_WIDGET(gtk_builder_get_object(builder, "art"));
     GtkWidget *col_left = GTK_WIDGET(gtk_builder_get_object(builder, "col_left"));
-    GtkWidget *col_right = GTK_WIDGET(gtk_builder_get_object(builder, "col_right"));
     GtkWidget *title = GTK_WIDGET(gtk_builder_get_object(builder, "title"));
     GtkWidget *album_box = GTK_WIDGET(gtk_builder_get_object(builder, "album_box"));
     GtkWidget *primary_artists_box = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
@@ -724,12 +657,12 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
      * after the first layout pass.  Passing the column slot as the constraint
      * ensures the overflow logic uses the correct width from frame one. */
     if (primary_artists_box) {
-        populate_artist_buttons(primary_artists_box, col_left, 1.0, cache, track->track_id,
+        populate_artist_buttons(primary_artists_box, cache, track->track_id,
                                LIBRARY_ARTIST_ROLE_PRIMARY, artist_cbs, FALSE);
     }
 
     if (secondary_artists_box) {
-        populate_artist_buttons(secondary_artists_box, col_right, 1.0, cache, track->track_id,
+        populate_artist_buttons(secondary_artists_box, cache, track->track_id,
                                LIBRARY_ARTIST_ROLE_FEATURING, artist_cbs, TRUE);
     }
 
@@ -782,14 +715,11 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
             }
         }
 
-        /* Role pills with overflow — constrained to col_right width */
-        int btn_w = 0;
-        if (credit_artist_btn)
-            gtk_widget_measure(credit_artist_btn, GTK_ORIENTATION_HORIZONTAL,
-                               -1, &btn_w, NULL, NULL, NULL);
-        populate_credit_pills(credit_annotation, col_right, 1.0,
+        /* Role pills as items + "…" overflow — the credit_artist_btn is
+         * pinned[0] declared in the track row template. */
+        populate_credit_pills(credit_annotation,
                               (const char *const *)credit->roles,
-                              credit->role_count, btn_w);
+                              credit->role_count);
 
         gtk_widget_set_visible(credit_annotation, TRUE);
     }
@@ -866,15 +796,13 @@ GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
     }
 
     /* Combined artists box: primary buttons + "ft" + featuring buttons.
-     * ProportionalBox allocates the right slot to exactly 40% of flexible
-     * space, so the overflow constraint uses the artists_box itself at 1.0.
      * Suppress primary artist when it matches the album artist — the album
      * header already shows who the album artist is.  Only show non-album-
      * artist primaries (e.g. "Baths" on an ODESZA album). */
     if (artists_box) {
         gboolean show_primary = (album_artist_id == 0) ||
                                 (track->artist_id != album_artist_id);
-        populate_artist_buttons_combined(artists_box, row, 0.40, cache,
+        populate_artist_buttons_combined(artists_box, cache,
                                          track->track_id, artist_cbs,
                                          show_primary);
     }
@@ -1081,7 +1009,7 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
     }
 
     /* Genre pills: multi-row wrapping overflow layout.
-     * Single QuadOverflowBox with max-rows=3 handles wrapping + ellipsis. */
+     * Single QuadratureOverflowBox with max-rows=3 handles wrapping + ellipsis. */
     if (template_genres && album->genres && album->genres[0]) {
         g_type_ensure(QUADRATURE_TYPE_OVERFLOW_BOX);
         gchar **raw = g_strsplit(album->genres, ";", 0);
@@ -1091,18 +1019,18 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
             if (raw[i][0]) g_ptr_array_add(clean, raw[i]);
         }
 
-        QuadOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(
+        QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(
             g_object_new(QUADRATURE_TYPE_OVERFLOW_BOX,
                          "spacing", 6, "row-spacing", 4, "max-rows", 3, NULL));
         for (guint i = 0; i < clean->len; i++) {
             GtkWidget *pill = gtk_label_new(g_ptr_array_index(clean, i));
             gtk_widget_add_css_class(pill, "genre-pill");
-            quad_overflow_box_append(ofb, pill);
+            quadrature_overflow_box_append(ofb, pill);
         }
         GtkWidget *overflow = gtk_label_new("…");
         gtk_widget_add_css_class(overflow, "genre-pill");
-        quad_overflow_box_append(ofb, overflow);
-        quad_overflow_box_set_item_count(ofb, clean->len);
+        quadrature_overflow_box_append(ofb, overflow);
+        quadrature_overflow_box_set_item_count(ofb, clean->len);
         gtk_box_append(GTK_BOX(template_genres), GTK_WIDGET(ofb));
 
         g_ptr_array_free(clean, FALSE);

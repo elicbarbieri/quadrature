@@ -30,7 +30,9 @@ void on_indexer_started(IndexerController *idx, const char *library_path, gpoint
 void on_indexer_progress(IndexerController *idx, const char *library_path,
                          indexer_progress_t *p, gpointer data);
 void on_indexer_library_updated(IndexerController *idx, const char *library_path,
-                                indexer_progress_t *p, gpointer data);
+                                indexer_progress_t *p,
+                                library_cache_changeset_t *changeset,
+                                gpointer data);
 void on_indexer_artwork_updated(IndexerController *idx, const char *library_path,
                                 indexer_progress_t *p, gpointer data);
 void on_indexer_done(IndexerController *idx, const char *library_path,

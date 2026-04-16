@@ -26,6 +26,31 @@ Phase 8  ARTIST_BIO    Fetch artist bios from Wikipedia via Wikidata → bios DB
 
 `INDEXER_LIBRARY_UPDATED` triggers a library-cache reload for the affected slot — old data stays live until the background warming thread finishes, then `on_cache_ready` fires `refresh_library_views()`. `INDEXER_ARTWORK_UPDATED` reloads atlas files and refreshes views directly.
 
+## Change Tracking (update_hook)
+
+The indexer owns the sole writer connection to each library's `quadrature.sqlite`. At
+DB open time it registers `sqlite3_update_hook` on that connection; every
+`INSERT`/`UPDATE`/`DELETE` committed through it is routed to a per-indexer
+`ChangeTracker`. The tracker keeps four `GHashTable`s of rowids — one each for
+`artists`, `albums`, `tracks` — plus a single `track_artists_dirty` flag (see
+LIBRARY_CACHE.md → COW Refresh Invariants → I5 for why the latter isn't row-precise).
+
+Before each `INDEXER_LIBRARY_UPDATED` emission, the indexer thread calls
+`change_tracker_snapshot_and_clear()`. This drains the tracker into a fresh
+`library_cache_changeset_t` and passes it by const pointer to the callback. The
+tracker starts accumulating again from zero, so the next LIBRARY_UPDATED carries
+only what Phase 6 (or later) actually mutated.
+
+Why this exists: `rename_artist_inplace` (Phase 6) and `db_get_or_create_artist_mb`
+(Phase 2's name-collapsing) mutate `artists` rows **in place**. Without the tracker,
+the COW refresh had no way to distinguish "artist entity in cache reflects current
+DB row" from "entity in cache is stale but happens to still have the same rowid."
+See `docs/architecture/LIBRARY_CACHE.md` for the refresh-side contract.
+
+Debounce + merge: when LIBRARY_UPDATED fires twice within 500 ms (Phase 3 then
+Phase 6), `indexer_bridge` merges the two changesets rather than dropping the
+earlier one — otherwise Phase 3's rowids would be silently lost.
+
 ______________________________________________________________________
 
 ## Core Invariant: mtime change → full re-process

@@ -678,8 +678,18 @@ Test(database, log_error_legacy_wrapper_defaults) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * db_prune_orphan_albums: full cascade (tracks, track_artists, FTS)
+ * db_reconcile_album_tracks: whole-album wipe cascade (tracks, track_artists, FTS)
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Prune each given album by reconciling against an empty current-path set.
+ *  Matches how Phase 1's orphan sweep invokes the API. */
+static void test_prune_albums(quadrature_db_t *db, const int64_t *ids, size_t count) {
+    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+    for (size_t i = 0; i < count; i++) {
+        cr_assert_eq(db_reconcile_album_tracks(db, ids[i], NULL, 0), QUADRATURE_OK);
+    }
+    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+}
 
 /**
  * Build a test library for pruning tests:
@@ -764,7 +774,7 @@ Test(database, prune_orphan_albums_cascades_tracks_and_fts) {
 
     /* Prune Discovery — 3 tracks + FTS entries should cascade */
     int64_t orphan[] = { disc_id };
-    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+    test_prune_albums(db, orphan, 1);
 
     cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM albums"), 2);
     cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM tracks"), 4);
@@ -783,7 +793,7 @@ Test(database, prune_orphan_albums_full_wipe) {
     build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
 
     int64_t all[] = { disc_id, ram_id, sect_id };
-    cr_assert_eq(db_prune_orphan_albums(db, all, 3), QUADRATURE_OK);
+    test_prune_albums(db, all, 3);
     cr_assert_eq(db_prune_orphan_artists(db), QUADRATURE_OK);
 
     cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM albums"), 0);
@@ -806,7 +816,7 @@ Test(database, prune_orphan_artist_after_album_deletion) {
 
     /* Delete SECT → Golden Features becomes orphaned */
     int64_t orphan[] = { sect_id };
-    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+    test_prune_albums(db, orphan, 1);
     cr_assert_eq(db_prune_orphan_artists(db), QUADRATURE_OK);
 
     cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM artists"), 1,
@@ -832,7 +842,7 @@ Test(database, featured_artist_survives_album_deletion) {
     /* Delete SECT — Daft Punk's featured credit on track 7 goes away,
      * but Daft Punk survives via own albums. */
     int64_t orphan[] = { sect_id };
-    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+    test_prune_albums(db, orphan, 1);
     cr_assert_eq(db_prune_orphan_artists(db), QUADRATURE_OK);
 
     /* Track 7 completely gone */
@@ -859,7 +869,7 @@ Test(database, prune_orphan_errors_removes_stale_paths) {
 
     /* After pruning Discovery album, the error for its path should be cleaned */
     int64_t orphan[] = { disc_id };
-    cr_assert_eq(db_prune_orphan_albums(db, orphan, 1), QUADRATURE_OK);
+    test_prune_albums(db, orphan, 1);
     cr_assert_eq(db_prune_orphan_errors(db, "/music"), QUADRATURE_OK);
 
     cr_assert_eq(test_count_rows(db, "SELECT COUNT(*) FROM indexer_errors"), 0,

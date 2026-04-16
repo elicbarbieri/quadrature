@@ -46,7 +46,7 @@
           </object>
         </child>
         <child>
-          <object class="GtkBox" id="library_badges">
+          <object class="QuadratureOverflowBox" id="library_badges">
             <property name="spacing">4</property>
             <property name="visible">false</property>
           </object>

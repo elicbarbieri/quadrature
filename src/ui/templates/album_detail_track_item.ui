@@ -38,7 +38,7 @@
 
     <!-- right slot: combined artists (40% of flexible space) -->
     <child type="right">
-      <object class="GtkBox" id="artists_box">
+      <object class="QuadratureOverflowBox" id="artists_box">
         <property name="valign">center</property>
         <property name="halign">end</property>
       </object>

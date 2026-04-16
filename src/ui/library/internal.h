@@ -527,7 +527,7 @@ guint append_credit_rows(UnifiedDetailData *ud,
                          const char *artist_name,
                          int64_t viewed_artist_id,
                          GHashTable *skip_track_ids,
-                         GHashTable *skip_album_ids,
+                         GHashTable *skip_album_mbids,
                          UiRowSizeGroups *track_groups,
                          UiRowSizeGroups *album_groups);
 

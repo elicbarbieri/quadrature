@@ -473,8 +473,18 @@ static const char* MB_ISRC_LOOKUP_SQL =
     "WHERE i.isrc = ANY($1::text[])";
 
 // MB PG: get scoring data for a Solr candidate release (by UUID).
-// Returns (total_duration_ms, track_count, release_type, release_title, artist_credit)
-// in one roundtrip — all fields needed for Picard-style weighted scoring.
+// Returns (total_duration_ms, track_count, release_type, release_title,
+//          artist_credit, status, country_codes, formats) in one roundtrip
+// — all fields needed for Picard-style weighted scoring plus the
+// quadrature-specific status weight.
+//
+// country_codes:  comma-separated ISO codes for every release event
+//                 (e.g. "US,GB,JP"). NULL if no release_country rows.
+// formats:        comma-separated DISTINCT medium format names
+//                 (e.g. "CD" or "12\" Vinyl,Digital Media"). NULL if none.
+// status:         lowercase release_status name ("official", "promotion",
+//                 "bootleg", "pseudo-release", "withdrawn", "cancelled")
+//                 or NULL for unset.
 static const char* MB_SOLR_RELEASE_INFO_SQL =
     "SELECT "
     "  (SELECT COALESCE(SUM(rec.length), 0) FROM track t "
@@ -487,10 +497,20 @@ static const char* MB_SOLR_RELEASE_INFO_SQL =
     "  (SELECT string_agg(a.name, ', ' ORDER BY acn.position) "
     "   FROM artist_credit_name acn "
     "   JOIN artist a ON a.id = acn.artist "
-    "   WHERE acn.artist_credit = r.artist_credit) "
+    "   WHERE acn.artist_credit = r.artist_credit), "
+    "  LOWER(rs.name), "
+    "  (SELECT string_agg(iso.code, ',') "
+    "   FROM release_country rc "
+    "   JOIN iso_3166_1 iso ON iso.area = rc.country "
+    "   WHERE rc.release = r.id), "
+    "  (SELECT string_agg(DISTINCT mf.name, ',') "
+    "   FROM medium m "
+    "   JOIN medium_format mf ON mf.id = m.format "
+    "   WHERE m.release = r.id) "
     "FROM release r "
     "JOIN release_group rg ON rg.id = r.release_group "
     "LEFT JOIN release_group_primary_type rgt ON rgt.id = rg.type "
+    "LEFT JOIN release_status rs ON rs.id = r.status "
     "WHERE r.gid = $1::uuid";
 
 quadrature_result_t mb_acoustid_prepare_stmts(mb_pg_client_t* mb_client,
@@ -828,6 +848,80 @@ static double release_type_score(const char* type) {
 }
 
 // --------------------------------------------------------------------------
+// Hardcoded preference lists — matches Picard's priority-list scoring shape
+// (score = (N - position) / N, 0.0 if not in list) but with non-empty
+// defaults instead of Picard's empty-by-default lists. These exist purely
+// to break ties between near-identical release candidates so the resolver
+// converges on a stable, sane pick instead of a duration-noise tiebreak.
+//
+// TODO: surface these as user-tunable settings (settings.ini) once the
+// scoring proves out in practice.
+// --------------------------------------------------------------------------
+
+static const char* PREFERRED_COUNTRIES[] = { "US", NULL };
+static const char* PREFERRED_FORMATS[]   = { "CD", "Digital Media", NULL };
+
+// Status priority (NOT a Picard signal — quadrature-specific). Order
+// reflects "trust" — official releases beat promotional copies which
+// beat bootlegs. Pseudo/withdrawn/cancelled rank below bootleg.
+static const char* PREFERRED_STATUSES[]  = {
+    "official", "promotion", "bootleg",
+    "pseudo-release", "withdrawn", "cancelled", NULL
+};
+
+// Score a value against a priority list using Picard's formula:
+//   if value matches list[i]: score = (N - i) / N    (1.0 at top, ~0 at bottom)
+//   if value not in list:     score = 0.0
+// Case-insensitive comparison.
+static double priority_list_score(const char* value, const char* const* list) {
+    if (!value || !value[0] || !list || !list[0]) return 0.0;
+    int total = 0;
+    while (list[total]) total++;
+    for (int i = 0; i < total; i++) {
+        if (g_ascii_strcasecmp(value, list[i]) == 0)
+            return (double)(total - i) / (double)total;
+    }
+    return 0.0;
+}
+
+// Country score: take the BEST matching country from the release's country
+// codes (a release can have multiple). country_codes is a comma-separated
+// ISO-3166-1 alpha-2 string (e.g. "US,GB,JP") or NULL.
+static double country_score(const char* country_codes) {
+    if (!country_codes || !country_codes[0]) return 0.0;
+    double best = 0.0;
+    char** parts = g_strsplit(country_codes, ",", -1);
+    for (char** p = parts; *p; p++) {
+        char* trimmed = g_strstrip(*p);
+        double s = priority_list_score(trimmed, PREFERRED_COUNTRIES);
+        if (s > best) best = s;
+    }
+    g_strfreev(parts);
+    return best;
+}
+
+// Format score: Picard averages across all media. We do the same.
+// formats is a comma-separated DISTINCT list of medium format names
+// (e.g. "CD" or "12\" Vinyl,Digital Media") or NULL.
+static double format_score(const char* formats) {
+    if (!formats || !formats[0]) return 0.0;
+    char** parts = g_strsplit(formats, ",", -1);
+    double sum = 0.0;
+    int n = 0;
+    for (char** p = parts; *p; p++) {
+        char* trimmed = g_strstrip(*p);
+        sum += priority_list_score(trimmed, PREFERRED_FORMATS);
+        n++;
+    }
+    g_strfreev(parts);
+    return n > 0 ? sum / (double)n : 0.0;
+}
+
+static double status_score(const char* status) {
+    return priority_list_score(status, PREFERRED_STATUSES);
+}
+
+// --------------------------------------------------------------------------
 // Lucene escaping + Solr preprocessing
 // --------------------------------------------------------------------------
 
@@ -1004,6 +1098,14 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
     char* best_release_id = NULL;
     double best_score = -1.0;
 
+    /* Diagnostic: dump per-candidate score breakdown so we can see
+     * exactly which signal flipped one release over another. Picard's
+     * weights (album=17, type=10, artist=6, tracks=5, dur=3) plus the
+     * status/country/format extension and Solr-relevance multiplier are
+     * visible per row. */
+    g_debug("solr-scoring: '%s' by '%s' — %u candidates",
+            album_title, artist_name, ndocs);
+
     for (guint i = 0; i < ndocs; i++) {
         JsonObject* doc = json_array_get_object_element(docs, i);
         if (!doc) continue;
@@ -1017,7 +1119,8 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
         if (json_object_has_member(doc, "score") && max_solr_score > 0.0)
             solr_score = json_object_get_double_member(doc, "score") / max_solr_score;
 
-        // One PG roundtrip: (duration, tracks, type, title, artist)
+        // One PG roundtrip: (duration, tracks, type, title, artist,
+        //                    status, country_codes, formats)
         const char* info_params[1] = { release_mbid };
         PGresult* info_res = (PGresult*)mb_pg_exec_prepared(
             mb_client, STMT_MB_SOLR_DUR, 1, info_params);
@@ -1030,9 +1133,12 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
 
         int64_t candidate_dur    = strtoll(PQgetvalue(info_res, 0, 0), NULL, 10);
         int64_t candidate_tracks = strtoll(PQgetvalue(info_res, 0, 1), NULL, 10);
-        const char* mb_type   = PQgetisnull(info_res, 0, 2) ? NULL : PQgetvalue(info_res, 0, 2);
-        const char* mb_title  = PQgetisnull(info_res, 0, 3) ? "" : PQgetvalue(info_res, 0, 3);
-        const char* mb_artist = PQgetisnull(info_res, 0, 4) ? "" : PQgetvalue(info_res, 0, 4);
+        const char* mb_type    = PQgetisnull(info_res, 0, 2) ? NULL : PQgetvalue(info_res, 0, 2);
+        const char* mb_title   = PQgetisnull(info_res, 0, 3) ? ""   : PQgetvalue(info_res, 0, 3);
+        const char* mb_artist  = PQgetisnull(info_res, 0, 4) ? ""   : PQgetvalue(info_res, 0, 4);
+        const char* mb_status  = PQgetisnull(info_res, 0, 5) ? NULL : PQgetvalue(info_res, 0, 5);
+        const char* mb_countries = PQgetisnull(info_res, 0, 6) ? NULL : PQgetvalue(info_res, 0, 6);
+        const char* mb_formats   = PQgetisnull(info_res, 0, 7) ? NULL : PQgetvalue(info_res, 0, 7);
 
         // 1. Album title similarity (weight 17) — Picard similarity2()
         // Use clean_album (edition text stripped) for fair comparison against MB title
@@ -1042,36 +1148,61 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
         double artist_sim = similarity2(artist_name, mb_artist);
 
         // 3. Release type (weight 10) — Picard default: all types = 0.5
-        double type_score = release_type_score(mb_type);
+        double type_sc = release_type_score(mb_type);
 
         // 4. Track count (weight 5) — Picard trackcount_score()
-        double track_score;
+        double track_sc;
         if (candidate_tracks == 0) {
-            track_score = 0.3;
+            track_sc = 0.3;
         } else if ((int64_t)local_track_count == candidate_tracks) {
-            track_score = 1.0;
+            track_sc = 1.0;
         } else if ((int64_t)local_track_count < candidate_tracks) {
-            track_score = 0.3;
+            track_sc = 0.3;
         } else {
-            track_score = 0.0;
+            track_sc = 0.0;
         }
 
         // 5. Duration (weight 3) — tiebreaker between editions
-        double dur_score = 0.5;
+        double dur_sc = 0.5;
         if (candidate_dur > 0 && local_total_duration_ms > 0) {
             int64_t thresh = local_total_duration_ms / 10;
             if (thresh < 300000) thresh = 300000;
             int64_t delta = llabs(candidate_dur - local_total_duration_ms);
-            dur_score = 1.0 - (double)(delta < thresh ? delta : thresh) / (double)thresh;
+            dur_sc = 1.0 - (double)(delta < thresh ? delta : thresh) / (double)thresh;
         }
 
-        // Picard formula: linear_combination_of_weights(parts) * get_score(release)
+        // 6-8. Status / country / format (weight 2 each — matches Picard's
+        // country/format weights; status is a quadrature extension that
+        // Picard does not score). All three break ties between near-
+        // identical candidates with the same title/artist/tracks/duration.
+        double status_sc  = status_score(mb_status);
+        double country_sc = country_score(mb_countries);
+        double format_sc  = format_score(mb_formats);
+
+        // Linear combination — total weight 47 (Picard 41 + status/country/format = 6).
         double local_sim = (title_sim   * 17.0 +
-                            type_score  * 10.0 +
+                            type_sc     * 10.0 +
                             artist_sim  *  6.0 +
-                            track_score *  5.0 +
-                            dur_score   *  3.0) / 41.0;
+                            track_sc    *  5.0 +
+                            dur_sc      *  3.0 +
+                            status_sc   *  2.0 +
+                            country_sc  *  2.0 +
+                            format_sc   *  2.0) / 47.0;
         double score = local_sim * solr_score;
+
+        g_debug("  %s tracks=%" G_GINT64_FORMAT "/%zu type=%s status=%s "
+                "countries=%s formats=%s | "
+                "title=%.2f artist=%.2f type_s=%.2f trk=%.2f dur=%.2f "
+                "stat=%.2f cty=%.2f fmt=%.2f | "
+                "local=%.3f solr=%.3f → score=%.4f",
+                release_mbid, candidate_tracks, local_track_count,
+                mb_type ? mb_type : "?",
+                mb_status ? mb_status : "?",
+                mb_countries ? mb_countries : "?",
+                mb_formats ? mb_formats : "?",
+                title_sim, artist_sim, type_sc, track_sc, dur_sc,
+                status_sc, country_sc, format_sc,
+                local_sim, solr_score, score);
 
         PQclear(info_res);
 

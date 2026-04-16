@@ -89,6 +89,7 @@ typedef struct {
     char* library_path;       /* heap-owned */
     indexer_event_t event;
     indexer_progress_t progress;
+    library_cache_changeset_t* changeset; /* owned; NULL except for LIBRARY_UPDATED */
 } IdleCallbackData;
 
 /* Forward declaration */
@@ -102,6 +103,7 @@ static gboolean on_indexer_event_idle(gpointer user_data) {
      * The ref we hold keeps the GObject memory valid so this check is safe. */
     if (!INDEXER_IS_CONTROLLER(self)) {
         g_free(data->library_path);
+        library_cache_changeset_free(data->changeset);
         g_object_unref(self);
         g_free(data);
         return G_SOURCE_REMOVE;
@@ -119,7 +121,8 @@ static gboolean on_indexer_event_idle(gpointer user_data) {
             break;
 
         case INDEXER_LIBRARY_UPDATED:
-            g_signal_emit(self, signals[SIGNAL_LIBRARY_UPDATED], 0, lib, &data->progress);
+            g_signal_emit(self, signals[SIGNAL_LIBRARY_UPDATED], 0, lib,
+                          &data->progress, data->changeset);
             break;
 
         case INDEXER_ARTWORK_UPDATED:
@@ -161,6 +164,7 @@ static gboolean on_indexer_event_idle(gpointer user_data) {
     }
 
     g_free(data->library_path);
+    library_cache_changeset_free(data->changeset);
     g_object_unref(self);
     g_free(data);
     return G_SOURCE_REMOVE;
@@ -172,10 +176,11 @@ static gboolean on_indexer_event_idle(gpointer user_data) {
 
 static void on_indexer_callback(indexer_event_t event,
                                  const indexer_progress_t* progress,
+                                 const library_cache_changeset_t* changeset,
                                  void* user_data) {
     ScanCallbackData* scan_data = user_data;
 
-    IdleCallbackData* data = g_new(IdleCallbackData, 1);
+    IdleCallbackData* data = g_new0(IdleCallbackData, 1);
     data->controller = g_object_ref(scan_data->controller);
     data->library_path = g_strdup(scan_data->library_path);
     data->event = event;
@@ -184,6 +189,9 @@ static void on_indexer_callback(indexer_event_t event,
     } else {
         memset(&data->progress, 0, sizeof(data->progress));
     }
+    /* Deep-copy the changeset: the source pointer is valid only for the
+     * duration of the indexer's synchronous callback. */
+    data->changeset = library_cache_changeset_copy(changeset);
 
     g_idle_add(on_indexer_event_idle, data);
 }
@@ -376,9 +384,12 @@ static void indexer_controller_class_init(IndexerControllerClass* klass) {
      * IndexerController::library-updated:
      * @library_path: The library root whose SQLite metadata changed
      * @progress: Pointer to indexer_progress_t (valid only during signal emission)
+     * @changeset: Pointer to library_cache_changeset_t (valid only during
+     *             signal emission) listing the DB rowids mutated since the
+     *             previous LIBRARY_UPDATED. May be NULL.
      *
      * Emitted whenever the library database changes in a way that requires
-     * the library cache to be cleared and re-warmed. Fired after:
+     * the library cache to be refreshed. Fired after:
      *   - Phases 1-3 (initial scan + metadata)
      *   - Phase 6 (MusicBrainz enrichment committed)
      */
@@ -387,7 +398,7 @@ static void indexer_controller_class_init(IndexerControllerClass* klass) {
         G_TYPE_FROM_CLASS(klass),
         G_SIGNAL_RUN_LAST,
         0, NULL, NULL, NULL,
-        G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_POINTER);
+        G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_POINTER);
 
     /**
      * IndexerController::artwork-updated:

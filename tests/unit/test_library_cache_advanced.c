@@ -186,7 +186,7 @@ Test(cow_refresh, new_album_appears_after_refresh, .init = cow_setup, .fini = co
     db_close(db);
 
     /* COW refresh (full) + synchronous wait */
-    library_cache_refresh_slot(cow_cache, 0, NULL, 0);
+    library_cache_refresh_slot(cow_cache, 0, NULL);
     library_cache_await_slot(cow_cache, 0);
 
     /* After: 2 albums */
@@ -204,7 +204,7 @@ Test(cow_refresh, existing_track_survives_refresh, .init = cow_setup, .fini = co
     cr_assert_str_eq(before->title, "One More Time");
 
     /* Full COW refresh (no DB changes — entities should be seeded from old) */
-    library_cache_refresh_slot(cow_cache, 0, NULL, 0);
+    library_cache_refresh_slot(cow_cache, 0, NULL);
     library_cache_await_slot(cow_cache, 0);
 
     /* Track should still be accessible with same data */
@@ -230,7 +230,10 @@ Test(cow_refresh, delta_refresh_updates_changed_album, .init = cow_setup, .fini 
 
     /* Delta refresh — only album 1 changed */
     int64_t changed[] = { 1 };
-    library_cache_refresh_slot(cow_cache, 0, changed, 1);
+    library_cache_changeset_t cs = {
+        .albums = changed, .albums_count = 1,
+    };
+    library_cache_refresh_slot(cow_cache, 0, &cs);
     library_cache_await_slot(cow_cache, 0);
 
     /* New track should be visible */
@@ -270,7 +273,7 @@ Test(cow_refresh, genres_recomputed_after_refresh, .init = cow_setup, .fini = co
     db_close(db);
 
     /* Full COW refresh */
-    library_cache_refresh_slot(cow_cache, 0, NULL, 0);
+    library_cache_refresh_slot(cow_cache, 0, NULL);
     library_cache_await_slot(cow_cache, 0);
 
     /* Find the new album and check genres */
@@ -321,7 +324,7 @@ Test(cow_refresh, appearance_tracks_after_cow_refresh, .init = cow_setup, .fini 
     db_close(db);
 
     /* COW refresh */
-    library_cache_refresh_slot(cow_cache, 0, NULL, 0);
+    library_cache_refresh_slot(cow_cache, 0, NULL);
     library_cache_await_slot(cow_cache, 0);
 
     /* Re-find DP after refresh */
@@ -891,7 +894,7 @@ Test(concurrent_cow, readers_during_refresh_no_crash, .init = m2_setup, .fini = 
         pthread_create(&readers[i], NULL, concurrent_reader, &ctx);
 
     /* While readers are hammering, do a COW refresh */
-    library_cache_refresh_slot(m2_cache, 0, NULL, 0);
+    library_cache_refresh_slot(m2_cache, 0, NULL);
     library_cache_await_slot(m2_cache, 0);
 
     /* Join readers */

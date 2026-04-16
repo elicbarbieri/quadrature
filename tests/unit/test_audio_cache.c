@@ -14,6 +14,7 @@
 #include <criterion/hooks.h>
 #include "internal.h"
 #include <pthread.h>
+#include <signal.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -117,11 +118,12 @@ Test(audio_cache, cancel_empty_cache) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Test: Lock and Unlock Operations
+ * Test: Lock/Unlock API Contract
  *
- * Note: Lock/unlock require the track to be loaded first (API contract).
- * Testing lock/unlock on unloaded tracks would crash intentionally.
- * This test verifies the cache remains functional after creation.
+ * Lock/unlock require the track to be loaded first. Calling them on an
+ * unloaded track crashes via g_error (see src/audio/audio_cache.c:640,675).
+ * The non-crashing surface is covered here; the crash contracts are
+ * enforced by the death tests further down.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 Test(audio_cache, lock_unlock_api_contract) {
@@ -132,6 +134,44 @@ Test(audio_cache, lock_unlock_api_contract) {
     cr_assert_eq(audio_cache_get_memory_used(cache), 0);
 
     audio_cache_destroy(cache);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Death tests — invariant violations MUST terminate the process
+ *
+ * These tests verify the CLAUDE.md "crash on invariant violations / no
+ * silent fallbacks" rule by triggering each documented crash path and
+ * asserting the expected termination.
+ *
+ * Termination signal depends on which GLib macro fires:
+ *   - g_assert()  → abort()       → SIGABRT
+ *   - g_error()   → G_BREAKPOINT  → SIGTRAP
+ *
+ * Keep each death test minimal and single-purpose: the body should be the
+ * shortest possible path to the crash, so a regression is unambiguous.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Invariant: audio_cache_lock() requires the track to have been loaded.
+ * Enforced by g_error at src/audio/audio_cache.c:640. */
+Test(audio_cache, death_lock_unloaded_track, .signal = SIGTRAP) {
+    audio_cache_t *cache = NULL;
+    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    (void)audio_cache_lock(cache, 12345);  /* never loaded → g_error */
+}
+
+/* Invariant: audio_cache_unlock() on a track not in cache aborts.
+ * Enforced by g_error at src/audio/audio_cache.c:675. */
+Test(audio_cache, death_unlock_unloaded_track, .signal = SIGTRAP) {
+    audio_cache_t *cache = NULL;
+    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    audio_cache_unlock(cache, 12345);
+}
+
+/* Invariant: track_id must be > 0. Enforced by g_assert at audio_cache.c:634. */
+Test(audio_cache, death_lock_rejects_zero_track_id, .signal = SIGABRT) {
+    audio_cache_t *cache = NULL;
+    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    (void)audio_cache_lock(cache, 0);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

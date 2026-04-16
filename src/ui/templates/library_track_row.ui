@@ -44,7 +44,7 @@
           </object>
         </child>
         <child>
-          <object class="GtkBox" id="primary_artists_box">
+          <object class="QuadratureOverflowBox" id="primary_artists_box">
             <style>
               <class name="library-row-subtitle"/>
             </style>
@@ -52,7 +52,7 @@
         </child>
         <!-- library badges: populated dynamically by row_helpers.c -->
         <child>
-          <object class="GtkBox" id="library_badges">
+          <object class="QuadratureOverflowBox" id="library_badges">
             <property name="spacing">4</property>
             <property name="visible">false</property>
           </object>
@@ -73,18 +73,21 @@
         </child>
         <!-- Featuring artists -->
         <child>
-          <object class="GtkBox" id="secondary_artists_box">
+          <object class="QuadratureOverflowBox" id="secondary_artists_box">
             <property name="hexpand">true</property>
             <style>
               <class name="library-row-subtitle"/>
             </style>
           </object>
         </child>
-        <!-- credit annotation: hidden unless credit data is set dynamically -->
+        <!-- credit annotation: hidden unless credit data is set dynamically.
+             credit_artist_btn is the first (pinned) child; role pills are
+             appended as items, with a "…" overflow indicator last. -->
         <child>
-          <object class="GtkBox" id="credit_annotation">
+          <object class="QuadratureOverflowBox" id="credit_annotation">
             <property name="spacing">6</property>
             <property name="visible">false</property>
+            <property name="pinned-count">1</property>
             <child>
               <object class="GtkButton" id="credit_artist_btn">
                 <property name="has-frame">false</property>
@@ -98,7 +101,7 @@
                 </child>
               </object>
             </child>
-            <!-- role pills appended dynamically by row_helpers.c -->
+            <!-- role pills + overflow indicator appended dynamically -->
           </object>
         </child>
       </object>

@@ -117,6 +117,7 @@ set(INDEXER_CORE_SOURCES
     src/indexer/artist_art.c
     src/indexer/artist_atlas.c
     src/indexer/artist_bio.c
+    src/indexer/change_tracker.c
 )
 
 # Shared engine library
@@ -346,6 +347,7 @@ if(BUILD_TESTS)
 
     # End-to-end integration tests (require MB PG + SOLR — skip if unavailable)
     unit_test(test_e2e_library_resolution  INCLUDES ${S}/indexer ${S}/indexer/musicbrainz ${S}/database  LIBS quadrature_indexer_core quadrature_engine)
+    unit_test(test_metadata_search         INCLUDES ${S}/indexer ${S}/indexer/musicbrainz ${S}/database  LIBS quadrature_indexer_core quadrature_engine)
 
     # GPIO tests
     unit_test(test_axia_gpio  INCLUDES ${S}/gpio  LIBS quadrature_gpio ${GLIB_LIBRARIES} Threads::Threads)

@@ -30,6 +30,7 @@
 
 #include "quadrature.h"
 #include "database.h"
+#include "library.h"
 #include <glib.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -146,8 +147,20 @@ typedef enum {
  * Callback
  * ============================================================================= */
 
+/**
+ * Indexer event callback.
+ *
+ * @param event      Which event fired.
+ * @param progress   Snapshot of indexer state at emit time (always non-NULL).
+ * @param changeset  For INDEXER_LIBRARY_UPDATED: set of DB rows mutated since
+ *                   the previous LIBRARY_UPDATED (ownership stays with the
+ *                   indexer; valid for the duration of the call only).
+ *                   NULL for all other events.
+ * @param user_data  Cookie from indexer_config_t.
+ */
 typedef void (*indexer_callback_t)(indexer_event_t event,
                                    const indexer_progress_t* progress,
+                                   const library_cache_changeset_t* changeset,
                                    void* user_data);
 
 /* =============================================================================

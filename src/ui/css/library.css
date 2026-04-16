@@ -546,9 +546,16 @@
 }
 
 .artist-btn:disabled {
-    color: rgba(0, 212, 255, 0.4);
+    opacity: 1;
+    color: #00d4ff;
     background: transparent;
-    border-color: rgba(0, 212, 255, 0.15);
+    border-color: rgba(0, 212, 255, 0.3);
+}
+
+.artist-btn:disabled:hover {
+    color: #00d4ff;
+    background-color: transparent;
+    border-color: rgba(0, 212, 255, 0.3);
 }
 
 

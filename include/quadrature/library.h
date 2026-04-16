@@ -181,6 +181,57 @@ typedef enum {
 typedef struct library_cache library_cache_t;
 
 /* =============================================================================
+ * COW Refresh Changeset
+ *
+ * Carries the set of DB rowids that have been mutated since the last cache
+ * warming (or previous refresh). Produced by the indexer's ChangeTracker,
+ * consumed by library_cache_refresh_slot() to drive SEED skipping.
+ *
+ * See docs/architecture/LIBRARY_CACHE.md → "COW Refresh Invariants" for the
+ * correctness contract — in short: the changeset is never load-bearing.
+ * Passing NULL means "unknown, rebuild everything from DB" and is always safe.
+ *
+ * All int64_t arrays are LOCAL rowids (not global IDs).
+ * ============================================================================= */
+
+typedef struct library_cache_changeset {
+    int64_t *artists;         /* Mutated local artist rowids; NULL if count==0 */
+    size_t   artists_count;
+
+    int64_t *albums;          /* Mutated local album rowids */
+    size_t   albums_count;
+
+    int64_t *tracks;          /* Mutated local track rowids */
+    size_t   tracks_count;
+
+    /* True if any track_artists row was mutated. track_artists is keyed by a
+     * synthetic rowid (not track_id), so row-precise invalidation isn't
+     * worthwhile — if set, the refresh rebuilds all track_artists arrays. */
+    bool     track_artists_dirty;
+} library_cache_changeset_t;
+
+/** Allocate an empty changeset (zeroed). Owns its arrays. */
+library_cache_changeset_t *library_cache_changeset_new(void);
+
+/** Free a changeset and its arrays. NULL-safe. */
+void library_cache_changeset_free(library_cache_changeset_t *cs);
+
+/** Deep-copy a changeset. Returns NULL if src is NULL. */
+library_cache_changeset_t *library_cache_changeset_copy(
+    const library_cache_changeset_t *src);
+
+/**
+ * Merge src into dst. Duplicates in the unioned arrays are removed. If either
+ * has track_artists_dirty, the result has it too. src is unchanged.
+ * Safe when dst is NULL (no-op) or src is NULL (no-op).
+ */
+void library_cache_changeset_merge(library_cache_changeset_t *dst,
+                                   const library_cache_changeset_t *src);
+
+/** True if the changeset contains no rowids and track_artists is clean. */
+bool library_cache_changeset_is_empty(const library_cache_changeset_t *cs);
+
+/* =============================================================================
  * Lifecycle
  * ============================================================================= */
 
@@ -628,13 +679,13 @@ void library_cache_clear_slot(library_cache_t *cache, int bitmap_index);
  *
  * @param cache Library cache
  * @param bitmap_index Stable library ID to refresh
- * @param changed_album_local_ids Array of local album IDs that changed (from indexer)
- * @param changed_count Number of changed albums (0 = full re-read from DB)
+ * @param changes Changeset from the indexer (NULL = full rebuild, always safe).
+ *                The callee does NOT take ownership; it reads the arrays and
+ *                they may be freed as soon as the call returns.
  */
 void library_cache_refresh_slot(library_cache_t *cache,
                                 int bitmap_index,
-                                const int64_t *changed_album_local_ids,
-                                int changed_count);
+                                const library_cache_changeset_t *changes);
 
 /* =============================================================================
  * Multi-Library Accessors
@@ -716,6 +767,22 @@ int library_cache_get_artist_libraries(library_cache_t *cache,
  */
 int library_cache_get_album_libraries(library_cache_t *cache,
                                       int64_t album_global_id,
+                                      int *out_libs, int max_libs);
+
+/**
+ * Get all library bitmap indices that contain the "same" track as the given
+ * one — identified by (release_group MBID, disc_num, track_num). Requires the
+ * track's album to have a resolved musicbrainz_release_group_id; otherwise
+ * falls back to the source library only.
+ *
+ * Strict match: a library is included only if a track with the matching
+ * (disc, track) tuple actually exists there — a release in the same release
+ * group missing the track (e.g. deluxe bonus cut) will not be badged.
+ *
+ * @return Number of library indices written (0 if entity not found)
+ */
+int library_cache_get_track_libraries(library_cache_t *cache,
+                                      int64_t track_global_id,
                                       int *out_libs, int max_libs);
 
 /**
