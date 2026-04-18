@@ -272,6 +272,12 @@ static void device_enum_done(GObject *src, GAsyncResult *res, gpointer data) {
             } else if (!found) {
                 ui_channel_strip_set_device_name(w->channels[i], saved);
                 ui_channel_strip_set_device_state(w->channels[i], DEVICE_STATE_INVALID);
+                /* Clear pipeline target so that when the device reappears the
+                 * set_player_device() early-out sees a transition (NULL → name)
+                 * and recreates the stream on the correct node. Without this,
+                 * PW silently migrates the orphaned stream to the default sink
+                 * and the early-out skips recreation on replug. */
+                dispatch_player_device(w->pipeline, i, NULL);
             } else {
                 ui_channel_strip_set_device_name(w->channels[i], NULL);
                 ui_channel_strip_set_device_state(w->channels[i], DEVICE_STATE_VALID);

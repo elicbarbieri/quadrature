@@ -93,6 +93,7 @@ set(DATABASE_SOURCES
     src/database/db.c
     src/database/db_read.c
     src/database/db_write.c
+    src/database/reconciler.c
     src/database/db_meta.c
     src/database/db_bios.c
     src/database/migrations/001_initial.c
@@ -101,6 +102,9 @@ set(DATABASE_SOURCES
 # Library sources
 set(LIBRARY_SOURCES
     src/library/library_cache.c
+    src/library/library_mask.c
+    src/library/cache_search.c
+    src/library/library_search.c
 )
 
 # Indexer core sources (shared between daemon and embedded)
@@ -324,12 +328,11 @@ if(BUILD_TESTS)
 
     # Standalone (no engine)
     unit_test(test_overflow_layout  SOURCES src/ui/overflow_plan.c  LIBS ${GLIB_LIBRARIES})
-    unit_test(test_library_mask                                     LIBS ${GLIB_LIBRARIES})
+    unit_test(test_library_mask       SOURCES src/library/library_mask.c  LIBS ${GLIB_LIBRARIES})
 
     # Engine tests
     unit_test(test_database         INCLUDES ${S}/database          LIBS quadrature_engine)
     unit_test(test_library_cache                                    LIBS quadrature_engine)
-    unit_test(test_library_cache_advanced                           LIBS quadrature_engine)
     unit_test(test_path_resolution                                  LIBS quadrature_engine)
 
     # Audio tests
@@ -340,6 +343,7 @@ if(BUILD_TESTS)
     # Indexer tests
     unit_test(test_indexer              INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
     unit_test(test_indexer_integration  INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core quadrature_engine)
+    unit_test(test_reconciler           INCLUDES ${S}/database  LIBS quadrature_engine)
     unit_test(test_multi_disc           INCLUDES ${S}/indexer ${S}/database  LIBS quadrature_indexer_core)
 
     # MusicBrainz tests

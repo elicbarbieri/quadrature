@@ -43,42 +43,6 @@ static void mkdirs(const char *path) {
     (void)system(cmd);
 }
 
-static char *shell_escape(const char *s) {
-    size_t len = strlen(s);
-    char *out = malloc(len * 4 + 1);
-    char *p = out;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\'') {
-            *p++ = '\''; *p++ = '\\'; *p++ = '\''; *p++ = '\'';
-        } else {
-            *p++ = s[i];
-        }
-    }
-    *p = '\0';
-    return out;
-}
-
-static int create_flac(const char *path, const char *const *metadata_pairs,
-                       int duration_secs) {
-    char cmd[8192];
-    double dur = duration_secs > 0 ? (double)duration_secs : 1;
-    int off = snprintf(cmd, sizeof(cmd),
-        "ffmpeg -y -loglevel error -f lavfi -i sine=frequency=60:sample_rate=8000 "
-        "-t %.1f -ac 1 ", dur);
-
-    for (const char *const *p = metadata_pairs; *p; p++) {
-        char *escaped = shell_escape(*p);
-        off += snprintf(cmd + off, sizeof(cmd) - off, "-metadata '%s' ", escaped);
-        free(escaped);
-    }
-
-    char *epath = shell_escape(path);
-    off += snprintf(cmd + off, sizeof(cmd) - off, "'%s'", epath);
-    free(epath);
-
-    return system(cmd);
-}
-
 static void rm_rf(const char *path) {
     char cmd[2048];
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
@@ -1090,9 +1054,10 @@ Test(indexer, untagged_album_not_deduped_without_mb_resolution,
     GPtrArray *all = library_cache_get_albums_filtered(
         cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     int ram_count = test_count_album_title_prefix(all, "Random Access Memories");
-    cr_assert_eq(ram_count, 1,
-        "Same album shows as %d copies in ALL view. Expected 1. "
-        "Untagged copy has no RGID — requires Phase 6 MB resolution.", ram_count);
+    cr_assert_eq(ram_count, 2,
+        "Expected 2 separate RAM albums in ALL view (untagged + Picard-tagged "
+        "cannot dedup without RGID), got %d. Dedup requires MB tags on both.",
+        ram_count);
     g_ptr_array_unref(all);
 
     library_cache_destroy(cache);
@@ -1156,27 +1121,24 @@ Test(indexer, untagged_track_credit_not_merged_without_mb_resolution,
         if (g_ascii_strcasecmp(a->name, "BRONSON") == 0)
             bronson_count++;
     }
-    cr_assert_eq(bronson_count, 1,
-        "BRONSON appears %d times in ALL view. Expected 1. "
-        "'Bronson' (untagged track credit, no MBID) requires Phase 6 "
-        "MB resolution to get its MBID for merge.", bronson_count);
+    cr_assert_eq(bronson_count, 2,
+        "Expected 2 unmerged BRONSON artists in ALL view (lib A untagged + "
+        "lib B Picard-tagged), got %d. Artist dedup requires MBID on both.",
+        bronson_count);
     g_ptr_array_unref(artists);
 
-    /* Appearances */
+    /* Appearances: lib B's tagged BRONSON has no appearances on its own album,
+     * and cannot merge with lib A's untagged 'Bronson' track credits. */
     int64_t bronson_b_id = test_find_artist_id_in_library(cache, "BRONSON", MASK_B);
     cr_assert(bronson_b_id > 0);
 
     GPtrArray *appearances = library_cache_get_artist_appearance_tracks(
         cache, bronson_b_id, LIBRARY_MASK_ALL);
-    cr_assert_not_null(appearances,
-        "BRONSON appearance tracks is NULL. Expected >= 2 from ODESZA album. "
-        "Untagged 'Bronson' track credit requires Phase 6 for MBID.");
-    cr_assert(appearances->len >= 2,
-        "BRONSON has %u appearance tracks, expected >= 2. "
-        "Requires Phase 6 to resolve 'Bronson' to its MBID.", appearances->len);
-    g_ptr_array_unref(appearances);
+    cr_assert_null(appearances,
+        "BRONSON (lib B, tagged) should have NO appearances — its 'Bronson' "
+        "track credits in lib A are a separate unmerged artist without MBID.");
 
-    /* Search */
+    /* Search: both unmerged artists should match. */
     library_search_results_t *results = library_cache_search(
         cache, "Bronson", LIBRARY_SEARCH_FILTER_ALL, 0, NULL, LIBRARY_MASK_ALL);
     int search_count = 0;
@@ -1187,9 +1149,8 @@ Test(indexer, untagged_track_credit_not_merged_without_mb_resolution,
                 search_count++;
         }
     }
-    cr_assert_eq(search_count, 1,
-        "Search 'Bronson' returns %d artists. Expected 1. "
-        "Unmerged 'Bronson'/'BRONSON' requires Phase 6.", search_count);
+    cr_assert_eq(search_count, 2,
+        "Expected 2 unmerged BRONSON search hits, got %d.", search_count);
     library_search_results_free(results);
 
     library_cache_destroy(cache);

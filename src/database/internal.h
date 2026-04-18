@@ -25,26 +25,20 @@ struct quadrature_db {
     // Prepared statements for writes
     sqlite3_stmt* insert_artist;
     sqlite3_stmt* select_artist;
-    sqlite3_stmt* upsert_track;
     sqlite3_stmt* insert_artist_fts;  // artists_fts: (rowid, name)
     sqlite3_stmt* update_album_fts;   // albums_fts by album_id (joins for artist name)
     sqlite3_stmt* insert_track_artist;
     sqlite3_stmt* delete_track_artists;
 
-    // Cached statements for indexer hot paths
-    sqlite3_stmt* select_track_by_path;
+    // Cached statements used by the reconciler
     sqlite3_stmt* select_album_by_path;
-    sqlite3_stmt* update_album_by_id;
     sqlite3_stmt* insert_folder_album;
-    sqlite3_stmt* update_track_artist_display; /* UPDATE tracks SET artist_display=? WHERE id=? */
-    sqlite3_stmt* set_album_release_id;        /* UPDATE albums SET mb_release_id=?,mb_status=? WHERE id=? AND mb_status!=RESOLVED */
     sqlite3_stmt* sync_album_tracks_fts;       /* Bulk INSERT OR REPLACE INTO tracks_fts for all tracks in an album */
     /* MB artist statements -- used in db_get_or_create_artist_mb() */
     sqlite3_stmt* select_artist_by_mb_id;
     sqlite3_stmt* update_artist_sort_name;
     /* Step 2: exact name match, only for rows with NULL or same MBID */
     sqlite3_stmt* select_artist_by_name_nocase;
-    sqlite3_stmt* update_artist_mb_data;
     sqlite3_stmt* insert_artist_mb;
     sqlite3_stmt* insert_artist_fts_replace;
     /* Step 3: normalized name match (strips spaces + hyphens, lowercased) */
@@ -56,12 +50,7 @@ struct quadrature_db {
     sqlite3_stmt* delete_track_artists_artist_id; /* DELETE FROM track_artists WHERE artist_id=? */
 
     /* MB resolver hot-path statements (avoid prepare/finalize per call) */
-    sqlite3_stmt* update_track_title;          /* UPDATE tracks SET title=? WHERE id=? */
-    sqlite3_stmt* update_track_genre;          /* UPDATE tracks SET genre=? WHERE id=? */
     sqlite3_stmt* set_album_mb_status;         /* UPDATE albums SET mb_status=?,mb_resolved_at=? WHERE id=? */
-    sqlite3_stmt* update_album_artist;         /* UPDATE albums SET artist_id=?,is_compilation=? WHERE id=? */
-    sqlite3_stmt* update_album_mb;             /* UPDATE albums SET title=?,mb_release_id=?,... WHERE id=? */
-    sqlite3_stmt* sync_album_fts;              /* INSERT OR REPLACE INTO albums_fts for single album */
 
     // Cached read statements (pre-compiled for warming + merged-count hot paths)
     sqlite3_stmt* read_track_by_id;

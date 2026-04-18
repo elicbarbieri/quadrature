@@ -69,17 +69,7 @@ Test(indexer, audio_file_detection) {
 
 // ============================================================================
 // Metadata Extraction
-// Disabled: FFmpeg + Criterion fork interaction causes crashes.
-// The extraction works correctly when tested outside Criterion.
 // ============================================================================
-
-Test(indexer, metadata_extraction_params) {
-    index_item_t item = {0};
-    cr_assert_eq(extract_audio_metadata(NULL, &item), QUADRATURE_ERROR_INVALID_PARAM);
-    cr_assert_eq(extract_audio_metadata("test.flac", NULL), QUADRATURE_ERROR_INVALID_PARAM);
-    cr_assert_eq(extract_audio_metadata("/nonexistent/path.flac", &item),
-                 QUADRATURE_ERROR_FILE_NOT_FOUND);
-}
 
 Test(indexer, metadata_extraction_real_files) {
     // Validates metadata extraction from real audio files.

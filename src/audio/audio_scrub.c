@@ -36,7 +36,8 @@
 #define RUBBERBAND_MAX       4.0f    /* Pitch-preserved mode max */
 
 /* Crossfade for smooth zone transitions (prevents clicks) */
-#define CROSSFADE_MS         10      /* 10ms crossfade */
+#define CROSSFADE_MS            10   /* 10ms crossfade */
+#define CROSSFADE_MIN_FRAMES    64   /* Clamp so very low sample rates still fade */
 #define ZONE_PASSTHROUGH     0
 #define ZONE_TURNTABLE       1
 #define ZONE_RUBBERBAND      2
@@ -280,7 +281,7 @@ quadrature_result_t audio_scrubber_create(uint32_t sample_rate, audio_scrubber_t
 
     /* Calculate crossfade length in frames */
     s->crossfade_length = (sample_rate * CROSSFADE_MS) / 1000;
-    if (s->crossfade_length < 64) s->crossfade_length = 64;
+    if (s->crossfade_length < CROSSFADE_MIN_FRAMES) s->crossfade_length = CROSSFADE_MIN_FRAMES;
     s->crossfade_frames = 0;
 
     /* Pre-allocate work buffers */
@@ -446,18 +447,6 @@ static inline float cubic_hermite(float y0, float y1, float y2, float y3, float 
     float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
     float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
     return ((c3 * t + c2) * t + c1) * t + c0;
-}
-
-/* Get a sample with bounds checking, returns 0 for out-of-bounds */
-static inline void get_sample_safe(const float *samples, int64_t idx, uint64_t num_frames,
-                                    float *left, float *right) {
-    if (idx >= 0 && (uint64_t)idx < num_frames) {
-        *left = samples[idx * 2];
-        *right = samples[idx * 2 + 1];
-    } else {
-        *left = 0.0f;
-        *right = 0.0f;
-    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

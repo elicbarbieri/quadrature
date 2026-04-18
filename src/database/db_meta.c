@@ -7,6 +7,8 @@
  */
 
 #include "quadrature/metadata.h"
+#include "quadrature/database.h"
+#include "internal.h"
 #include <sqlite3.h>
 #include <glib.h>
 #include <string.h>
@@ -19,6 +21,12 @@
 struct quadrature_meta_db {
     sqlite3* db;
 
+    /* When non-NULL, this handle is ATTACHed to a main quadrature_db
+     * connection as schema "meta". All writes share the main connection's
+     * transaction. Lifecycle owned by caller; we DETACH (not close) on
+     * db_meta_close. */
+    quadrature_db_t* attached_to;
+
     // Cached prepared statements (lazy-initialized on first use)
     sqlite3_stmt* stmt_upsert_release;
     sqlite3_stmt* stmt_upsert_recording;
@@ -27,6 +35,11 @@ struct quadrature_meta_db {
     sqlite3_stmt* stmt_insert_recording_link;
     sqlite3_stmt* stmt_delete_recording_links;
 };
+
+/* Returns "meta." if attached, "" otherwise. */
+static inline const char* meta_schema_prefix(const quadrature_meta_db_t* db) {
+    return db->attached_to ? "meta." : "";
+}
 
 // =============================================================================
 // Schema
@@ -110,11 +123,15 @@ static void apply_meta_pragmas(sqlite3* db) {
 // Lazy Statement Cache
 // =============================================================================
 
-/* Returns a cached prepared statement, preparing it on first use. */
+/* Returns a cached prepared statement, preparing it on first use.
+ * sql_fmt must contain a single %s placeholder for the schema prefix
+ * (expands to "meta." when attached, "" otherwise). */
 static sqlite3_stmt* meta_get_stmt(quadrature_meta_db_t* db,
-                                    sqlite3_stmt** slot, const char* sql) {
+                                    sqlite3_stmt** slot, const char* sql_fmt) {
     if (!*slot) {
+        char* sql = sqlite3_mprintf(sql_fmt, meta_schema_prefix(db));
         int rc = sqlite3_prepare_v2(db->db, sql, -1, slot, NULL);
+        sqlite3_free(sql);
         if (rc != SQLITE_OK) {
             g_critical("meta_get_stmt: prepare failed: %s", sqlite3_errmsg(db->db));
             return NULL;
@@ -193,6 +210,48 @@ quadrature_result_t db_meta_open_readonly(const char* library_root,
     return QUADRATURE_OK;
 }
 
+quadrature_result_t db_meta_open_attached(quadrature_db_t* main_db,
+                                           const char* library_root,
+                                           quadrature_meta_db_t** out) {
+    if (!main_db || !library_root || !out) return QUADRATURE_ERROR_INVALID_PARAM;
+
+    /* First, ensure the meta file exists with schema applied (standalone open
+     * + close). This also runs the per-file pragmas. */
+    {
+        quadrature_meta_db_t* tmp = NULL;
+        quadrature_result_t res = db_meta_open(library_root, &tmp);
+        if (res != QUADRATURE_OK) return res;
+        db_meta_close(tmp);
+    }
+
+    char* path = g_build_filename(library_root, "quadrature-metadata.sqlite", NULL);
+    char* sql  = sqlite3_mprintf("ATTACH DATABASE %Q AS meta", path);
+    g_free(path);
+
+    db_lock(main_db);
+    /* Idempotent ATTACH: detach first if already attached (e.g. on re-scan). */
+    sqlite3_exec(main_db->db, "DETACH DATABASE meta", NULL, NULL, NULL);
+    char* err = NULL;
+    int rc = sqlite3_exec(main_db->db, sql, NULL, NULL, &err);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) {
+        g_critical("db_meta_open_attached: ATTACH failed: %s", err ? err : "?");
+        sqlite3_free(err);
+        db_unlock(main_db);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+    /* Meta-DB pragmas on the attached schema (connection-scoped pragmas like
+     * cache_size/mmap_size are set on the main connection already). */
+    sqlite3_exec(main_db->db, "PRAGMA meta.synchronous=OFF", NULL, NULL, NULL);
+    db_unlock(main_db);
+
+    quadrature_meta_db_t* db = g_new0(quadrature_meta_db_t, 1);
+    db->db = main_db->db;
+    db->attached_to = main_db;
+    *out = db;
+    return QUADRATURE_OK;
+}
+
 void db_meta_close(quadrature_meta_db_t* db) {
     if (!db) return;
 
@@ -209,7 +268,14 @@ void db_meta_close(quadrature_meta_db_t* db) {
         if (*stmts[i]) { sqlite3_finalize(*stmts[i]); *stmts[i] = NULL; }
     }
 
-    sqlite3_close(db->db);
+    if (db->attached_to) {
+        /* Detach, but leave the main connection open. */
+        db_lock(db->attached_to);
+        sqlite3_exec(db->attached_to->db, "DETACH DATABASE meta", NULL, NULL, NULL);
+        db_unlock(db->attached_to);
+    } else {
+        sqlite3_close(db->db);
+    }
     g_free(db);
 }
 
@@ -219,6 +285,8 @@ void db_meta_close(quadrature_meta_db_t* db) {
 
 quadrature_result_t db_meta_begin(quadrature_meta_db_t* db) {
     if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+    /* Attached: main db owns the transaction — no-op. */
+    if (db->attached_to) return QUADRATURE_OK;
     char* err = NULL;
     int rc = sqlite3_exec(db->db, "BEGIN IMMEDIATE", NULL, NULL, &err);
     if (rc != SQLITE_OK) {
@@ -231,6 +299,7 @@ quadrature_result_t db_meta_begin(quadrature_meta_db_t* db) {
 
 quadrature_result_t db_meta_commit(quadrature_meta_db_t* db) {
     if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+    if (db->attached_to) return QUADRATURE_OK;
     char* err = NULL;
     int rc = sqlite3_exec(db->db, "COMMIT", NULL, NULL, &err);
     if (rc != SQLITE_OK) {
@@ -244,6 +313,7 @@ quadrature_result_t db_meta_commit(quadrature_meta_db_t* db) {
 
 quadrature_result_t db_meta_rollback(quadrature_meta_db_t* db) {
     if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+    if (db->attached_to) return QUADRATURE_OK;
     sqlite3_exec(db->db, "ROLLBACK", NULL, NULL, NULL);
     return QUADRATURE_OK;
 }
@@ -261,7 +331,7 @@ quadrature_result_t db_meta_upsert_recording(quadrature_meta_db_t* db,
     if (!db || !recording_mbid || !release_mbid) return QUADRATURE_ERROR_INVALID_PARAM;
 
     sqlite3_stmt* stmt = meta_get_stmt(db, &db->stmt_upsert_recording,
-        "INSERT OR REPLACE INTO recordings(recording_mbid, release_mbid, disc_num, track_num)"
+        "INSERT OR REPLACE INTO %srecordings(recording_mbid, release_mbid, disc_num, track_num)"
         " VALUES(?,?,?,?)");
     if (!stmt) return QUADRATURE_ERROR_INTERNAL;
 
@@ -284,7 +354,7 @@ quadrature_result_t db_meta_upsert_link_type(quadrature_meta_db_t* db,
     if (!db || !link_type_gid || !name) return QUADRATURE_ERROR_INVALID_PARAM;
 
     sqlite3_stmt* stmt = meta_get_stmt(db, &db->stmt_upsert_link_type,
-        "INSERT OR REPLACE INTO link_types(link_type_gid, name, description)"
+        "INSERT OR REPLACE INTO %slink_types(link_type_gid, name, description)"
         " VALUES(?,?,?)");
     if (!stmt) return QUADRATURE_ERROR_INTERNAL;
 
@@ -310,7 +380,7 @@ quadrature_result_t db_meta_upsert_artist(quadrature_meta_db_t* db,
     if (!db || !artist_mbid || !name) return QUADRATURE_ERROR_INVALID_PARAM;
 
     sqlite3_stmt* stmt = meta_get_stmt(db, &db->stmt_upsert_artist,
-        "INSERT OR REPLACE INTO artists(artist_mbid, name, sort_name, artist_type)"
+        "INSERT OR REPLACE INTO %sartists(artist_mbid, name, sort_name, artist_type)"
         " VALUES(?,?,?,?)");
     if (!stmt) return QUADRATURE_ERROR_INTERNAL;
 
@@ -342,7 +412,7 @@ quadrature_result_t db_meta_insert_recording_link(quadrature_meta_db_t* db,
         return QUADRATURE_ERROR_INVALID_PARAM;
 
     sqlite3_stmt* stmt = meta_get_stmt(db, &db->stmt_insert_recording_link,
-        "INSERT INTO recording_links"
+        "INSERT INTO %srecording_links"
         "(recording_mbid, artist_mbid, link_type_gid, entity0_credit, attributes)"
         " VALUES(?,?,?,?,?)");
     if (!stmt) return QUADRATURE_ERROR_INTERNAL;
@@ -371,7 +441,7 @@ quadrature_result_t db_meta_delete_recording_links(quadrature_meta_db_t* db,
     if (!db || !recording_mbid) return QUADRATURE_ERROR_INVALID_PARAM;
 
     sqlite3_stmt* stmt = meta_get_stmt(db, &db->stmt_delete_recording_links,
-        "DELETE FROM recording_links WHERE recording_mbid = ?");
+        "DELETE FROM %srecording_links WHERE recording_mbid = ?");
     if (!stmt) return QUADRATURE_ERROR_INTERNAL;
 
     sqlite3_bind_text(stmt, 1, recording_mbid, -1, SQLITE_STATIC);
@@ -524,7 +594,7 @@ quadrature_result_t db_meta_upsert_release(quadrature_meta_db_t* db,
     if (!db || !release_mbid) return QUADRATURE_ERROR_INVALID_PARAM;
 
     sqlite3_stmt* stmt = meta_get_stmt(db, &db->stmt_upsert_release,
-        "INSERT OR REPLACE INTO releases"
+        "INSERT OR REPLACE INTO %sreleases"
         "(release_mbid, release_date, release_type, label, catalog_number, barcode, genres)"
         " VALUES(?,?,?,?,?,?,?)");
     if (!stmt) return QUADRATURE_ERROR_INTERNAL;

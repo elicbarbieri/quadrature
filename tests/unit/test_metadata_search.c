@@ -36,20 +36,22 @@
  * (build_credit_track_set in src/ui/search/search_view.c) and assert
  * dedup against the meta DB's recording_mbid / release_group_mbid axes.
  *
- * The test points the indexer at the user's real ~/Music and
- * ~/elicb_music paths so REAL Picard tags + REAL audio drive the
- * resolver. A temporary data dir is used for output so the user's live
- * DBs are never touched.
+ * Story 1 (tagged) synthesizes a tiny FLAC fixture in /tmp with real RAM
+ * MBIDs baked as Picard tags — no personal-library dependency.
+ *
+ * Stories 2 and 3 still depend on real tag-less audio (fingerprint → AcoustID
+ * only matches real recordings). On machines without the path below, those
+ * stories will fail the setup cr_assert.
  *
  * Required env vars (test skips if absent):
- *   MB_PG_PASSWORD       — MusicBrainz PostgreSQL password
- *   MB_SOLR_URL          — SOLR endpoint
+ *   MB_PG_PASSWORD       — MusicBrainz PostgreSQL password (all stories)
+ *   MB_SOLR_URL          — SOLR endpoint (all stories)
  *   ACOUSTID_PG_PASSWORD — AcoustID PostgreSQL password (Story 2 + 3)
  *   ACOUSTID_INDEX_URL   — acoustid-index HTTP endpoint (Story 2 + 3)
  *
- * Required filesystem:
- *   ~/Music/Daft Punk/Random Access Memories/        (must exist, Picard-tagged)
- *   ~/elicb_music/Daft Punk/Random Access Memories (2013)/   (must exist, tag-less)
+ * Required filesystem (Stories 2 + 3 only):
+ *   ~/elicb_music/Daft Punk/Random Access Memories (2013)/  (tag-less FLACs
+ *     that fingerprint-match against the local AcoustID index)
  *
  * Run:
  *   source .env && cd build && ninja test_metadata_search
@@ -58,6 +60,7 @@
 
 #include <criterion/criterion.h>
 #include <criterion/hooks.h>
+#include "test_helpers.h"
 #include "quadrature/indexer.h"
 #include "quadrature/database.h"
 #include "quadrature/library.h"
@@ -93,10 +96,9 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
 #define MBID_PHARRELL_WILLIAMS      "149f91ef-1287-46da-9a8e-87fee02f1471"
 #define EXPECTED_PHARRELL_RAM_RECORDINGS  2
 
-/* Source paths in the user's home directory — fixtures symlink into these
- * so the indexer scans real audio + real Picard tags. */
-#define SRC_TAGGED_RAM_PARENT   "/home/elicb/Music/Daft Punk"
-#define SRC_TAGGED_RAM_FOLDER   "Random Access Memories"
+/* Source path in the user's home directory — Stories 2 + 3 reflink-copy this
+ * tag-less RAM into the fixture root so Chromaprint can fingerprint against
+ * the local AcoustID index. */
 #define SRC_TAGLESS_RAM_PARENT  "/home/elicb/elicb_music/Daft Punk"
 #define SRC_TAGLESS_RAM_FOLDER  "Random Access Memories (2013)"
 
@@ -144,9 +146,14 @@ static const char *acoustid_index_url(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Filesystem helpers — fixtures symlink into the user's real library so
- * REAL audio + REAL Picard tags drive the indexer. Temp data dir keeps
- * the user's live DBs untouched.
+ * Fixture helpers — Story 1 synthesizes tagged FLACs from real RAM MBIDs
+ * (hermetic, no audio required). Stories 2 + 3 reflink-copy the user's real
+ * tag-less RAM so Chromaprint/AcoustID has a real signal to match against.
+ *
+ * Reflink (cp --reflink=auto) uses CoW on btrfs/xfs for near-zero-cost
+ * cloning; falls back to full copy on other filesystems. Symlinks can't be
+ * used — the indexer deliberately skips them (src/indexer/indexer.c:108) to
+ * prevent cycles.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void run_shell(const char *fmt, ...) {
@@ -166,20 +173,78 @@ static bool path_exists(const char *path) {
     return stat(path, &st) == 0;
 }
 
-/* Symlink the user's real RAM album folder under a fresh fixture root.
- * Layout mirrors prod: <fixture_root>/<artist>/<album>/<files...>. */
-static void link_ram_fixture(const char *fixture_root,
+/* Reflink-copy the user's real RAM album folder under a fresh fixture root.
+ * Layout mirrors prod: <fixture_root>/<artist>/<album>/<files...>. Used by
+ * Stories 2 + 3, which need real audio for Chromaprint fingerprinting. */
+static void copy_ram_fixture(const char *fixture_root,
                              const char *src_parent,
                              const char *src_album) {
-    char artist_dir[512], src_full[1024];
+    char artist_dir[512], src_full[1024], dst_album[1024];
     snprintf(artist_dir, sizeof(artist_dir), "%s/Daft Punk", fixture_root);
     snprintf(src_full,   sizeof(src_full),   "%s/%s", src_parent, src_album);
+    snprintf(dst_album,  sizeof(dst_album),  "%s/%s", artist_dir, src_album);
     cr_assert(path_exists(src_full),
         "Source album not found on disk: %s\n"
-        "This test reads the user's real library; that path must exist.",
-        src_full);
+        "Stories 2 + 3 require real audio for AcoustID fingerprinting.\n"
+        "Expected album at: %s",
+        src_full, src_full);
     mkdirs(artist_dir);
-    run_shell("ln -sfn '%s' '%s/%s'", src_full, artist_dir, src_album);
+    /* --reflink=auto: CoW clone on btrfs/xfs, full copy otherwise.
+     * Preserves mtime/xattrs so Phase 1 delta detection and tag reads match prod. */
+    run_shell("cp -a --reflink=auto '%s' '%s'", src_full, dst_album);
+}
+
+/* Synthesize a tagged RAM fixture — silent FLACs with real Picard tags.
+ * No audio data in repo, no user-library dependency. Real MBIDs mean
+ * Phase 6 resolves the release straight from the tag (no fingerprint /
+ * Solr search needed), and meta.sqlite gets populated from the live MB PG
+ * just like it would for the real album. */
+typedef struct { int disc, num, dur; const char *title; } ram_track_t;
+static const ram_track_t RAM_TRACKS[] = {
+    { 1,  1, 274, "Give Life Back to Music" },
+    { 1,  2, 321, "The Game of Love" },
+    { 1,  3, 548, "Giorgio by Moroder" },
+    { 1,  4, 228, "Within" },
+    { 1,  5, 337, "Instant Crush" },
+    { 1,  6, 353, "Lose Yourself to Dance" },
+    { 1,  7, 496, "Touch" },
+    { 1,  8, 367, "Get Lucky" },
+    { 1,  9, 290, "Beyond" },
+    { 1, 10, 341, "Motherboard" },
+    { 1, 11, 279, "Fragments of Time" },
+    { 1, 12, 251, "Doin' It Right" },
+    { 1, 13, 383, "Contact" },
+};
+
+static void build_ram_tagged_fixture(const char *fixture_root) {
+    char album_dir[1024];
+    snprintf(album_dir, sizeof(album_dir),
+             "%s/Daft Punk/Random Access Memories", fixture_root);
+    mkdirs(album_dir);
+
+    for (size_t i = 0; i < sizeof(RAM_TRACKS) / sizeof(RAM_TRACKS[0]); i++) {
+        const ram_track_t *t = &RAM_TRACKS[i];
+        char fpath[1536], title_tag[256], track_tag[32], disc_tag[32];
+        snprintf(fpath, sizeof(fpath), "%s/%d-%02d %s.flac",
+                 album_dir, t->disc, t->num, t->title);
+        snprintf(title_tag, sizeof(title_tag), "title=%s", t->title);
+        snprintf(track_tag, sizeof(track_tag), "track=%d", t->num);
+        snprintf(disc_tag,  sizeof(disc_tag),  "disc=%d",  t->disc);
+        const char *tags[] = {
+            title_tag, track_tag, disc_tag,
+            "artist=Daft Punk",
+            "album=Random Access Memories",
+            "album_artist=Daft Punk",
+            "date=2013",
+            "MUSICBRAINZ_ALBUMID="          MBID_RAM_RELEASE_PICARD,
+            "MUSICBRAINZ_RELEASEGROUPID="   MBID_RAM_RELEASE_GROUP,
+            "MUSICBRAINZ_ARTISTID="         MBID_DAFT_PUNK_ARTIST,
+            "MUSICBRAINZ_ALBUMARTISTID="    MBID_DAFT_PUNK_ARTIST,
+            NULL
+        };
+        cr_assert_eq(create_flac(fpath, tags, t->dur), 0,
+            "failed to synthesize %s", fpath);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -319,6 +384,7 @@ static void story_paths_init(int lib_count) {
 
 static void story_teardown(void) {
     if (cache) { library_cache_destroy(cache); cache = NULL; }
+    if (getenv("QUAD_KEEP_FIXTURES")) return;
     for (int i = 0; i < MAX_LIBS; i++) {
         if (lib_root[i][0]) rm_rf(lib_root[i]);
         if (lib_data[i][0]) rm_rf(lib_data[i]);
@@ -326,86 +392,22 @@ static void story_teardown(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Credit-search helper — duplicates `build_credit_track_set` in
- * src/ui/search/search_view.c (currently `static` inside the UI module).
- * Same primitives, same dedup pattern as production.
+ * Credit-search helper — thin wrapper around library_credit_search() so the
+ * test matches production's exact dedup semantics. Any dedup change made for
+ * the UI flows through here automatically.
  *
- * TODO(refactor): extract the prod symbol into a non-UI module so this
- * test can call it directly and any dedup fix lands in exactly one place.
+ * The caller owns the returned GArrays (test keeps ownership symmetry with
+ * the old local impl). The rest of library_credit_search_result_t is
+ * discarded for brevity — we're only asserting on counts / MBIDs.
  * ═══════════════════════════════════════════════════════════════════════════ */
 static void run_credit_search(library_cache_t *c, const char *credit_query,
                               GArray **out_track_ids, GArray **out_album_ids) {
-    GHashTable *track_set = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                                   g_free, NULL);
-
-    int lib_count = library_cache_get_library_count(c);
-    for (int li = 0; li < lib_count; li++) {
-        int bi = library_cache_get_bitmap_index(c, li);
-        if (!library_cache_get_available(c, bi)) continue;
-        library_cache_dbs_t dbs = library_cache_get_dbs(c, bi);
-        if (!dbs.meta || !dbs.db) continue;
-
-        db_meta_artist_search_result_t *artists = NULL;
-        size_t artist_count = 0;
-        if (db_meta_search_artists(dbs.meta, credit_query, 50,
-                                    &artists, &artist_count) != QUADRATURE_OK)
-            continue;
-
-        for (size_t ai = 0; ai < artist_count; ai++) {
-            db_meta_artist_credit_t *credits = NULL;
-            size_t credit_count = 0;
-            if (db_meta_get_credits_by_artist(dbs.meta, artists[ai].artist_mbid,
-                                               NULL, &credits, &credit_count)
-                != QUADRATURE_OK) continue;
-
-            if (credit_count > 0) {
-                db_track_position_t *pos = g_new0(db_track_position_t, credit_count);
-                int64_t *tids = g_new0(int64_t, credit_count);
-                for (size_t ci = 0; ci < credit_count; ci++) {
-                    pos[ci].release_mbid = credits[ci].release_mbid;
-                    pos[ci].disc_num     = credits[ci].disc_num;
-                    pos[ci].track_num    = credits[ci].track_num;
-                }
-                db_resolve_track_positions_batch(dbs.db, pos, credit_count, tids);
-                for (size_t ci = 0; ci < credit_count; ci++) {
-                    if (tids[ci] == 0) continue;
-                    int64_t gid = LIBRARY_MAKE_GLOBAL_ID(bi, tids[ci]);
-                    int64_t *key = g_new(int64_t, 1); *key = gid;
-                    if (!g_hash_table_lookup(track_set, key))
-                        g_hash_table_insert(track_set, key, GINT_TO_POINTER(1));
-                    else
-                        g_free(key);
-                }
-                g_free(pos); g_free(tids);
-            }
-            db_meta_artist_credits_free(credits, credit_count);
-        }
-        db_meta_artist_search_results_free(artists, artist_count);
-    }
-
-    /* Mirror apply_search_with_credits's album derivation: dedup by
-     * raw `t->album_id` of resolved tracks. (Suspected source of the bug.) */
-    GArray *tracks = g_array_new(FALSE, FALSE, sizeof(int64_t));
-    GArray *albums = g_array_new(FALSE, FALSE, sizeof(int64_t));
-    GHashTable *seen_albums = g_hash_table_new(g_int64_hash, g_int64_equal);
-
-    GHashTableIter it; gpointer k;
-    g_hash_table_iter_init(&it, track_set);
-    while (g_hash_table_iter_next(&it, &k, NULL)) {
-        int64_t tid = *(int64_t *)k;
-        g_array_append_val(tracks, tid);
-        const library_track_info_t *t = library_cache_get_track(c, tid);
-        if (!t) continue;
-        if (!g_hash_table_contains(seen_albums, &t->album_id)) {
-            g_hash_table_add(seen_albums, (gpointer)&t->album_id);
-            g_array_append_val(albums, t->album_id);
-        }
-    }
-    g_hash_table_unref(seen_albums);
-    g_hash_table_unref(track_set);
-
-    *out_track_ids = tracks;
-    *out_album_ids = albums;
+    library_credit_search_result_t *r =
+        library_credit_search(c, credit_query, NULL, LIBRARY_MASK_ALL);
+    /* Steal the GArrays — swap NULLs in so result_free doesn't double-unref. */
+    *out_track_ids = r->track_ids; r->track_ids = NULL;
+    *out_album_ids = r->album_ids; r->album_ids = NULL;
+    library_credit_search_result_free(r);
 }
 
 /* ── Dedup-axis helpers ───────────────────────────────────────────────── */
@@ -483,7 +485,7 @@ static void require_acoustid_env(void) {
 static void story1_setup(void) {
     require_mb_env();
     story_paths_init(1);
-    link_ram_fixture(lib_root[0], SRC_TAGGED_RAM_PARENT, SRC_TAGGED_RAM_FOLDER);
+    build_ram_tagged_fixture(lib_root[0]);
     setup_prod_cache(1);
     run_prod_indexers(1, false);
 }
@@ -526,7 +528,7 @@ static void story2_setup(void) {
     require_mb_env();
     require_acoustid_env();
     story_paths_init(1);
-    link_ram_fixture(lib_root[0], SRC_TAGLESS_RAM_PARENT, SRC_TAGLESS_RAM_FOLDER);
+    copy_ram_fixture(lib_root[0], SRC_TAGLESS_RAM_PARENT, SRC_TAGLESS_RAM_FOLDER);
     setup_prod_cache(1);
     run_prod_indexers(1, true);
 }
@@ -576,8 +578,8 @@ static void story3_setup(void) {
     require_mb_env();
     require_acoustid_env();
     story_paths_init(2);
-    link_ram_fixture(lib_root[0], SRC_TAGGED_RAM_PARENT,  SRC_TAGGED_RAM_FOLDER);
-    link_ram_fixture(lib_root[1], SRC_TAGLESS_RAM_PARENT, SRC_TAGLESS_RAM_FOLDER);
+    build_ram_tagged_fixture(lib_root[0]);
+    copy_ram_fixture(lib_root[1], SRC_TAGLESS_RAM_PARENT, SRC_TAGLESS_RAM_FOLDER);
     setup_prod_cache(2);
     run_prod_indexers(2, true);
 }

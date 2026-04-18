@@ -8,6 +8,7 @@
 #define G_LOG_DOMAIN "quadrature"
 
 #include "../internal.h"
+#include "quadrature/library_search.h"
 #include <string.h>
 
 static void clear_search_results(GtkWidget *list_box) {
@@ -23,7 +24,8 @@ static void clear_search_results(GtkWidget *list_box) {
  * Using the header_func API ensures GTK manages header widget clip/layout correctly. */
 static void search_section_header_func(GtkListBoxRow *row,
                                         GtkListBoxRow *before,
-                                        gpointer       data G_GNUC_UNUSED) {
+                                        gpointer       data) {
+    (void)data;
     /* Use gtk_list_box_row_get_child() — NOT get_first_child() — because
      * set_header() inserts the header before the child in the widget tree,
      * making get_first_child() return the header widget on re-invocation. */
@@ -105,24 +107,6 @@ static gboolean metadata_search_active(UiWindow *w) {
     return filter_bar_get_search_mode(&w->search_filter_bar) == FILTER_SEARCH_METADATA;
 }
 
-/* Credit info stored per track in the credit search hash table */
-typedef struct {
-    GPtrArray *roles;     /* unique role strings (owned), e.g. "Guitar", "Producer" */
-    GHashTable *role_set; /* for dedup */
-    char *artist_name;    /* The matched credit artist name */
-    char *artist_mbid;    /* MusicBrainz ID for resolving library artist_id */
-} CreditTrackInfo;
-
-static void credit_track_info_free(gpointer data) {
-    CreditTrackInfo *info = data;
-    if (!info) return;
-    g_ptr_array_unref(info->roles);
-    g_hash_table_unref(info->role_set);
-    g_free(info->artist_name);
-    g_free(info->artist_mbid);
-    g_free(info);
-}
-
 /* ── Async Credit Search (GTask-based) ─────────────────────────────────── */
 
 /* Input parameters for background credit search (copied from UI state) */
@@ -130,13 +114,8 @@ typedef struct {
     library_cache_t *cache;
     char *credit_text;
     char *role_gid;       /* first selected role GID, or NULL */
+    uint32_t library_mask;
 } CreditSearchInput;
-
-/* Output from background credit search */
-typedef struct {
-    GHashTable *track_set;      /* int64_t* → CreditTrackInfo* */
-    GPtrArray  *meta_artists;   /* "mbid\tname\ttype" packed strings */
-} CreditSearchResult;
 
 static void credit_search_input_free(CreditSearchInput *in) {
     if (!in) return;
@@ -145,167 +124,7 @@ static void credit_search_input_free(CreditSearchInput *in) {
     g_free(in);
 }
 
-static void credit_search_result_free(CreditSearchResult *r) {
-    if (!r) return;
-    if (r->track_set) g_hash_table_unref(r->track_set);
-    if (r->meta_artists) g_ptr_array_unref(r->meta_artists);
-    g_free(r);
-}
-
-/**
- * Build map of global track_ids → CreditTrackInfo matched by credit search.
- * Thread-safe: accesses only library_cache and DB handles (no GTK widgets).
- *
- * For each library: search metadata artists matching credit text, then for each
- * matching artist get their credits (optionally filtered by role), batch-resolve
- * via positional bridge to track_ids.
- *
- * Returns a CreditSearchResult (caller must free with credit_search_result_free).
- */
-static CreditSearchResult *build_credit_track_set(library_cache_t *cache,
-                                                    const char *credit_text,
-                                                    const char *role_gid) {
-    CreditSearchResult *result = g_new0(CreditSearchResult, 1);
-    result->track_set = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                               g_free, credit_track_info_free);
-    result->meta_artists = g_ptr_array_new_with_free_func(g_free);
-
-    gboolean has_credit_text = credit_text && *credit_text;
-
-    /* Deduplicate meta artists across libraries by MBID */
-    GHashTable *seen_mbids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-
-    int lib_count = library_cache_get_library_count(cache);
-    for (int li = 0; li < lib_count; li++) {
-        int bi = library_cache_get_bitmap_index(cache, li);
-        if (!library_cache_get_available(cache, bi)) continue;
-        library_cache_dbs_t dbs = library_cache_get_dbs(cache, bi);
-        if (!dbs.meta) continue;
-
-        /* Find matching artists in this library's metadata DB */
-        GPtrArray *artist_mbids_to_query = g_ptr_array_new_with_free_func(g_free);
-        /* MBID → artist name mapping for CreditTrackInfo population */
-        GHashTable *mbid_to_name = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-
-        if (has_credit_text) {
-            db_meta_artist_search_result_t *artists = NULL;
-            size_t artist_count = 0;
-            quadrature_result_t res = db_meta_search_artists(
-                dbs.meta, credit_text, 50, &artists, &artist_count);
-            if (res == QUADRATURE_OK) {
-                for (size_t i = 0; i < artist_count; i++) {
-                    g_ptr_array_add(artist_mbids_to_query,
-                                    g_strdup(artists[i].artist_mbid));
-                    g_hash_table_insert(mbid_to_name,
-                                        g_strdup(artists[i].artist_mbid),
-                                        g_strdup(artists[i].name ? artists[i].name : ""));
-                    /* Collect unique meta artist info for display */
-                    if (!g_hash_table_contains(seen_mbids, artists[i].artist_mbid)) {
-                        g_hash_table_add(seen_mbids, g_strdup(artists[i].artist_mbid));
-                        /* Store as "mbid\tname\ttype" packed string */
-                        g_ptr_array_add(result->meta_artists,
-                            g_strdup_printf("%s\t%s\t%s",
-                                artists[i].artist_mbid,
-                                artists[i].name ? artists[i].name : "",
-                                artists[i].artist_type ? artists[i].artist_type : ""));
-                    }
-                }
-                db_meta_artist_search_results_free(artists, artist_count);
-            }
-        } else {
-            /* Role filter only (no credit text) — we can't enumerate all artists.
-             * Role-only filtering without a credit name is a no-op for track matching. */
-            g_ptr_array_unref(artist_mbids_to_query);
-            g_hash_table_unref(mbid_to_name);
-            continue;
-        }
-
-        if (artist_mbids_to_query->len == 0) {
-            g_ptr_array_unref(artist_mbids_to_query);
-            g_hash_table_unref(mbid_to_name);
-            continue;
-        }
-
-        /* For each matched artist, get their credits and batch-resolve to track_ids */
-        gboolean have_lib_db = (dbs.db != NULL);
-
-        for (guint ai = 0; ai < artist_mbids_to_query->len; ai++) {
-            const char *artist_mbid = g_ptr_array_index(artist_mbids_to_query, ai);
-
-            db_meta_artist_credit_t *credits = NULL;
-            size_t credit_count = 0;
-            quadrature_result_t res = db_meta_get_credits_by_artist(
-                dbs.meta, artist_mbid, role_gid, &credits, &credit_count);
-
-            if (res == QUADRATURE_OK && credit_count > 0 && have_lib_db) {
-                /* Batch-resolve all credit positions at once */
-                db_track_position_t *positions = g_new0(db_track_position_t, credit_count);
-                int64_t *track_ids = g_new0(int64_t, credit_count);
-
-                for (size_t ci = 0; ci < credit_count; ci++) {
-                    positions[ci].release_mbid = credits[ci].release_mbid;
-                    positions[ci].disc_num = credits[ci].disc_num;
-                    positions[ci].track_num = credits[ci].track_num;
-                }
-
-                db_resolve_track_positions_batch(dbs.db, positions, credit_count, track_ids);
-
-                const char *artist_name = g_hash_table_lookup(mbid_to_name, artist_mbid);
-                for (size_t ci = 0; ci < credit_count; ci++) {
-                    if (track_ids[ci] == 0) continue;
-
-                    int64_t global_id = LIBRARY_MAKE_GLOBAL_ID(bi, track_ids[ci]);
-                    db_meta_artist_credit_t *c = &credits[ci];
-
-                    /* Format role for this credit */
-                    char *role = NULL;
-                    if (c->attributes && c->attributes[0]) {
-                        role = g_strdup(c->attributes);
-                        role[0] = g_ascii_toupper(role[0]);
-                    } else {
-                        role = g_strdup(c->link_type_name ? c->link_type_name : "Credit");
-                        if (role[0])
-                            role[0] = g_ascii_toupper(role[0]);
-                    }
-
-                    /* Accumulate roles per track */
-                    int64_t *lookup_key = g_new(int64_t, 1);
-                    *lookup_key = global_id;
-                    CreditTrackInfo *info = g_hash_table_lookup(result->track_set, lookup_key);
-                    if (!info) {
-                        info = g_new0(CreditTrackInfo, 1);
-                        info->roles = g_ptr_array_new_with_free_func(g_free);
-                        info->role_set = g_hash_table_new(g_str_hash, g_str_equal);
-                        info->artist_name = g_strdup(artist_name ? artist_name : "");
-                        info->artist_mbid = g_strdup(artist_mbid);
-                        g_hash_table_insert(result->track_set, lookup_key, info);
-                    } else {
-                        g_free(lookup_key);
-                    }
-                    /* Add role if unique — roles array owns, role_set borrows */
-                    if (!g_hash_table_contains(info->role_set, role)) {
-                        char *owned = g_strdup(role);
-                        g_ptr_array_add(info->roles, owned);
-                        g_hash_table_add(info->role_set, owned);
-                    }
-                    g_free(role);
-                }
-
-                g_free(positions);
-                g_free(track_ids);
-            }
-            db_meta_artist_credits_free(credits, credit_count);
-        }
-
-        g_ptr_array_unref(artist_mbids_to_query);
-        g_hash_table_unref(mbid_to_name);
-    }
-
-    g_hash_table_unref(seen_mbids);
-    return result;
-}
-
-/* GTask worker thread: runs the credit search off the main thread */
+/* GTask worker thread: runs the credit search off the main thread. */
 static void credit_search_thread(GTask *task, gpointer src,
                                   gpointer data, GCancellable *cancel) {
     (void)src;
@@ -313,15 +132,16 @@ static void credit_search_thread(GTask *task, gpointer src,
 
     if (g_cancellable_is_cancelled(cancel)) return;
 
-    CreditSearchResult *result = build_credit_track_set(
-        in->cache, in->credit_text, in->role_gid);
+    library_credit_search_result_t *result = library_credit_search(
+        in->cache, in->credit_text, in->role_gid, in->library_mask);
 
     if (g_cancellable_is_cancelled(cancel)) {
-        credit_search_result_free(result);
+        library_credit_search_result_free(result);
         return;
     }
 
-    g_task_return_pointer(task, result, (GDestroyNotify)credit_search_result_free);
+    g_task_return_pointer(task, result,
+        (GDestroyNotify)library_credit_search_result_free);
 }
 
 /* ── Display helpers for search results ── */
@@ -390,7 +210,7 @@ static void populate_search_tracks(UiWindow *w, GPtrArray *tracks,
         const UiTrackCreditInfo *credit = NULL;
         UiTrackCreditInfo credit_data;
         if (credit_info) {
-            CreditTrackInfo *ci = g_hash_table_lookup(credit_info, &track->track_id);
+            library_credit_info_t *ci = g_hash_table_lookup(credit_info, &track->track_id);
             if (ci) {
                 /* Try to resolve MB artist to a library artist_id for navigation */
                 int64_t resolved_artist_id = 0;
@@ -410,8 +230,12 @@ static void populate_search_tracks(UiWindow *w, GPtrArray *tracks,
                         }
                     }
                 }
-                /* Build NULL-terminated roles array */
-                g_ptr_array_add(ci->roles, NULL);  /* sentinel */
+                /* Build NULL-terminated roles array — append sentinel once per row.
+                 * Not idempotent across repeated reads of the same ci; callers
+                 * treat roles as consumed. */
+                if (ci->roles->len == 0 ||
+                        g_ptr_array_index(ci->roles, ci->roles->len - 1) != NULL)
+                    g_ptr_array_add(ci->roles, NULL);
                 credit_data = (UiTrackCreditInfo){
                     .roles = (const char *const *)ci->roles->pdata,
                     .role_count = ci->roles->len - 1,  /* exclude sentinel */
@@ -441,14 +265,13 @@ static void populate_search_tracks(UiWindow *w, GPtrArray *tracks,
 /**
  * Apply credit search results to the UI (main thread only).
  *
- * When metadata mode is active, the search text drives ONLY the credit search.
- * Credit-matched tracks are displayed directly — no intersection with
- * library_cache_search, which would filter out session musicians who don't
- * appear as main library entities.
+ * The result's track_ids / album_ids are already deduped cross-library by
+ * library_credit_search (by RGID|disc|track for tracks, RGID for albums);
+ * this function just resolves them to cache-owned info pointers for display.
  */
-static void apply_search_with_credits(UiWindow *w, GHashTable *credit_tracks,
-                                       GPtrArray *meta_artists G_GNUC_UNUSED) {
-    if (g_hash_table_size(credit_tracks) == 0) {
+static void apply_search_with_credits(UiWindow *w,
+                                       library_credit_search_result_t *result) {
+    if (!result || result->track_ids->len == 0) {
         clear_search_results(w->search_results_list);
         gtk_widget_set_visible(w->search_results_list, FALSE);
         gtk_widget_set_visible(w->search_empty_label, TRUE);
@@ -456,48 +279,12 @@ static void apply_search_with_credits(UiWindow *w, GHashTable *credit_tracks,
         return;
     }
 
-    /* Resolve credit track_ids to library_track_info_t for display.
-     *
-     * Two physical libraries can both contain the same recording (e.g. CD
-     * rip + vinyl rip of the same release; or Music + elicb_music both
-     * holding RAM). They produce different global track ids — but the
-     * recording MBID is identical, so collapsing by (release_group_mbid,
-     * disc_num, track_num) gives one row per unique recording.
-     *
-     * Same idea for albums: dedup by release_group_mbid (the cross-edition
-     * identifier the rest of the cache already uses) instead of raw
-     * global album_id. */
     GPtrArray *tracks = g_ptr_array_new();
-    GHashTable *seen_tracks = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-
-    GHashTableIter iter;
-    gpointer key;
-    g_hash_table_iter_init(&iter, credit_tracks);
-    while (g_hash_table_iter_next(&iter, &key, NULL)) {
-        int64_t track_id = *(int64_t *)key;
-        const library_track_info_t *info = library_cache_get_track(
-            w->library_cache, track_id);
-        if (!info) continue;
-
-        /* Build dedup key (release_group_mbid|disc|track). Albums without
-         * an RGID can't be cross-library-merged anyway — fall back to the
-         * raw album_id so each still appears at most once. */
-        const library_album_info_t *a =
-            library_cache_get_album(w->library_cache, info->album_id, w->library_mask);
-        char *dedup_key = (a && a->musicbrainz_release_group_id && a->musicbrainz_release_group_id[0])
-            ? g_strdup_printf("%s|%d|%d",
-                              a->musicbrainz_release_group_id,
-                              info->disc_num, info->track_num)
-            : g_strdup_printf("@%" G_GINT64_FORMAT, info->album_id);
-
-        if (g_hash_table_contains(seen_tracks, dedup_key)) {
-            g_free(dedup_key);
-            continue;
-        }
-        g_hash_table_add(seen_tracks, dedup_key);  /* takes ownership */
-        g_ptr_array_add(tracks, (gpointer)info);
+    for (guint i = 0; i < result->track_ids->len; i++) {
+        int64_t tid = g_array_index(result->track_ids, int64_t, i);
+        const library_track_info_t *info = library_cache_get_track(w->library_cache, tid);
+        if (info) g_ptr_array_add(tracks, (gpointer)info);
     }
-    g_hash_table_unref(seen_tracks);
 
     if (tracks->len == 0) {
         g_ptr_array_unref(tracks);
@@ -508,37 +295,20 @@ static void apply_search_with_credits(UiWindow *w, GHashTable *credit_tracks,
         return;
     }
 
-    /* Derive albums from credit-matched tracks for album section.
-     * Dedup by release_group_mbid (collapses RGID twins across editions
-     * AND across libraries). Albums without an RGID dedup by album_id. */
-    GHashTable *seen_albums = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     GPtrArray *albums = g_ptr_array_new();
-    for (guint i = 0; i < tracks->len; i++) {
-        const library_track_info_t *t = g_ptr_array_index(tracks, i);
-        const library_album_info_t *album =
-            library_cache_get_album(w->library_cache, t->album_id, w->library_mask);
-        if (!album) continue;
-
-        char *album_key = (album->musicbrainz_release_group_id
-                           && album->musicbrainz_release_group_id[0])
-            ? g_strdup(album->musicbrainz_release_group_id)
-            : g_strdup_printf("@%" G_GINT64_FORMAT, t->album_id);
-
-        if (g_hash_table_contains(seen_albums, album_key)) {
-            g_free(album_key);
-            continue;
-        }
-        g_hash_table_add(seen_albums, album_key);  /* takes ownership */
-        g_ptr_array_add(albums, (gpointer)album);
+    for (guint i = 0; i < result->album_ids->len; i++) {
+        int64_t aid = g_array_index(result->album_ids, int64_t, i);
+        const library_album_info_t *a =
+            library_cache_get_album(w->library_cache, aid, w->library_mask);
+        if (a) g_ptr_array_add(albums, (gpointer)a);
     }
-    g_hash_table_unref(seen_albums);
 
     gtk_widget_set_visible(w->search_empty_label, FALSE);
     gtk_widget_set_visible(w->search_results_list, TRUE);
     clear_search_results(w->search_results_list);
 
     populate_search_albums(w, albums);
-    populate_search_tracks(w, tracks, credit_tracks);
+    populate_search_tracks(w, tracks, result->credit_info);
 
     g_ptr_array_unref(albums);
     g_ptr_array_unref(tracks);
@@ -549,7 +319,7 @@ static void on_credit_search_done(GObject *src, GAsyncResult *res, gpointer data
     (void)src;
     UiWindow *w = UI_WINDOW(data);
     GError *error = NULL;
-    CreditSearchResult *result = g_task_propagate_pointer(G_TASK(res), &error);
+    library_credit_search_result_t *result = g_task_propagate_pointer(G_TASK(res), &error);
 
     if (!result) {
         /* Cancelled or failed — don't touch UI if cancelled (superseded by newer search) */
@@ -559,8 +329,8 @@ static void on_credit_search_done(GObject *src, GAsyncResult *res, gpointer data
         return;
     }
 
-    apply_search_with_credits(w, result->track_set, result->meta_artists);
-    credit_search_result_free(result);
+    apply_search_with_credits(w, result);
+    library_credit_search_result_free(result);
 }
 
 void do_search(UiWindow *w) {
@@ -594,6 +364,7 @@ void do_search(UiWindow *w) {
         input->cache = w->library_cache;
         input->credit_text = g_strdup(query);
         input->role_gid = (role_gids && role_count > 0) ? g_strdup(role_gids[0]) : NULL;
+        input->library_mask = w->library_mask;
         g_free(role_gids);
 
         /* Show searching indicator */

@@ -1539,7 +1539,7 @@ int64_t db_get_max_id(quadrature_db_t* db, const char* table_name) {
     return max_id;
 }
 
-quadrature_result_t db_get_artist_ids_filtered(quadrature_db_t* db,
+static quadrature_result_t get_artist_ids(quadrature_db_t* db,
     const db_id_query_opts_t* opts, int64_t** out_ids, size_t* out_count) {
     if (!db || !opts || !out_ids || !out_count) return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -1631,7 +1631,7 @@ quadrature_result_t db_get_artist_ids_filtered(quadrature_db_t* db,
     return QUADRATURE_OK;
 }
 
-quadrature_result_t db_get_album_ids_filtered(quadrature_db_t* db,
+static quadrature_result_t get_album_ids(quadrature_db_t* db,
     const db_id_query_opts_t* opts, int64_t** out_ids, size_t* out_count) {
     if (!db || !opts || !out_ids || !out_count) return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -1708,15 +1708,18 @@ quadrature_result_t db_get_album_ids_filtered(quadrature_db_t* db,
     return QUADRATURE_OK;
 }
 
-quadrature_result_t db_search_track_ids(quadrature_db_t* db,
-    const char* query, const db_search_opts_t* opts, size_t limit,
-    int64_t** out_ids, size_t* out_count) {
+static quadrature_result_t get_track_ids(quadrature_db_t* db,
+    const db_id_query_opts_t* opts, int64_t** out_ids, size_t* out_count) {
+    const char *query = opts ? opts->search_text : NULL;
     if (!db || !query || !out_ids || !out_count) return QUADRATURE_ERROR_INVALID_PARAM;
 
     *out_ids = NULL;
     *out_count = 0;
 
     if (!query[0]) return QUADRATURE_OK;
+
+    const db_search_opts_t *filters = opts->filters;
+    size_t limit = opts->limit;
 
     char* q = build_fts_query(query);
     if (!q) return QUADRATURE_OK;
@@ -1726,17 +1729,17 @@ quadrature_result_t db_search_track_ids(quadrature_db_t* db,
         " JOIN tracks t ON f.rowid = t.id"
         " WHERE tracks_fts MATCH ?");
 
-    if (opts && opts->genre_count > 0) {
+    if (filters && filters->genre_count > 0) {
         g_string_append(sql_str, " AND (");
-        for (size_t gi = 0; gi < opts->genre_count; gi++) {
+        for (size_t gi = 0; gi < filters->genre_count; gi++) {
             if (gi > 0) g_string_append(sql_str, " OR ");
             g_string_append(sql_str, "';' || t.genre || ';' LIKE '%;' || ? || ';%'");
         }
         g_string_append_c(sql_str, ')');
     }
-    if (opts && opts->year_mask) {
+    if (filters && filters->year_mask) {
         g_string_append(sql_str, " AND (");
-        sql_append_year_or(sql_str, opts->year_mask, "t.year");
+        sql_append_year_or(sql_str, filters->year_mask, "t.year");
         g_string_append_c(sql_str, ')');
     }
     // rank uses table-level BM25 weights: title=10x, artist=5x, album=1x
@@ -1756,7 +1759,7 @@ quadrature_result_t db_search_track_ids(quadrature_db_t* db,
 
     int pidx = 1;
     sqlite3_bind_text(stmt, pidx++, q, -1, SQLITE_STATIC);
-    if (opts) pidx = sql_bind_genres(stmt, pidx, opts);
+    if (filters) pidx = sql_bind_genres(stmt, pidx, filters);
     sqlite3_bind_int64(stmt, pidx, limit > 0 ? (int64_t)limit : 100);
 
     size_t cap = 64;
@@ -1777,6 +1780,18 @@ quadrature_result_t db_search_track_ids(quadrature_db_t* db,
     *out_ids = ids;
     *out_count = n;
     return QUADRATURE_OK;
+}
+
+quadrature_result_t db_get_entity_ids_filtered(quadrature_db_t* db,
+    db_entity_t entity,
+    const db_id_query_opts_t* opts,
+    int64_t** out_ids, size_t* out_count) {
+    switch (entity) {
+        case DB_ENTITY_ARTIST: return get_artist_ids(db, opts, out_ids, out_count);
+        case DB_ENTITY_ALBUM:  return get_album_ids(db, opts, out_ids, out_count);
+        case DB_ENTITY_TRACK:  return get_track_ids(db, opts, out_ids, out_count);
+    }
+    return QUADRATURE_ERROR_INVALID_PARAM;
 }
 
 // =============================================================================

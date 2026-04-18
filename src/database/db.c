@@ -1,89 +1,48 @@
 #include <glib.h>
 #include "internal.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 
 // =============================================================================
-// Migration System
+// Schema Initialization
 //
-// Each migration lives in src/database/migrations/NNN_name.c and exports a
-// function: quadrature_result_t db_migration_NNN_name(sqlite3* db).
-// PRAGMA user_version tracks how many migrations have been applied.
+// Fresh implementation: a single initial schema defined in
+// src/database/migrations/001_initial.c. When additional schema changes become
+// necessary, introduce a proper versioned migration runner here.
 // =============================================================================
 
-/* Migration functions — one per .c file in src/database/migrations/ */
 extern quadrature_result_t db_migration_001_initial(sqlite3* db);
 
-static quadrature_result_t (*const MIGRATIONS[])(sqlite3*) = {
-    db_migration_001_initial,
-    /* Future: db_migration_002_listening_history, db_migration_003_playlists, ... */
-};
-static const int MIGRATION_COUNT = (int)(sizeof(MIGRATIONS) / sizeof(MIGRATIONS[0]));
+#define DB_SCHEMA_VERSION 1
 
-static quadrature_result_t db_migrate(sqlite3* db) {
-    /* Read current schema version */
-    int current = 0;
+static quadrature_result_t db_init_schema(sqlite3* db) {
     sqlite3_stmt* stmt = NULL;
+    int current = 0;
     sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, NULL);
     if (sqlite3_step(stmt) == SQLITE_ROW)
         current = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
 
-    if (current == MIGRATION_COUNT)
+    if (current == DB_SCHEMA_VERSION)
         return QUADRATURE_OK;
-
-    if (current > MIGRATION_COUNT) {
-        g_critical("Database version %d is newer than app version %d — downgrade not supported",
-                   current, MIGRATION_COUNT);
+    if (current > DB_SCHEMA_VERSION) {
+        g_critical("Database schema v%d is newer than app v%d — downgrade not supported",
+                   current, DB_SCHEMA_VERSION);
         return QUADRATURE_ERROR_INTERNAL;
     }
 
-    /* Apply pending migrations in a single transaction */
-    sqlite3_exec(db, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
-
-    char* err = NULL;
-    int rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        g_critical("Migration BEGIN failed: %s", err);
-        sqlite3_free(err);
-        sqlite3_exec(db, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
-        return QUADRATURE_ERROR_INTERNAL;
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    quadrature_result_t res = db_migration_001_initial(db);
+    if (res != QUADRATURE_OK) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return res;
     }
-
-    for (int i = current; i < MIGRATION_COUNT; i++) {
-        quadrature_result_t res = MIGRATIONS[i](db);
-        if (res != QUADRATURE_OK) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            sqlite3_exec(db, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
-            return res;
-        }
-    }
-
-    char pragma[48];
-    snprintf(pragma, sizeof(pragma), "PRAGMA user_version = %d", MIGRATION_COUNT);
-    sqlite3_exec(db, pragma, NULL, NULL, NULL);
+    sqlite3_exec(db, "PRAGMA user_version = " G_STRINGIFY(DB_SCHEMA_VERSION), NULL, NULL, NULL);
     sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
-
-    if (current > 0)
-        g_info("Database migrated from v%d to v%d", current, MIGRATION_COUNT);
-
-    return QUADRATURE_OK;
-}
-
-static quadrature_result_t apply_pragmas(sqlite3* db) {
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA temp_store=MEMORY", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA cache_size=-64000", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA mmap_size=268435456", NULL, NULL, NULL);  // 256MB mmap for reads
-    sqlite3_exec(db, "PRAGMA wal_autocheckpoint=10000", NULL, NULL, NULL);  // defer checkpoint until ~40MB burst
-    sqlite3_busy_timeout(db, 5000);
-    sqlite3_exec(db, "PRAGMA optimize", NULL, NULL, NULL);  // update planner statistics
     return QUADRATURE_OK;
 }
 
@@ -105,148 +64,80 @@ void db_unlock(quadrature_db_t* db) {
 // Statement Management
 // =============================================================================
 
-void db_prepare_stmts(quadrature_db_t* db) {
-    if (db->insert_artist) return;  // Already prepared
+typedef struct {
+    size_t      offset;   /* offsetof(quadrature_db_t, stmt_field) */
+    const char *sql;
+} stmt_entry_t;
 
-    sqlite3_prepare_v2(db->db,
-        "INSERT OR IGNORE INTO artists(name) VALUES(?)",
-        -1, &db->insert_artist, NULL);
-    sqlite3_prepare_v2(db->db,
-        "SELECT id FROM artists WHERE name=? COLLATE NOCASE",
-        -1, &db->select_artist, NULL);
-    sqlite3_prepare_v2(db->db,
-        "INSERT INTO tracks(title,album_id,path,duration_ms,track_num,disc_num,mtime,year,genre) "
-        "VALUES(?,?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(album_id, path) DO UPDATE SET "
-        "title=CASE WHEN (SELECT mb_status FROM albums WHERE id=excluded.album_id)=1 THEN title ELSE excluded.title END, "
-        "album_id=excluded.album_id, "
-        "duration_ms=excluded.duration_ms, track_num=excluded.track_num, "
-        "disc_num=excluded.disc_num, mtime=excluded.mtime, "
-        "year=excluded.year, genre=excluded.genre",
-        -1, &db->upsert_track, NULL);
-    sqlite3_prepare_v2(db->db,
-        "INSERT OR REPLACE INTO artists_fts(rowid, name) VALUES(?,?)",
-        -1, &db->insert_artist_fts, NULL);
-    sqlite3_prepare_v2(db->db,
+#define STMT(field, sql_text) { offsetof(struct quadrature_db, field), sql_text }
+
+static const stmt_entry_t PREPARED_STMTS[] = {
+    /* ── Artist writes ─────────────────────────────────────────────────── */
+    STMT(insert_artist,
+        "INSERT OR IGNORE INTO artists(name) VALUES(?)"),
+    STMT(select_artist,
+        "SELECT id FROM artists WHERE name=? COLLATE NOCASE"),
+    STMT(insert_artist_fts,
+        "INSERT OR REPLACE INTO artists_fts(rowid, name) VALUES(?,?)"),
+    STMT(update_album_fts,
         "INSERT OR REPLACE INTO albums_fts(rowid, title, artist) "
         "SELECT al.id, al.title, COALESCE(ar.name,'') "
-        "FROM albums al LEFT JOIN artists ar ON al.artist_id = ar.id WHERE al.id = ?",
-        -1, &db->update_album_fts, NULL);
-    sqlite3_prepare_v2(db->db,
+        "FROM albums al LEFT JOIN artists ar ON al.artist_id = ar.id WHERE al.id = ?"),
+    STMT(insert_track_artist,
         "INSERT OR REPLACE INTO track_artists(track_id,artist_id,position,join_phrase) "
-        "VALUES(?,?,?,?)",
-        -1, &db->insert_track_artist, NULL);
-    sqlite3_prepare_v2(db->db,
-        "DELETE FROM track_artists WHERE track_id = ?",
-        -1, &db->delete_track_artists, NULL);
+        "VALUES(?,?,?,?)"),
+    STMT(delete_track_artists,
+        "DELETE FROM track_artists WHERE track_id = ?"),
 
-    // Cached statements for indexer hot paths
-    sqlite3_prepare_v2(db->db,
-        "SELECT id FROM tracks WHERE album_id = ? AND path = ?",
-        -1, &db->select_track_by_path, NULL);
-    sqlite3_prepare_v2(db->db,
-        "SELECT id FROM albums WHERE path = ?",
-        -1, &db->select_album_by_path, NULL);
-    sqlite3_prepare_v2(db->db,
-        "UPDATE albums SET title = ?, artist_id = ?, is_compilation = ?, year = ? "
-        "WHERE id = ? AND mb_status < 2",
-        -1, &db->update_album_by_id, NULL);
-    sqlite3_prepare_v2(db->db,
+    /* ── Reconciler statements ─────────────────────────────────────────── */
+    STMT(select_album_by_path,
+        "SELECT id FROM albums WHERE path = ?"),
+    STMT(insert_folder_album,
         "INSERT INTO albums(title, artist_id, path, year, is_compilation) "
-        "VALUES(?, ?, ?, ?, ?)",
-        -1, &db->insert_folder_album, NULL);
-    sqlite3_prepare_v2(db->db,
-        "UPDATE tracks SET artist_display = ? WHERE id = ?",
-        -1, &db->update_track_artist_display, NULL);
-    // Allow tag-sourced release IDs to override NO_MATCH/FAILED status (user re-tagged
-    // with Picard). Only RESOLVED (2) is preserved — it already has full MB data.
-    sqlite3_prepare_v2(db->db,
-        "UPDATE albums SET musicbrainz_release_id = ?, mb_status = ? "
-        "WHERE id = ? AND mb_status != 2",
-        -1, &db->set_album_release_id, NULL);
-    sqlite3_prepare_v2(db->db,
+        "VALUES(?, ?, ?, ?, ?)"),
+    STMT(sync_album_tracks_fts,
         "INSERT OR REPLACE INTO tracks_fts(rowid, title, artist, album) "
         "SELECT t.id, t.title, COALESCE(t.artist_display,''), COALESCE(al.title,'') "
-        "FROM tracks t JOIN albums al ON t.album_id = al.id WHERE t.album_id = ?",
-        -1, &db->sync_album_tracks_fts, NULL);
-    sqlite3_prepare_v2(db->db,
-        "SELECT id FROM artists WHERE musicbrainz_id = ?",
-        -1, &db->select_artist_by_mb_id, NULL);
-    sqlite3_prepare_v2(db->db,
+        "FROM tracks t JOIN albums al ON t.album_id = al.id WHERE t.album_id = ?"),
+
+    /* ── MB artist resolution (db_get_or_create_artist_mb) ─────────────── */
+    STMT(select_artist_by_mb_id,
+        "SELECT id FROM artists WHERE musicbrainz_id = ?"),
+    STMT(update_artist_sort_name,
         "UPDATE artists SET sort_name = ? WHERE id = ? "
-        "AND (sort_name IS NULL OR sort_name = '')",
-        -1, &db->update_artist_sort_name, NULL);
-    /* Step 2: exact NOCASE match, skip rows already claimed by a different MBID */
-    sqlite3_prepare_v2(db->db,
+        "AND (sort_name IS NULL OR sort_name = '')"),
+    STMT(select_artist_by_name_nocase,
         "SELECT id FROM artists WHERE name = ? COLLATE NOCASE "
-        "AND (musicbrainz_id IS NULL OR musicbrainz_id = ?)",
-        -1, &db->select_artist_by_name_nocase, NULL);
-    sqlite3_prepare_v2(db->db,
-        "UPDATE artists SET musicbrainz_id = ?, sort_name = ? WHERE id = ?",
-        -1, &db->update_artist_mb_data, NULL);
-    sqlite3_prepare_v2(db->db,
-        "INSERT INTO artists(name, musicbrainz_id, sort_name) VALUES(?, ?, ?)",
-        -1, &db->insert_artist_mb, NULL);
-    sqlite3_prepare_v2(db->db,
-        "INSERT OR REPLACE INTO artists_fts(rowid, name) VALUES(?,?)",
-        -1, &db->insert_artist_fts_replace, NULL);
-    /* Step 3: normalized lookup — strips spaces and hyphens using SQLite REPLACE+LOWER */
-    sqlite3_prepare_v2(db->db,
+        "AND (musicbrainz_id IS NULL OR musicbrainz_id = ?)"),
+    STMT(insert_artist_mb,
+        "INSERT INTO artists(name, musicbrainz_id, sort_name) VALUES(?, ?, ?)"),
+    STMT(insert_artist_fts_replace,
+        "INSERT OR REPLACE INTO artists_fts(rowid, name) VALUES(?,?)"),
+    STMT(select_artist_normalized_no_mbid,
         "SELECT id FROM artists "
         "WHERE REPLACE(REPLACE(LOWER(name), ' ', ''), '-', '') = ? "
-        "AND musicbrainz_id IS NULL",
-        -1, &db->select_artist_normalized_no_mbid, NULL);
-    /* Rename in-place: set canonical MB name + MBID + sort_name */
-    sqlite3_prepare_v2(db->db,
-        "UPDATE artists SET name = ?, musicbrainz_id = ?, sort_name = ? WHERE id = ?",
-        -1, &db->rename_artist_mb, NULL);
-    /* Conflict merge: re-home track_artists from old artist to new */
-    sqlite3_prepare_v2(db->db,
-        "UPDATE OR IGNORE track_artists SET artist_id = ? WHERE artist_id = ?",
-        -1, &db->move_track_artists, NULL);
-    sqlite3_prepare_v2(db->db,
-        "DELETE FROM track_artists WHERE artist_id = ?",
-        -1, &db->delete_track_artists_artist_id, NULL);
+        "AND musicbrainz_id IS NULL"),
+    STMT(rename_artist_mb,
+        "UPDATE artists SET name = ?, musicbrainz_id = ?, sort_name = ? WHERE id = ?"),
+    STMT(move_track_artists,
+        "UPDATE OR IGNORE track_artists SET artist_id = ? WHERE artist_id = ?"),
+    STMT(delete_track_artists_artist_id,
+        "DELETE FROM track_artists WHERE artist_id = ?"),
 
-    /* merge_duplicate_artist cached statements */
-    sqlite3_prepare_v2(db->db,
-        "SELECT id FROM artists WHERE name = ? COLLATE NOCASE AND musicbrainz_id = ?",
-        -1, &db->select_artist_by_name_and_mbid, NULL);
-    sqlite3_prepare_v2(db->db,
-        "DELETE FROM artists_fts WHERE rowid = ?",
-        -1, &db->delete_artist_fts, NULL);
-    sqlite3_prepare_v2(db->db,
-        "DELETE FROM artists WHERE id = ?",
-        -1, &db->delete_artist, NULL);
+    /* ── Duplicate artist merge ────────────────────────────────────────── */
+    STMT(select_artist_by_name_and_mbid,
+        "SELECT id FROM artists WHERE name = ? COLLATE NOCASE AND musicbrainz_id = ?"),
+    STMT(delete_artist_fts,
+        "DELETE FROM artists_fts WHERE rowid = ?"),
+    STMT(delete_artist,
+        "DELETE FROM artists WHERE id = ?"),
 
-    /* MB resolver hot-path statements */
-    sqlite3_prepare_v2(db->db,
-        "UPDATE tracks SET title = ? WHERE id = ?",
-        -1, &db->update_track_title, NULL);
-    sqlite3_prepare_v2(db->db,
-        "UPDATE tracks SET genre = ? WHERE id = ?",
-        -1, &db->update_track_genre, NULL);
-    sqlite3_prepare_v2(db->db,
-        "UPDATE albums SET mb_status = ?, mb_resolved_at = ? WHERE id = ?",
-        -1, &db->set_album_mb_status, NULL);
-    sqlite3_prepare_v2(db->db,
-        "UPDATE albums SET artist_id = ?, is_compilation = ? WHERE id = ?",
-        -1, &db->update_album_artist, NULL);
-    sqlite3_prepare_v2(db->db,
-        "UPDATE albums SET title = ?, musicbrainz_release_id = ?, "
-        "musicbrainz_release_group_id = ?, "
-        "year = CASE WHEN ? > 0 THEN ? ELSE year END, "
-        "mb_status = ?, mb_resolved_at = ? WHERE id = ?",
-        -1, &db->update_album_mb, NULL);
-    sqlite3_prepare_v2(db->db,
-        "INSERT OR REPLACE INTO albums_fts(rowid, title, artist) "
-        "SELECT al.id, al.title, COALESCE(ar.name,'') "
-        "FROM albums al LEFT JOIN artists ar ON al.artist_id = ar.id WHERE al.id = ?",
-        -1, &db->sync_album_fts, NULL);
+    /* ── MB resolver status-only writes ────────────────────────────────── */
+    STMT(set_album_mb_status,
+        "UPDATE albums SET mb_status = ?, mb_resolved_at = ? WHERE id = ?"),
 
-    /* ── Cached read statements ────────────────────────────────────────── */
-
-    sqlite3_prepare_v2(db->db,
+    /* ── Cached reads ──────────────────────────────────────────────────── */
+    STMT(read_track_by_id,
         "SELECT t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, "
         "       t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "
         "       t.artist_display "
@@ -254,20 +145,16 @@ void db_prepare_stmts(quadrature_db_t* db) {
         "LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0 "
         "LEFT JOIN artists a ON a.id = ta.artist_id "
         "LEFT JOIN albums al ON t.album_id = al.id "
-        "WHERE t.id = ?",
-        -1, &db->read_track_by_id, NULL);
-
-    sqlite3_prepare_v2(db->db,
+        "WHERE t.id = ?"),
+    STMT(read_artist_by_id,
         "SELECT a.id, a.name, a.musicbrainz_id, "
         "COUNT(DISTINCT al.id), COUNT(DISTINCT ta.track_id) "
         "FROM artists a "
         "LEFT JOIN albums al ON al.artist_id = a.id "
         "LEFT JOIN track_artists ta ON ta.artist_id = a.id "
         "WHERE a.id = ? "
-        "GROUP BY a.id",
-        -1, &db->read_artist_by_id, NULL);
-
-    sqlite3_prepare_v2(db->db,
+        "GROUP BY a.id"),
+    STMT(read_album_by_id,
         "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
         "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
         "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g "
@@ -275,14 +162,10 @@ void db_prepare_stmts(quadrature_db_t* db) {
         "  al.path, al.musicbrainz_release_id "
         "FROM albums al "
         "LEFT JOIN artists a ON al.artist_id = a.id "
-        "WHERE al.id = ?",
-        -1, &db->read_album_by_id, NULL);
-
-    sqlite3_prepare_v2(db->db,
-        "SELECT COUNT(*) FROM albums WHERE artist_id = ?",
-        -1, &db->read_albums_by_artist_count, NULL);
-
-    sqlite3_prepare_v2(db->db,
+        "WHERE al.id = ?"),
+    STMT(read_albums_by_artist_count,
+        "SELECT COUNT(*) FROM albums WHERE artist_id = ?"),
+    STMT(read_albums_by_artist,
         "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
         "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
         "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g "
@@ -291,97 +174,56 @@ void db_prepare_stmts(quadrature_db_t* db) {
         "FROM albums al "
         "LEFT JOIN artists a ON al.artist_id = a.id "
         "WHERE al.artist_id = ? "
-        "ORDER BY al.year, al.title COLLATE NOCASE",
-        -1, &db->read_albums_by_artist, NULL);
-
-    sqlite3_prepare_v2(db->db,
+        "ORDER BY al.year, al.title COLLATE NOCASE"),
+    STMT(read_tracks_by_album,
         "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM
         " WHERE t.album_id = ?"
-        " ORDER BY t.disc_num, t.track_num, t.title COLLATE NOCASE",
-        -1, &db->read_tracks_by_album, NULL);
-
-    sqlite3_prepare_v2(db->db,
-        "SELECT COUNT(*) FROM track_artists WHERE track_id = ?",
-        -1, &db->read_track_artists_count, NULL);
-
-    sqlite3_prepare_v2(db->db,
+        " ORDER BY t.disc_num, t.track_num, t.title COLLATE NOCASE"),
+    STMT(read_track_artists_count,
+        "SELECT COUNT(*) FROM track_artists WHERE track_id = ?"),
+    STMT(read_track_artists,
         "SELECT ta.artist_id, a.name, ta.join_phrase, ta.position "
         "FROM track_artists ta "
         "LEFT JOIN artists a ON a.id = ta.artist_id "
         "WHERE ta.track_id = ? "
-        "ORDER BY ta.position",
-        -1, &db->read_track_artists, NULL);
+        "ORDER BY ta.position"),
 
-    /* Warming iterators — no JOINs, no aggregates, maximum throughput.
-     * Entities loaded in earlier phases; derived fields computed in C. */
-    /* No WHERE EXISTS — orphan artists pruned by indexer finalize.
-     * ORDER BY rowid = pure sequential B-tree scan. */
-    sqlite3_prepare_v2(db->db,
-        "SELECT a.id, a.name, a.musicbrainz_id "
-        "FROM artists a "
-        "ORDER BY a.id",
-        -1, &db->iter_all_artists, NULL);
-
-    sqlite3_prepare_v2(db->db,
+    /* ── Warming iterators (no JOINs, sequential rowid scan) ───────────── */
+    STMT(iter_all_artists,
+        "SELECT a.id, a.name, a.musicbrainz_id FROM artists a ORDER BY a.id"),
+    STMT(iter_all_albums,
         "SELECT al.id, al.title, al.artist_id, al.year, al.path, "
         "al.musicbrainz_release_id, al.musicbrainz_release_group_id "
-        "FROM albums al "
-        "ORDER BY al.id",
-        -1, &db->iter_all_albums, NULL);
-
-    /* ORDER BY rowid = pure sequential table scan, no index overhead.
-     * Album grouping and disc/track ordering done in C (Phase 4). */
-    sqlite3_prepare_v2(db->db,
+        "FROM albums al ORDER BY al.id"),
+    STMT(iter_all_tracks,
         "SELECT t.id, t.title, t.path, t.duration_ms, t.track_num, "
         "t.disc_num, t.year, t.album_id, t.genre, t.artist_display "
-        "FROM tracks t "
-        "ORDER BY t.id",
-        -1, &db->iter_all_tracks, NULL);
-
-    sqlite3_prepare_v2(db->db,
+        "FROM tracks t ORDER BY t.id"),
+    STMT(iter_all_track_artists,
         "SELECT ta.track_id, ta.artist_id, ta.join_phrase, ta.position "
-        "FROM track_artists ta "
-        "ORDER BY ta.track_id, ta.position",
-        -1, &db->iter_all_track_artists, NULL);
-
-    sqlite3_prepare_v2(db->db,
+        "FROM track_artists ta ORDER BY ta.track_id, ta.position"),
+    STMT(get_max_ids,
         "SELECT (SELECT MAX(id) FROM artists),"
         "       (SELECT MAX(id) FROM albums),"
-        "       (SELECT MAX(id) FROM tracks)",
-        -1, &db->get_max_ids, NULL);
+        "       (SELECT MAX(id) FROM tracks)"),
+};
+
+static inline sqlite3_stmt** stmt_slot(quadrature_db_t* db, size_t offset) {
+    return (sqlite3_stmt**)((char*)db + offset);
+}
+
+void db_prepare_stmts(quadrature_db_t* db) {
+    if (db->insert_artist) return;  /* Already prepared */
+    for (size_t i = 0; i < G_N_ELEMENTS(PREPARED_STMTS); i++) {
+        const stmt_entry_t *e = &PREPARED_STMTS[i];
+        sqlite3_prepare_v2(db->db, e->sql, -1, stmt_slot(db, e->offset), NULL);
+    }
 }
 
 void db_finalize_stmts(quadrature_db_t* db) {
-    sqlite3_stmt** stmts[] = {
-        &db->insert_artist, &db->select_artist, &db->upsert_track,
-        &db->insert_artist_fts, &db->update_album_fts,
-        &db->insert_track_artist, &db->delete_track_artists,
-        &db->select_track_by_path, &db->select_album_by_path,
-        &db->update_album_by_id, &db->insert_folder_album,
-        &db->update_track_artist_display, &db->set_album_release_id,
-        &db->sync_album_tracks_fts, &db->select_artist_by_mb_id,
-        &db->update_artist_sort_name, &db->select_artist_by_name_nocase,
-        &db->update_artist_mb_data, &db->insert_artist_mb,
-        &db->insert_artist_fts_replace, &db->select_artist_normalized_no_mbid,
-        &db->rename_artist_mb, &db->move_track_artists,
-        &db->delete_track_artists_artist_id,
-        &db->update_track_title, &db->update_track_genre,
-        &db->set_album_mb_status,
-        &db->update_album_artist, &db->update_album_mb, &db->sync_album_fts,
-        // merge_duplicate_artist cached statements
-        &db->select_artist_by_name_and_mbid,
-        &db->delete_artist_fts, &db->delete_artist,
-        // cached read statements
-        &db->read_track_by_id, &db->read_artist_by_id, &db->read_album_by_id,
-        &db->read_albums_by_artist_count, &db->read_albums_by_artist,
-        &db->read_tracks_by_album, &db->read_track_artists_count,
-        &db->read_track_artists,
-        &db->iter_all_artists, &db->iter_all_albums,
-        &db->iter_all_tracks, &db->iter_all_track_artists,
-        &db->get_max_ids,
-    };
-    for (size_t i = 0; i < G_N_ELEMENTS(stmts); i++) {
-        if (*stmts[i]) { sqlite3_finalize(*stmts[i]); *stmts[i] = NULL; }
+    for (size_t i = 0; i < G_N_ELEMENTS(PREPARED_STMTS); i++) {
+        sqlite3_stmt **slot = stmt_slot(db, PREPARED_STMTS[i].offset);
+        if (*slot) { sqlite3_finalize(*slot); *slot = NULL; }
     }
 }
 
@@ -414,16 +256,17 @@ quadrature_result_t db_open(const char* path, quadrature_db_t** out) {
         db->db_path = strdup(path);
     }
 
-    quadrature_result_t res = apply_pragmas(db->db);
-    if (res != QUADRATURE_OK) {
-        sqlite3_close(db->db);
-        pthread_mutex_destroy(&db->lock);
-        free(db->db_path);
-        free(db);
-        return res;
-    }
+    sqlite3_exec(db->db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    sqlite3_exec(db->db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+    sqlite3_exec(db->db, "PRAGMA temp_store=MEMORY", NULL, NULL, NULL);
+    sqlite3_exec(db->db, "PRAGMA cache_size=-64000", NULL, NULL, NULL);
+    sqlite3_exec(db->db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
+    sqlite3_exec(db->db, "PRAGMA mmap_size=268435456", NULL, NULL, NULL);       /* 256MB mmap for reads */
+    sqlite3_exec(db->db, "PRAGMA wal_autocheckpoint=10000", NULL, NULL, NULL);  /* defer checkpoint until ~40MB burst */
+    sqlite3_busy_timeout(db->db, 5000);
+    sqlite3_exec(db->db, "PRAGMA optimize", NULL, NULL, NULL);
 
-    res = db_migrate(db->db);
+    quadrature_result_t res = db_init_schema(db->db);
     if (res != QUADRATURE_OK) {
         sqlite3_close(db->db);
         pthread_mutex_destroy(&db->lock);

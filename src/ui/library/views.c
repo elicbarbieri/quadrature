@@ -21,6 +21,7 @@
 
 #include "../internal.h"
 #include "internal.h"
+#include "quadrature/library_search.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Sort Option Definitions
@@ -119,6 +120,7 @@ typedef struct {
     LibraryItemKind kind;
     char *credit_text;
     char *role_gid;
+    uint32_t library_mask;
 } CreditEntityInput;
 
 static void credit_entity_input_free(gpointer data) {
@@ -130,85 +132,50 @@ static void credit_entity_input_free(gpointer data) {
 }
 
 /**
- * Build a set of global entity IDs matched by credit search.
- * Thread-safe: accesses only library_cache and DB handles (no GTK widgets).
+ * Build a set of global entity IDs matched by credit search. Delegates to
+ * library_credit_search() so the *same* cross-library (RGID-based) dedup
+ * that powers the metadata search bar also filters this browse view —
+ * without that shared call, a RAM release present in two libraries used to
+ * leak through as two rows in the filtered list.
  *
- * @param kind LIBRARY_ITEM_ALBUM → return album IDs, LIBRARY_ITEM_ARTIST → artist IDs
+ * For LIBRARY_ITEM_ALBUM we return album_ids directly (already RGID-deduped).
+ * For LIBRARY_ITEM_ARTIST we walk the surviving tracks and collect the
+ * primary artist_id of each (the cache's MBID index collapses cross-library
+ * artists at display time, so raw artist_ids here are safe membership keys).
  */
 static GHashTable *build_credit_entity_set_impl(library_cache_t *cache,
                                                   LibraryItemKind kind,
                                                   const char *credit_text,
-                                                  const char *role_gid) {
-    GHashTable *entity_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+                                                  const char *role_gid,
+                                                  uint32_t library_mask) {
+    GHashTable *entity_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                                    g_free, NULL);
 
-    int lib_count = library_cache_get_library_count(cache);
-    for (int li = 0; li < lib_count; li++) {
-        int bi = library_cache_get_bitmap_index(cache, li);
-        if (!library_cache_get_available(cache, bi)) continue;
-        library_cache_dbs_t dbs = library_cache_get_dbs(cache, bi);
-        if (!dbs.meta) continue;
+    library_credit_search_result_t *r =
+        library_credit_search(cache, credit_text, role_gid, library_mask);
 
-        /* Search metadata artists matching credit text */
-        db_meta_artist_search_result_t *artists = NULL;
-        size_t artist_count = 0;
-        quadrature_result_t res = db_meta_search_artists(
-            dbs.meta, credit_text, 50, &artists, &artist_count);
-
-        if (res != QUADRATURE_OK || artist_count == 0) {
-            if (artists) db_meta_artist_search_results_free(artists, artist_count);
-            continue;
-        }
-
-        gboolean have_lib_db = (dbs.db != NULL);
-
-        for (size_t ai = 0; ai < artist_count; ai++) {
-            const char *artist_mbid = artists[ai].artist_mbid;
-            if (!artist_mbid) continue;
-
-            db_meta_artist_credit_t *credits = NULL;
-            size_t credit_count = 0;
-            res = db_meta_get_credits_by_artist(
-                dbs.meta, artist_mbid, role_gid, &credits, &credit_count);
-
-            if (res == QUADRATURE_OK && credit_count > 0 && have_lib_db) {
-                /* Batch-resolve all credit positions at once */
-                db_track_position_t *positions = g_new0(db_track_position_t, credit_count);
-                int64_t *track_ids = g_new0(int64_t, credit_count);
-
-                for (size_t ci = 0; ci < credit_count; ci++) {
-                    positions[ci].release_mbid = credits[ci].release_mbid;
-                    positions[ci].disc_num = credits[ci].disc_num;
-                    positions[ci].track_num = credits[ci].track_num;
-                }
-
-                db_resolve_track_positions_batch(dbs.db, positions, credit_count, track_ids);
-
-                for (size_t ci = 0; ci < credit_count; ci++) {
-                    if (track_ids[ci] == 0) continue;
-
-                    int64_t global_track_id = LIBRARY_MAKE_GLOBAL_ID(li, track_ids[ci]);
-                    const library_track_info_t *track =
-                        library_cache_get_track(cache, global_track_id);
-                    if (track) {
-                        int64_t eid = (kind == LIBRARY_ITEM_ALBUM)
-                                      ? track->album_id : track->artist_id;
-                        if (!g_hash_table_contains(entity_ids, &eid)) {
-                            int64_t *key = g_new(int64_t, 1);
-                            *key = eid;
-                            g_hash_table_add(entity_ids, key);
-                        }
-                    }
-                }
-
-                g_free(positions);
-                g_free(track_ids);
+    if (kind == LIBRARY_ITEM_ALBUM) {
+        for (guint i = 0; i < r->album_ids->len; i++) {
+            int64_t eid = g_array_index(r->album_ids, int64_t, i);
+            if (!g_hash_table_contains(entity_ids, &eid)) {
+                int64_t *key = g_new(int64_t, 1); *key = eid;
+                g_hash_table_add(entity_ids, key);
             }
-            db_meta_artist_credits_free(credits, credit_count);
         }
-
-        db_meta_artist_search_results_free(artists, artist_count);
+    } else {  /* LIBRARY_ITEM_ARTIST */
+        for (guint i = 0; i < r->track_ids->len; i++) {
+            int64_t tid = g_array_index(r->track_ids, int64_t, i);
+            const library_track_info_t *track = library_cache_get_track(cache, tid);
+            if (!track) continue;
+            int64_t eid = track->artist_id;
+            if (!g_hash_table_contains(entity_ids, &eid)) {
+                int64_t *key = g_new(int64_t, 1); *key = eid;
+                g_hash_table_add(entity_ids, key);
+            }
+        }
     }
 
+    library_credit_search_result_free(r);
     return entity_ids;
 }
 
@@ -221,7 +188,7 @@ static void credit_entity_search_thread(GTask *task, gpointer src,
     if (g_cancellable_is_cancelled(cancel)) return;
 
     GHashTable *result = build_credit_entity_set_impl(
-        in->cache, in->kind, in->credit_text, in->role_gid);
+        in->cache, in->kind, in->credit_text, in->role_gid, in->library_mask);
 
     if (g_cancellable_is_cancelled(cancel)) {
         g_hash_table_unref(result);
@@ -619,6 +586,7 @@ static void invalidate_filter(ViewData *vd) {
         input->kind = vd->kind;
         input->credit_text = g_strdup(credit_text);
         input->role_gid = (role_gids && role_count > 0) ? g_strdup(role_gids[0]) : NULL;
+        input->library_mask = view_library_mask(vd);
         g_free(role_gids);
 
         vd->credit_cancel = g_cancellable_new();

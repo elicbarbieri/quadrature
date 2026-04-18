@@ -636,7 +636,8 @@ static gboolean update_dashboard(gpointer data) {
 
 typedef struct { audio_pipeline_t* pipeline; int player_id; } ReconnectData;
 
-static void on_reconnect_clicked(GtkButton* btn G_GNUC_UNUSED, gpointer data) {
+static void on_reconnect_clicked(GtkButton* btn, gpointer data) {
+    (void)btn;
     ReconnectData* d = data;
     audio_pipeline_player_reconnect(d->pipeline, d->player_id);
 }
@@ -645,7 +646,8 @@ static void on_reconnect_clicked(GtkButton* btn G_GNUC_UNUSED, gpointer data) {
  * Lifecycle — map/unmap timer gating
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void on_perf_map(GtkWidget* w G_GNUC_UNUSED, gpointer data) {
+static void on_perf_map(GtkWidget* w, gpointer data) {
+    (void)w;
     PerfViewPrivate* priv = data;
     if (priv->timer_id == 0) {
         priv->timer_id = g_timeout_add(100, update_dashboard, priv);
@@ -653,7 +655,8 @@ static void on_perf_map(GtkWidget* w G_GNUC_UNUSED, gpointer data) {
     }
 }
 
-static void on_perf_unmap(GtkWidget* w G_GNUC_UNUSED, gpointer data) {
+static void on_perf_unmap(GtkWidget* w, gpointer data) {
+    (void)w;
     PerfViewPrivate* priv = data;
     if (priv->timer_id) {
         g_source_remove(priv->timer_id);
@@ -662,7 +665,8 @@ static void on_perf_unmap(GtkWidget* w G_GNUC_UNUSED, gpointer data) {
     }
 }
 
-static void on_view_destroy(GtkWidget* widget G_GNUC_UNUSED, gpointer data) {
+static void on_view_destroy(GtkWidget* widget, gpointer data) {
+    (void)widget;
     PerfViewPrivate* priv = data;
     if (priv->timer_id) {
         g_source_remove(priv->timer_id);

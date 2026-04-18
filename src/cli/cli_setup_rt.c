@@ -132,28 +132,6 @@ static rt_check_result_t check_pipewire_running(void) {
     return r;
 }
 
-static rt_check_result_t check_pipewire_rt_priority(void) {
-    rt_check_result_t r = {
-        .name = "PipeWire RT priority",
-        .can_auto_apply = true,
-    };
-
-    /* TODO: parse pw-metadata -n settings for clock.rt-prio */
-    char* out = run_cmd("pw-metadata -n settings 0");
-    if (!out) {
-        r.status = RT_SKIP;
-        r.detail = g_strdup("Could not query PipeWire metadata");
-        return r;
-    }
-
-    /* Look for rt.prio or default.clock.rt-prio in output */
-    /* For now, report as info — full parsing in pass 2 */
-    r.status = RT_PASS;
-    r.detail = g_strdup("Queried successfully (detailed parsing TODO)");
-    g_free(out);
-    return r;
-}
-
 static rt_check_result_t check_force_quantum(void) {
     rt_check_result_t r = { .name = "No global force-quantum override" };
 
@@ -502,7 +480,6 @@ int cli_setup_rt(int argc, char** argv) {
     /* Run all checks */
     rt_check_result_t checks[] = {
         check_pipewire_running(),
-        check_pipewire_rt_priority(),
         check_force_quantum(),
         check_suspend_on_idle(),
         check_rtkit(),
@@ -516,13 +493,13 @@ int cli_setup_rt(int argc, char** argv) {
 
     /* Print results */
     printf("PipeWire:\n");
-    for (int i = 0; i < 4; i++) print_check(&checks[i]);
+    for (int i = 0; i < 3; i++) print_check(&checks[i]);
 
     printf("\nSystem:\n");
-    for (int i = 4; i < 8; i++) print_check(&checks[i]);
+    for (int i = 3; i < 7; i++) print_check(&checks[i]);
 
     printf("\nKernel:\n");
-    for (int i = 8; i < check_count; i++) print_check(&checks[i]);
+    for (int i = 7; i < check_count; i++) print_check(&checks[i]);
 
     /* Count issues */
     int fails = 0, warns = 0;

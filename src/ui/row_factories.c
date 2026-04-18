@@ -831,7 +831,8 @@ GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
  * Only fires for multi-disc albums (set via gtk_list_box_set_header_func). */
 static void disc_header_func(GtkListBoxRow *row,
                               GtkListBoxRow *before,
-                              gpointer       data G_GNUC_UNUSED) {
+                              gpointer       data) {
+    (void)data;
     GtkWidget *child = gtk_list_box_row_get_child(row);
     gpointer disc_ptr = child ? g_object_get_data(G_OBJECT(child), "quad-disc") : NULL;
     if (!disc_ptr) return;

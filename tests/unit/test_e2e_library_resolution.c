@@ -27,9 +27,12 @@
 
 #include <criterion/criterion.h>
 #include <criterion/hooks.h>
+#include "test_helpers.h"
 #include "quadrature/indexer.h"
 #include "quadrature/database.h"
 #include "quadrature/library.h"
+#include "quadrature/library_search.h"
+#include <stdbool.h>
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -53,6 +56,11 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
 #define MBID_BRONSON_ARTIST        "887b5b46-3f15-4475-b2bd-4d026c2b2031"
 #define MBID_BRONSON_RELEASE       "5ed617d7-898f-4e05-82a1-bfc586a4b013"
 #define MBID_BRONSON_RELEASE_GROUP "d95b8366-994d-448d-8689-422b20b6cabb"
+
+/* Totally Enormous Extinct Dinosaurs — credited on BRONSON track 10 (DAWN).
+ * MB's canonical artist name is "TEED"; Picard writes the credit-as-credited
+ * ("Totally Enormous Extinct Dinosaurs") in ARTISTS but ships the same MBID. */
+#define MBID_TEED_ARTIST           "bd075a82-b196-4752-a1bb-3d87be3236a0"
 
 /* Daft Punk — Random Access Memories */
 #define MBID_DAFT_PUNK_ARTIST      "056e4f3e-d505-4dad-8ec1-d04f521cbb56"
@@ -121,47 +129,6 @@ static void mkdirs(const char *path) {
     char cmd[2048];
     snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", path);
     (void)system(cmd);
-}
-
-static char *shell_escape(const char *s) {
-    size_t len = strlen(s);
-    char *out = malloc(len * 4 + 1);
-    char *p = out;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\'') {
-            *p++ = '\''; *p++ = '\\'; *p++ = '\''; *p++ = '\'';
-        } else {
-            *p++ = s[i];
-        }
-    }
-    *p = '\0';
-    return out;
-}
-
-/**
- * Create a FLAC file with given metadata and duration.
- * Uses a 60Hz sine wave at 8kHz mono to keep files tiny (~1KB/sec).
- * duration_secs=0 defaults to 0.5s (for tag-less filler files).
- */
-static int create_flac(const char *path, const char *const *metadata_pairs,
-                        int duration_secs) {
-    char cmd[8192];
-    double dur = duration_secs > 0 ? (double)duration_secs : 0.5;
-    int off = snprintf(cmd, sizeof(cmd),
-        "ffmpeg -y -loglevel error -f lavfi -i sine=frequency=60:sample_rate=8000 "
-        "-t %.1f -ac 1 ", dur);
-
-    for (const char *const *p = metadata_pairs; *p; p++) {
-        char *escaped = shell_escape(*p);
-        off += snprintf(cmd + off, sizeof(cmd) - off, "-metadata '%s' ", escaped);
-        free(escaped);
-    }
-
-    char *epath = shell_escape(path);
-    off += snprintf(cmd + off, sizeof(cmd) - off, "'%s'", epath);
-    free(epath);
-
-    return system(cmd);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -284,20 +251,35 @@ static void build_lib_a(const char *root) {
 static void build_lib_b(const char *root) {
     char path[1024], tracknum[32], title_tag[256];
 
-    /* BRONSON — full Picard tags */
+    /* BRONSON — full Picard tags.
+     * Track 10 (DAWN) carries a feat. credit exactly as real Picard writes it:
+     *   ARTIST               = "BRONSON feat. Totally Enormous Extinct Dinosaurs"
+     *   MUSICBRAINZ_ARTISTID = "<bronson-mbid>;<teed-mbid>"
+     * Exercises Phase 2's ability to keep the parallel MBID list in lock-step
+     * with the feat.-split ARTIST credits. */
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON", root);
     mkdirs(path);
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
         char fpath[1024];
+        const bool is_dawn = (i == BRONSON_TRACK_COUNT - 1);
+
         snprintf(fpath, sizeof(fpath), "%s/%02d BRONSON - %s.flac",
                  path, i + 1, BRONSON_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", BRONSON_TRACKS[i]);
+
+        const char *artist_tag = is_dawn
+            ? "artist=BRONSON feat. Totally Enormous Extinct Dinosaurs"
+            : "artist=BRONSON";
+        const char *mb_artistid_tag = is_dawn
+            ? "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST ";" MBID_TEED_ARTIST
+            : "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST;
+
         const char *tags[] = {
-            title_tag, "artist=BRONSON", "album=BRONSON", "album_artist=BRONSON",
+            title_tag, artist_tag, "album=BRONSON", "album_artist=BRONSON",
             tracknum, "date=2020", "genre=Electronic",
             "MUSICBRAINZ_ALBUMID=" MBID_BRONSON_RELEASE,
-            "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST,
+            mb_artistid_tag,
             "MUSICBRAINZ_RELEASEGROUPID=" MBID_BRONSON_RELEASE_GROUP,
             "MUSICBRAINZ_ALBUMARTISTID=" MBID_BRONSON_ARTIST,
             NULL
@@ -701,6 +683,35 @@ Test(e2e, user_imports_two_messy_libraries,
     cr_assert(bronson->musicbrainz_id != NULL && bronson->musicbrainz_id[0],
         "BRONSON artist should have MBID after resolution");
     cr_assert_str_eq(bronson->musicbrainz_id, MBID_BRONSON_ARTIST);
+
+    /* ── TEED (feat. artist on DAWN) — no orphan alias row ─────────────
+     * Picard tagged DAWN with ARTIST="BRONSON feat. Totally Enormous Extinct
+     * Dinosaurs" + MUSICBRAINZ_ARTISTID="<bronson>;<teed>". Phase 2 must
+     * consume the parallel MBID list; otherwise it creates an MBID-less
+     * "Totally Enormous Extinct Dinosaurs" row that Phase 6 cannot reconcile
+     * with the canonical "TEED" (bd075a82), leaving an orphan artist behind. */
+    const library_artist_info_t *teed = NULL;
+    for (guint i = 0; i < artists->len; i++) {
+        const library_artist_info_t *a = g_ptr_array_index(artists, i);
+        if (a->musicbrainz_id && strcmp(a->musicbrainz_id, MBID_TEED_ARTIST) == 0) {
+            cr_assert_null(teed,
+                "Two artist rows share the TEED MBID — Phase 2 split credits "
+                "off ARTIST without consuming MUSICBRAINZ_ARTISTID, then Phase "
+                "6 inserted a second TEED row with the MBID.");
+            teed = a;
+        }
+    }
+    cr_assert_not_null(teed,
+        "TEED artist (MBID %s) not found — feat. credit on DAWN not resolved",
+        MBID_TEED_ARTIST);
+
+    /* The orphan from the original bug: a row named literally "Totally
+     * Enormous Extinct Dinosaurs" (no MBID) left behind by Phase 2 when it
+     * ignored MUSICBRAINZ_ARTISTID. Must not exist after a clean index. */
+    cr_assert_null(find_artist(artists, "Totally Enormous Extinct Dinosaurs"),
+        "Orphan artist 'Totally Enormous Extinct Dinosaurs' (no MBID) still "
+        "present — Phase 2 created it from the ARTIST tag and Phase 6 could "
+        "not merge it into the canonical 'TEED' row.");
 
     const library_artist_info_t *dp = find_artist(artists, "Daft Punk");
     cr_assert_not_null(dp, "Daft Punk not found");

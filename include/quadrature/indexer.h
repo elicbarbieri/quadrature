@@ -46,6 +46,9 @@ extern "C" {
 
 typedef struct indexer indexer_t;
 
+/* Max filesystem path length used across indexer public/internal APIs. */
+#define INDEXER_PATH_MAX 4096
+
 /* =============================================================================
  * Progress Information
  * ============================================================================= */
@@ -94,7 +97,7 @@ typedef struct {
     /* Path to the new atlas file written during this scan.
      * Set on INDEXER_ARTWORK_READY and INDEXER_COMPLETED.
      * Empty string if artwork processing was disabled or no atlas was written. */
-    char atlas_path[512];
+    char atlas_path[INDEXER_PATH_MAX];
 
     /* Artist art progress (Phase 7) */
     size_t artist_art_total;
@@ -267,7 +270,8 @@ typedef struct {
     const char* acoustid_index_url;    /* URL for acoustid-index HTTP service, e.g. "http://host:8081" (optional) */
     const char* mb_solr_url;           /* MusicBrainz Solr base URL, e.g. "http://host:8983" (optional) */
     int parallelism;                    /* 0 = auto */
-    const char* library_root;          /* Absolute path to library root; required for fingerprinting */
+    const char* library_root;          /* Absolute path to library root (music files); required for fingerprinting */
+    const char* data_root;             /* Absolute path to data root (DB + meta); NULL = same as library_root */
 } mb_resolver_options_t;
 
 typedef enum {
@@ -347,6 +351,138 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
  * Free fingerprint data.
  */
 void mb_fingerprint_free(mb_fingerprint_t* fp);
+
+/* ============================================================================
+ * Album State Reconciler — the single writer for album/track updates
+ *
+ * Producers (Phase 2 metadata extraction, Phase 6 MusicBrainz resolver) build
+ * a `desired_album_state_t` describing what the album SHOULD look like.
+ * `db_reconcile_album()` loads current DB state, diffs against desired, and
+ * emits only the field-level UPDATE/INSERT/DELETE operations needed to
+ * converge. Must be called inside an active transaction.
+ * ========================================================================== */
+
+typedef enum {
+    RECONCILE_SOURCE_TAGS = 1,   /* Phase 2: audio file tags (FFmpeg) */
+    RECONCILE_SOURCE_MB   = 2,   /* Phase 6: MusicBrainz resolver */
+} reconcile_source_t;
+
+typedef enum {
+    RECONCILE_CONFIDENCE_NONE  = 0,
+    RECONCILE_CONFIDENCE_FUZZY = 1,  /* title + duration similarity (Pass 2) */
+    RECONCILE_CONFIDENCE_EXACT = 2,  /* (disc,track) match (Pass 1) */
+} reconcile_confidence_t;
+
+typedef struct {
+    int64_t     artist_id;
+    const char* name;
+    const char* join_phrase;  /* "", " feat. ", " & " */
+    int         position;
+} desired_track_artist_t;
+
+typedef enum {
+    DESIRED_TRACK_TITLE       = 1 << 0,
+    DESIRED_TRACK_NUM         = 1 << 1,
+    DESIRED_TRACK_DISC        = 1 << 2,
+    DESIRED_TRACK_DURATION    = 1 << 3,
+    DESIRED_TRACK_YEAR        = 1 << 4,
+    DESIRED_TRACK_GENRE       = 1 << 5,  /* replace */
+    DESIRED_TRACK_GENRE_MERGE = 1 << 6,  /* merge into existing */
+    DESIRED_TRACK_MTIME       = 1 << 7,
+    DESIRED_TRACK_ARTISTS     = 1 << 8,
+} desired_track_field_t;
+
+typedef struct {
+    const char* path;              /* identity — album-relative; required */
+    uint32_t    present_fields;    /* desired_track_field_t bitmask */
+
+    const char* title;
+    uint16_t    track_num;
+    uint16_t    disc_num;
+    uint32_t    duration_ms;
+    uint16_t    year;
+    const char* genre;
+    int64_t     mtime;
+
+    const desired_track_artist_t* artists;
+    size_t                        artist_count;
+
+    reconcile_confidence_t position_confidence;
+} desired_track_t;
+
+typedef enum {
+    DESIRED_ALBUM_TITLE             = 1 << 0,
+    DESIRED_ALBUM_ARTIST_ID         = 1 << 1,
+    DESIRED_ALBUM_COMPILATION       = 1 << 2,
+    DESIRED_ALBUM_YEAR              = 1 << 3,
+    DESIRED_ALBUM_MB_RELEASE_ID     = 1 << 4,
+    DESIRED_ALBUM_MB_RELEASE_GROUP  = 1 << 5,
+    DESIRED_ALBUM_MB_STATUS         = 1 << 6,
+    DESIRED_ALBUM_MB_RESOLVED_AT    = 1 << 7,
+    DESIRED_ALBUM_PATH              = 1 << 8,
+} desired_album_field_t;
+
+typedef struct {
+    reconcile_source_t source;
+    uint32_t           present_fields;
+
+    const char* path;
+    const char* title;
+    int64_t     artist_id;
+    bool        is_compilation;
+    uint16_t    year;
+    const char* musicbrainz_release_id;
+    const char* musicbrainz_release_group_id;
+    int         mb_status;
+    int64_t     mb_resolved_at;
+
+    const desired_track_t* tracks;
+    size_t                 track_count;
+} desired_album_state_t;
+
+typedef struct {
+    /* Delete any existing DB track whose path is NOT in desired.tracks. */
+    bool prune_missing_tracks;
+
+    /* Minimum confidence required to overwrite track_num / disc_num from MB. */
+    reconcile_confidence_t mb_position_min_confidence;
+
+    /* When TAGS-sourced and album is already MB_STATUS_RESOLVED, skip
+     * title/artist/MB-field writes (user edits + MB are authoritative). */
+    bool respect_user_edits;
+} reconcile_policy_t;
+
+extern const reconcile_policy_t RECONCILE_POLICY_MB;    /* Phase 6 */
+extern const reconcile_policy_t RECONCILE_POLICY_TAGS;  /* Phase 2 */
+
+typedef struct {
+    int  album_fields_changed;
+    int  tracks_inserted;
+    int  tracks_updated;
+    int  tracks_deleted;
+    int  track_titles_changed;
+    int  track_positions_changed;
+    int  track_artists_changed;
+    int  track_genres_changed;
+    bool fts_synced;
+} reconcile_summary_t;
+
+/* Create a new album row (or return an existing one) by folder path.
+ * All MB fields default to 0/NULL. Producers call this, then db_reconcile_album. */
+quadrature_result_t db_create_or_get_album_by_path(
+    quadrature_db_t* db, const char* path, const char* title,
+    int64_t artist_id, uint16_t year, int64_t* album_id_out);
+
+/* Reconcile one album's state to match `desired`. Must run inside a txn.
+ * summary_out may be NULL. */
+quadrature_result_t db_reconcile_album(
+    quadrature_db_t* db, int64_t album_id,
+    const desired_album_state_t* desired,
+    const reconcile_policy_t* policy,
+    reconcile_summary_t* summary_out);
+
+/* Delete an album and all its tracks (orphan sweep). Must run inside a txn. */
+quadrature_result_t db_delete_album(quadrature_db_t* db, int64_t album_id);
 
 #ifdef __cplusplus
 }

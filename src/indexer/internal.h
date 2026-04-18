@@ -8,6 +8,7 @@
 
 #include "quadrature/quadrature.h"
 #include "quadrature/database.h"
+#include "quadrature/indexer.h"
 #include "quadrature/library.h"
 #include <glib.h>
 #include <pthread.h>
@@ -60,7 +61,7 @@ void change_tracker_reset(change_tracker_t *ct);
 // Constants
 // =============================================================================
 
-#define INDEXER_PATH_MAX 4096
+/* INDEXER_PATH_MAX lives in <quadrature/indexer.h> (used in public progress struct). */
 #define INDEXER_PATH_SUFFIX_RESERVE 32
 
 // =============================================================================
@@ -210,6 +211,8 @@ typedef struct {
     char* rel_path;        // Track path relative to album dir (owned)
     char* title;           // From tag or filename fallback (owned, may be NULL)
     char* artist_tag;      // Raw artist tag string for parse_artist_tag (owned, may be NULL)
+    char* mb_artist_ids;   // Raw MUSICBRAINZ_ARTISTID tag (semicolon-delimited MBID list
+                           //   aligned with the split credits of artist_tag; owned, may be NULL)
     char* genre;           // Genre tag (owned, may be NULL)
     uint32_t duration_ms;
     uint16_t track_num;

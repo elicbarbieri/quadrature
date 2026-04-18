@@ -6,6 +6,7 @@
  */
 
 #include <criterion/criterion.h>
+#include "test_helpers.h"
 #include "quadrature/library.h"
 #include "quadrature/database.h"
 #include <pthread.h>
@@ -62,135 +63,35 @@ static void setup_test_data(void) {
     cr_assert_eq(res, QUADRATURE_OK);
     cr_assert_not_null(test_db);
 
-    // Create artists first
     cr_assert_eq(db_begin_transaction(test_db), QUADRATURE_OK);
-    int64_t test_artist_id = db_get_or_create_artist(test_db, "Test Artist");
-    cr_assert(test_artist_id > 0);
+    int64_t test_artist_id    = db_get_or_create_artist(test_db, "Test Artist");
     int64_t another_artist_id = db_get_or_create_artist(test_db, "Another Artist");
+    cr_assert(test_artist_id > 0);
     cr_assert(another_artist_id > 0);
 
-    // Create albums with correct artist associations
-    // Album paths are relative to music_base ("/music")
-    int64_t album1_id = 0, album2_id = 0, album3_id = 0;
-    cr_assert_eq(db_upsert_folder_album(test_db, "Artist1/Album1",
-        "First Album", test_artist_id, 2020, &album1_id), QUADRATURE_OK);
-    cr_assert_eq(db_upsert_folder_album(test_db, "Artist1/Album2",
-        "Double Album", test_artist_id, 2021, &album2_id), QUADRATURE_OK);
-    cr_assert_eq(db_upsert_folder_album(test_db, "Artist2/Album",
-        "Another Album", another_artist_id, 2022, &album3_id), QUADRATURE_OK);
+    int64_t album1_id = test_insert_album(test_db, "Artist1/Album1", "First Album",  test_artist_id,    2020);
+    int64_t album2_id = test_insert_album(test_db, "Artist1/Album2", "Double Album", test_artist_id,    2021);
+    int64_t album3_id = test_insert_album(test_db, "Artist2/Album",  "Another Album", another_artist_id, 2022);
 
-    // Album 1: Single disc album with 3 tracks
-    // Track paths are relative to album directory
-    db_index_item_t item1 = {
-        .path = "01-track1.mp3",
-        .title = "Track One",
-        .album = "First Album",
-        .duration_ms = 180000,
-        .track_num = 1,
-        .disc_num = 1,
-        .year = 2020,
-        .mtime = 1000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &item1, album1_id, NULL), QUADRATURE_OK);
+    const int64_t ta[1]   = { test_artist_id };
+    const char *names[1]  = { "Test Artist" };
+    const char *joins[1]  = { "" };
+    const int64_t oa[1]   = { another_artist_id };
+    const char *onames[1] = { "Another Artist" };
 
-    db_index_item_t item2 = {
-        .path = "02-track2.mp3",
-        .title = "Track Two",
-        .album = "First Album",
-        .duration_ms = 200000,
-        .track_num = 2,
-        .disc_num = 1,
-        .year = 2020,
-        .mtime = 1000001,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &item2, album1_id, NULL), QUADRATURE_OK);
+    /* Album 1 — single disc, 3 tracks. */
+    test_insert_track_full(test_db, album1_id, "01-track1.mp3", "Track One",   1, 1, 180000, ta, names, joins, 1);
+    test_insert_track_full(test_db, album1_id, "02-track2.mp3", "Track Two",   2, 1, 200000, ta, names, joins, 1);
+    test_insert_track_full(test_db, album1_id, "03-track3.mp3", "Track Three", 3, 1, 220000, ta, names, joins, 1);
 
-    db_index_item_t item3 = {
-        .path = "03-track3.mp3",
-        .title = "Track Three",
-        .album = "First Album",
-        .duration_ms = 220000,
-        .track_num = 3,
-        .disc_num = 1,
-        .year = 2020,
-        .mtime = 1000002,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &item3, album1_id, NULL), QUADRATURE_OK);
+    /* Album 2 — two discs, 2 tracks each. */
+    test_insert_track_full(test_db, album2_id, "CD1/01-intro.mp3",   "Disc 1 Intro",   1, 1, 150000, ta, names, joins, 1);
+    test_insert_track_full(test_db, album2_id, "CD1/02-main.mp3",    "Disc 1 Main",    2, 1, 300000, ta, names, joins, 1);
+    test_insert_track_full(test_db, album2_id, "CD2/01-opening.mp3", "Disc 2 Opening", 1, 2, 180000, ta, names, joins, 1);
+    test_insert_track_full(test_db, album2_id, "CD2/02-finale.mp3",  "Disc 2 Finale",  2, 2, 400000, ta, names, joins, 1);
 
-    // Album 2: Multi-disc album (2 discs, 2 tracks each)
-    db_index_item_t disc1_track1 = {
-        .path = "CD1/01-intro.mp3",
-        .title = "Disc 1 Intro",
-        .album = "Double Album",
-        .duration_ms = 150000,
-        .track_num = 1,
-        .disc_num = 1,
-        .year = 2021,
-        .mtime = 2000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &disc1_track1, album2_id, NULL), QUADRATURE_OK);
-
-    db_index_item_t disc1_track2 = {
-        .path = "CD1/02-main.mp3",
-        .title = "Disc 1 Main",
-        .album = "Double Album",
-        .duration_ms = 300000,
-        .track_num = 2,
-        .disc_num = 1,
-        .year = 2021,
-        .mtime = 2000001,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &disc1_track2, album2_id, NULL), QUADRATURE_OK);
-
-    db_index_item_t disc2_track1 = {
-        .path = "CD2/01-opening.mp3",
-        .title = "Disc 2 Opening",
-        .album = "Double Album",
-        .duration_ms = 180000,
-        .track_num = 1,
-        .disc_num = 2,
-        .year = 2021,
-        .mtime = 2000002,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &disc2_track1, album2_id, NULL), QUADRATURE_OK);
-
-    db_index_item_t disc2_track2 = {
-        .path = "CD2/02-finale.mp3",
-        .title = "Disc 2 Finale",
-        .album = "Double Album",
-        .duration_ms = 400000,
-        .track_num = 2,
-        .disc_num = 2,
-        .year = 2021,
-        .mtime = 2000003,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &disc2_track2, album2_id, NULL), QUADRATURE_OK);
-
-    // Different artist with one album
-    db_index_item_t other_artist_track = {
-        .path = "track.mp3",
-        .title = "Other Track",
-        .album = "Another Album",
-        .duration_ms = 240000,
-        .track_num = 1,
-        .disc_num = 1,
-        .year = 2022,
-        .mtime = 3000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(test_db, &other_artist_track, album3_id, NULL), QUADRATURE_OK);
-
-    // Link tracks to artists via track_artists junction table
-    db_track_artist_t ta_test = { .artist_id = test_artist_id, .position = 0, .join_phrase = "" };
-    for (int64_t tid = 1; tid <= 7; tid++) {
-        db_set_track_artists(test_db, tid, &ta_test, 1);
-    }
-    db_track_artist_t ta_other = { .artist_id = another_artist_id, .position = 0, .join_phrase = "" };
-    db_set_track_artists(test_db, 8, &ta_other, 1);
-
-    /* Sync FTS for all three albums (replaces per-track writes removed from db_upsert_track_with_album) */
-    db_sync_album_fts(test_db, album1_id);
-    db_sync_album_fts(test_db, album2_id);
-    db_sync_album_fts(test_db, album3_id);
+    /* Album 3 — different artist. */
+    test_insert_track_full(test_db, album3_id, "track.mp3", "Other Track", 1, 1, 240000, oa, onames, joins, 1);
 
     cr_assert_eq(db_commit(test_db), QUADRATURE_OK);
 }

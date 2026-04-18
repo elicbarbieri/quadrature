@@ -12,6 +12,8 @@
 #include <criterion/hooks.h>
 #include "quadrature/quadrature.h"
 #include "quadrature/database.h"
+#include "quadrature/indexer.h"
+#include "test_helpers.h"
 #include "../../src/database/internal.h"
 #include "../../src/indexer/internal.h"
 
@@ -250,41 +252,10 @@ Test(multi_disc, db_track_disc_num_basic) {
     quadrature_db_t* db = NULL;
     cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
 
-    // Create artist and album
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/album", "Album",
-        artist_id, 2024, &album_id), QUADRATURE_OK);
-
-    // Insert track with disc_num = 1 (default)
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    db_index_item_t item1 = {
-        .path = "/music/album/cd1/track1.mp3",
-        .title = "Track 1",
-        .album = "Album",
-        .duration_ms = 180000,
-        .track_num = 1,
-        .disc_num = 1,  // Disc 1
-        .year = 2024,
-        .mtime = 1000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item1, album_id, NULL), QUADRATURE_OK);
-
-    // Insert track with disc_num = 2
-    db_index_item_t item2 = {
-        .path = "/music/album/cd2/track1.mp3",
-        .title = "Track 1 Disc 2",
-        .album = "Album",
-        .duration_ms = 200000,
-        .track_num = 1,
-        .disc_num = 2,  // Disc 2
-        .year = 2024,
-        .mtime = 1000001,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item2, album_id, NULL), QUADRATURE_OK);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music/album", "Album", artist_id, 2024);
+    test_insert_track_full(db, album_id, "/music/album/cd1/track1.mp3", "Track 1",        1, 1, 180000, NULL, NULL, NULL, 0);
+    test_insert_track_full(db, album_id, "/music/album/cd2/track1.mp3", "Track 1 Disc 2", 1, 2, 200000, NULL, NULL, NULL, 0);
 
     // Verify both tracks were inserted
     size_t count = 0;
@@ -299,32 +270,15 @@ Test(multi_disc, db_track_disc_num_default) {
     quadrature_db_t* db = NULL;
     cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
 
-    // Create artist and album
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music", "Album",
-        artist_id, 2024, &album_id), QUADRATURE_OK);
-
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    // Insert track with disc_num = 0 (should default to 1)
-    db_index_item_t item = {
-        .path = "/music/track.mp3",
-        .title = "Track",
-        .album = "Album",
-        .duration_ms = 180000,
-        .track_num = 1,
-        .disc_num = 0,  // Zero - should default to 1
-        .year = 2024,
-        .mtime = 1000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
+    int64_t track_id = test_insert_track_full(db, album_id, "/music/track.mp3", "Track",
+                                               1, 0 /* should default to 1 */, 180000,
+                                               NULL, NULL, NULL, 0);
 
     // Retrieve track and verify disc_num
     db_track_t* track = NULL;
-    cr_assert_eq(db_get_track(db, 1, &track), QUADRATURE_OK);
+    cr_assert_eq(db_get_track(db, track_id, &track), QUADRATURE_OK);
     cr_assert_not_null(track);
     cr_assert_eq(track->disc_num, 1, "disc_num=0 should be stored as 1");
 
@@ -337,45 +291,23 @@ Test(multi_disc, db_track_disc_num_update) {
     quadrature_db_t* db = NULL;
     cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
 
-    // Create artist and album
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music", "Album",
-        artist_id, 2024, &album_id), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
+    int64_t track_id = test_insert_track_full(db, album_id, "/music/track.mp3", "Original Title",
+                                               5, 3, 180000, NULL, NULL, NULL, 0);
 
-    const char* path = "/music/track.mp3";
+    /* Re-reconcile the same path with updated fields — should update, not insert. */
+    test_insert_track_full(db, album_id, "/music/track.mp3", "Updated Title",
+                            5, 4, 180000, NULL, NULL, NULL, 0);
 
-    // Insert with disc_num = 3
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    db_index_item_t item = {
-        .path = path,
-        .title = "Original Title",
-        .album = "Album",
-        .duration_ms = 180000,
-        .track_num = 5,
-        .disc_num = 3,
-        .year = 2024,
-        .mtime = 1000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    // Update the same track with different disc_num
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    item.title = "Updated Title";
-    item.disc_num = 4;  // Changed disc
-    item.mtime = 2000000;
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    // Verify count is still 1 (upsert, not insert)
+    // Verify count is still 1 (reconciler updates by path, not insert)
     size_t count = 0;
     cr_assert_eq(test_get_track_count(db, &count), QUADRATURE_OK);
-    cr_assert_eq(count, 1, "Should still have 1 track after upsert");
+    cr_assert_eq(count, 1, "Should still have 1 track after re-reconcile");
 
     // Verify disc_num was updated
     db_track_t* track = NULL;
-    cr_assert_eq(db_get_track(db, 1, &track), QUADRATURE_OK);
+    cr_assert_eq(db_get_track(db, track_id, &track), QUADRATURE_OK);
     cr_assert_not_null(track);
     cr_assert_eq(track->disc_num, 4, "disc_num should be updated to 4");
     cr_assert_str_eq(track->title, "Updated Title", "title should be updated");
@@ -389,54 +321,11 @@ Test(multi_disc, db_track_multi_disc_same_track_num) {
     quadrature_db_t* db = NULL;
     cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
 
-    // Create artist and album
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/album", "Double Album",
-        artist_id, 2024, &album_id), QUADRATURE_OK);
-
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    // Track 1 on Disc 1
-    db_index_item_t disc1_track1 = {
-        .path = "/music/album/cd1/01.mp3",
-        .title = "Opening",
-        .album = "Double Album",
-        .duration_ms = 180000,
-        .track_num = 1,
-        .disc_num = 1,
-        .year = 2024,
-        .mtime = 1000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &disc1_track1, album_id, NULL), QUADRATURE_OK);
-
-    // Track 1 on Disc 2 (same track_num, different disc)
-    db_index_item_t disc2_track1 = {
-        .path = "/music/album/cd2/01.mp3",
-        .title = "Second Half Opening",
-        .album = "Double Album",
-        .duration_ms = 200000,
-        .track_num = 1,  // Same track number
-        .disc_num = 2,   // Different disc
-        .year = 2024,
-        .mtime = 1000001,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &disc2_track1, album_id, NULL), QUADRATURE_OK);
-
-    // Track 2 on Disc 1
-    db_index_item_t disc1_track2 = {
-        .path = "/music/album/cd1/02.mp3",
-        .title = "Second Track",
-        .album = "Double Album",
-        .duration_ms = 190000,
-        .track_num = 2,
-        .disc_num = 1,
-        .year = 2024,
-        .mtime = 1000002,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &disc1_track2, album_id, NULL), QUADRATURE_OK);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music/album", "Double Album", artist_id, 2024);
+    int64_t tid_d1t1 = test_insert_track_full(db, album_id, "/music/album/cd1/01.mp3", "Opening",             1, 1, 180000, NULL, NULL, NULL, 0);
+    int64_t tid_d2t1 = test_insert_track_full(db, album_id, "/music/album/cd2/01.mp3", "Second Half Opening", 1, 2, 200000, NULL, NULL, NULL, 0);
+    int64_t tid_d1t2 = test_insert_track_full(db, album_id, "/music/album/cd1/02.mp3", "Second Track",        2, 1, 190000, NULL, NULL, NULL, 0);
 
     // Verify all 3 tracks exist
     size_t count = 0;
@@ -446,22 +335,19 @@ Test(multi_disc, db_track_multi_disc_same_track_num) {
     // Retrieve and verify each track
     db_track_t* track = NULL;
 
-    // Disc 1, Track 1
-    cr_assert_eq(db_get_track(db, 1, &track), QUADRATURE_OK);
+    cr_assert_eq(db_get_track(db, tid_d1t1, &track), QUADRATURE_OK);
     cr_assert_eq(track->track_num, 1);
     cr_assert_eq(track->disc_num, 1);
     cr_assert_str_eq(track->title, "Opening");
     db_track_free(track);
 
-    // Disc 2, Track 1
-    cr_assert_eq(db_get_track(db, 2, &track), QUADRATURE_OK);
+    cr_assert_eq(db_get_track(db, tid_d2t1, &track), QUADRATURE_OK);
     cr_assert_eq(track->track_num, 1);
     cr_assert_eq(track->disc_num, 2);
     cr_assert_str_eq(track->title, "Second Half Opening");
     db_track_free(track);
 
-    // Disc 1, Track 2
-    cr_assert_eq(db_get_track(db, 3, &track), QUADRATURE_OK);
+    cr_assert_eq(db_get_track(db, tid_d1t2, &track), QUADRATURE_OK);
     cr_assert_eq(track->track_num, 2);
     cr_assert_eq(track->disc_num, 1);
     cr_assert_str_eq(track->title, "Second Track");
@@ -475,35 +361,20 @@ Test(multi_disc, db_track_high_disc_numbers) {
     quadrature_db_t* db = NULL;
     cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
 
-    // Create artist and album
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/boxset", "Complete Works",
-        artist_id, 2024, &album_id), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music/boxset", "Complete Works", artist_id, 2024);
 
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    // Simulate a large box set with many discs
+    int64_t disc15_tid = 0;
     for (uint16_t disc = 1; disc <= 20; disc++) {
         char path[128];
         char title[64];
         snprintf(path, sizeof(path), "/music/boxset/cd%d/track1.mp3", disc);
         snprintf(title, sizeof(title), "Disc %d Track 1", disc);
-
-        db_index_item_t item = {
-            .path = path,
-            .title = title,
-            .album = "Complete Works",
-            .duration_ms = 180000 + disc * 1000,
-            .track_num = 1,
-            .disc_num = disc,
-            .year = 2024,
-            .mtime = 1000000 + disc,
-        };
-        cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
+        int64_t tid = test_insert_track_full(db, album_id, path, title,
+                                               1, disc, 180000 + disc * 1000,
+                                               NULL, NULL, NULL, 0);
+        if (disc == 15) disc15_tid = tid;
     }
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
 
     // Verify all 20 tracks
     size_t count = 0;
@@ -512,7 +383,7 @@ Test(multi_disc, db_track_high_disc_numbers) {
 
     // Spot check a high disc number
     db_track_t* track = NULL;
-    cr_assert_eq(db_get_track(db, 15, &track), QUADRATURE_OK);
+    cr_assert_eq(db_get_track(db, disc15_tid, &track), QUADRATURE_OK);
     cr_assert_eq(track->disc_num, 15, "Track 15 should be on disc 15");
     db_track_free(track);
 

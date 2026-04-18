@@ -279,6 +279,7 @@ void extracted_track_free(extracted_track_t* track) {
     g_free(track->rel_path);
     g_free(track->title);
     g_free(track->artist_tag);
+    g_free(track->mb_artist_ids);
     g_free(track->genre);
 }
 
@@ -954,7 +955,7 @@ static void phase_scan(indexer_t* idx, work_queue_t* queue) {
         g_hash_table_iter_init(&iter, album_mtimes);
         while (g_hash_table_iter_next(&iter, &key, &value)) {
             db_album_mtime_t* cached = value;
-            db_reconcile_album_tracks(idx->db, cached->album_id, NULL, 0);
+            db_delete_album(idx->db, cached->album_id);
         }
         db_commit_batch(idx->db);
     }
@@ -1115,48 +1116,6 @@ static void apply_title_featuring(char** title, char** artist_tag) {
     g_free(feat);
 }
 
-// Process a single-disc album
-/*
- * Write Phase 2 (file-tag) artist credits for a track.
- * Skipped entirely if the track was already resolved by MusicBrainz (Phase 4).
- * Splits the raw artist tag on " feat. ", " ft. ", and " & " delimiters.
- * Logs a warning for tags containing " with " or ", " which may need manual review.
- */
-static void write_phase2_track_artists(indexer_t* idx, bool mb_resolved,
-                                        int64_t track_id, const char* artist_tag,
-                                        const char* file_path) {
-    if (mb_resolved) return;
-
-    /* Warn about ambiguous delimiters we don't auto-split */
-    if (strcasestr(artist_tag, " with "))
-        log_indexer_error(idx, file_path,
-            "Artist tag may contain unsplit credits (' with '): %s", artist_tag);
-    if (strstr(artist_tag, ", "))
-        log_indexer_error(idx, file_path,
-            "Artist tag may contain unsplit credits (', '): %s", artist_tag);
-
-    artist_credit_t* credits = NULL;
-    size_t count = parse_artist_tag(artist_tag, &credits);
-
-    db_track_artist_t* ta = g_new(db_track_artist_t, count);
-    size_t written = 0;
-    for (size_t k = 0; k < count; k++) {
-        int64_t aid = get_or_create_artist_cached(idx->artist_cache, idx->db, credits[k].name);
-        if (aid <= 0) continue;
-        ta[written++] = (db_track_artist_t){
-            .artist_id   = aid,
-            .name        = credits[k].name,       /* borrowed; freed by artist_credits_free below */
-            .position    = (int)k,
-            .join_phrase = credits[k].join_phrase, /* borrowed; same lifetime */
-        };
-    }
-    if (written > 0)
-        db_set_track_artists(idx->db, track_id, ta, written);
-
-    g_free(ta);
-    artist_credits_free(credits, count);
-}
-
 static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
     const char* dir_path = work->item->dir_path;
 
@@ -1246,15 +1205,16 @@ static void metadata_worker_single_disc(metadata_work_t* work, indexer_t* idx) {
         }
 
         tracks[track_idx] = (extracted_track_t){
-            .rel_path    = g_strdup(track_rel),
-            .title       = g_strdup(items[i].title),
-            .artist_tag  = g_strdup(items[i].artist ? items[i].artist : album_artist),
-            .genre       = g_strdup(items[i].genre),
-            .duration_ms = items[i].duration_ms,
-            .track_num   = items[i].track_num,
-            .disc_num    = items[i].disc_num > 0 ? items[i].disc_num : 1,
-            .year        = items[i].year,
-            .mtime       = scan.stats[i].st_mtime,
+            .rel_path      = g_strdup(track_rel),
+            .title         = g_strdup(items[i].title),
+            .artist_tag    = g_strdup(items[i].artist ? items[i].artist : album_artist),
+            .mb_artist_ids = g_strdup(items[i].mb_artist_id),
+            .genre         = g_strdup(items[i].genre),
+            .duration_ms   = items[i].duration_ms,
+            .track_num     = items[i].track_num,
+            .disc_num      = items[i].disc_num > 0 ? items[i].disc_num : 1,
+            .year          = items[i].year,
+            .mtime         = scan.stats[i].st_mtime,
         };
         if (delim)
             apply_artist_delimiter(&tracks[track_idx].artist_tag, delim);
@@ -1415,15 +1375,16 @@ static void metadata_worker_multi_disc(metadata_work_t* work, indexer_t* idx) {
             }
 
             tracks[track_idx] = (extracted_track_t){
-                .rel_path    = g_strdup(track_rel),
-                .title       = g_strdup(items[i].title),
-                .artist_tag  = g_strdup(items[i].artist ? items[i].artist : album_artist),
-                .genre       = g_strdup(items[i].genre),
-                .duration_ms = items[i].duration_ms,
-                .track_num   = items[i].track_num,
-                .disc_num    = items[i].disc_num > 0 ? items[i].disc_num : 1,
-                .year        = items[i].year,
-                .mtime       = scan->stats[i].st_mtime,
+                .rel_path      = g_strdup(track_rel),
+                .title         = g_strdup(items[i].title),
+                .artist_tag    = g_strdup(items[i].artist ? items[i].artist : album_artist),
+                .mb_artist_ids = g_strdup(items[i].mb_artist_id),
+                .genre         = g_strdup(items[i].genre),
+                .duration_ms   = items[i].duration_ms,
+                .track_num     = items[i].track_num,
+                .disc_num      = items[i].disc_num > 0 ? items[i].disc_num : 1,
+                .year          = items[i].year,
+                .mtime         = scan->stats[i].st_mtime,
             };
             if (delim)
                 apply_artist_delimiter(&tracks[track_idx].artist_tag, delim);
@@ -1489,10 +1450,99 @@ typedef struct {
     size_t albums_written;
 } metadata_writer_ctx_t;
 
-/* Removed: check_album_track_gaps() moved to library_validation.c as validate_album_track_numbering() */
+/*
+ * Parse a track's raw ARTIST tag into a desired_track_artist_t[] suitable for
+ * the reconciler. Resolves each credit to an artist_id via the writer's cache.
+ * Returns g_malloc'd array (may be NULL if count==0); caller must free via
+ * phase2_track_credits_free(). *credits_storage_out receives the underlying
+ * artist_credit_t[] so its owned name/join_phrase strings survive until the
+ * caller is done with the returned desired array.
+ */
+static desired_track_artist_t* phase2_parse_track_credits(
+    metadata_writer_ctx_t* ctx, metadata_result_t* mr, extracted_track_t* tr,
+    artist_credit_t** credits_storage_out, size_t* count_out) {
+
+    *credits_storage_out = NULL;
+    *count_out = 0;
+    if (!tr->artist_tag || !*tr->artist_tag) return NULL;
+
+    /* Warn about ambiguous delimiters we don't auto-split */
+    if (strcasestr(tr->artist_tag, " with "))
+        log_indexer_error(ctx->idx, mr->dir_path,
+            "Artist tag may contain unsplit credits (' with '): %s", tr->artist_tag);
+    if (strstr(tr->artist_tag, ", "))
+        log_indexer_error(ctx->idx, mr->dir_path,
+            "Artist tag may contain unsplit credits (', '): %s", tr->artist_tag);
+
+    artist_credit_t* credits = NULL;
+    size_t n = parse_artist_tag(tr->artist_tag, &credits);
+    if (n == 0) {
+        artist_credits_free(credits, n);
+        return NULL;
+    }
+
+    /* If Picard gave us a parallel MUSICBRAINZ_ARTISTID list, split it.
+     * When the split count matches the credit count, use it to stamp each
+     * credit with its canonical MBID so later MB resolution (Phase 6) can
+     * find the row by MBID instead of creating a duplicate. */
+    char** mbids = NULL;
+    size_t mbid_count = 0;
+    if (tr->mb_artist_ids && *tr->mb_artist_ids) {
+        mbids = g_strsplit(tr->mb_artist_ids, ";", -1);
+        for (char** p = mbids; *p; p++) {
+            g_strstrip(*p);
+            mbid_count++;
+        }
+    }
+    const bool mbids_aligned = (mbids && mbid_count == n);
+    if (mbids && !mbids_aligned) {
+        /* Count disagreement — either ARTIST was split differently than
+         * Picard's ARTISTS list, or the tag is malformed. Safer to skip
+         * MBID assignment than to mis-attribute a credit. */
+        log_indexer_error(ctx->idx, mr->dir_path,
+            "Track '%s': ARTIST parsed into %zu credits but MUSICBRAINZ_ARTISTID "
+            "has %zu IDs — MBIDs skipped for this track",
+            tr->title ? tr->title : tr->rel_path, n, mbid_count);
+    }
+
+    desired_track_artist_t* out = g_new0(desired_track_artist_t, n);
+    size_t w = 0;
+    for (size_t k = 0; k < n; k++) {
+        const char* mbid = mbids_aligned && mbids[k][0] ? mbids[k] : NULL;
+        int64_t aid;
+        if (mbid) {
+            /* Use MB-aware path so the MBID lands on the artist row. Bypasses
+             * the name-keyed artist_cache (it's not MBID-aware), which is fine
+             * for the tiny number of feat.-credit tracks per album. */
+            aid = db_get_or_create_artist_mb(ctx->idx->db,
+                                              credits[k].name, NULL, mbid);
+        } else {
+            aid = get_or_create_artist_cached(ctx->artist_cache, ctx->idx->db,
+                                               credits[k].name);
+        }
+        if (aid <= 0) continue;
+        out[w++] = (desired_track_artist_t){
+            .artist_id   = aid,
+            .name        = credits[k].name,
+            .join_phrase = credits[k].join_phrase,
+            .position    = (int)k,
+        };
+    }
+    if (mbids) g_strfreev(mbids);
+
+    *credits_storage_out = credits;
+    *count_out = w;
+    if (w == 0) {
+        g_free(out);
+        artist_credits_free(credits, n);
+        *credits_storage_out = NULL;
+        return NULL;
+    }
+    return out;
+}
 
 /**
- * Write a single metadata_result_t to the database.
+ * Write a single metadata_result_t to the database via the reconciler.
  * Returns true on success, false on failure (album skipped).
  */
 static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr) {
@@ -1515,61 +1565,98 @@ static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr)
     }
 
     int64_t album_id = 0;
-    quadrature_result_t res = db_upsert_folder_album(db,
-        mr->album_rel_path, mr->folder_name, artist_id, 0, &album_id);
+    quadrature_result_t res = db_create_or_get_album_by_path(
+        db, mr->album_rel_path, mr->folder_name, artist_id, 0, &album_id);
     if (res != QUADRATURE_OK || album_id <= 0) {
         log_indexer_error(idx, mr->dir_path,
             "Failed to create album: %s", mr->folder_name);
         return false;
     }
 
-    if (mr->album_mb_release_id)
-        db_set_album_release_id_from_tags(db, album_id, mr->album_mb_release_id);
-    if (mr->album_mb_release_group_id)
-        db_set_album_release_group_id_from_tags(db, album_id, mr->album_mb_release_group_id);
+    /* Build desired track array + per-track credit storage (freed at end). */
+    desired_track_t*        d_tracks = g_new0(desired_track_t, mr->track_count);
+    desired_track_artist_t** d_artists = g_new0(desired_track_artist_t*, mr->track_count);
+    artist_credit_t**       raw_credits = g_new0(artist_credit_t*, mr->track_count);
+    size_t*                 raw_credit_counts = g_new0(size_t, mr->track_count);
 
     for (size_t t = 0; t < mr->track_count; t++) {
         extracted_track_t* tr = &mr->tracks[t];
 
-        db_index_item_t db_item = {
-            .path        = tr->rel_path,
-            .title       = tr->title,
-            .album       = mr->folder_name,
-            .duration_ms = tr->duration_ms,
-            .track_num   = tr->track_num,
-            .disc_num    = tr->disc_num,
-            .year        = tr->year,
-            .mtime       = tr->mtime,
-            .genre       = tr->genre,
-        };
+        uint32_t fields = DESIRED_TRACK_TITLE | DESIRED_TRACK_NUM | DESIRED_TRACK_DISC
+                        | DESIRED_TRACK_DURATION | DESIRED_TRACK_YEAR
+                        | DESIRED_TRACK_MTIME;
+        if (tr->genre && *tr->genre) fields |= DESIRED_TRACK_GENRE;
 
-        int64_t track_id = 0;
-        if (db_upsert_track_with_album(db, &db_item, album_id, &track_id) == QUADRATURE_OK) {
-            atomic_fetch_add(&idx->files_new, 1);
-            if (track_id > 0) {
-                write_phase2_track_artists(idx, mr->mb_resolved,
-                    track_id, tr->artist_tag, mr->dir_path);
+        size_t artist_count = 0;
+        desired_track_artist_t* a = NULL;
+        /* Skip tag-sourced artist writes when MB already resolved this album
+         * (Phase 6 owns track_artists in that case). */
+        if (!mr->mb_resolved) {
+            a = phase2_parse_track_credits(ctx, mr, tr,
+                                            &raw_credits[t], &raw_credit_counts[t]);
+            if (a) {
+                fields |= DESIRED_TRACK_ARTISTS;
+                artist_count = raw_credit_counts[t];
             }
-        } else {
-            log_indexer_error(idx, mr->dir_path,
-                "Failed to save track: %s", tr->title ? tr->title : "(unknown)");
         }
+        d_artists[t] = a;
+
+        d_tracks[t] = (desired_track_t){
+            .path                = tr->rel_path,
+            .present_fields      = fields,
+            .title               = tr->title,
+            .track_num           = tr->track_num,
+            .disc_num            = tr->disc_num > 0 ? tr->disc_num : 1,
+            .duration_ms         = tr->duration_ms,
+            .year                = tr->year,
+            .genre               = tr->genre,
+            .mtime               = tr->mtime,
+            .artists             = a,
+            .artist_count        = artist_count,
+            .position_confidence = RECONCILE_CONFIDENCE_NONE,  /* TAGS source */
+        };
+        atomic_fetch_add(&idx->files_new, 1);
     }
 
-    /* Reconcile the DB with the filesystem: any track row for this album
-     * whose path is not in the current scan represents a file that was
-     * deleted or renamed since the last indexing. Remove the stale rows
-     * so subsequent cache warms reflect the on-disk truth.
-     *
-     * Passing mr->tracks[].rel_path matches the exact path written by
-     * db_upsert_track_with_album above (stored album-relative). */
-    const char** current_paths = g_newa(const char*, mr->track_count);
+    /* Build desired album state. */
+    uint32_t album_fields = DESIRED_ALBUM_TITLE | DESIRED_ALBUM_ARTIST_ID;
+    int mb_status_val = MB_STATUS_NOT_ATTEMPTED;
+    if (mr->album_mb_release_id && mr->album_mb_release_id[0]) {
+        album_fields |= DESIRED_ALBUM_MB_RELEASE_ID | DESIRED_ALBUM_MB_STATUS;
+        mb_status_val = MB_STATUS_HAS_RELEASE_ID;
+    }
+    if (mr->album_mb_release_group_id && mr->album_mb_release_group_id[0]) {
+        album_fields |= DESIRED_ALBUM_MB_RELEASE_GROUP;
+    }
+
+    desired_album_state_t desired = {
+        .source                       = RECONCILE_SOURCE_TAGS,
+        .present_fields               = album_fields,
+        .path                         = mr->album_rel_path,
+        .title                        = mr->folder_name,
+        .artist_id                    = artist_id,
+        .is_compilation               = false,
+        .year                         = 0,
+        .musicbrainz_release_id       = mr->album_mb_release_id,
+        .musicbrainz_release_group_id = mr->album_mb_release_group_id,
+        .mb_status                    = mb_status_val,
+        .mb_resolved_at               = 0,
+        .tracks                       = d_tracks,
+        .track_count                  = mr->track_count,
+    };
+
+    db_reconcile_album(db, album_id, &desired, &RECONCILE_POLICY_TAGS, NULL);
+
+    /* Free per-track credit storage. */
     for (size_t t = 0; t < mr->track_count; t++) {
-        current_paths[t] = mr->tracks[t].rel_path;
+        g_free(d_artists[t]);
+        if (raw_credits[t])
+            artist_credits_free(raw_credits[t], raw_credit_counts[t]);
     }
-    db_reconcile_album_tracks(db, album_id, current_paths, mr->track_count);
-
-    db_sync_album_fts(db, album_id);
+    g_free(d_tracks);
+    g_free(d_artists);
+    g_free(raw_credits);
+    g_free(raw_credit_counts);
 
     /* ── Validate track numbering (supports both per-disc and continuous patterns) ── */
     validate_album_track_numbering(idx, mr);
@@ -2336,6 +2423,7 @@ static void* indexer_worker(void* arg) {
             .acoustid_index_url = idx->acoustid_index_url,
             .mb_solr_url = idx->mb_solr_url,
             .library_root = get_library_root(idx),
+            .data_root = get_data_root(idx),
         };
         mb_resolver_t* resolver = NULL;
         quadrature_result_t res = mb_resolver_create(&resolver, idx->db, &opts,

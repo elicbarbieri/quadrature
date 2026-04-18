@@ -11,10 +11,13 @@
 
 #include <criterion/criterion.h>
 #include "quadrature/library.h"
+#include "quadrature/library_search.h"
 #include "quadrature/database.h"
+#include "quadrature/indexer.h"
 #include "../../src/database/internal.h"
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -35,61 +38,145 @@ static inline void test_cleanup_db(const char *path) {
  * Track / artist creation helpers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Create a track with default duration (200s) and link it to an album. */
-static inline void test_create_track(quadrature_db_t *db, int64_t album_id,
-                                     const char *title, int track_num,
-                                     int disc_num) {
-    db_index_item_t item = {
-        .path        = title,   /* unique within album */
-        .title       = title,
-        .album       = "unused",
-        .duration_ms = 200000,
-        .track_num   = (uint16_t)track_num,
-        .disc_num    = (uint16_t)disc_num,
-        .year        = 2020,
-        .mtime       = 1000000 + track_num,
-    };
-    quadrature_result_t res = db_upsert_track_with_album(db, &item, album_id, NULL);
-    cr_assert_eq(res, QUADRATURE_OK, "failed to create track '%s'", title);
+/* Fixture helpers — thin wrappers over the reconciler so tests can populate
+ * a synthetic DB state without running the full indexer. */
+
+/** Create or fetch an album at `path` with title + artist_id. */
+static inline int64_t test_insert_album(quadrature_db_t *db, const char *path,
+                                        const char *title, int64_t artist_id,
+                                        uint16_t year) {
+    int64_t album_id = 0;
+    cr_assert_eq(db_create_or_get_album_by_path(db, path, title, artist_id,
+                                                 year, &album_id),
+                 QUADRATURE_OK, "insert album '%s'", path);
+    return album_id;
 }
 
-/**
- * Create a track with a custom duration (milliseconds).
- * Useful for tests that verify duration-based matching or sorting.
- */
-static inline void test_create_track_with_duration(quadrature_db_t *db,
-                                                   int64_t album_id,
-                                                   const char *title,
-                                                   int track_num,
-                                                   int disc_num,
-                                                   int duration_ms) {
-    db_index_item_t item = {
-        .path        = title,
-        .title       = title,
-        .album       = "unused",
-        .duration_ms = duration_ms,
-        .track_num   = (uint16_t)track_num,
-        .disc_num    = (uint16_t)disc_num,
-        .year        = 2020,
-        .mtime       = 1000000 + track_num,
+/** Insert a single track into `album_id` via the reconciler.
+ *  Returns the new track's row id. */
+static inline int64_t test_insert_track_full(quadrature_db_t *db,
+                                             int64_t album_id,
+                                             const char *rel_path,
+                                             const char *title,
+                                             int track_num, int disc_num,
+                                             int duration_ms,
+                                             const int64_t *artist_ids,
+                                             const char **artist_names,
+                                             const char **join_phrases,
+                                             int artist_count) {
+    desired_track_artist_t credits[8];
+    cr_assert(artist_count <= 8);
+    for (int i = 0; i < artist_count; i++) {
+        credits[i] = (desired_track_artist_t){
+            .artist_id = artist_ids[i],
+            .name = artist_names[i],
+            .join_phrase = join_phrases ? join_phrases[i] : "",
+            .position = i,
+        };
+    }
+
+    desired_track_t track = {
+        .path          = rel_path,
+        .present_fields = DESIRED_TRACK_TITLE | DESIRED_TRACK_NUM
+                        | DESIRED_TRACK_DISC  | DESIRED_TRACK_DURATION
+                        | DESIRED_TRACK_YEAR  | DESIRED_TRACK_MTIME
+                        | (artist_count > 0 ? DESIRED_TRACK_ARTISTS : 0),
+        .title         = title,
+        .track_num     = (uint16_t)track_num,
+        .disc_num      = (uint16_t)(disc_num > 0 ? disc_num : 1),
+        .duration_ms   = (uint32_t)duration_ms,
+        .year          = 2020,
+        .mtime         = 1000000 + track_num,
+        .artists       = artist_count > 0 ? credits : NULL,
+        .artist_count  = (size_t)artist_count,
     };
-    quadrature_result_t res = db_upsert_track_with_album(db, &item, album_id, NULL);
-    cr_assert_eq(res, QUADRATURE_OK, "failed to create track '%s'", title);
+    desired_album_state_t desired = {
+        .source = RECONCILE_SOURCE_TAGS,
+        .tracks = &track, .track_count = 1,
+    };
+    reconcile_policy_t policy = {0};  /* no prune, no confidence gate */
+
+    bool need_txn = !db->in_transaction;
+    if (need_txn) cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+    cr_assert_eq(db_reconcile_album(db, album_id, &desired, &policy, NULL),
+                 QUADRATURE_OK, "reconcile track '%s'", rel_path);
+    if (need_txn) cr_assert_eq(db_commit(db), QUADRATURE_OK);
+
+    /* Look up new track_id by (album_id, path). */
+    db_lock(db);
+    sqlite3_stmt *q = NULL;
+    sqlite3_prepare_v2(db->db,
+        "SELECT id FROM tracks WHERE album_id = ? AND path = ?",
+        -1, &q, NULL);
+    sqlite3_bind_int64(q, 1, album_id);
+    sqlite3_bind_text (q, 2, rel_path, -1, SQLITE_STATIC);
+    int64_t track_id = (sqlite3_step(q) == SQLITE_ROW)
+                     ? sqlite3_column_int64(q, 0) : 0;
+    sqlite3_finalize(q);
+    db_unlock(db);
+    cr_assert(track_id > 0, "track '%s' not inserted", rel_path);
+    return track_id;
+}
+
+/** Create a track with default duration (200s). Returns track_id. */
+static inline int64_t test_create_track(quadrature_db_t *db, int64_t album_id,
+                                        const char *title, int track_num,
+                                        int disc_num) {
+    return test_insert_track_full(db, album_id, title, title,
+                                   track_num, disc_num, 200000,
+                                   NULL, NULL, NULL, 0);
+}
+
+/** Create a track with a custom duration (milliseconds). Returns track_id. */
+static inline int64_t test_create_track_with_duration(quadrature_db_t *db,
+                                                      int64_t album_id,
+                                                      const char *title,
+                                                      int track_num,
+                                                      int disc_num,
+                                                      int duration_ms) {
+    return test_insert_track_full(db, album_id, title, title,
+                                   track_num, disc_num, duration_ms,
+                                   NULL, NULL, NULL, 0);
 }
 
 /** Link a track to a single artist (position=0, no join phrase). */
 static inline void test_link_track_artist(quadrature_db_t *db,
                                           int64_t track_id,
                                           int64_t artist_id) {
-    db_track_artist_t ta = {
-        .artist_id = artist_id, .position = 0, .join_phrase = ""
-    };
-    db_set_track_artists(db, track_id, &ta, 1);
+    /* Direct SQL — needed to add credits AFTER initial reconcile-based insert
+     * without re-running the full album reconcile. */
+    bool need_txn = !db->in_transaction;
+    if (need_txn) db_begin_transaction(db);
+    db_lock(db);
+    sqlite3_exec(db->db, "DELETE FROM track_artists WHERE track_id = "
+                          "(SELECT id FROM tracks WHERE id = ?)", NULL, NULL, NULL);
+    sqlite3_stmt *del = NULL;
+    sqlite3_prepare_v2(db->db, "DELETE FROM track_artists WHERE track_id = ?",
+                       -1, &del, NULL);
+    sqlite3_bind_int64(del, 1, track_id);
+    sqlite3_step(del); sqlite3_finalize(del);
+
+    sqlite3_stmt *ins = NULL;
+    sqlite3_prepare_v2(db->db,
+        "INSERT INTO track_artists(track_id, artist_id, position, join_phrase) "
+        "VALUES(?, ?, 0, '')", -1, &ins, NULL);
+    sqlite3_bind_int64(ins, 1, track_id);
+    sqlite3_bind_int64(ins, 2, artist_id);
+    sqlite3_step(ins); sqlite3_finalize(ins);
+
+    sqlite3_stmt *upd = NULL;
+    sqlite3_prepare_v2(db->db,
+        "UPDATE tracks SET artist_display = (SELECT name FROM artists WHERE id = ?) "
+        "WHERE id = ?", -1, &upd, NULL);
+    sqlite3_bind_int64(upd, 1, artist_id);
+    sqlite3_bind_int64(upd, 2, track_id);
+    sqlite3_step(upd); sqlite3_finalize(upd);
+    db_unlock(db);
+    if (need_txn) db_commit(db);
 }
 
 /**
  * Link a track to multiple artists (featured credit pattern).
- * artists[] and join_phrases[] must have `count` elements.
  * Positions assigned in array order.
  */
 static inline void test_link_track_artists(quadrature_db_t *db,
@@ -97,14 +184,60 @@ static inline void test_link_track_artists(quadrature_db_t *db,
                                            const int64_t *artist_ids,
                                            const char **join_phrases,
                                            int count) {
-    db_track_artist_t ta[8];
-    cr_assert(count <= 8, "test_link_track_artists: max 8 artists");
+    bool need_txn = !db->in_transaction;
+    if (need_txn) db_begin_transaction(db);
+    db_lock(db);
+    sqlite3_stmt *del = NULL;
+    sqlite3_prepare_v2(db->db, "DELETE FROM track_artists WHERE track_id = ?",
+                       -1, &del, NULL);
+    sqlite3_bind_int64(del, 1, track_id);
+    sqlite3_step(del); sqlite3_finalize(del);
+
+    GString *display = g_string_new(NULL);
     for (int i = 0; i < count; i++) {
-        ta[i].artist_id = artist_ids[i];
-        ta[i].position = i;
-        ta[i].join_phrase = (char *)join_phrases[i];
+        sqlite3_stmt *ins = NULL;
+        sqlite3_prepare_v2(db->db,
+            "INSERT INTO track_artists(track_id, artist_id, position, join_phrase) "
+            "VALUES(?, ?, ?, ?)", -1, &ins, NULL);
+        sqlite3_bind_int64(ins, 1, track_id);
+        sqlite3_bind_int64(ins, 2, artist_ids[i]);
+        sqlite3_bind_int  (ins, 3, i);
+        sqlite3_bind_text (ins, 4, join_phrases ? join_phrases[i] : "",
+                           -1, SQLITE_TRANSIENT);
+        sqlite3_step(ins); sqlite3_finalize(ins);
+
+        /* Append "name + join_phrase" for artist_display. */
+        sqlite3_stmt *q = NULL;
+        sqlite3_prepare_v2(db->db, "SELECT name FROM artists WHERE id = ?",
+                           -1, &q, NULL);
+        sqlite3_bind_int64(q, 1, artist_ids[i]);
+        if (sqlite3_step(q) == SQLITE_ROW) {
+            const char *n = (const char*)sqlite3_column_text(q, 0);
+            if (n) g_string_append(display, n);
+        }
+        sqlite3_finalize(q);
+        if (join_phrases && join_phrases[i]) g_string_append(display, join_phrases[i]);
     }
-    db_set_track_artists(db, track_id, ta, count);
+
+    sqlite3_stmt *upd = NULL;
+    sqlite3_prepare_v2(db->db, "UPDATE tracks SET artist_display = ? WHERE id = ?",
+                       -1, &upd, NULL);
+    sqlite3_bind_text (upd, 1, display->str, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upd, 2, track_id);
+    sqlite3_step(upd); sqlite3_finalize(upd);
+    g_string_free(display, TRUE);
+
+    /* Refresh tracks_fts for the whole album. */
+    sqlite3_stmt *fts = NULL;
+    sqlite3_prepare_v2(db->db,
+        "INSERT OR REPLACE INTO tracks_fts(rowid, title, artist, album) "
+        "SELECT t.id, t.title, COALESCE(t.artist_display,''), COALESCE(al.title,'') "
+        "FROM tracks t JOIN albums al ON t.album_id = al.id WHERE t.id = ?",
+        -1, &fts, NULL);
+    sqlite3_bind_int64(fts, 1, track_id);
+    sqlite3_step(fts); sqlite3_finalize(fts);
+    db_unlock(db);
+    if (need_txn) db_commit(db);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -275,6 +408,64 @@ static inline char *test_read_text(quadrature_db_t *db, const char *sql,
     sqlite3_finalize(stmt);
     db_unlock(db);
     return result;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Fixture FLAC synthesis
+ *
+ * Builds real FLAC files with Vorbis-comment tags using ffmpeg's `anullsrc`
+ * (digital silence). Silence compresses to ~195 bytes/second in FLAC, so a
+ * 6-minute track is ~70 KB — tiny enough for tests that need hundreds of
+ * tracks without blowing up build time or disk.
+ *
+ * The indexer reads duration from the stream header (`-t <secs>`), so passing
+ * a track's real duration makes MB lookups accurate without shipping audio.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Quote a string for inclusion in a single-quoted shell argument. */
+static inline char *shell_escape(const char *s) {
+    size_t len = strlen(s);
+    char *out = (char *)malloc(len * 4 + 1);
+    char *p = out;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\'') {
+            *p++ = '\''; *p++ = '\\'; *p++ = '\''; *p++ = '\'';
+        } else {
+            *p++ = s[i];
+        }
+    }
+    *p = '\0';
+    return out;
+}
+
+/**
+ * Create a FLAC file at `path` with the given Vorbis-comment tags and
+ * exact duration. `metadata_pairs` is a NULL-terminated array of "key=value"
+ * strings. Returns ffmpeg's exit status (0 on success).
+ *
+ * Audio is digital silence — ~195 B/s after FLAC compression. Use real
+ * durations when MB lookup accuracy matters.
+ */
+static inline int create_flac(const char *path,
+                              const char *const *metadata_pairs,
+                              int duration_secs) {
+    char cmd[8192];
+    double dur = duration_secs > 0 ? (double)duration_secs : 1;
+    int off = snprintf(cmd, sizeof(cmd),
+        "ffmpeg -y -loglevel error -f lavfi -i anullsrc=r=8000:cl=mono "
+        "-t %.1f ", dur);
+
+    for (const char *const *p = metadata_pairs; *p; p++) {
+        char *escaped = shell_escape(*p);
+        off += snprintf(cmd + off, sizeof(cmd) - off, "-metadata '%s' ", escaped);
+        free(escaped);
+    }
+
+    char *epath = shell_escape(path);
+    off += snprintf(cmd + off, sizeof(cmd) - off, "'%s'", epath);
+    free(epath);
+
+    return system(cmd);
 }
 
 #endif /* TEST_HELPERS_H */

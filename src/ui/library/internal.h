@@ -12,6 +12,8 @@
 #include "quadrature/library.h"
 #include "quadrature/settings.h"
 
+struct PlaybackIntent;
+
 G_BEGIN_DECLS
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -392,9 +394,7 @@ typedef struct {
 typedef struct {
     /* High-level actions */
     void (*on_navigate)(LibraryItemKind kind, int64_t id, gpointer data);
-    void (*on_play)(const char *path, const char *title,
-                    const char *artist, const char *album,
-                    int64_t track_id, gpointer data);
+    void (*on_play)(const struct PlaybackIntent *intent, gpointer data);
     void (*on_back)(gpointer data);
     void (*on_album_loaded)(int64_t album_id, const LibraryTrackInfo *tracks,
                             size_t count, gpointer data);

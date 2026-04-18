@@ -1,5 +1,6 @@
 #include <criterion/criterion.h>
 #include "test_helpers.h"
+#include "quadrature/indexer.h"
 #include <pthread.h>
 
 #define TEST_DB_FILE "test_database.db"
@@ -117,77 +118,6 @@ Test(database, empty_operations) {
 }
 
 // ============================================================================
-// Track Upsert Operations
-// ============================================================================
-
-Test(database, track_upsert) {
-    quadrature_db_t* db = NULL;
-    db_open_memory(&db);
-
-    // Create artist and album for tracks
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
-    cr_assert_neq(artist_id, 0);
-
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music", "Test Album",
-        artist_id, 2024, &album_id), QUADRATURE_OK);
-    cr_assert_neq(album_id, 0);
-
-    // --- INSERT ---
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    db_index_item_t item1 = {
-        .path = "/music/track1.mp3",
-        .title = "First Song",
-        .album = "Test Album",
-        .duration_ms = 180000,
-        .track_num = 1,
-        .year = 2024,
-        .mtime = 1000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item1, album_id, NULL), QUADRATURE_OK);
-
-    db_index_item_t item2 = {
-        .path = "/music/track2.mp3",
-        .title = "Second Song",
-        .album = "Test Album",
-        .duration_ms = 200000,
-        .track_num = 2,
-        .year = 2024,
-        .mtime = 1000001,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item2, album_id, NULL), QUADRATURE_OK);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    // Verify inserts
-    size_t count = 0;
-    cr_assert_eq(test_get_track_count(db, &count), QUADRATURE_OK);
-    cr_assert_eq(count, 2);
-
-    // --- UPDATE ---
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    db_index_item_t update = {
-        .path = "/music/track1.mp3",
-        .title = "Updated Title",
-        .album = "Test Album",
-        .duration_ms = 185000,
-        .track_num = 1,
-        .year = 2024,
-        .mtime = 2000000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &update, album_id, NULL), QUADRATURE_OK);
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    // Count unchanged
-    cr_assert_eq(test_get_track_count(db, &count), QUADRATURE_OK);
-    cr_assert_eq(count, 2);
-
-    db_close(db);
-}
-
-// ============================================================================
 // Transaction Rollback
 // ============================================================================
 
@@ -195,35 +125,27 @@ Test(database, transaction_rollback) {
     quadrature_db_t* db = NULL;
     db_open_memory(&db);
 
-    // Create artist and album
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music", "Album",
-        artist_id, 2024, &album_id), QUADRATURE_OK);
-
-    // Insert one track
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    db_index_item_t item = {
-        .path = "/music/committed.mp3",
-        .title = "Committed",
-        .album = "Album",
-        .duration_ms = 100000,
-        .track_num = 1,
-        .year = 2024,
-        .mtime = 1000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
+    test_insert_track_full(db, album_id, "/music/committed.mp3", "Committed",
+                            1, 1, 100000, NULL, NULL, NULL, 0);
 
     size_t count = 0;
     cr_assert_eq(test_get_track_count(db, &count), QUADRATURE_OK);
     cr_assert_eq(count, 1);
 
-    // Start new transaction, add track, then rollback
+    // Start a transaction, write a track via raw SQL, then rollback.
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    item.path = "/music/rolled_back.mp3";
-    item.title = "Should Not Exist";
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
+    db_lock(db);
+    sqlite3_stmt *ins = NULL;
+    sqlite3_prepare_v2(db->db,
+        "INSERT INTO tracks(title, album_id, path, duration_ms, track_num, "
+        "disc_num, mtime, year) VALUES('Should Not Exist', ?, "
+        "'/music/rolled_back.mp3', 100000, 2, 1, 2000, 2024)",
+        -1, &ins, NULL);
+    sqlite3_bind_int64(ins, 1, album_id);
+    sqlite3_step(ins); sqlite3_finalize(ins);
+    db_unlock(db);
     cr_assert_eq(db_rollback(db), QUADRATURE_OK);
 
     // Count should still be 1
@@ -309,29 +231,12 @@ Test(database, prune_orphan_artists_removes_unreferenced) {
     cr_assert_gt(linked_id, 0);
 
     /* Create an album and a track linked to linked_id only */
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music", "Album", linked_id, 2020, &album_id), QUADRATURE_OK);
-
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    db_index_item_t item = {
-        .path = "/music/track.mp3", .title = "Track", .album = "Album",
-        .duration_ms = 60000, .track_num = 1, .year = 2020, .mtime = 1000,
-    };
-    db_index_item_t *artists_list[1] = {NULL};
-    (void)artists_list;
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
-
-    /* Manually insert a track_artists row for linked_id */
-    sqlite3_stmt *ins = NULL;
-    sqlite3_prepare_v2(db->db,
-        "INSERT INTO track_artists(track_id, artist_id, position) "
-        "SELECT id, ?, 0 FROM tracks WHERE path = '/music/track.mp3' LIMIT 1",
-        -1, &ins, NULL);
-    sqlite3_bind_int64(ins, 1, linked_id);
-    sqlite3_step(ins);
-    sqlite3_finalize(ins);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music", "Album", linked_id, 2020);
+    const int64_t ta[1] = { linked_id };
+    const char *names[1] = { "LinkedArtist" };
+    const char *joins[1] = { "" };
+    test_insert_track_full(db, album_id, "/music/track.mp3", "Track",
+                            1, 1, 60000, ta, names, joins, 1);
 
     cr_assert_eq(count_artists(db), 2, "Both artists exist before prune");
 
@@ -364,9 +269,8 @@ Test(database, prune_orphan_artists_preserves_album_artist) {
     cr_assert_gt(album_artist_id, 0);
 
     /* Create an album whose artist_id references album_artist_id — no track_artists rows */
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/ao", "Album",
-        album_artist_id, 2024, &album_id), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/music/ao", "Album", album_artist_id, 2024);
+    (void)album_id;
 
     cr_assert_eq(count_artists(db), 2, "Both artists exist before prune");
 
@@ -397,26 +301,12 @@ Test(database, get_artists_page_excludes_orphans) {
 
     /* Create a real artist with a track */
     int64_t real_id = db_get_or_create_artist(db, "RealArtist");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/m2", "Album2", real_id, 2021, &album_id), QUADRATURE_OK);
-
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    db_index_item_t item = {
-        .path = "/m2/song.mp3", .title = "Song", .album = "Album2",
-        .duration_ms = 30000, .track_num = 1, .year = 2021, .mtime = 2000,
-    };
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, NULL), QUADRATURE_OK);
-
-    sqlite3_stmt *ins = NULL;
-    sqlite3_prepare_v2(db->db,
-        "INSERT INTO track_artists(track_id, artist_id, position) "
-        "SELECT id, ?, 0 FROM tracks WHERE path = '/m2/song.mp3' LIMIT 1",
-        -1, &ins, NULL);
-    sqlite3_bind_int64(ins, 1, real_id);
-    sqlite3_step(ins);
-    sqlite3_finalize(ins);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/m2", "Album2", real_id, 2021);
+    const int64_t ta[1] = { real_id };
+    const char *names[1] = { "RealArtist" };
+    const char *joins[1] = { "" };
+    test_insert_track_full(db, album_id, "/m2/song.mp3", "Song",
+                            1, 1, 30000, ta, names, joins, 1);
 
     db_artist_t *results = NULL;
     size_t out_count = 0, total_count = 0;
@@ -435,86 +325,8 @@ Test(database, get_artists_page_excludes_orphans) {
     db_close(db);
 }
 
-// ============================================================================
-// MB-Resolved Album Re-Index Protection
-// ============================================================================
-
-/* Regression test for: mb_status guard used wrong constant (!=1 instead of <2),
- * allowing a re-index to clobber artist_id on albums already at MB_STATUS_RESOLVED.
- *
- * Scenario (mirrors real Apollo 440 case):
- *   Pass 1 — metadata phase: album created with file-tag artist ("Apollo Four Forty")
- *   MB phase: artist updated to canonical MB artist ("Apollo 440"), mb_status → RESOLVED
- *   Pass 2 — re-index: metadata phase runs again with file-tag artist
- *   Expected: album.artist_id must still be the MB-resolved artist after pass 2.
- */
-Test(database, mb_resolved_album_artist_not_clobbered_on_reindex) {
-    quadrature_db_t *db = NULL;
-    db_open_memory(&db);
-
-    /* ── Pass 1: metadata phase ── */
-    int64_t filetag_artist_id = db_get_or_create_artist(db, "Apollo Four Forty");
-    cr_assert_gt(filetag_artist_id, 0);
-
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/apollo440/ghoyo", "Gettin' High on Your Own Supply",
-        filetag_artist_id, 1999, &album_id), QUADRATURE_OK);
-    cr_assert_gt(album_id, 0);
-
-    /* ── MB phase: resolve to canonical artist + set status ── */
-    int64_t mb_artist_id = db_get_or_create_artist_mb(db,
-        "Apollo 440", "Apollo 440", "1ff10dff-7ac7-4e53-bc02-d5c3cbd8448b");
-    cr_assert_gt(mb_artist_id, 0);
-    cr_assert_neq(mb_artist_id, filetag_artist_id); /* sanity: two distinct artists */
-
-    cr_assert_eq(db_update_album_artist(db, album_id, mb_artist_id, false), QUADRATURE_OK);
-    cr_assert_eq(db_update_album_mb(db, album_id,
-        "Gettin' High on Your Own Supply",
-        "a12184c1-cbdc-3ab4-b5c8-aa0685aa9c47",
-        "d9b8543e-b058-305a-8bd3-e841382a6168",
-        1999, MB_STATUS_RESOLVED), QUADRATURE_OK);
-
-    /* ── Pass 2: re-index — metadata phase runs again with file-tag artist ── */
-    int64_t album_id2 = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/apollo440/ghoyo", "Gettin' High on Your Own Supply",
-        filetag_artist_id, 1999, &album_id2), QUADRATURE_OK);
-    cr_assert_eq(album_id2, album_id); /* same album row */
-
-    /* ── Assert: MB-resolved artist must survive the re-index ── */
-    int64_t actual_artist = test_read_int64(db, "SELECT artist_id FROM albums WHERE id = ?", album_id);
-    cr_assert_eq(actual_artist, mb_artist_id,
-        "MB-resolved artist_id must survive re-index (got filetag artist instead)");
-
-    db_close(db);
-}
-
-/* Complement: un-resolved album (mb_status=0) MUST have its artist updated on re-index. */
-Test(database, unresolved_album_artist_updated_on_reindex) {
-    quadrature_db_t *db = NULL;
-    db_open_memory(&db);
-
-    int64_t artist_v1 = db_get_or_create_artist(db, "Old Tag Name");
-    int64_t artist_v2 = db_get_or_create_artist(db, "Corrected Tag Name");
-    cr_assert_gt(artist_v1, 0);
-    cr_assert_gt(artist_v2, 0);
-
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/somealbum", "Some Album",
-        artist_v1, 2020, &album_id), QUADRATURE_OK);
-
-    /* Re-index with corrected tag — mb_status is still 0 (NOT_ATTEMPTED) */
-    int64_t album_id2 = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "/music/somealbum", "Some Album",
-        artist_v2, 2020, &album_id2), QUADRATURE_OK);
-    cr_assert_eq(album_id2, album_id);
-
-    /* ── Assert: artist_id must be updated to artist_v2 ── */
-    int64_t actual_artist = test_read_int64(db, "SELECT artist_id FROM albums WHERE id = ?", album_id);
-    cr_assert_eq(actual_artist, artist_v2,
-        "Unresolved album artist_id must be updated on re-index");
-
-    db_close(db);
-}
+// MB-resolved re-index guard behavior is now tested against the reconciler
+// directly in test_reconciler.c.
 
 // ============================================================================
 // Concurrent Read Safety
@@ -681,12 +493,12 @@ Test(database, log_error_legacy_wrapper_defaults) {
  * db_reconcile_album_tracks: whole-album wipe cascade (tracks, track_artists, FTS)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Prune each given album by reconciling against an empty current-path set.
+/** Prune each given album by deleting it (and all its tracks).
  *  Matches how Phase 1's orphan sweep invokes the API. */
 static void test_prune_albums(quadrature_db_t *db, const int64_t *ids, size_t count) {
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     for (size_t i = 0; i < count; i++) {
-        cr_assert_eq(db_reconcile_album_tracks(db, ids[i], NULL, 0), QUADRATURE_OK);
+        cr_assert_eq(db_delete_album(db, ids[i]), QUADRATURE_OK);
     }
     cr_assert_eq(db_commit(db), QUADRATURE_OK);
 }
@@ -702,54 +514,33 @@ static void test_prune_albums(quadrature_db_t *db, const int64_t *ids, size_t co
 static void build_prune_fixture(quadrature_db_t *db,
                                 int64_t *disc_out, int64_t *ram_out,
                                 int64_t *sect_out) {
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
     int64_t dp = db_get_or_create_artist_mb(db, "Daft Punk", "Daft Punk",
         "056e4f3e-d505-4dad-8ec1-d04f521cbb56");
     int64_t gf = db_get_or_create_artist(db, "Golden Features");
 
-    int64_t disc_id = 0, ram_id = 0, sect_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/Discovery",
-        "Discovery", dp, 2001, &disc_id), QUADRATURE_OK);
-    cr_assert_eq(db_update_album_mb(db, disc_id, "Discovery",
-        "d073287b-d1bd-4f11-a933-a4386f8cf701",
-        "cc001111-1111-1111-1111-111111111111",
-        2001, MB_STATUS_RESOLVED), QUADRATURE_OK);
+    int64_t disc_id = test_insert_album(db, "DaftPunk/Discovery", "Discovery",              dp, 2001);
+    int64_t ram_id  = test_insert_album(db, "DaftPunk/RAM",       "Random Access Memories", dp, 2013);
+    int64_t sect_id = test_insert_album(db, "GoldenFeatures/SECT","SECT",                   gf, 2021);
 
-    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/RAM",
-        "Random Access Memories", dp, 2013, &ram_id), QUADRATURE_OK);
-    cr_assert_eq(db_update_album_mb(db, ram_id, "Random Access Memories",
-        "8ecfafd1-89a8-423a-968f-3fff47f0b0f9",
-        "aa997ea0-2936-40bd-884d-3af8a0e064dc",
-        2013, MB_STATUS_RESOLVED), QUADRATURE_OK);
+    const int64_t ta_dp[1] = { dp };
+    const char *dp_names[1] = { "Daft Punk" };
+    const int64_t ta_gf[1] = { gf };
+    const char *gf_names[1] = { "Golden Features" };
+    const char *j[1] = { "" };
 
-    cr_assert_eq(db_upsert_folder_album(db, "GoldenFeatures/SECT",
-        "SECT", gf, 2021, &sect_id), QUADRATURE_OK);
+    test_insert_track_full(db, disc_id, "One More Time",   "One More Time",   1, 1, 200000, ta_dp, dp_names, j, 1);
+    test_insert_track_full(db, disc_id, "Aerodynamic",     "Aerodynamic",     2, 1, 200000, ta_dp, dp_names, j, 1);
+    test_insert_track_full(db, disc_id, "Digital Love",    "Digital Love",    3, 1, 200000, ta_dp, dp_names, j, 1);
+    test_insert_track_full(db, ram_id,  "Get Lucky",       "Get Lucky",       1, 1, 200000, ta_dp, dp_names, j, 1);
+    test_insert_track_full(db, ram_id,  "Lose Yourself",   "Lose Yourself",   2, 1, 200000, ta_dp, dp_names, j, 1);
+    test_insert_track_full(db, sect_id, "Ariana",          "Ariana",          1, 1, 200000, ta_gf, gf_names, j, 1);
 
-    test_create_track(db, disc_id, "One More Time", 1, 1);
-    test_create_track(db, disc_id, "Aerodynamic", 2, 1);
-    test_create_track(db, disc_id, "Digital Love", 3, 1);
-    test_create_track(db, ram_id, "Get Lucky", 1, 1);
-    test_create_track(db, ram_id, "Lose Yourself to Dance", 2, 1);
-    test_create_track(db, sect_id, "Ariana", 1, 1);
-    test_create_track(db, sect_id, "Touch feat. Daft Punk", 2, 1);
-
-    db_track_artist_t ta_dp = { .artist_id = dp, .position = 0, .join_phrase = "" };
-    for (int64_t tid = 1; tid <= 5; tid++)
-        db_set_track_artists(db, tid, &ta_dp, 1);
-
-    db_track_artist_t ta_gf = { .artist_id = gf, .position = 0, .join_phrase = "" };
-    db_set_track_artists(db, 6, &ta_gf, 1);
-
-    db_track_artist_t ta_feat[2] = {
-        { .artist_id = gf, .position = 0, .join_phrase = "" },
-        { .artist_id = dp, .position = 1, .join_phrase = " feat. " },
-    };
-    db_set_track_artists(db, 7, ta_feat, 2);
-
-    db_sync_album_fts(db, disc_id);
-    db_sync_album_fts(db, ram_id);
-    db_sync_album_fts(db, sect_id);
+    /* Track 7: featured credit — Golden Features feat. Daft Punk */
+    int64_t feat_tid = test_insert_track_full(db, sect_id, "Touch", "Touch feat. Daft Punk",
+                                                2, 1, 200000, ta_gf, gf_names, j, 1);
+    const int64_t feat_ids[2] = { gf, dp };
+    const char *feat_joins[2] = { "", " feat. " };
+    test_link_track_artists(db, feat_tid, feat_ids, feat_joins, 2);
 
     db_lock(db);
     sqlite3_exec(db->db,
@@ -757,8 +548,6 @@ static void build_prune_fixture(quadrature_db_t *db,
         "VALUES('DaftPunk/Discovery/cover.jpg', 3, 3, 'artwork extraction failed')",
         NULL, NULL, NULL);
     db_unlock(db);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
 
     *disc_out = disc_id;
     *ram_out = ram_id;
@@ -878,150 +667,9 @@ Test(database, prune_orphan_errors_removes_stale_paths) {
     db_close(db);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * mb_status guards: resolved data protected from re-index clobber
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-Test(database, mb_resolved_title_not_clobbered_on_reindex) {
-    quadrature_db_t *db = NULL;
-    db_open_memory(&db);
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    int64_t aid = db_get_or_create_artist(db, "Daft Punk");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/RAM",
-        "Random Access Memories", aid, 2013, &album_id), QUADRATURE_OK);
-
-    /* MB resolution corrects title */
-    cr_assert_eq(db_update_album_mb(db, album_id,
-        "Random Access Memories (10th Anniversary Edition)",
-        "8ecfafd1-89a8-423a-968f-3fff47f0b0f9",
-        "aa997ea0-2936-40bd-884d-3af8a0e064dc",
-        2013, MB_STATUS_RESOLVED), QUADRATURE_OK);
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    /* Re-index: file tags still say original title */
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    int64_t id2 = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "DaftPunk/RAM",
-        "Random Access Memories", aid, 2013, &id2), QUADRATURE_OK);
-    cr_assert_eq(id2, album_id);
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    /* Title must be the MB-corrected version */
-    char *title = test_read_text(db,
-        "SELECT title FROM albums WHERE id = ?", album_id);
-    cr_assert_str_eq(title, "Random Access Memories (10th Anniversary Edition)",
-        "MB-resolved title must survive re-index, got '%s'", title);
-    free(title);
-
-    db_close(db);
-}
-
-/**
- * db_set_album_release_id_from_tags gates on mb_status != RESOLVED.
- * Per METADATA.md: "updates regardless of current status — as long as not
- * already RESOLVED." Status 0, 1, 3, 4 all allow update; only 2 blocks it.
- */
-Test(database, release_id_from_tags_gated_on_not_resolved) {
-    quadrature_db_t *db = NULL;
-    db_open_memory(&db);
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    int64_t aid = db_get_or_create_artist(db, "ODESZA");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "ODESZA/LG",
-        "The Last Goodbye", aid, 2022, &album_id), QUADRATURE_OK);
-
-    /* Phase 2: first tag sets release_id (status 0 → 1) */
-    cr_assert_eq(db_set_album_release_id_from_tags(db, album_id,
-        "aaaa1111-1111-1111-1111-111111111111"), QUADRATURE_OK);
-
-    /* Phase 2 again with different tag: status=1 → update allowed per spec */
-    cr_assert_eq(db_set_album_release_id_from_tags(db, album_id,
-        "bbbb2222-2222-2222-2222-222222222222"), QUADRATURE_OK);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    /* Should have the SECOND release_id (update allowed on status=1) */
-    char *rid = test_read_text(db,
-        "SELECT musicbrainz_release_id FROM albums WHERE id = ?", album_id);
-    cr_assert_str_eq(rid, "bbbb2222-2222-2222-2222-222222222222",
-        "Re-tag should update release_id when status=HAS_RELEASE_ID");
-    free(rid);
-
-    /* Now resolve fully — after RESOLVED, tags should NOT overwrite */
-    cr_assert_eq(db_update_album_mb(db, album_id, "The Last Goodbye",
-        "cccc3333-3333-3333-3333-333333333333",
-        "dddd4444-4444-4444-4444-444444444444",
-        2022, MB_STATUS_RESOLVED), QUADRATURE_OK);
-
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    db_set_album_release_id_from_tags(db, album_id,
-        "eeee5555-5555-5555-5555-555555555555");
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    /* Should still have the RESOLVED release_id, not the tag override */
-    char *rid2 = test_read_text(db,
-        "SELECT musicbrainz_release_id FROM albums WHERE id = ?", album_id);
-    cr_assert_str_eq(rid2, "cccc3333-3333-3333-3333-333333333333",
-        "RESOLVED album must reject tag-sourced release_id override");
-    free(rid2);
-
-    db_close(db);
-}
-
-Test(database, full_mb_lifecycle_immutable_after_resolved) {
-    quadrature_db_t *db = NULL;
-    db_open_memory(&db);
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-
-    int64_t aid = db_get_or_create_artist(db, "BRONSON");
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, "BRONSON/BRONSON",
-        "BRONSON", aid, 2020, &album_id), QUADRATURE_OK);
-
-    /* Phase 2 → HAS_RELEASE_ID */
-    db_set_album_release_id_from_tags(db, album_id,
-        "5ed617d7-898f-4e05-82a1-bfc586a4b013");
-
-    /* Phase 6 → RESOLVED with different data */
-    db_update_album_mb(db, album_id, "BRONSON (Deluxe)",
-        "aaaa1111-1111-1111-1111-111111111111",
-        "d95b8366-994d-448d-8689-422b20b6cabb",
-        2020, MB_STATUS_RESOLVED);
-
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    /* Re-index: Phase 2 tries to overwrite */
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    int64_t id2 = 0;
-    db_upsert_folder_album(db, "BRONSON/BRONSON", "BRONSON", aid, 2020, &id2);
-    db_set_album_release_id_from_tags(db, album_id,
-        "5ed617d7-898f-4e05-82a1-bfc586a4b013");
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
-
-    /* Everything must be preserved */
-    char *title = test_read_text(db, "SELECT title FROM albums WHERE id = ?", album_id);
-    cr_assert_str_eq(title, "BRONSON (Deluxe)");
-    free(title);
-
-    char *rid = test_read_text(db,
-        "SELECT musicbrainz_release_id FROM albums WHERE id = ?", album_id);
-    cr_assert_str_eq(rid, "aaaa1111-1111-1111-1111-111111111111");
-    free(rid);
-
-    char *rgid = test_read_text(db,
-        "SELECT musicbrainz_release_group_id FROM albums WHERE id = ?", album_id);
-    cr_assert_str_eq(rgid, "d95b8366-994d-448d-8689-422b20b6cabb");
-    free(rgid);
-
-    int64_t status = test_read_int64(db,
-        "SELECT mb_status FROM albums WHERE id = ?", album_id);
-    cr_assert_eq(status, MB_STATUS_RESOLVED);
-
-    db_close(db);
-}
+/* mb_status guard behaviors (title/release_id immutable after RESOLVED,
+ * respect_user_edits policy) are now tested against the reconciler
+ * directly in test_reconciler.c. */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Album mtime batch with sizes
@@ -1035,8 +683,7 @@ Test(database, mtime_batch_writes_size) {
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
     cr_assert_gt(artist_id, 0);
 
-    int64_t album_id = 0;
-    db_upsert_folder_album(db, "test/album", "Test Album", artist_id, 2024, &album_id);
+    int64_t album_id = test_insert_album(db, "test/album", "Test Album", artist_id, 2024);
     cr_assert_gt(album_id, 0);
 
     /* Write mtime + size */

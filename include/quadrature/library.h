@@ -37,18 +37,15 @@ extern "C" {
 
 #define LIBRARY_MASK_ALL  UINT32_MAX
 
-/** Simple toggle: flip a single library bit on/off.
- *  Never returns 0 — falls back to LIBRARY_MASK_ALL. */
-static inline uint32_t library_mask_after_toggle(uint32_t current_mask,
-                                                  int lib_idx) {
-    uint32_t toggled = current_mask ^ (1u << lib_idx);
-    return toggled ? toggled : LIBRARY_MASK_ALL;
-}
+/* Sentinel passed to library_cache_get_albums / _get_artists `num_results`
+ * parameter to request every matching library version. */
+#define LIBRARY_RESULTS_ALL  (-1)
+
+/** Toggle a single library bit. Never returns 0 — falls back to LIBRARY_MASK_ALL. */
+uint32_t library_mask_after_toggle(uint32_t current_mask, int lib_idx);
 
 /** Solo: enable only this library, disable all others. */
-static inline uint32_t library_mask_solo(int lib_idx) {
-    return 1u << lib_idx;
-}
+uint32_t library_mask_solo(int lib_idx);
 
 /* =============================================================================
  * Global ID Encoding (Multi-Library Support)
@@ -144,21 +141,10 @@ typedef struct {
  * Search Types
  * ============================================================================= */
 
-typedef enum {
-    LIBRARY_SEARCH_FILTER_ALL,
-    LIBRARY_SEARCH_FILTER_ARTISTS,
-    LIBRARY_SEARCH_FILTER_ALBUMS,
-    LIBRARY_SEARCH_FILTER_TRACKS,
-} library_search_filter_t;
-
-typedef struct {
-    GPtrArray* artists;      /* library_artist_info_t* */
-    GPtrArray* albums;       /* library_album_info_t* */
-    GPtrArray* tracks;       /* library_track_info_t* */
-    size_t total_artists;    /* Total matches (may exceed array size) */
-    size_t total_albums;
-    size_t total_tracks;
-} library_search_results_t;
+/* FTS search types (library_search_filter_t, library_search_results_t) and
+ * library_cache_search / library_credit_search live in library_search.h.
+ * Kept separate so UI views that only touch cache entity data don't pull in
+ * the search query surface. */
 
 /* =============================================================================
  * Sort Options
@@ -330,7 +316,7 @@ const library_album_info_t* library_cache_get_album(library_cache_t* cache,
  * @param cache        Library cache
  * @param album_id     Global album ID (any library version)
  * @param library_mask Bitmask of enabled libraries
- * @param num_results  Max results to return (-1 = all)
+ * @param num_results  Max results to return (LIBRARY_RESULTS_ALL for every version)
  * @return GPtrArray of interior pointers (caller must g_ptr_array_unref), or NULL
  */
 GPtrArray* library_cache_get_albums(library_cache_t* cache,
@@ -354,7 +340,7 @@ const library_artist_info_t* library_cache_get_artist(library_cache_t* cache,
  * @param cache        Library cache
  * @param artist_id    Global artist ID (any library version)
  * @param library_mask Bitmask of enabled libraries
- * @param num_results  Max results to return (-1 = all)
+ * @param num_results  Max results to return (LIBRARY_RESULTS_ALL for every version)
  * @return GPtrArray of interior pointers (caller must g_ptr_array_unref), or NULL
  */
 GPtrArray* library_cache_get_artists(library_cache_t* cache,
@@ -530,32 +516,8 @@ GPtrArray* library_cache_get_albums_filtered(library_cache_t* cache,
                                               const db_search_opts_t* filters,
                                               uint32_t library_mask);
 
-/* =============================================================================
- * Search
- * ============================================================================= */
-
-/**
- * Search across artists, albums, and tracks.
- * Caller owns the returned results and must free with library_search_results_free().
- *
- * @param cache Library cache
- * @param query Search query
- * @param filter Search filter (all, artists only, albums only, tracks only)
- * @param limit Max results per type (0 = unlimited)
- * @param opts Optional genre/year filter options (NULL = no extra filters)
- * @return Search results (caller-owned) or NULL on error
- */
-library_search_results_t* library_cache_search(library_cache_t* cache,
-                                                const char* query,
-                                                library_search_filter_t filter,
-                                                size_t limit,
-                                                const db_search_opts_t* opts,
-                                                uint32_t library_mask);
-
-/**
- * Free search results returned by library_cache_search().
- */
-void library_search_results_free(library_search_results_t* results);
+/* Search API (library_cache_search, library_credit_search) is declared in
+ * library_search.h. */
 
 /* =============================================================================
  * Prefetch API (Kernel Page Cache Hints)

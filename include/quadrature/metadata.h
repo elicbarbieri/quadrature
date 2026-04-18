@@ -18,6 +18,7 @@
 #define QUADRATURE_METADATA_H
 
 #include "quadrature/quadrature.h"
+#include "quadrature/database.h"
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -72,6 +73,20 @@ typedef struct {
  */
 quadrature_result_t db_meta_open(const char* library_root,
                                   quadrature_meta_db_t** out);
+
+/**
+ * Open the metadata DB in ATTACH mode — attaches quadrature-metadata.sqlite
+ * to the main DB connection as schema "meta". Writes go through the main
+ * connection, so db_reconcile_album and meta writes commit atomically inside
+ * the main batch transaction.
+ *
+ * db_meta_begin/commit become no-ops in this mode (the main db owns the
+ * transaction). db_meta_close() will DETACH but leave the main connection
+ * open.
+ */
+quadrature_result_t db_meta_open_attached(quadrature_db_t* main_db,
+                                           const char* library_root,
+                                           quadrature_meta_db_t** out);
 
 /**
  * Open the metadata DB read-only. Returns QUADRATURE_ERROR_FILE_NOT_FOUND if

@@ -43,8 +43,9 @@ typedef struct {
 
 G_DEFINE_TYPE_WITH_PRIVATE(PerfChart, perf_chart, GTK_TYPE_WIDGET)
 
-static void perf_chart_draw_func(GtkDrawingArea* area G_GNUC_UNUSED, cairo_t* cr,
+static void perf_chart_draw_func(GtkDrawingArea* area, cairo_t* cr,
                                   int width, int height, gpointer data) {
+    (void)area;
     PerfChart* chart = PERF_CHART(data);
     PerfChartPrivate* priv = perf_chart_get_instance_private(chart);
     PerfChartClass* klass = PERF_CHART_GET_CLASS(chart);
@@ -71,7 +72,8 @@ static void perf_chart_draw_func(GtkDrawingArea* area G_GNUC_UNUSED, cairo_t* cr
     }
 }
 
-static void on_motion(GtkEventControllerMotion* ctrl G_GNUC_UNUSED, double x, double y, gpointer data) {
+static void on_motion(GtkEventControllerMotion* ctrl, double x, double y, gpointer data) {
+    (void)ctrl;
     PerfChart* chart = PERF_CHART(data);
     PerfChartPrivate* priv = perf_chart_get_instance_private(chart);
     PerfChartClass* klass = PERF_CHART_GET_CLASS(chart);
@@ -100,7 +102,8 @@ static void on_motion(GtkEventControllerMotion* ctrl G_GNUC_UNUSED, double x, do
     }
 }
 
-static void on_leave(GtkEventControllerMotion* ctrl G_GNUC_UNUSED, gpointer data) {
+static void on_leave(GtkEventControllerMotion* ctrl, gpointer data) {
+    (void)ctrl;
     PerfChart* chart = PERF_CHART(data);
     PerfChartPrivate* priv = perf_chart_get_instance_private(chart);
 
@@ -465,9 +468,10 @@ static inline double line_chart_val_to_y(PerfLineChart* chart, int margin_top,
     return margin_top + chart_h * (1.0 - t);
 }
 
-static gboolean line_chart_tick(GtkWidget* widget G_GNUC_UNUSED,
-                                GdkFrameClock* clock G_GNUC_UNUSED,
+static gboolean line_chart_tick(GtkWidget* widget,
+                                GdkFrameClock* clock,
                                 gpointer data) {
+    (void)widget; (void)clock;
     PerfLineChart* chart = PERF_LINE_CHART(data);
 
     /* Self-remove after 2x sample interval of no new data */
@@ -1106,7 +1110,8 @@ static void stacked_area_draw(PerfChart *base, cairo_t *cr, int w, int h) {
     }
 }
 
-static int stacked_area_hit_test(PerfChart *base, double x, double y G_GNUC_UNUSED) {
+static int stacked_area_hit_test(PerfChart *base, double x, double y) {
+    (void)y;
     PerfStackedAreaChart *chart = PERF_STACKED_AREA_CHART(base);
     if (chart->sample_interval_ms <= 0) return -1;
 
@@ -1426,9 +1431,10 @@ static char* timeline_format_tooltip(PerfChart* base, int element) {
     return g_strdup(ev->tooltip);
 }
 
-static void on_timeline_click(GtkGestureClick* gesture G_GNUC_UNUSED,
-                              int n_press G_GNUC_UNUSED,
+static void on_timeline_click(GtkGestureClick* gesture,
+                              int n_press,
                               double x, double y, gpointer data) {
+    (void)gesture; (void)n_press;
     PerfTimelineChart* chart = PERF_TIMELINE_CHART(data);
     PerfChartPrivate* priv = perf_chart_get_instance_private(PERF_CHART(chart));
     int hit = timeline_hit_test(PERF_CHART(chart), x, y);

@@ -23,11 +23,18 @@
 /* View names for content stack pages */
 static const char *VIEW_SEARCH = "search";
 
-/* Map view name to display label for back button */
+/* Map view name to display label for back button. */
+static const struct { const char *view; const char *label; } VIEW_LABELS[] = {
+    { "search",  "Search"  },
+    { "artists", "Artists" },
+    { "albums",  "Albums"  },
+};
+
 static const char *view_display_name(const char *view) {
-    if (strcmp(view, "search") == 0) return "Search";
-    if (strcmp(view, "artists") == 0) return "Artists";
-    return "Albums";
+    for (size_t i = 0; i < G_N_ELEMENTS(VIEW_LABELS); i++) {
+        if (strcmp(view, VIEW_LABELS[i].view) == 0) return VIEW_LABELS[i].label;
+    }
+    return VIEW_LABELS[G_N_ELEMENTS(VIEW_LABELS) - 1].label;  /* default: Albums */
 }
 
 G_DEFINE_FINAL_TYPE(UiWindow, ui_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -54,7 +61,7 @@ void settings_save_debounced(UiWindow *w) {
 
 /* Library view callbacks */
 static void on_library_navigate(LibraryItemKind kind, int64_t id, gpointer data);
-static void on_library_play(const char *path, const char *title, const char *artist, const char *album, int64_t track_id, gpointer data);
+static void on_library_play(const PlaybackIntent *intent, gpointer data);
 static void on_library_back(gpointer data);
 static void on_track_info(int64_t track_id, gpointer data);
 static void on_channel_strip_clicked(UiChannelStrip *strip, int channel_id, gpointer data);
@@ -122,11 +129,13 @@ static void on_track_changed(int player_id, int64_t track_id, void* user_data) {
              * loaded in engine, we just need to refresh the UI. */
             char *resolved = library_cache_resolve_track_path(w->library_cache, track_id);
             ui_channel_strip_update_track_display(w->channels[player_id],
-                                                   track_id,
-                                                   resolved,
-                                                   track->title,
-                                                   track->artist_display,
-                                                   track->album_title);
+                &(PlaybackIntent){
+                    .track_id = track_id,
+                    .path     = resolved,
+                    .title    = track->title,
+                    .artist   = track->artist_display,
+                    .album    = track->album_title,
+                });
             g_free(resolved);
         }
     }
@@ -525,8 +534,13 @@ static void on_track_secondary(int64_t track_id, gpointer data) {
     if (!track) return;
 
     char *resolved = library_cache_resolve_track_path(w->library_cache, track_id);
-    on_library_play(resolved, track->title, track->artist_display,
-                    track->album_title, track->track_id, w);
+    on_library_play(&(PlaybackIntent){
+        .track_id = track->track_id,
+        .path     = resolved,
+        .title    = track->title,
+        .artist   = track->artist_display,
+        .album    = track->album_title,
+    }, w);
     g_free(resolved);
 }
 
@@ -545,8 +559,13 @@ static void on_album_secondary(int64_t album_id, gpointer data) {
 
     const library_track_info_t *track = g_ptr_array_index(tracks, 0);
     char *resolved = library_cache_resolve_track_path(w->library_cache, track->track_id);
-    on_library_play(resolved, track->title, track->artist_display,
-                    track->album_title, track->track_id, w);
+    on_library_play(&(PlaybackIntent){
+        .track_id = track->track_id,
+        .path     = resolved,
+        .title    = track->title,
+        .artist   = track->artist_display,
+        .album    = track->album_title,
+    }, w);
     g_free(resolved);
     g_ptr_array_unref(tracks);
 }
@@ -648,14 +667,13 @@ static void on_library_navigate(LibraryItemKind kind, int64_t id, gpointer data)
     w->current_view = "detail";
 }
 
-static void on_library_play(const char *path, const char *title,
-                            const char *artist, const char *album,
-                            int64_t track_id, gpointer data) {
+static void on_library_play(const PlaybackIntent *intent, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
+    g_return_if_fail(intent != NULL);
 
     /* Reject tracks from disconnected libraries */
-    if (track_id > 0 && w->library_cache) {
-        int lib_idx = LIBRARY_GLOBAL_ID_LIB(track_id);
+    if (intent->track_id > 0 && w->library_cache) {
+        int lib_idx = LIBRARY_GLOBAL_ID_LIB(intent->track_id);
         if (!library_cache_get_available(w->library_cache, lib_idx)) {
             ui_window_show_toast(w, "Library disconnected", TOAST_WARNING, 3000);
             return;
@@ -694,13 +712,13 @@ static void on_library_play(const char *path, const char *title,
     }
 
     g_info("Load Track → Channel %d: '%s' by %s from '%s' (track_id=%" G_GINT64_FORMAT ")",
-           ch + 1, title, artist, album, track_id);
+           ch + 1, intent->title, intent->artist, intent->album, intent->track_id);
 
     if (!w->channels[ch])
         return;
 
     /* Load the track - album context is resolved via LibraryCache in channel_strip */
-    ui_channel_strip_load_track(w->channels[ch], track_id, path, title, artist, album);
+    ui_channel_strip_load_track(w->channels[ch], intent);
     ensure_update_tick(w);
 }
 
@@ -755,10 +773,13 @@ static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
            channel + 1, track->title, track->artist_display, track->album_title, track_id);
 
     char *resolved = library_cache_resolve_track_path(w->library_cache, track_id);
-    ui_channel_strip_load_track(w->channels[channel], track_id, resolved,
-                                 track->title,
-                                 track->artist_display,
-                                 track->album_title);
+    ui_channel_strip_load_track(w->channels[channel], &(PlaybackIntent){
+        .track_id = track_id,
+        .path     = resolved,
+        .title    = track->title,
+        .artist   = track->artist_display,
+        .album    = track->album_title,
+    });
     g_free(resolved);
     ensure_update_tick(w);
 }

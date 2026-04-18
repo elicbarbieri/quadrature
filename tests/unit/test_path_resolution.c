@@ -10,6 +10,7 @@
  */
 
 #include <criterion/criterion.h>
+#include "test_helpers.h"
 #include "quadrature/library.h"
 #include "quadrature/database.h"
 #include <string.h>
@@ -62,36 +63,13 @@ static int64_t insert_album_track(quadrature_db_t *db,
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
     cr_assert(artist_id > 0);
 
-    int64_t album_id = 0;
-    cr_assert_eq(db_upsert_folder_album(db, album_path, album_title,
-                                         artist_id, 2024, &album_id),
-                 QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, album_path, album_title, artist_id, 2024);
 
-    db_index_item_t item = {
-        .path       = track_path,
-        .title      = track_title,
-        .album      = album_title,
-        .duration_ms = 240000,
-        .track_num  = 1,
-        .disc_num   = 1,
-        .year       = 2024,
-        .mtime      = 1000000,
-    };
-    int64_t track_id = 0;
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, &track_id),
-                 QUADRATURE_OK);
-    cr_assert(track_id > 0);
-
-    /* Wire up track_artists so the cache can resolve artist info */
-    db_track_artist_t ta = {
-        .artist_id    = artist_id,
-        .position     = 0,
-        .join_phrase  = "",
-    };
-    db_set_track_artists(db, track_id, &ta, 1);
-    db_sync_album_fts(db, album_id);
-
-    return track_id;
+    const int64_t ta[1] = { artist_id };
+    const char *names[1] = { "Test Artist" };
+    const char *joins[1] = { "" };
+    return test_insert_track_full(db, album_id, track_path, track_title,
+                                    1, 1, 240000, ta, names, joins, 1);
 }
 
 /**

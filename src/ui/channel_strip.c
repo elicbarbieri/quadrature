@@ -1377,13 +1377,14 @@ static void ui_channel_strip_init(UiChannelStrip *s) {
     s->waveform_track_id = 0;
     g_signal_connect(s->waveform, "seek", G_CALLBACK(on_seek), s);
 
-    /* Click gesture on the outer widget — clicks on interactive children (buttons,
-     * album/artist labels) claim the sequence in bubble phase; background clicks
-     * (including the border) bubble up here to toggle focus. */
+    /* Click gesture scoped to the display panel — clicks on interactive children
+     * (album/artist/next-track labels) claim the sequence in bubble phase; background
+     * clicks inside the LCD panel bubble up here to toggle focus. Clicks on transport
+     * buttons, seek bar, or the gap between the panel and those widgets do NOT toggle. */
     s->channel_click_gesture = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(s->channel_click_gesture), GDK_BUTTON_PRIMARY);
     g_signal_connect(s->channel_click_gesture, "released", G_CALLBACK(on_channel_clicked), s);
-    gtk_widget_add_controller(GTK_WIDGET(s), GTK_EVENT_CONTROLLER(s->channel_click_gesture));
+    gtk_widget_add_controller(s->display_panel, GTK_EVENT_CONTROLLER(s->channel_click_gesture));
 
     /* Shuttle scale gestures:
      * 1. Click gesture in CAPTURE phase - handles right-click reset only
@@ -1698,20 +1699,16 @@ void ui_channel_strip_set_spectrum_visible(UiChannelStrip *s, gboolean visible) 
 }
 
 quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
-                                                 int64_t track_id,
-                                                 const char *path,
-                                                 const char *title,
-                                                 const char *artist,
-                                                 const char *album) {
+                                                 const PlaybackIntent *intent) {
     g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), QUADRATURE_ERROR_INVALID_PARAM);
-    g_return_val_if_fail(track_id > 0, QUADRATURE_ERROR_INVALID_PARAM);
+    g_return_val_if_fail(intent && intent->track_id > 0, QUADRATURE_ERROR_INVALID_PARAM);
 
     /* Update UI metadata FIRST (instant feedback) */
-    s->current_track_id = track_id;
-    g_free(s->filepath); s->filepath = g_strdup(path);
-    g_free(s->title);    s->title = g_strdup(title);
-    g_free(s->artist);   s->artist = g_strdup(artist);
-    g_free(s->album);    s->album = g_strdup(album);
+    s->current_track_id = intent->track_id;
+    g_free(s->filepath); s->filepath = g_strdup(intent->path);
+    g_free(s->title);    s->title = g_strdup(intent->title);
+    g_free(s->artist);   s->artist = g_strdup(intent->artist);
+    g_free(s->album);    s->album = g_strdup(intent->album);
     update_display(s);
     update_button_sensitivity(s, s->prev_player_state);
 
@@ -1723,7 +1720,7 @@ quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
     /* Estimate duration from cache for instant seek bar (before decode completes) */
     s->has_deferred_seek = FALSE;
     if (s->library) {
-        const library_track_info_t *ti = library_cache_get_track(s->library, track_id);
+        const library_track_info_t *ti = library_cache_get_track(s->library, intent->track_id);
         uint32_t rate = s->pipeline ? audio_pipeline_get_sample_rate(s->pipeline) : 0;
         s->ui_length_samples = (rate > 0 && ti && ti->duration_ms > 0)
             ? ((uint64_t)ti->duration_ms * rate) / 1000 : 0;
@@ -1731,12 +1728,12 @@ quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
 
     if (s->pipeline && s->pipeline->cache) {
         /* Load track into cache FIRST (non-blocking, starts decode) */
-        quadrature_result_t res = audio_cache_load(s->pipeline->cache, track_id);
+        quadrature_result_t res = audio_cache_load(s->pipeline->cache, intent->track_id);
         if (res != QUADRATURE_OK) return res;
 
         /* Set player track — may fail if no active device yet. That's OK:
          * on_play_pause will retry set_player_track when the user presses play. */
-        res = audio_pipeline_set_player_track(s->pipeline, s->channel_id, track_id);
+        res = audio_pipeline_set_player_track(s->pipeline, s->channel_id, intent->track_id);
         if (res == QUADRATURE_OK) {
             s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
             s->sample_rate = audio_pipeline_get_sample_rate(s->pipeline);
@@ -1750,18 +1747,15 @@ quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
 }
 
 void ui_channel_strip_update_track_display(UiChannelStrip *s,
-                                            int64_t track_id,
-                                            const char *path,
-                                            const char *title,
-                                            const char *artist,
-                                            const char *album) {
+                                            const PlaybackIntent *intent) {
     g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
+    g_return_if_fail(intent != NULL);
 
-    s->current_track_id = track_id;
-    g_free(s->filepath); s->filepath = g_strdup(path);
-    g_free(s->title);    s->title = g_strdup(title);
-    g_free(s->artist);   s->artist = g_strdup(artist);
-    g_free(s->album);    s->album = g_strdup(album);
+    s->current_track_id = intent->track_id;
+    g_free(s->filepath); s->filepath = g_strdup(intent->path);
+    g_free(s->title);    s->title = g_strdup(intent->title);
+    g_free(s->artist);   s->artist = g_strdup(intent->artist);
+    g_free(s->album);    s->album = g_strdup(intent->album);
 
     if (s->pipeline) {
         s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
@@ -1814,9 +1808,8 @@ void ui_channel_strip_set_mode(UiChannelStrip *s, ChannelMode mode) {
 
     /* Handle mode entry actions */
     if (mode == CHANNEL_MODE_QUEUED) {
-        /* Cue to start when entering QUEUED */
-        if (s->pipeline)
-            audio_pipeline_player_seek(s->pipeline, s->channel_id, 0);
+        /* Note: Do NOT seek to 0 here - preserve current playback position
+         * so queued tracks resume from where they were paused */
 
         /* Note: Preview audio cleanup is handled by preview_off() function
          * (Button state is managed by preview_on/preview_off functions) */

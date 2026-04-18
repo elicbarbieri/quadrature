@@ -10,7 +10,6 @@
 #include "internal.h"
 #include "../internal.h"
 #include "quadrature/metadata.h"
-#include "quadrature/database.h"
 #include <string.h>
 
 /* wire_info_buttons, append_credit_rows declared in library/internal.h */
@@ -582,7 +581,7 @@ static void populate_library_toggles(UnifiedDetailData *ud, GtkWidget *toggles_b
     }
 
     GPtrArray *versions = library_cache_get_albums(ud->cache, album->album_id,
-                                                    ud->library_mask, -1);
+                                                    ud->library_mask, LIBRARY_RESULTS_ALL);
     if (!versions || versions->len <= 1) {
         g_clear_pointer(&versions, g_ptr_array_unref);
         gtk_widget_set_visible(toggles_box, FALSE);
@@ -744,7 +743,7 @@ static void populate_artist_library_toggles(UnifiedDetailData *ud, int64_t activ
     }
 
     GPtrArray *versions = library_cache_get_artists(ud->cache, active_artist_id,
-                                                     ud->library_mask, -1);
+                                                     ud->library_mask, LIBRARY_RESULTS_ALL);
     if (!versions || versions->len <= 1) {
         g_clear_pointer(&versions, g_ptr_array_unref);
         gtk_widget_set_visible(toggles_box, FALSE);
@@ -1155,7 +1154,8 @@ void on_album_card_artist_navigate(GtkButton *btn, gpointer data) {
 
 /* Called when a revealer finishes its hide animation.
  * Chains: hide completes → set slow duration on target → reveal target. */
-static void on_revealer_hidden(GtkRevealer *revealer, GParamSpec *pspec G_GNUC_UNUSED, gpointer data) {
+static void on_revealer_hidden(GtkRevealer *revealer, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
     if (gtk_revealer_get_child_revealed(revealer))
         return;  /* Only act on hide completion */
 
@@ -1506,7 +1506,8 @@ static GtkWidget *build_artist_page(UnifiedDetailData *ud) {
  * appears_on_tracks with credit-annotated track rows.
  */
 static void load_meta_artist_state(UnifiedDetailData *ud, const char *artist_mbid,
-                                    const char *artist_name, const char *artist_type G_GNUC_UNUSED) {
+                                    const char *artist_name, const char *artist_type) {
+    (void)artist_type;
     ud->state = DETAIL_STATE_META_ARTIST;
     ud->current_id = 0;
     ud->merged_rep_album_id = 0;

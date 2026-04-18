@@ -14,6 +14,7 @@
 
 #include <criterion/criterion.h>
 #include "quadrature/indexer.h"
+#include "test_helpers.h"
 #include "quadrature/database.h"
 #include "internal.h"   /* mb_pg_client_t, mb_pg_exec, mb_pg_client_create/destroy */
 #include <libpq-fe.h>
@@ -287,34 +288,27 @@ Test(mb_resolve, full_resolve) {
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
     cr_assert_gt(artist_id, 0LL, "failed to create artist");
 
-    int64_t album_id = 0;
-    cr_assert_eq(
-        db_upsert_folder_album(db, "/fake/test", "Test Album",
-                               artist_id, 2020, &album_id),
-        QUADRATURE_OK, "failed to create test album");
-    cr_assert_gt(album_id, 0LL);
-
-    // Insert enough tracks so the resolver finds them (track count >= 1)
-    db_index_item_t item = {
-        .path        = "/fake/test/01-track.flac",
-        .title       = "Test Track 1",
-        .album       = "Test Album",
-        .duration_ms = 180000,
-        .track_num   = 1,
-        .disc_num    = 1,
-        .year        = 2020,
-        .mtime       = 1000000,
-    };
-    cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    int64_t track_id = 0;
-    cr_assert_eq(db_upsert_track_with_album(db, &item, album_id, &track_id),
-                 QUADRATURE_OK);
-
-    // Simulate Phase 2: store the MB release UUID from file tags
-    cr_assert_eq(db_set_album_release_id_from_tags(db, album_id, release_uuid),
-                 QUADRATURE_OK);
-    cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    int64_t album_id = test_insert_album(db, "/fake/test", "Test Album", artist_id, 2020);
+    int64_t track_id = test_insert_track_full(db, album_id,
+                            "/fake/test/01-track.flac", "Test Track 1",
+                            1, 1, 180000, NULL, NULL, NULL, 0);
     (void)track_id;
+
+    // Simulate Phase 2: stamp the MB release UUID and HAS_RELEASE_ID status
+    // onto the album via the reconciler.
+    {
+        desired_album_state_t desired = {
+            .source = RECONCILE_SOURCE_TAGS,
+            .present_fields = DESIRED_ALBUM_MB_RELEASE_ID | DESIRED_ALBUM_MB_STATUS,
+            .musicbrainz_release_id = release_uuid,
+            .mb_status = MB_STATUS_HAS_RELEASE_ID,
+        };
+        reconcile_policy_t p = {0};
+        cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
+        cr_assert_eq(db_reconcile_album(db, album_id, &desired, &p, NULL),
+                     QUADRATURE_OK);
+        cr_assert_eq(db_commit(db), QUADRATURE_OK);
+    }
 
     // Verify album is initially unresolved
     int64_t* unresolved = NULL;

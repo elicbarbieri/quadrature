@@ -16,6 +16,7 @@
 
 #define G_LOG_DOMAIN "quadrature"
 
+#include "internal.h"
 #include "quadrature/library.h"
 #include "quadrature/database.h"
 #include "quadrature/metadata.h"
@@ -23,10 +24,13 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 
-/* Forward declarations for helpers defined after the warming thread */
+/* library_mask_after_toggle / library_mask_solo live in library_mask.c. */
+
+/* Forward declarations for helpers defined after the warming thread.
+ * library_mask_is_multi_library / library_build_corrected_query are exported
+ * via internal.h for sibling search files. */
 static void build_search_vocab_slot(struct library_cache *cache, int slot_idx);
 static const char *correct_token(struct library_cache *cache, const char *token);
-static char *build_corrected_query(struct library_cache *cache, const char *query);
 static void build_mbid_indices(struct library_cache *cache);
 
 #include <string.h>
@@ -38,112 +42,8 @@ static void build_mbid_indices(struct library_cache *cache);
 #include <stdatomic.h>
 #include <glib.h>
 
-/* =============================================================================
- * LibrarySlot — per-library state
- * ============================================================================= */
-
-typedef struct library_cache LibraryCachePriv;  /* avoid forward-decl loop */
-
-typedef struct {
-    int    lib_idx;         /* Position in slots[] array (internal, mutable) */
-    int    bitmap_index;    /* Stable library ID encoded in global entity IDs */
-    char  *db_path;
-    char  *music_base;
-    char  *display_name;
-
-    /* Entity arrays (indexed by LOCAL id — O(1) lookup) */
-    library_artist_info_t **artists;
-    size_t                  artists_capacity;
-    library_album_info_t  **albums;
-    size_t                  albums_capacity;
-    library_track_info_t  **tracks;
-    size_t                  tracks_capacity;
-
-    /* Relationship arrays (indexed by LOCAL id) */
-    GArray    **album_tracks;           /* album_tracks[local_album_id] → GArray<int64_t global track ids> */
-    size_t      album_tracks_capacity;
-    GPtrArray **track_artists;          /* track_artists[local_track_id] → GPtrArray<library_track_artist_t*> */
-    size_t      track_artists_capacity;
-    GPtrArray **artist_albums;          /* artist_albums[local_artist_id] → GPtrArray<library_album_info_t*> */
-    size_t      artist_albums_capacity;
-    GPtrArray **artist_appearances;
-    size_t      artist_appearances_capacity;
-    GPtrArray **artist_appearance_tracks;
-    size_t      artist_appearance_tracks_capacity;
-    GPtrArray **album_tracks_ptrs;      /* cached GPtrArray<library_track_info_t*> results */
-    size_t      album_tracks_ptrs_capacity;
-
-    /* DB connections */
-    quadrature_db_t *db;        /* UI readonly — main thread only */
-    quadrature_db_t *db_warm;   /* warming thread only */
-
-    /* Cached auxiliary DB handles (readonly, main thread only — NULL if file missing) */
-    quadrature_meta_db_t *meta_db;
-    quadrature_bios_db_t *bios_db;
-
-    /* Per-slot warming state */
-    GThread    *warm_thread;
-    atomic_int  warm_cancel;
-    atomic_int  warm_state;     /* LIBRARY_CACHE_IDLE / WARMING / READY / REFRESHING */
-
-    /* Availability: FALSE when music_base path is inaccessible (drive removed) */
-    atomic_bool available;
-
-    /* Backpointer */
-    LibraryCachePriv *cache;
-} LibrarySlot;
-
-/* =============================================================================
- * struct library_cache
- * ============================================================================= */
-
-struct library_cache {
-    LibrarySlot  *slots;
-    int           slot_count;
-
-    /* Bitmap index → slot mapping.
-     * bitmap_map[bitmap_index] points to the LibrarySlot for that library.
-     * Reads are lock-free via g_atomic_pointer_get().
-     * Writes are protected by cache->lock. */
-    LibrarySlot **bitmap_map;
-    int           bitmap_capacity;  /* Size of bitmap_map array */
-
-    /* Merged search vocabulary */
-    char        **search_vocab;
-    size_t        search_vocab_count;
-
-    library_cache_ready_cb ready_cb;
-    void                  *ready_cb_data;
-
-    GMutex lock;  /* Covers slot arrays, MBID indices, and bitmap_map writes */
-
-    /* ── MBID Resolution Indices ──
-     * Sorted arrays for O(log n) cross-library artist/album resolution.
-     * Built after each slot warms. Query functions use these to collect
-     * data from all slots sharing a MusicBrainz ID. */
-    struct {
-        struct mbid_artist_entry {
-            char mbid[37];           /* Inline UUID string */
-            int64_t *global_ids;     /* Heap array of artist global IDs */
-            uint8_t count;
-        } *entries;
-        size_t count;
-    } mbid_artist_index;
-
-    struct {
-        struct mbrid_album_entry {
-            char mbrid[37];          /* Inline release-group UUID string */
-            int64_t *global_ids;     /* Heap array of album global IDs */
-            uint8_t count;
-        } *entries;
-        size_t count;
-    } mbrid_album_index;
-
-    /* Background prefetch thread — open()+fadvise() off main thread */
-    GAsyncQueue *prefetch_queue;    /* char* paths (owned by queue) */
-    GThread     *prefetch_thread;
-    atomic_int   prefetch_shutdown;
-};
+/* LibrarySlot and struct library_cache live in internal.h so that
+ * cache_search.c and library_search.c can walk them directly. */
 
 /* =============================================================================
  * Memory Management Helpers
@@ -205,26 +105,10 @@ static void release_track_artist(gpointer data) {
     g_atomic_rc_box_release_full(data, clear_track_artist);
 }
 
-/* =============================================================================
- * Slot Flat-Array Helpers
- * ============================================================================= */
-
-static inline library_artist_info_t *slot_get_artist(LibrarySlot *slot, int64_t local_id) {
-    if (local_id <= 0 || (size_t)local_id >= slot->artists_capacity) return NULL;
-    return slot->artists[local_id];
-}
-
-static inline library_album_info_t *slot_get_album(LibrarySlot *slot, int64_t local_id) {
-    if (local_id <= 0 || (size_t)local_id >= slot->albums_capacity) return NULL;
-    return slot->albums[local_id];
-}
-
-static inline library_track_info_t *slot_get_track(LibrarySlot *slot, int64_t local_id) {
-    if (local_id <= 0 || (size_t)local_id >= slot->tracks_capacity) return NULL;
-    return slot->tracks[local_id];
-}
-
-/* slot_set_* always *replaces*: if an entity already lives at local_id it is
+/* slot_get_artist/album/track live in internal.h (inline, shared with
+ * cache_search.c and library_search.c).
+ *
+ * slot_set_* always *replaces*: if an entity already lives at local_id it is
  * released before the new one is installed. This is what makes the warming
  * callbacks authoritative under COW refresh (see LIBRARY_CACHE.md
  * → "COW Refresh Invariants" → I2). */
@@ -1216,7 +1100,7 @@ static const char *correct_token(library_cache_t *cache, const char *token) {
     return (best_dist <= max_dist) ? best : token;
 }
 
-static char *build_corrected_query(library_cache_t *cache, const char *query) {
+char *library_build_corrected_query(library_cache_t *cache, const char *query) {
     if (!query || !*query) return NULL;
 
     GString *out = g_string_new(NULL);
@@ -1764,6 +1648,17 @@ static gpointer cow_refresh_thread_func(gpointer data) {
     if (db_open_readonly(slot->db_path, &slot->db_warm) != QUADRATURE_OK) {
         g_warning("COW refresh [bitmap=%d]: failed to reopen db_warm", slot->bitmap_index);
         goto done;
+    }
+
+    /* Auxiliary DBs may have been created by the indexer after the initial
+     * warm (meta/bios exist only after Phase 6/8 write to them). */
+    if (!slot->meta_db || !slot->bios_db) {
+        char *data_root = g_path_get_dirname(slot->db_path);
+        if (!slot->meta_db && db_meta_open_readonly(data_root, &slot->meta_db) != QUADRATURE_OK)
+            slot->meta_db = NULL;
+        if (!slot->bios_db && db_bios_open_readonly(data_root, &slot->bios_db) != QUADRATURE_OK)
+            slot->bios_db = NULL;
+        g_free(data_root);
     }
 
     /* Shadow slot holds the new arrays while DELTA runs. Shares bitmap_index
@@ -2701,7 +2596,7 @@ static const struct mbid_artist_entry *resolve_artist_mbid(
  * Check if the mask selects multiple active libraries (for this cache).
  * When only one library is active, no cross-library dedup is needed.
  */
-static bool mask_is_multi_library(library_cache_t *cache, uint32_t mask) {
+bool library_mask_is_multi_library(library_cache_t *cache, uint32_t mask) {
     int active = 0;
     for (int i = 0; i < cache->slot_count && active < 2; i++) {
         if (mask & (1u << cache->slots[i].bitmap_index))
@@ -2716,7 +2611,7 @@ GPtrArray *library_cache_get_albums_by_artist(library_cache_t *cache,
     if (!cache || artist_id <= 0 || library_mask == 0) return NULL;
 
     const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
-    bool need_dedup = entry && mask_is_multi_library(cache, library_mask);
+    bool need_dedup = entry && library_mask_is_multi_library(cache, library_mask);
     GHashTable *seen = need_dedup
         ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
     GPtrArray *result = g_ptr_array_new();
@@ -2753,7 +2648,7 @@ GPtrArray *library_cache_get_artist_appearances(library_cache_t *cache,
     if (!cache || artist_id <= 0 || library_mask == 0) return NULL;
 
     const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
-    bool need_dedup = entry && mask_is_multi_library(cache, library_mask);
+    bool need_dedup = entry && library_mask_is_multi_library(cache, library_mask);
     GHashTable *seen = need_dedup
         ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
     GPtrArray *result = g_ptr_array_new();
@@ -2784,7 +2679,7 @@ GPtrArray *library_cache_get_artist_appearance_tracks(library_cache_t *cache,
     if (!cache || artist_id <= 0 || library_mask == 0) return NULL;
 
     const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
-    bool need_dedup = entry && mask_is_multi_library(cache, library_mask);
+    bool need_dedup = entry && library_mask_is_multi_library(cache, library_mask);
     GHashTable *seen = need_dedup
         ? g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL) : NULL;
     GPtrArray *result = g_ptr_array_new();
@@ -2823,7 +2718,7 @@ void library_cache_get_merged_artist_counts(library_cache_t *cache,
     if (!cache || artist_id <= 0 || library_mask == 0) return;
 
     const struct mbid_artist_entry *entry = resolve_artist_mbid(cache, artist_id);
-    bool multi = entry && mask_is_multi_library(cache, library_mask);
+    bool multi = entry && library_mask_is_multi_library(cache, library_mask);
 
     /* ── Album count (MBRID-deduped) ── */
     if (album_count) {
@@ -2938,7 +2833,7 @@ GPtrArray *library_cache_get_artists_filtered(library_cache_t *cache,
 
     GPtrArray *result = g_ptr_array_new();
     /* Dedup MBID artists when showing all libraries (each MBID appears once) */
-    GHashTable *seen_mbids = mask_is_multi_library(cache, library_mask)
+    GHashTable *seen_mbids = library_mask_is_multi_library(cache, library_mask)
         ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
 
     for (int i = 0; i < cache->slot_count; i++) {
@@ -2955,7 +2850,7 @@ GPtrArray *library_cache_get_artists_filtered(library_cache_t *cache,
 
         int64_t *ids = NULL;
         size_t count = 0;
-        db_get_artist_ids_filtered(slot->db, &opts, &ids, &count);
+        db_get_entity_ids_filtered(slot->db, DB_ENTITY_ARTIST, &opts, &ids, &count);
 
         for (size_t j = 0; j < count; j++) {
             int64_t local_id = ids[j];
@@ -2986,7 +2881,7 @@ GPtrArray *library_cache_get_albums_filtered(library_cache_t *cache,
     g_assert(cache != NULL);
 
     GPtrArray *result = g_ptr_array_new();
-    GHashTable *seen_mbrids = mask_is_multi_library(cache, library_mask)
+    GHashTable *seen_mbrids = library_mask_is_multi_library(cache, library_mask)
         ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
 
     for (int i = 0; i < cache->slot_count; i++) {
@@ -3003,7 +2898,7 @@ GPtrArray *library_cache_get_albums_filtered(library_cache_t *cache,
 
         int64_t *ids = NULL;
         size_t count = 0;
-        db_get_album_ids_filtered(slot->db, &opts, &ids, &count);
+        db_get_entity_ids_filtered(slot->db, DB_ENTITY_ALBUM, &opts, &ids, &count);
 
         for (size_t j = 0; j < count; j++) {
             int64_t local_id = ids[j];
@@ -3029,165 +2924,7 @@ GPtrArray *library_cache_get_albums_filtered(library_cache_t *cache,
  * Search
  * ============================================================================= */
 
-static size_t run_search_queries(library_cache_t *cache, const char *query,
-                                  library_search_filter_t filter, size_t limit,
-                                  const db_search_opts_t *opts,
-                                  uint32_t library_mask,
-                                  library_search_results_t *results) {
-    size_t total = 0;
-    bool multi = mask_is_multi_library(cache, library_mask);
-    GHashTable *seen_artist_mbids = multi
-        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
-    GHashTable *seen_album_mbrids = multi
-        ? g_hash_table_new(g_str_hash, g_str_equal) : NULL;
-    GHashTable *seen_track_keys = multi
-        ? g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL) : NULL;
-
-    for (int slot_idx = 0; slot_idx < cache->slot_count; slot_idx++) {
-        LibrarySlot *slot = &cache->slots[slot_idx];
-        if (!(library_mask & (1u << slot->bitmap_index))) continue;
-        if (!slot->db) continue;
-        if (!atomic_load(&slot->available)) continue;
-
-        if (filter == LIBRARY_SEARCH_FILTER_ALL || filter == LIBRARY_SEARCH_FILTER_ARTISTS) {
-            db_id_query_opts_t id_opts = {
-                .search_text = query,
-                .filters     = opts,
-                .sort        = DB_SORT_NAME_ASC,
-            };
-            int64_t *ids = NULL;
-            size_t count = 0;
-            db_get_artist_ids_filtered(slot->db, &id_opts, &ids, &count);
-
-            for (size_t i = 0; i < count; i++) {
-                library_artist_info_t *info = slot_get_artist(slot, ids[i]);
-                if (!info) continue;
-                if (seen_artist_mbids && info->musicbrainz_id) {
-                    if (g_hash_table_contains(seen_artist_mbids, info->musicbrainz_id))
-                        continue;
-                    g_hash_table_add(seen_artist_mbids, info->musicbrainz_id);
-                }
-                g_ptr_array_add(results->artists, info);
-            }
-            g_free(ids);
-        }
-
-        if (filter == LIBRARY_SEARCH_FILTER_ALL || filter == LIBRARY_SEARCH_FILTER_ALBUMS) {
-            db_id_query_opts_t id_opts = {
-                .search_text = query,
-                .filters     = opts,
-                .sort        = DB_SORT_NAME_ASC,
-            };
-            int64_t *ids = NULL;
-            size_t count = 0;
-            db_get_album_ids_filtered(slot->db, &id_opts, &ids, &count);
-
-            for (size_t i = 0; i < count; i++) {
-                library_album_info_t *info = slot_get_album(slot, ids[i]);
-                if (!info) continue;
-                if (seen_album_mbrids && info->musicbrainz_release_group_id &&
-                    info->musicbrainz_release_group_id[0]) {
-                    if (g_hash_table_contains(seen_album_mbrids, info->musicbrainz_release_group_id))
-                        continue;
-                    g_hash_table_add(seen_album_mbrids, info->musicbrainz_release_group_id);
-                }
-                g_ptr_array_add(results->albums, info);
-            }
-            g_free(ids);
-        }
-
-        if (filter == LIBRARY_SEARCH_FILTER_ALL || filter == LIBRARY_SEARCH_FILTER_TRACKS) {
-            int64_t *ids = NULL;
-            size_t count = 0;
-            size_t db_max = limit > 0 ? limit : 100;
-            db_search_track_ids(slot->db, query, opts, db_max, &ids, &count);
-
-            for (size_t i = 0; i < count; i++) {
-                library_track_info_t *info = slot_get_track(slot, ids[i]);
-                if (!info) continue;
-                if (seen_track_keys) {
-                    int64_t local_album = LIBRARY_GLOBAL_ID_LOCAL(info->album_id);
-                    library_album_info_t *alb = slot_get_album(slot, local_album);
-                    if (alb && alb->musicbrainz_release_group_id &&
-                        alb->musicbrainz_release_group_id[0]) {
-                        char key[128];
-                        snprintf(key, sizeof(key), "%s:%u:%u",
-                                 alb->musicbrainz_release_group_id,
-                                 info->disc_num, info->track_num);
-                        if (g_hash_table_contains(seen_track_keys, key))
-                            continue;
-                        g_hash_table_add(seen_track_keys, g_strdup(key));
-                    }
-                }
-                g_ptr_array_add(results->tracks, info);
-            }
-            g_free(ids);
-        }
-    }
-
-    if (seen_artist_mbids) g_hash_table_destroy(seen_artist_mbids);
-    if (seen_album_mbrids) g_hash_table_destroy(seen_album_mbrids);
-    if (seen_track_keys) g_hash_table_destroy(seen_track_keys);
-
-    /* Enforce final limits across all slots */
-    size_t artist_max = (filter == LIBRARY_SEARCH_FILTER_ALL)
-                        ? (limit > 0 ? limit : 3)
-                        : (limit > 0 ? limit : 100);
-    size_t album_max  = (filter == LIBRARY_SEARCH_FILTER_ALL)
-                        ? (limit > 0 ? limit : 4)
-                        : (limit > 0 ? limit : 100);
-    size_t track_max  = (filter == LIBRARY_SEARCH_FILTER_ALL)
-                        ? (limit > 0 ? limit : 8)
-                        : (limit > 0 ? limit : 100);
-    if (results->artists->len > artist_max)
-        g_ptr_array_set_size(results->artists, artist_max);
-    if (results->albums->len > album_max)
-        g_ptr_array_set_size(results->albums, album_max);
-    if (results->tracks->len > track_max)
-        g_ptr_array_set_size(results->tracks, track_max);
-
-    total = results->artists->len + results->albums->len + results->tracks->len;
-    return total;
-}
-
-library_search_results_t *library_cache_search(library_cache_t *cache,
-                                                const char *query,
-                                                library_search_filter_t filter,
-                                                size_t limit,
-                                                const db_search_opts_t *opts,
-                                                uint32_t library_mask) {
-    if (!cache || !query) return NULL;
-
-    library_search_results_t *results = g_new0(library_search_results_t, 1);
-    results->artists = g_ptr_array_new();
-    results->albums  = g_ptr_array_new();
-    results->tracks  = g_ptr_array_new();
-
-    size_t found = run_search_queries(cache, query, filter, limit, opts, library_mask, results);
-
-    if (found == 0 && strlen(query) >= 2 && cache->search_vocab_count > 0) {
-        char *corrected = build_corrected_query(cache, query);
-        if (corrected && g_strcmp0(corrected, query) != 0) {
-            g_debug("cache search: no results for '%s', trying corrected '%s'", query, corrected);
-            found = run_search_queries(cache, corrected, filter, limit, opts, library_mask, results);
-        }
-        g_free(corrected);
-    }
-
-    results->total_artists = results->artists->len;
-    results->total_albums  = results->albums->len;
-    results->total_tracks  = results->tracks->len;
-
-    return results;
-}
-
-void library_search_results_free(library_search_results_t *results) {
-    if (!results) return;
-    if (results->artists) g_ptr_array_unref(results->artists);
-    if (results->albums)  g_ptr_array_unref(results->albums);
-    if (results->tracks)  g_ptr_array_unref(results->tracks);
-    g_free(results);
-}
+/* library_cache_search / library_search_results_free now live in cache_search.c. */
 
 /* =============================================================================
  * Prefetch API

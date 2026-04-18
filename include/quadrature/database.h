@@ -236,13 +236,6 @@ quadrature_result_t db_get_max_ids(quadrature_db_t *db,
  * ============================================================================= */
 
 /**
- * Set all artist associations for a track (replaces any existing).
- * Called by the indexer after parsing artist names.
- */
-quadrature_result_t db_set_track_artists(quadrature_db_t* db, int64_t track_id,
-                                          const db_track_artist_t* artists, size_t count);
-
-/**
  * Get all artists for a track, ordered by position.
  * Caller must free with db_track_artists_free().
  */
@@ -277,32 +270,33 @@ void db_albums_free(db_album_t* albums, size_t count);
  * ============================================================================= */
 
 /**
+ * Entity kind for unified ID-filtered queries.
+ * Sort order applies to ARTIST/ALBUM; TRACK queries are FTS-ranked.
+ */
+typedef enum {
+    DB_ENTITY_ARTIST = 0,
+    DB_ENTITY_ALBUM  = 1,
+    DB_ENTITY_TRACK  = 2,  /* FTS-only: requires opts.search_text, ignores sort */
+} db_entity_t;
+
+/**
  * Options for ID-only filtered queries.
  * Returns only entity IDs -- caller resolves against in-memory cache.
  */
 typedef struct {
-    const char* search_text;           /* NULL = no text filter */
+    const char* search_text;           /* NULL = no text filter (required for TRACK) */
     const db_search_opts_t* filters;   /* NULL = no genre/year filter */
-    db_sort_t sort;
+    db_sort_t sort;                    /* Ignored for TRACK (FTS rank order) */
+    size_t limit;                      /* 0 = unlimited */
 } db_id_query_opts_t;
 
 /**
- * Get filtered artist IDs. Caller must g_free(*out_ids).
+ * Get filtered entity IDs (artists, albums, or tracks).
+ * Caller must g_free(*out_ids).
  */
-quadrature_result_t db_get_artist_ids_filtered(quadrature_db_t* db,
-    const db_id_query_opts_t* opts, int64_t** out_ids, size_t* out_count);
-
-/**
- * Get filtered album IDs. Caller must g_free(*out_ids).
- */
-quadrature_result_t db_get_album_ids_filtered(quadrature_db_t* db,
-    const db_id_query_opts_t* opts, int64_t** out_ids, size_t* out_count);
-
-/**
- * Search track IDs via FTS. Caller must g_free(*out_ids).
- */
-quadrature_result_t db_search_track_ids(quadrature_db_t* db,
-    const char* query, const db_search_opts_t* opts, size_t limit,
+quadrature_result_t db_get_entity_ids_filtered(quadrature_db_t* db,
+    db_entity_t entity,
+    const db_id_query_opts_t* opts,
     int64_t** out_ids, size_t* out_count);
 
 /**
@@ -344,15 +338,6 @@ quadrature_result_t db_rollback(quadrature_db_t* db);
 quadrature_result_t db_begin_batch(quadrature_db_t* db);
 quadrature_result_t db_commit_batch(quadrature_db_t* db);
 
-/* =============================================================================
- * Write Operations (for indexer)
- * ============================================================================= */
-
-quadrature_result_t db_upsert_track_with_album(quadrature_db_t* db, const db_index_item_t* item,
-                                                int64_t album_id, int64_t* track_id_out);
-/* Get or create artist by name, returns artist_id (0 on error) */
-int64_t db_get_or_create_artist(quadrature_db_t* db, const char* name);
-
 /**
  * Iterate all artist (id, name) pairs — used by indexer to pre-load name cache.
  */
@@ -360,7 +345,7 @@ typedef void (*db_artist_name_iter_cb)(int64_t id, const char *name, void *user_
 quadrature_result_t db_iter_artist_names(quadrature_db_t *db, db_artist_name_iter_cb cb, void *user_data);
 
 /* =============================================================================
- * MusicBrainz Resolution Operations
+ * MusicBrainz Resolution (read side)
  * ============================================================================= */
 
 /* MB resolution status values */
@@ -369,67 +354,6 @@ quadrature_result_t db_iter_artist_names(quadrature_db_t *db, db_artist_name_ite
 #define MB_STATUS_RESOLVED       2   /* Fully resolved: MB PG data fetched and written to SQLite */
 #define MB_STATUS_NO_MATCH       3   /* Resolution attempted but no MB match found */
 #define MB_STATUS_FAILED         4   /* Resolution attempted but errored */
-
-/**
- * Get or create artist with MusicBrainz data.
- * Deduplicates by musicbrainz_id first, then by name.
- * Returns artist_id (0 on error).
- */
-int64_t db_get_or_create_artist_mb(quadrature_db_t* db,
-                                    const char* name,
-                                    const char* sort_name,
-                                    const char* musicbrainz_id);
-
-/**
- * Update album with MusicBrainz release metadata.
- * Only stores fields needed for indexing/sorting: title, release IDs, year, status.
- * Display-only metadata (label, catalog, barcode, type, genres) goes to metadata DB.
- */
-quadrature_result_t db_update_album_mb(quadrature_db_t* db, int64_t album_id,
-    const char* title,
-    const char* musicbrainz_release_id,
-    const char* musicbrainz_release_group_id,
-    uint16_t year,
-    int mb_status);
-
-/**
- * Update track title from MusicBrainz recording (called by Phase 4).
- * Track is identified by (disc_num, track_num) within the resolved album.
- */
-quadrature_result_t db_update_track_title(quadrature_db_t* db, int64_t track_id,
-    const char* title);
-
-/**
- * Merge MusicBrainz genres into a track's existing genre field.
- * Splits both current genre and mb_genres on ';', deduplicates,
- * and writes the merged semicolon-separated string back to tracks.genre.
- */
-quadrature_result_t db_merge_track_genres(quadrature_db_t* db,
-    int64_t track_id, const char* mb_genres);
-
-/**
- * Bulk-sync tracks_fts for all tracks in an album.
- * Executes one INSERT OR REPLACE INTO tracks_fts SELECT ... WHERE album_id=?
- * Call once per album after all tracks and artist_display values are committed.
- * Requires an active transaction.
- */
-quadrature_result_t db_sync_album_fts(quadrature_db_t* db, int64_t album_id);
-
-/**
- * Store MUSICBRAINZ_ALBUMID read from file tags during Phase 2.
- * Sets mb_status = MB_STATUS_HAS_RELEASE_ID so the resolver knows a release ID is ready.
- * Only updates if mb_status = MB_STATUS_NOT_ATTEMPTED so Phase 4 data is never clobbered.
- */
-quadrature_result_t db_set_album_release_id_from_tags(quadrature_db_t* db,
-    int64_t album_id, const char* musicbrainz_release_id);
-
-/**
- * Store MUSICBRAINZ_RELEASEGROUPID read from file tags during Phase 2.
- * Only writes if the album's release_group_id is currently NULL/empty and
- * mb_status != RESOLVED (never overwrite Phase 6 data).
- */
-quadrature_result_t db_set_album_release_group_id_from_tags(quadrature_db_t* db,
-    int64_t album_id, const char* musicbrainz_release_group_id);
 
 /**
  * Get musicbrainz_release_id for an album (stored by Phase 2 from file tags).
@@ -448,73 +372,12 @@ quadrature_result_t db_get_unresolved_albums(quadrature_db_t* db,
     int64_t retry_no_match_before,
     int64_t** album_ids, size_t* count);
 
-/**
- * Set album MB resolution status.
- */
-quadrature_result_t db_set_album_mb_status(quadrature_db_t* db,
-    int64_t album_id, int status, int64_t resolved_at);
-
-/**
- * Update album's artist and compilation fields.
- */
-quadrature_result_t db_update_album_artist(quadrature_db_t* db, int64_t album_id,
-    int64_t artist_id, bool is_compilation);
-
 /** Begin/end a deferred read transaction (snapshot isolation for bulk reads). */
 quadrature_result_t db_begin_read(quadrature_db_t *db);
 quadrature_result_t db_end_read(quadrature_db_t *db);
 
-/* WAL checkpoint for durability */
-quadrature_result_t db_checkpoint(quadrature_db_t* db);
-
-/**
- * Delete artists that have no entries in track_artists.
- * Handles the 1-Phase2-artist-to-many-MB-credits split case: when Phase 2
- * wrote a combined tag ("Artist A & Artist B") as one artist and Phase 4
- * resolved it to two separate artists, the combined row is correctly orphaned.
- * Also cleans artists_fts for deleted rows.
- * Called from the indexer finalize phase.
- */
-quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db);
-
-/**
- * Reconcile the tracks of a single album against the current filesystem.
- *
- * Deletes every track row for `album_id` whose path is NOT present in
- * `current_paths`. If that leaves the album with zero surviving tracks,
- * the album row itself is deleted — so this function covers both the
- * "some files removed/renamed" case (Phase 2 per-album write) and the
- * "whole album directory gone" case (Phase 1 orphan sweep).
- *
- * To delete an entire album, pass `current_paths = NULL, count = 0`:
- * every track matches "not in current" and the album becomes empty,
- * triggering deletion of the album row.
- *
- * `track_artists` rows cascade via FK; `tracks_fts` and `albums_fts`
- * orphan rows are cleaned up automatically.
- *
- * PRECONDITION: must be called within an active transaction (a batch
- * opened by `db_begin_batch` or an explicit `db_begin_transaction`).
- *
- * Paths must match exactly what `db_upsert_track_with_album` stored (the
- * album-relative path).
- */
-quadrature_result_t db_reconcile_album_tracks(quadrature_db_t* db,
-    int64_t album_id, const char* const* current_paths, size_t current_path_count);
-
 /* =============================================================================
- * Folder-Based Album Operations
- * ============================================================================= */
-
-quadrature_result_t db_upsert_folder_album(quadrature_db_t* db,
-                                            const char* folder_path,
-                                            const char* title,
-                                            int64_t artist_id,
-                                            uint16_t year,
-                                            int64_t* album_id_out);
-
-/* =============================================================================
- * Indexer Error Operations
+ * Indexer Error Types (write ops in <quadrature/db_write.h>)
  * ============================================================================= */
 
 /* Structured error codes for indexer_errors.error_code */
@@ -544,27 +407,12 @@ typedef enum {
     INDEXER_SEV_FATAL = 3,
 } indexer_error_severity_t;
 
-quadrature_result_t db_log_error_ex(quadrature_db_t* db, const char* path,
-                                    indexer_error_code_t error_code, int phase,
-                                    indexer_error_severity_t severity,
-                                    const char* message, int64_t scan_generation);
-
-/* Convenience: logs with error_code=0, phase=0, severity=ERROR (backward compat) */
-quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const char* message,
-                                int64_t scan_generation);
-quadrature_result_t db_clear_errors_for_path(quadrature_db_t* db, const char* path_prefix);
-
 /**
  * Get the next scan generation number (MAX(scan_generation) + 1).
  * Returns 1 for an empty indexer_errors table.
  */
 int64_t db_get_next_error_generation(quadrature_db_t* db);
 
-/**
- * Prune orphan errors whose paths don't correspond to any known album.
- * Cleans up errors for directories that have been removed from the library.
- */
-quadrature_result_t db_prune_orphan_errors(quadrature_db_t* db, const char* library_root);
 quadrature_result_t db_get_error_count(quadrature_db_t* db, const char* path_prefix, size_t* count);
 quadrature_result_t db_get_errors_page(quadrature_db_t* db, const char* path_prefix,
                                        size_t offset, size_t limit,
@@ -587,11 +435,6 @@ quadrature_result_t db_get_album_mtimes_page(quadrature_db_t* db,
                                               size_t limit,
                                               db_album_mtime_t** out,
                                               size_t* count_out);
-quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
-                                               const int64_t* album_ids,
-                                               const int64_t* mtimes,
-                                               const int64_t* sizes,
-                                               size_t count);
 void db_free_album_mtimes(db_album_mtime_t* albums, size_t count);
 
 /* =============================================================================
@@ -680,5 +523,10 @@ quadrature_result_t db_get_last_indexed_time(quadrature_db_t* db, int64_t* unix_
 #ifdef __cplusplus
 }
 #endif
+
+/* Umbrella include: write-side operations.
+ * Callers that only write (or want a narrower surface) can include
+ * <quadrature/db_write.h> directly; database.h stays as the one-stop header. */
+#include "db_write.h"
 
 #endif /* QUADRATURE_DATABASE_H */

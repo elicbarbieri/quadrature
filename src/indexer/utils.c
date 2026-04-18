@@ -141,9 +141,8 @@ void index_item_free(index_item_t* item) {
 // =============================================================================
 
 quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) {
-    if (!path || !out) {
-        return QUADRATURE_ERROR_INVALID_PARAM;
-    }
+    g_assert(path != NULL);
+    g_assert(out != NULL);
 
     out->path = strdup(path);
     out->title = NULL;

@@ -160,18 +160,21 @@ void ui_channel_strip_update(UiChannelStrip *strip, audio_pipeline_t *pipeline);
 void ui_channel_strip_set_spectrum_visible(UiChannelStrip *strip, gboolean visible);
 void ui_channel_strip_set_device_name(UiChannelStrip *strip, const char *device_name);
 int ui_channel_strip_get_channel_id(UiChannelStrip *strip);
+/* Minimal track descriptor for load/display operations.
+ * Borrows its string fields from the caller; fields remain valid only for the
+ * duration of the call. Cache owners must dup them before storing. */
+typedef struct PlaybackIntent {
+    int64_t     track_id;
+    const char *path;
+    const char *title;
+    const char *artist;
+    const char *album;
+} PlaybackIntent;
+
 quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *strip,
-                                                 int64_t track_id,
-                                                 const char *path,
-                                                 const char *title,
-                                                 const char *artist,
-                                                 const char *album);
+                                                 const PlaybackIntent *intent);
 void ui_channel_strip_update_track_display(UiChannelStrip *strip,
-                                            int64_t track_id,
-                                            const char *path,
-                                            const char *title,
-                                            const char *artist,
-                                            const char *album);
+                                            const PlaybackIntent *intent);
 
 void ui_channel_strip_set_device_state(UiChannelStrip *strip, DeviceState state);
 DeviceState ui_channel_strip_get_device_state(UiChannelStrip *strip);
