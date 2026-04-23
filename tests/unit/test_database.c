@@ -34,19 +34,19 @@ Test(database, null_safety_and_validation) {
     db_track_t* track = NULL;
 
     // --- Null database handle ---
-    cr_assert_eq(db_open_memory(NULL), QUADRATURE_ERROR_INVALID_PARAM);
+    cr_assert_eq(db_open(NULL, false, NULL), QUADRATURE_ERROR_INVALID_PARAM);
     db_close(NULL);  // Should not crash
     cr_assert_null(db_path(NULL));
 
     // Free functions accept null safely
-    db_track_free(NULL);
+    db_tracks_free(NULL, 1);
 
     // Operations with null database
     cr_assert_eq(db_get_track(NULL, 1, &track), QUADRATURE_ERROR_INVALID_PARAM);
 
     // --- Null parameters with valid database ---
     quadrature_db_t* db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     cr_assert_eq(db_get_track(db, 1, NULL), QUADRATURE_ERROR_INVALID_PARAM);
 
@@ -61,14 +61,14 @@ Test(database, lifecycle) {
     quadrature_db_t* db = NULL;
 
     // --- In-memory database ---
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
     cr_assert_not_null(db);
     cr_assert_null(db_path(db));
     db_close(db);
 
     // --- File-based database ---
     db = NULL;
-    cr_assert_eq(db_open(TEST_DB_FILE, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(TEST_DB_FILE, false, &db), QUADRATURE_OK);
     cr_assert_not_null(db);
     cr_assert_str_eq(db_path(db), TEST_DB_FILE);
 
@@ -83,7 +83,7 @@ Test(database, lifecycle) {
 
     // Reopen and verify persistence
     db = NULL;
-    cr_assert_eq(db_open(TEST_DB_FILE, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(TEST_DB_FILE, false, &db), QUADRATURE_OK);
     count = 999;
     test_get_track_count(db, &count);
     cr_assert_eq(count, 0);
@@ -101,7 +101,7 @@ Test(database, lifecycle) {
 
 Test(database, empty_operations) {
     quadrature_db_t* db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     size_t count = 999;
     db_track_t* track = NULL;
@@ -123,9 +123,9 @@ Test(database, empty_operations) {
 
 Test(database, transaction_rollback) {
     quadrature_db_t* db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
     test_insert_track_full(db, album_id, "/music/committed.mp3", "Committed",
                             1, 1, 100000, NULL, NULL, NULL, 0);
@@ -175,15 +175,15 @@ static size_t count_artists(quadrature_db_t *db) {
  * Expected: rename in-place — same artist_id returned, no new row. */
 Test(database, artist_normalized_rename_preserves_id) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     /* Phase 2: create via simple name (no MBID) */
-    int64_t id_phase2 = db_get_or_create_artist(db, "2 Mex");
+    int64_t id_phase2 = db_get_or_create_artist(db, "2 Mex", NULL, NULL);
     cr_assert_gt(id_phase2, 0, "Phase 2 artist should be created");
     cr_assert_eq(count_artists(db), 1, "Should have exactly 1 artist");
 
     /* Phase 4: resolve via MB — name differs by space but normalizes the same */
-    int64_t id_phase4 = db_get_or_create_artist_mb(db, "2Mex", "2Mex", "696c9bcb-1234-5678-abcd-000000000001");
+    int64_t id_phase4 = db_get_or_create_artist(db, "2Mex", "2Mex", "696c9bcb-1234-5678-abcd-000000000001");
     cr_assert_gt(id_phase4, 0, "MB artist should be found/created");
     cr_assert_eq(id_phase4, id_phase2, "Normalized rename should return original id (no orphan created)");
     cr_assert_eq(count_artists(db), 1, "Still exactly 1 artist after normalized rename");
@@ -194,10 +194,10 @@ Test(database, artist_normalized_rename_preserves_id) {
 /* Phase 4 called twice with the same MBID should return the same id. */
 Test(database, artist_mb_lookup_by_mbid_is_idempotent) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
-    int64_t id1 = db_get_or_create_artist_mb(db, "Madlib", "Madlib", "some-mbid-aaa");
-    int64_t id2 = db_get_or_create_artist_mb(db, "Madlib", "Madlib", "some-mbid-aaa");
+    int64_t id1 = db_get_or_create_artist(db, "Madlib", "Madlib", "some-mbid-aaa");
+    int64_t id2 = db_get_or_create_artist(db, "Madlib", "Madlib", "some-mbid-aaa");
     cr_assert_eq(id1, id2, "Same MBID should always return the same artist_id");
     cr_assert_eq(count_artists(db), 1, "One artist row for repeated MBID lookup");
 
@@ -207,12 +207,12 @@ Test(database, artist_mb_lookup_by_mbid_is_idempotent) {
 /* Step 2: exact name match (case-insensitive) with no MBID should rename in-place. */
 Test(database, artist_mb_exact_nocase_rename) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
-    int64_t id_phase2 = db_get_or_create_artist(db, "ac/dc");
+    int64_t id_phase2 = db_get_or_create_artist(db, "ac/dc", NULL, NULL);
     cr_assert_gt(id_phase2, 0);
 
-    int64_t id_mb = db_get_or_create_artist_mb(db, "AC/DC", "AC/DC", "mbid-acdc-001");
+    int64_t id_mb = db_get_or_create_artist(db, "AC/DC", "AC/DC", "mbid-acdc-001");
     cr_assert_eq(id_mb, id_phase2, "NOCASE rename should preserve artist_id");
     cr_assert_eq(count_artists(db), 1);
 
@@ -222,11 +222,11 @@ Test(database, artist_mb_exact_nocase_rename) {
 /* db_prune_orphan_artists must delete artists that have no track_artists rows. */
 Test(database, prune_orphan_artists_removes_unreferenced) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     /* Create two artists */
-    int64_t orphan_id  = db_get_or_create_artist(db, "OrphanArtist");
-    int64_t linked_id  = db_get_or_create_artist(db, "LinkedArtist");
+    int64_t orphan_id  = db_get_or_create_artist(db, "OrphanArtist", NULL, NULL);
+    int64_t linked_id  = db_get_or_create_artist(db, "LinkedArtist", NULL, NULL);
     cr_assert_gt(orphan_id, 0);
     cr_assert_gt(linked_id, 0);
 
@@ -261,10 +261,10 @@ Test(database, prune_orphan_artists_removes_unreferenced) {
 /* An artist referenced only via albums.artist_id (no track_artists) must survive prune. */
 Test(database, prune_orphan_artists_preserves_album_artist) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
-    int64_t orphan_id = db_get_or_create_artist(db, "TrueOrphan");
-    int64_t album_artist_id = db_get_or_create_artist(db, "AlbumOnlyArtist");
+    int64_t orphan_id = db_get_or_create_artist(db, "TrueOrphan", NULL, NULL);
+    int64_t album_artist_id = db_get_or_create_artist(db, "AlbumOnlyArtist", NULL, NULL);
     cr_assert_gt(orphan_id, 0);
     cr_assert_gt(album_artist_id, 0);
 
@@ -291,40 +291,6 @@ Test(database, prune_orphan_artists_preserves_album_artist) {
     db_close(db);
 }
 
-/* db_get_artists_page must not return artists that have no track_artists rows. */
-Test(database, get_artists_page_excludes_orphans) {
-    quadrature_db_t *db = NULL;
-    db_open_memory(&db);
-
-    /* Create an orphan artist with no tracks */
-    db_get_or_create_artist(db, "OrphanWithNoTracks");
-
-    /* Create a real artist with a track */
-    int64_t real_id = db_get_or_create_artist(db, "RealArtist");
-    int64_t album_id = test_insert_album(db, "/m2", "Album2", real_id, 2021);
-    const int64_t ta[1] = { real_id };
-    const char *names[1] = { "RealArtist" };
-    const char *joins[1] = { "" };
-    test_insert_track_full(db, album_id, "/m2/song.mp3", "Song",
-                            1, 1, 30000, ta, names, joins, 1);
-
-    db_artist_t *results = NULL;
-    size_t out_count = 0, total_count = 0;
-    db_page_opts_t opts = {
-        .offset = 0, .limit = 100, .sort = DB_SORT_NAME_ASC,
-        .search_text = NULL, .filters = NULL,
-    };
-    quadrature_result_t res = db_get_artists_page(db, &opts, &results, &out_count, &total_count);
-    cr_assert_eq(res, QUADRATURE_OK);
-    cr_assert_eq(out_count, 1, "Page should contain only the artist with tracks");
-    cr_assert_eq(total_count, 1, "Total should exclude orphan");
-    if (results && out_count > 0)
-        cr_assert_str_eq(results[0].name, "RealArtist");
-    db_artists_free(results, out_count);
-
-    db_close(db);
-}
-
 // MB-resolved re-index guard behavior is now tested against the reconciler
 // directly in test_reconciler.c.
 
@@ -343,7 +309,7 @@ static void* reader_thread(void* arg) {
 
 Test(database, concurrent_reads) {
     quadrature_db_t* db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     pthread_t threads[4];
     for (int i = 0; i < 4; i++) {
@@ -362,7 +328,7 @@ Test(database, concurrent_reads) {
 
 Test(database, fresh_db_version) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     /* user_version must be set after migrations run (currently 1) */
     db_lock(db);
@@ -383,17 +349,17 @@ Test(database, idempotent_reopen) {
 
     /* Open, write data, close */
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open(path, &db), QUADRATURE_OK);
-    int64_t artist_id = db_get_or_create_artist(db, "Migration Test Artist");
+    cr_assert_eq(db_open(path, false, &db), QUADRATURE_OK);
+    int64_t artist_id = db_get_or_create_artist(db, "Migration Test Artist", NULL, NULL);
     cr_assert_gt(artist_id, 0);
     db_close(db);
 
     /* Reopen — should succeed without re-running migrations */
     db = NULL;
-    cr_assert_eq(db_open(path, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(path, false, &db), QUADRATURE_OK);
 
     /* Data intact */
-    int64_t artist_id2 = db_get_or_create_artist(db, "Migration Test Artist");
+    int64_t artist_id2 = db_get_or_create_artist(db, "Migration Test Artist", NULL, NULL);
     cr_assert_eq(artist_id, artist_id2);
 
     /* Version still correct */
@@ -421,68 +387,9 @@ Test(database, rejects_newer_database) {
 
     /* db_open should reject it */
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open(path, &db), QUADRATURE_ERROR_INTERNAL);
+    cr_assert_eq(db_open(path, false, &db), QUADRATURE_ERROR_INTERNAL);
 
     unlink(path);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * db_log_error_ex: structured error round-trip
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-Test(database, log_error_ex_writes_structured_fields) {
-    quadrature_db_t* db = NULL;
-    db_open_memory(&db);
-
-    /* Write a structured error */
-    quadrature_result_t res = db_log_error_ex(db, "/test/path",
-        INDEXER_ERR_FFMPEG_DECODE, 2, INDEXER_SEV_ERROR,
-        "Failed to decode audio", 1);
-    cr_assert_eq(res, QUADRATURE_OK);
-
-    /* Read it back via direct SQL */
-    db_lock(db);
-    sqlite3_stmt* stmt = NULL;
-    sqlite3_prepare_v2(db->db,
-        "SELECT path, error_code, phase, severity, message, scan_generation "
-        "FROM indexer_errors ORDER BY id DESC LIMIT 1",
-        -1, &stmt, NULL);
-    int rc = sqlite3_step(stmt);
-    cr_assert_eq(rc, SQLITE_ROW);
-
-    cr_assert_str_eq((const char*)sqlite3_column_text(stmt, 0), "/test/path");
-    cr_assert_eq(sqlite3_column_int(stmt, 1), INDEXER_ERR_FFMPEG_DECODE);
-    cr_assert_eq(sqlite3_column_int(stmt, 2), 2);  /* phase */
-    cr_assert_eq(sqlite3_column_int(stmt, 3), INDEXER_SEV_ERROR);
-    cr_assert_str_eq((const char*)sqlite3_column_text(stmt, 4), "Failed to decode audio");
-    cr_assert_eq(sqlite3_column_int64(stmt, 5), 1);  /* scan_generation */
-
-    sqlite3_finalize(stmt);
-    db_unlock(db);
-
-    db_close(db);
-}
-
-Test(database, log_error_legacy_wrapper_defaults) {
-    quadrature_db_t* db = NULL;
-    db_open_memory(&db);
-
-    /* Legacy wrapper should write defaults: error_code=0, phase=0, severity=2 */
-    db_log_error(db, "/legacy/path", "Legacy error", 5);
-
-    db_lock(db);
-    sqlite3_stmt* stmt = NULL;
-    sqlite3_prepare_v2(db->db,
-        "SELECT error_code, phase, severity FROM indexer_errors LIMIT 1",
-        -1, &stmt, NULL);
-    cr_assert_eq(sqlite3_step(stmt), SQLITE_ROW);
-    cr_assert_eq(sqlite3_column_int(stmt, 0), 0);  /* INDEXER_ERR_UNKNOWN */
-    cr_assert_eq(sqlite3_column_int(stmt, 1), 0);  /* phase 0 */
-    cr_assert_eq(sqlite3_column_int(stmt, 2), 2);  /* INDEXER_SEV_ERROR */
-    sqlite3_finalize(stmt);
-    db_unlock(db);
-
-    db_close(db);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -514,9 +421,9 @@ static void test_prune_albums(quadrature_db_t *db, const int64_t *ids, size_t co
 static void build_prune_fixture(quadrature_db_t *db,
                                 int64_t *disc_out, int64_t *ram_out,
                                 int64_t *sect_out) {
-    int64_t dp = db_get_or_create_artist_mb(db, "Daft Punk", "Daft Punk",
+    int64_t dp = db_get_or_create_artist(db, "Daft Punk", "Daft Punk",
         "056e4f3e-d505-4dad-8ec1-d04f521cbb56");
-    int64_t gf = db_get_or_create_artist(db, "Golden Features");
+    int64_t gf = db_get_or_create_artist(db, "Golden Features", NULL, NULL);
 
     int64_t disc_id = test_insert_album(db, "DaftPunk/Discovery", "Discovery",              dp, 2001);
     int64_t ram_id  = test_insert_album(db, "DaftPunk/RAM",       "Random Access Memories", dp, 2013);
@@ -544,8 +451,8 @@ static void build_prune_fixture(quadrature_db_t *db,
 
     db_lock(db);
     sqlite3_exec(db->db,
-        "INSERT INTO indexer_errors(path, error_code, phase, message) "
-        "VALUES('DaftPunk/Discovery/cover.jpg', 3, 3, 'artwork extraction failed')",
+        "INSERT INTO indexer_errors(path, message) "
+        "VALUES('DaftPunk/Discovery/cover.jpg', 'artwork extraction failed')",
         NULL, NULL, NULL);
     db_unlock(db);
 
@@ -556,7 +463,7 @@ static void build_prune_fixture(quadrature_db_t *db,
 
 Test(database, prune_orphan_albums_cascades_tracks_and_fts) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     int64_t disc_id, ram_id, sect_id;
     build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
@@ -576,7 +483,7 @@ Test(database, prune_orphan_albums_cascades_tracks_and_fts) {
 
 Test(database, prune_orphan_albums_full_wipe) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     int64_t disc_id, ram_id, sect_id;
     build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
@@ -598,7 +505,7 @@ Test(database, prune_orphan_albums_full_wipe) {
 
 Test(database, prune_orphan_artist_after_album_deletion) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     int64_t disc_id, ram_id, sect_id;
     build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
@@ -623,7 +530,7 @@ Test(database, prune_orphan_artist_after_album_deletion) {
 
 Test(database, featured_artist_survives_album_deletion) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     int64_t disc_id, ram_id, sect_id;
     build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
@@ -649,7 +556,7 @@ Test(database, featured_artist_survives_album_deletion) {
 
 Test(database, prune_orphan_errors_removes_stale_paths) {
     quadrature_db_t *db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     int64_t disc_id, ram_id, sect_id;
     build_prune_fixture(db, &disc_id, &ram_id, &sect_id);
@@ -677,10 +584,10 @@ Test(database, prune_orphan_errors_removes_stale_paths) {
 
 Test(database, mtime_batch_writes_size) {
     quadrature_db_t* db = NULL;
-    db_open_memory(&db);
+    db_open(NULL, false, &db);
 
     /* Create an artist and album */
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     cr_assert_gt(artist_id, 0);
 
     int64_t album_id = test_insert_album(db, "test/album", "Test Album", artist_id, 2024);

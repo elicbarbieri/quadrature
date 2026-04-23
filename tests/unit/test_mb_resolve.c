@@ -283,9 +283,9 @@ Test(mb_resolve, full_resolve) {
 
     // Build in-memory SQLite DB with one album
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     cr_assert_gt(artist_id, 0LL, "failed to create artist");
 
     int64_t album_id = test_insert_album(db, "/fake/test", "Test Album", artist_id, 2020);
@@ -305,7 +305,7 @@ Test(mb_resolve, full_resolve) {
         };
         reconcile_policy_t p = {0};
         cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-        cr_assert_eq(db_reconcile_album(db, album_id, &desired, &p, NULL),
+        cr_assert_eq(db_reconcile_albums(db, &album_id, &desired, 1, &p, NULL),
                      QUADRATURE_OK);
         cr_assert_eq(db_commit(db), QUADRATURE_OK);
     }

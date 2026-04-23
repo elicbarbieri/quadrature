@@ -159,8 +159,7 @@ typedef struct library_cache library_cache_t;
 typedef struct _ArtworkManager ArtworkManager;
 #endif
 
-GtkWidget* perf_view_new(perf_dashboard_t* dashboard, audio_cache_t* cache,
-                           audio_pipeline_t* pipeline,
+GtkWidget* perf_view_new(audio_pipeline_t* pipeline,
                            library_cache_t* library_cache,
                            ArtworkManager* artwork_mgr);
 

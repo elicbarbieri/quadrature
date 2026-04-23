@@ -21,6 +21,56 @@
 #include <stdio.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Direct ring-buffer readers
+ *
+ * Perf view reads audio internals directly (via src/audio/internal.h) rather
+ * than through wrapper APIs in audio_pipeline.c. These helpers are the
+ * ring-buffer snapshotting routines, kept here so perf-specific concerns
+ * live with perf code.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static double perf_budget_max_pct(audio_pipeline_t* pipeline, int player_id) {
+    const budget_rb_t* rb = pipeline->players[player_id].budget_rb;
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+    uint32_t available = write_pos < BUDGET_RB_CAPACITY ? write_pos : BUDGET_RB_CAPACITY;
+    if (!available) return 0.0;
+    uint32_t window = available < 100 ? available : 100;   /* ~1 second */
+    uint32_t start = write_pos - window;
+    uint16_t mx = 0;
+    for (uint32_t i = 0; i < window; i++) {
+        uint16_t v = rb->samples[(start + i) & (BUDGET_RB_CAPACITY - 1)];
+        if (v > mx) mx = v;
+    }
+    return (double)mx / 100.0;
+}
+
+static uint32_t perf_read_latency_samples(audio_pipeline_t* pipeline, int player_id,
+                                          uint16_t* out, uint32_t max_samples) {
+    const latency_rb_t* rb = pipeline->players[player_id].latency_rb;
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+    uint32_t total = write_pos < LATENCY_RB_CAPACITY ? write_pos : LATENCY_RB_CAPACITY;
+    if (total > max_samples) total = max_samples;
+    uint32_t start = write_pos - total;
+    for (uint32_t i = 0; i < total; i++)
+        out[i] = rb->samples[(start + i) & (LATENCY_RB_CAPACITY - 1)];
+    return total;
+}
+
+static uint32_t perf_read_interval_samples(audio_pipeline_t* pipeline, int player_id,
+                                           int64_t* out, uint32_t max_samples,
+                                           uint32_t* out_write_pos) {
+    const interval_rb_t* rb = pipeline->players[player_id].interval_rb;
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+    uint32_t total = write_pos < INTERVAL_RB_CAPACITY ? write_pos : INTERVAL_RB_CAPACITY;
+    if (total > max_samples) total = max_samples;
+    uint32_t start = write_pos - total;
+    for (uint32_t i = 0; i < total; i++)
+        out[i] = rb->samples[(start + i) & (INTERVAL_RB_CAPACITY - 1)];
+    if (out_write_pos) *out_write_pos = write_pos;
+    return total;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Private State
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -214,8 +264,11 @@ static gboolean update_dashboard(gpointer data) {
     /* ─── Section 1: Channel Status Bar ─── */
     for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
         channel_state_t state = CHANNEL_STOPPED;
-        if (priv->pipeline)
-            state = audio_pipeline_get_player_state(priv->pipeline, i);
+        if (priv->pipeline) {
+            audio_player_display_t d;
+            audio_pipeline_get_player_display(priv->pipeline, i, &d);
+            state = d.state;
+        }
 
         const char* state_str = "Stopped";
         if (state == CHANNEL_PLAYING)      state_str = "Playing";
@@ -260,7 +313,7 @@ static gboolean update_dashboard(gpointer data) {
         /* Budget % label — only for active channels */
         if (priv->pipeline && active) {
             char buf[24];
-            double bpct = audio_pipeline_get_budget_max(priv->pipeline, i);
+            double bpct = perf_budget_max_pct(priv->pipeline, i);
             snprintf(buf, sizeof(buf), "Bgt: %.2f%%", bpct);
             if (strcmp(priv->prev_budget_text[i], buf) != 0) {
                 gtk_label_set_text(GTK_LABEL(priv->channel_budget_labels[i]), buf);
@@ -273,7 +326,8 @@ static gboolean update_dashboard(gpointer data) {
 
         /* Reconnect button — show only on device error */
         if (priv->pipeline) {
-            bool has_err = audio_pipeline_player_has_device_error(priv->pipeline, i);
+            bool has_err = atomic_load_explicit(
+                &priv->pipeline->players[i].device_error, memory_order_acquire);
             gtk_widget_set_visible(priv->channel_reconnect_btns[i], has_err);
             if (has_err != priv->prev_error_border[i]) {
                 if (has_err)
@@ -368,9 +422,11 @@ static gboolean update_dashboard(gpointer data) {
 
         for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
             ptrs[i] = lat_buf[i];
-            counts[i] = audio_pipeline_get_latency_samples(priv->pipeline, i, lat_buf[i], 8192);
+            counts[i] = perf_read_latency_samples(priv->pipeline, i, lat_buf[i], 8192);
 
-            channel_state_t st = audio_pipeline_get_player_state(priv->pipeline, i);
+            audio_player_display_t d_;
+            audio_pipeline_get_player_display(priv->pipeline, i, &d_);
+            channel_state_t st = d_.state;
             if (priv->latency_hist)
                 perf_grouped_hist_set_group_visible(priv->latency_hist, i, st != CHANNEL_STOPPED);
 
@@ -403,10 +459,12 @@ static gboolean update_dashboard(gpointer data) {
         double global_max = 0.0;
         uint32_t channel_write_pos[PERF_MAX_PLAYERS] = {0};
         for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-            channel_state_t st = audio_pipeline_get_player_state(priv->pipeline, i);
+            audio_player_display_t d_;
+            audio_pipeline_get_player_display(priv->pipeline, i, &d_);
+            channel_state_t st = d_.state;
             perf_line_chart_set_series_visible(priv->jitter_chart, i, st != CHANNEL_STOPPED);
 
-            uint32_t n = audio_pipeline_get_interval_samples(
+            uint32_t n = perf_read_interval_samples(
                 priv->pipeline, i, priv->interval_buf, INTERVAL_RB_CAPACITY, &channel_write_pos[i]);
 
             /* Max-pool decimation aligned to absolute time boundaries.
@@ -441,7 +499,9 @@ static gboolean update_dashboard(gpointer data) {
          * alignment), write_pos is monotonically increasing and reliable. */
         uint32_t max_epoch = 0;
         for (int i = 0; i < PERF_MAX_PLAYERS; i++) {
-            channel_state_t st = audio_pipeline_get_player_state(priv->pipeline, i);
+            audio_player_display_t d_;
+            audio_pipeline_get_player_display(priv->pipeline, i, &d_);
+            channel_state_t st = d_.state;
             if (st == CHANNEL_STOPPED) continue;
             uint32_t epoch = channel_write_pos[i] / JITTER_DECIMATE;
             if (epoch > max_epoch) max_epoch = epoch;
@@ -681,14 +741,13 @@ static void on_view_destroy(GtkWidget* widget, gpointer data) {
  * Widget Construction
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-GtkWidget* perf_view_new(perf_dashboard_t* dashboard, audio_cache_t* cache,
-                           audio_pipeline_t* pipeline,
+GtkWidget* perf_view_new(audio_pipeline_t* pipeline,
                            library_cache_t* library_cache,
                            ArtworkManager* artwork_mgr) {
     PerfViewPrivate* priv = g_new0(PerfViewPrivate, 1);
-    priv->dashboard     = dashboard;
-    priv->audio_cache   = cache;
     priv->pipeline      = pipeline;
+    priv->dashboard     = pipeline ? pipeline->perf  : NULL;
+    priv->audio_cache   = pipeline ? pipeline->cache : NULL;
     priv->library_cache = library_cache;
     priv->artwork_mgr   = artwork_mgr;
     priv->interval_buf = g_malloc(INTERVAL_RB_CAPACITY * sizeof(int64_t));

@@ -394,7 +394,7 @@ static void bootstrap_empty_db(const char *data_dir) {
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", data_dir);
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(db_path, &db), QUADRATURE_OK,
+    cr_assert_eq(db_open(db_path, false, &db), QUADRATURE_OK,
         "bootstrap_empty_db: failed to create schema at %s", db_path);
     db_close(db);
 }
@@ -1180,7 +1180,7 @@ Test(e2e, user_deletes_album_folder,
 
     /* Phase 2 created "Bronson" (no MBID) from the ODESZA track credit split.
      * Phase 6 resolved the ODESZA album via SOLR and called
-     * db_get_or_create_artist_mb("BRONSON", mbid) — Step 2 (name NOCASE)
+     * db_get_or_create_artist("BRONSON", mbid) — Step 2 (name NOCASE)
      * found the Phase 2 "Bronson" row and rename_artist_inplace() updated it
      * to "BRONSON" with MBID. After deleting ODESZA, the BRONSON album still
      * references this artist → it persists. There should be exactly 1 entry
@@ -1566,8 +1566,8 @@ Test(e2e, fresh_db_clean_reindex_merges_cross_library_artists,
     char db_a_path[512], db_b_path[512];
     snprintf(db_a_path, sizeof(db_a_path), "%s/quadrature.sqlite", lib_a_data);
     snprintf(db_b_path, sizeof(db_b_path), "%s/quadrature.sqlite", lib_b_data);
-    cr_assert_eq(db_open_readonly(db_a_path, &db_a), QUADRATURE_OK);
-    cr_assert_eq(db_open_readonly(db_b_path, &db_b), QUADRATURE_OK);
+    cr_assert_eq(db_open(db_a_path, true, &db_a), QUADRATURE_OK);
+    cr_assert_eq(db_open(db_b_path, true, &db_b), QUADRATURE_OK);
 
     /* If this precondition fails, the indexer (not the cache) is the culprit
      * and the cache assertions below are moot. */

@@ -230,70 +230,17 @@ static void ensure_vips_init(void) {
 }
 
 /**
- * Flatten alpha + write raw RGB pixels from a VipsImage.
- * Shared by both file and buffer resize paths.
- * Unrefs `img` on success or failure. Caller must not unref after calling.
- */
-static quadrature_result_t vips_to_raw_rgb(VipsImage* img, int thumb_size,
-                                            uint8_t** output_data, size_t* output_size) {
-    int bands = vips_image_get_bands(img);
-
-    /* Convert grayscale (1-band) to 3-band sRGB */
-    if (bands == 1) {
-        VipsImage *rgb = NULL;
-        if (vips_colourspace(img, &rgb, VIPS_INTERPRETATION_sRGB, NULL) != 0) {
-            g_warning("vips_colourspace (grey→sRGB) failed: %s", vips_error_buffer());
-            vips_error_clear();
-            g_object_unref(img);
-            return QUADRATURE_ERROR_INTERNAL;
-        }
-        g_object_unref(img);
-        img = rgb;
-    } else if (bands == 4) {
-        /* Flatten alpha channel (RGBA → RGB) */
-        VipsImage *flat = NULL;
-        if (vips_flatten(img, &flat, NULL) != 0) {
-            g_warning("vips_flatten failed: %s", vips_error_buffer());
-            vips_error_clear();
-            g_object_unref(img);
-            return QUADRATURE_ERROR_INTERNAL;
-        }
-        g_object_unref(img);
-        img = flat;
-    }
-
-    size_t len = 0;
-    void *buf = vips_image_write_to_memory(img, &len);
-    g_object_unref(img);
-
-    if (!buf) {
-        g_warning("vips_image_write_to_memory failed");
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
-    size_t expected = (size_t)thumb_size * thumb_size * ARTWORK_ATLAS_CHANNELS;
-    if (len != expected) {
-        g_warning("vips_to_raw_rgb: unexpected pixel size %zu (expected %zu)", len, expected);
-        g_free(buf);
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
-    *output_data = buf;
-    *output_size = len;
-    return QUADRATURE_OK;
-}
-
-/**
- * Resize in-memory image data to raw RGB pixels using vips_thumbnail_buffer.
- * Used for embedded artwork extracted from audio files (already in memory).
+ * Load an in-memory image, resize to a square thumb_size, and write out raw
+ * RGB pixels. Rejects inputs that don't produce a 3-band RGB result (grayscale,
+ * RGBA) — keep the atlas invariant strict and let the caller log/skip.
  */
 static quadrature_result_t vips_resize_buffer(const void* input_data, size_t input_size,
                                                int thumb_size,
                                                uint8_t** output_data, size_t* output_size) {
     ensure_vips_init();
 
-    VipsImage* out = NULL;
-    if (vips_thumbnail_buffer((void*)input_data, input_size, &out, thumb_size,
+    VipsImage* img = NULL;
+    if (vips_thumbnail_buffer((void*)input_data, input_size, &img, thumb_size,
                                "height", thumb_size,
                                "size", VIPS_SIZE_BOTH,
                                "crop", VIPS_INTERESTING_CENTRE,
@@ -303,7 +250,19 @@ static quadrature_result_t vips_resize_buffer(const void* input_data, size_t inp
         return QUADRATURE_ERROR_INTERNAL;
     }
 
-    return vips_to_raw_rgb(out, thumb_size, output_data, output_size);
+    size_t len = 0;
+    void *buf = vips_image_write_to_memory(img, &len);
+    g_object_unref(img);
+
+    size_t expected = (size_t)thumb_size * thumb_size * ARTWORK_ATLAS_CHANNELS;
+    if (!buf || len != expected) {
+        g_free(buf);
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+
+    *output_data = buf;
+    *output_size = len;
+    return QUADRATURE_OK;
 }
 
 static int compare_int64(const void *a, const void *b) {

@@ -991,17 +991,18 @@ struct artist_cache {
     GHashTable* by_name;  // g_utf8_casefold(name) → gint64* artist_id; owns both
 };
 
-static void artist_cache_preload_cb(int64_t id, const char* name, void* user_data) {
+static bool artist_cache_preload_cb(const db_artist_t* a, void* user_data) {
     artist_cache_t* c = user_data;
     gint64* v = g_new(gint64, 1);
-    *v = id;
-    g_hash_table_insert(c->by_name, g_utf8_casefold(name, -1), v);
+    *v = a->id;
+    g_hash_table_insert(c->by_name, g_utf8_casefold(a->name, -1), v);
+    return true;
 }
 
 static artist_cache_t* artist_cache_new(quadrature_db_t* db) {
     artist_cache_t* c = g_new0(artist_cache_t, 1);
     c->by_name = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-    db_iter_artist_names(db, artist_cache_preload_cb, c);
+    db_iter_all_artists(db, artist_cache_preload_cb, c);
     return c;
 }
 
@@ -1026,7 +1027,7 @@ static int64_t get_or_create_artist_cached(artist_cache_t* cache,
     }
     g_free(key);
 
-    int64_t id = db_get_or_create_artist(db, name);
+    int64_t id = db_get_or_create_artist(db, name, NULL, NULL);
     if (id > 0) {
         char* k2 = g_utf8_casefold(name, -1);
         gint64* v = g_new(gint64, 1);
@@ -1514,7 +1515,7 @@ static desired_track_artist_t* phase2_parse_track_credits(
             /* Use MB-aware path so the MBID lands on the artist row. Bypasses
              * the name-keyed artist_cache (it's not MBID-aware), which is fine
              * for the tiny number of feat.-credit tracks per album. */
-            aid = db_get_or_create_artist_mb(ctx->idx->db,
+            aid = db_get_or_create_artist(ctx->idx->db,
                                               credits[k].name, NULL, mbid);
         } else {
             aid = get_or_create_artist_cached(ctx->artist_cache, ctx->idx->db,
@@ -1552,7 +1553,7 @@ static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr)
     /* Use MB-aware artist creation when Picard tags provide ALBUMARTISTID */
     int64_t artist_id;
     if (mr->album_mb_artist_id && mr->album_mb_artist_id[0]) {
-        artist_id = db_get_or_create_artist_mb(db,
+        artist_id = db_get_or_create_artist(db,
             mr->album_artist, mr->album_artist, mr->album_mb_artist_id);
     } else {
         artist_id = get_or_create_artist_cached(
@@ -1645,7 +1646,7 @@ static bool write_album_to_db(metadata_writer_ctx_t* ctx, metadata_result_t* mr)
         .track_count                  = mr->track_count,
     };
 
-    db_reconcile_album(db, album_id, &desired, &RECONCILE_POLICY_TAGS, NULL);
+    db_reconcile_albums(db, &album_id, &desired, 1, &RECONCILE_POLICY_TAGS, NULL);
 
     /* Free per-track credit storage. */
     for (size_t t = 0; t < mr->track_count; t++) {
@@ -2296,7 +2297,7 @@ static quadrature_result_t check_disk_space(const char* data_root,
     size_t existing_tracks = 0;
     uint64_t existing_db_size = 0;
     if (db) {
-        db_get_total_track_count(db, &existing_tracks);
+        db_get_entity_count(db, DB_ENTITY_TRACK, &existing_tracks);
         char* db_path = g_build_filename(data_root, "quadrature.sqlite", NULL);
         struct stat db_stat;
         if (stat(db_path, &db_stat) == 0)
@@ -2340,7 +2341,7 @@ static void* indexer_worker(void* arg) {
     // Open per-library database (in data_root, not library_root)
     const char* dr = get_data_root(idx);
     char* db_path = g_build_filename(dr, "quadrature.sqlite", NULL);
-    if (db_open(db_path, &idx->db) != QUADRATURE_OK) {
+    if (db_open(db_path, false, &idx->db) != QUADRATURE_OK) {
         g_critical("indexer_worker: failed to open DB at %s", db_path);
         g_free(db_path);
         notify_event(idx, INDEXER_ERROR);

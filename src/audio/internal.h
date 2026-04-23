@@ -315,8 +315,7 @@ struct audio_player {
     atomic_int state;  /* CHANNEL_STOPPED, CHANNEL_PLAYING, CHANNEL_PAUSED, CHANNEL_ERROR */
     atomic_uint_fast64_t position_samples;
     atomic_uint_fast64_t length_samples;
-    atomic_bool repeat;
-    atomic_bool autoplay;  /* Continue playing on track advance (default: true) */
+    atomic_int end_mode;   /* track_end_mode_t — default TRACK_END_AUTOPLAY */
 
     /* Track ID-based playback (replaces filepath) */
     atomic_int_fast64_t current_track_id;   /* Currently playing track */
@@ -641,98 +640,6 @@ uint32_t audio_cache_get_decode_events(audio_cache_t* cache,
 /* ═══════════════════════════════════════════════════════════════════════════
  * Audio Pipeline Internal Functions
  * ═══════════════════════════════════════════════════════════════════════════ */
-
-/**
- * Get the performance dashboard for the pipeline (internal API).
- * Used by perf view for detailed timing histograms.
- *
- * @param pipeline  Pipeline instance
- * @return Performance dashboard (may be NULL if not enabled)
- */
-perf_dashboard_t* audio_pipeline_get_perf_dashboard(audio_pipeline_t* pipeline);
-
-/**
- * Get the audio cache for the pipeline (internal API).
- * Used by perf view for decode metrics.
- *
- * @param pipeline  Pipeline instance
- * @return Audio cache (may be NULL)
- */
-audio_cache_t* audio_pipeline_get_audio_cache(audio_pipeline_t* pipeline);
-
-/**
- * Get budget utilization histogram for a player (10 linear buckets: 0-9%, 10-19%, ...).
- * Reads from the lock-free budget ring buffer. Safe to call from any thread.
- *
- * @param pipeline   Pipeline instance
- * @param player_id  Player index (0-3)
- * @param out_buckets Array of 10 bucket counts (caller allocated)
- */
-void audio_pipeline_get_budget_histogram(audio_pipeline_t* pipeline, int player_id,
-                                          uint32_t out_buckets[10]);
-
-/**
- * Get max budget utilization over the last ~1 second for a player.
- * Scans the most recent ~100 samples (at ~10ms intervals) from the ring buffer
- * and returns the peak value. This directly answers "am I close to missing a
- * deadline?" — the only question that matters for real-time audio.
- *
- * @param pipeline   Pipeline instance
- * @param player_id  Player index (0-3)
- * @return           Peak budget percentage (0.00-100.00)
- */
-double audio_pipeline_get_budget_max(audio_pipeline_t* pipeline, int player_id);
-
-/**
- * Read recent callback latency samples from a player's ring buffer.
- *
- * @param pipeline    Pipeline instance
- * @param player_id   Player index (0-3)
- * @param out         Caller-allocated buffer for latency samples (µs)
- * @param max_samples Maximum number of samples to read
- * @return            Actual number of samples written to out
- */
-uint32_t audio_pipeline_get_latency_samples(audio_pipeline_t* pipeline, int player_id,
-                                              uint16_t* out, uint32_t max_samples);
-
-/**
- * Read recent callback interval deviation samples from a player's ring buffer.
- * Values are raw nanoseconds (always >= 0): peak absolute scheduling deviation
- * per ~10ms sampling window. Caller is responsible for unit conversion.
- *
- * @param pipeline    Pipeline instance
- * @param player_id   Player index (0-3)
- * @param out         Caller-allocated buffer for deviation samples (raw ns)
- * @param max_samples Maximum number of samples to read
- * @param out_write_pos  If non-NULL, receives the cumulative write position
- *                       (total samples ever written). Use to align decimation
- *                       groups to absolute time boundaries.
- * @return            Actual number of samples written to out
- */
-uint32_t audio_pipeline_get_interval_samples(audio_pipeline_t* pipeline, int player_id,
-                                               int64_t* out, uint32_t max_samples,
-                                               uint32_t* out_write_pos);
-
-/**
- * Check if a player has a PipeWire device error.
- *
- * @param pipeline   Pipeline instance
- * @param player_id  Player index (0-3)
- * @return true if device is in error state (auto-reconnect pending or failed)
- */
-bool audio_pipeline_player_has_device_error(audio_pipeline_t* pipeline, int player_id);
-
-/**
- * Check if a player has active PipeWire streams.
- * Players start dormant (no streams) and are activated when a valid output
- * device is assigned. Streams are deactivated when the device is removed
- * or after unrecoverable PipeWire errors.
- *
- * @param pipeline   Pipeline instance
- * @param player_id  Player index (0-3)
- * @return true if player has active output + monitor streams
- */
-bool audio_pipeline_player_streams_active(audio_pipeline_t* pipeline, int player_id);
 
 /**
  * Manually trigger stream reconnect for a player in error state.

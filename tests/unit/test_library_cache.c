@@ -59,13 +59,13 @@ static void setup_test_data(void) {
     cleanup_test_db();
 
     // Create file-based database (library_cache_create needs to open it readonly)
-    quadrature_result_t res = db_open(test_db_path, &test_db);
+    quadrature_result_t res = db_open(test_db_path, false, &test_db);
     cr_assert_eq(res, QUADRATURE_OK);
     cr_assert_not_null(test_db);
 
     cr_assert_eq(db_begin_transaction(test_db), QUADRATURE_OK);
-    int64_t test_artist_id    = db_get_or_create_artist(test_db, "Test Artist");
-    int64_t another_artist_id = db_get_or_create_artist(test_db, "Another Artist");
+    int64_t test_artist_id    = db_get_or_create_artist(test_db, "Test Artist", NULL, NULL);
+    int64_t another_artist_id = db_get_or_create_artist(test_db, "Another Artist", NULL, NULL);
     cr_assert(test_artist_id > 0);
     cr_assert(another_artist_id > 0);
 
@@ -136,7 +136,7 @@ Test(library_cache, create_destroy) {
 
     // Create a file-based database
     quadrature_db_t* db = NULL;
-    db_open(db_path, &db);
+    db_open(db_path, false, &db);
     db_close(db);  // Close so cache can open it readonly
 
     library_cache_t* cache = NULL;
@@ -397,11 +397,6 @@ Test(library_cache, search_filter_artists, .init = setup, .fini = teardown) {
 // =============================================================================
 // Prefetch Tests (verify no crash, can't easily verify kernel behavior)
 // =============================================================================
-
-Test(library_cache, prefetch_artwork_nonexistent_album, .init = setup, .fini = teardown) {
-    // Should not crash
-    library_cache_prefetch_fullsize_artwork(test_cache, 9999);
-}
 
 Test(library_cache, prefetch_audio_files_resolves_paths, .init = setup, .fini = teardown) {
     int64_t track_ids[] = {1, 2, 3};

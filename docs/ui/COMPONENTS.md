@@ -5,6 +5,7 @@ Reusable components and shared patterns. All row types use templates and shared 
 ## Selection
 
 Selection is handled automatically by the list view selection model:
+
 - **Visual:** Selected row gets highlight styling
 - **Keyboard:** Up/Down arrows navigate, Enter activates
 - **1-4 keys:** Queue selected track to channel N (no-op if nothing selected)
@@ -12,10 +13,10 @@ Selection is handled automatically by the list view selection model:
 ## Interaction Behavior by Row Type
 
 | Row Type | Activate (double-click / Enter) | Secondary (right-click) |
-|----------|--------------------------------|------------------------|
-| Track | Navigate to album, select track | Queue track |
-| Album | Navigate to album detail | Queue track 1 |
-| Artist | Navigate to artist detail | -- |
+| -------- | ------------------------------- | ----------------------- |
+| Track    | Navigate to album, select track | Queue track             |
+| Album    | Navigate to album detail        | Queue track 1           |
+| Artist   | Navigate to artist detail       | --                      |
 
 ## Inline Navigation Elements
 
@@ -35,12 +36,12 @@ The artist button container reads its allocated width and adds buttons left-to-r
 
 **Example Scenarios:**
 
-| Scenario | Artists | Display |
-|----------|---------|---------|
-| Sufficient space | `["Artist A", "Artist B"]` | `Artist A, Artist B` |
-| Tight space | `["Artist A", "Artist B", "Artist C"]` | `Artist A, Artist B, ...` |
-| Very long names | `["Very Long Artist Name"]` | `Very Long Artist..., ...` |
-| Featuring artists | `["Artist C", "Artist D"]` | `feat. Artist C, ...` |
+| Scenario          | Artists                                | Display                      |
+| ----------------- | -------------------------------------- | ---------------------------- |
+| Sufficient space  | `["Artist A", "Artist B"]`             | `[Artist A] [Artist B]`      |
+| Tight space       | `["Artist A", "Artist B", "Artist C"]` | `[Artist A] [Artist B], ...` |
+| Very long names   | `["Very Long Artist Name"]`            | `[...]`                      |
+| Featuring artists | `["Artist C", "Artist D"]`             | `ft. [Artist C] [...]`       |
 
 ### Album Button
 
@@ -52,9 +53,9 @@ Track rows include a clickable album name in amber. Click navigates to album det
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
-│ [48px  │ Artist Name (18px, bold)                       │ [art][art][art][art][art] │
-│ artist ├────────────────────────────────────────────────┤      48x48 thumbnails     │
-│  art]  │ N albums · Appears on N tracks (12px, dim)     │    (up to 6, rowspan=2)   │
+│ [48px  │ Artist Name (18px, bold)                       │ [art][art][art][art][art]  │
+│ artist ├────────────────────────────────────────────────┤      48x48 thumbnails      │
+│  art]  │ N albums · Appears on N tracks (12px, dim)     │    (up to 6, rowspan=2)    │
 └──────────────────────────────────────────────────────────────────────────────────────┘
   col 0              col 1 (expand)                              col 2 (40%)
 ```
@@ -122,10 +123,10 @@ Self-contained album card for artist detail view. Shows album header with large 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │ ┌──────────┐  Album Title                                                            │
-│ │  250px   │  Artist A, Artist B                                                    │
-│ │   art    │  Album · January 15, 2024                                              │
+│ │  250px   │  Artist A, Artist B                                                     │
+│ │   art    │  Album · January 15, 2024                                               │
 │ │          │  Label: Columbia Records                                                │
-│ └──────────┘  12 tracks · 45:32                                                     │
+│ └──────────┘  12 tracks · 45:32                                                      │
 │  1. Track One                                                                   3:02 │
 │  2. Track Two                         feat. Artist C...                         4:15 │
 │  3. Track Three                                                                 3:45 │
@@ -152,20 +153,21 @@ Full-page album view with header (artwork + metadata) and track list. Primary ar
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │  <- Back to Artists                                                                  │
 │                                                                                      │
-│  ┌─────────┐  Album Title Here (Natural Case)                                       │
-│  │ 250x250 │  [Primary Artists]         <- Artist button navigates to artist        │
-│  │  album  │  Album · January 15, 2024                                              │
-│  │   art   │  Label: Columbia Records                                               │
-│  └─────────┘  12 tracks - 45:32                                                     │
+│  ┌─────────┐  Album Title Here (Natural Case)                                        │
+│  │ 250x250 │  [Primary Artists]         <- Artist button navigates to artist         │
+│  │  album  │  Album · January 15, 2024                                               │
+│  │   art   │  Label: Columbia Records                                                │
+│  └─────────┘  12 tracks - 45:32                                                      │
 │                                                                                      │
-│   1  Track Title One                                                          3:45  │
-│   2  Track Title Two              feat. Artist X                              4:12  │
-│   3  Track Title Three                                                        2:58  │
+│   1  Track Title One                                                          3:45   │
+│   2  Track Title Two              feat. Artist X                              4:12   │
+│   3  Track Title Three                                                        2:58   │
 │                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Header layout:**
+
 - **Album art:** 250x250px (left side)
 - **Album title:** 36px, bold, natural case, ellipsizes if too long, selectable
 - **Primary artists:** 16px, clickable button (navigates to artist detail)
@@ -174,6 +176,7 @@ Full-page album view with header (artwork + metadata) and track list. Primary ar
 - **Stats:** 16px, selectable (track count and duration)
 
 **Track list:**
+
 - No primary artist names shown (since they are in the header)
 - Only featuring artists appear inline (when present)
 - Track number, title, featuring artists (optional), info button, duration
@@ -184,10 +187,10 @@ All three row templates (artist, album, track) use shared styling for inline ele
 
 ### Entity Buttons
 
-| Element | Color | Hover | Size | Weight |
-|---------|-------|-------|------|--------|
-| Album link | `#e5a640` (amber) | `#edb85c` | 16px | 500 |
-| Artist link | `#00d4ff` (cyan) | `#33ddff` | 16px | 500 |
+| Element     | Color             | Hover     | Size | Weight |
+| ----------- | ----------------- | --------- | ---- | ------ |
+| Album link  | `#e5a640` (amber) | `#edb85c` | 16px | 500    |
+| Artist link | `#00d4ff` (cyan)  | `#33ddff` | 16px | 500    |
 
 Both button types: transparent background, no border, underline on hover. Album button label uses ellipsize for overflow; artist buttons use width-aware overflow with "..." popover.
 

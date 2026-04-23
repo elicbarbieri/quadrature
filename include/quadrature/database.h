@@ -52,7 +52,7 @@ typedef struct {
     uint16_t year;
 } db_track_t;
 
-/* Artist info for library browsing (caller must free with db_artists_free) */
+/* Artist info (used internally by cache warming) */
 typedef struct {
     int64_t id;
     char* name;
@@ -94,7 +94,6 @@ typedef struct {
     int64_t created_at;
 } db_indexer_error_t;
 
-void db_indexer_error_free(db_indexer_error_t* err);
 void db_indexer_errors_free(db_indexer_error_t* errors, size_t count);
 
 /* =============================================================================
@@ -147,9 +146,14 @@ typedef struct {
  * Lifecycle
  * ============================================================================= */
 
-quadrature_result_t db_open(const char* path, quadrature_db_t** out);
-quadrature_result_t db_open_readonly(const char* path, quadrature_db_t** out);
-quadrature_result_t db_open_memory(quadrature_db_t** out);
+/**
+ * Open a database.
+ *   path=NULL     → in-memory (readonly ignored; always read/write)
+ *   readonly=true → read-only handle (skips schema init + app-level locking;
+ *                   WAL isolation handles concurrent writers)
+ *   readonly=false → read/write handle with schema migrations applied
+ */
+quadrature_result_t db_open(const char* path, bool readonly, quadrature_db_t** out);
 void db_close(quadrature_db_t* db);
 const char* db_path(const quadrature_db_t* db);
 
@@ -158,19 +162,11 @@ const char* db_path(const quadrature_db_t* db);
  * ============================================================================= */
 
 quadrature_result_t db_get_track(quadrature_db_t* db, int64_t id, db_track_t** out);
-void db_track_free(db_track_t* track);
-void db_tracks_free(db_track_t* tracks, size_t count);
+void db_tracks_free(db_track_t* tracks, size_t count);  /* count=1 for a single-track free */
 
 /* =============================================================================
  * Artist/Album Read Operations
  * ============================================================================= */
-
-/**
- * Get a single artist by ID with album/track counts and MusicBrainz ID.
- * Caller must free with db_artists_free(*out, 1). *out is NULL if not found.
- */
-quadrature_result_t db_get_artist_by_id(quadrature_db_t* db, int64_t artist_id,
-                                         db_artist_t** out);
 
 /**
  * Get a single album by ID.
@@ -179,7 +175,6 @@ quadrature_result_t db_get_artist_by_id(quadrature_db_t* db, int64_t artist_id,
 quadrature_result_t db_get_album_by_id(quadrature_db_t* db, int64_t album_id,
                                         db_album_t** out);
 
-quadrature_result_t db_get_albums_by_artist(quadrature_db_t* db, int64_t artist_id, db_album_t** out, size_t* count);
 quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id, db_track_t** out, size_t* count);
 
 /* -----------------------------------------------------------------------------
@@ -235,34 +230,6 @@ quadrature_result_t db_get_max_ids(quadrature_db_t *db,
  * Track Artist Operations (multi-artist via junction table)
  * ============================================================================= */
 
-/**
- * Get all artists for a track, ordered by position.
- * Caller must free with db_track_artists_free().
- */
-quadrature_result_t db_get_track_artists(quadrature_db_t* db, int64_t track_id,
-                                          db_track_artist_t** out, size_t* count);
-void db_track_artists_free(db_track_artist_t* artists, size_t count);
-
-
-/* =============================================================================
- * "Appears On" Operations (artist featured on other artists' albums)
- * ============================================================================= */
-
-/**
- * Get albums where artist appears on tracks but is NOT the album artist.
- * Queries through track_artists junction table.
- */
-quadrature_result_t db_get_artist_appearances(quadrature_db_t* db, int64_t artist_id,
-                                               db_album_t** out, size_t* count);
-
-/**
- * Get tracks where artist appears on albums by other artists.
- * Sorted by album title, disc number, track number.
- */
-quadrature_result_t db_get_artist_appearance_tracks(quadrature_db_t* db, int64_t artist_id,
-                                                     db_track_t** out, size_t* count);
-
-void db_artists_free(db_artist_t* artists, size_t count);
 void db_albums_free(db_album_t* albums, size_t count);
 
 /* =============================================================================
@@ -299,27 +266,6 @@ quadrature_result_t db_get_entity_ids_filtered(quadrature_db_t* db,
     const db_id_query_opts_t* opts,
     int64_t** out_ids, size_t* out_count);
 
-/**
- * Get MAX(id) for a table. Returns 0 if table is empty.
- */
-int64_t db_get_max_id(quadrature_db_t* db, const char* table_name);
-
-/* =============================================================================
- * Paginated Queries (for lazy loading)
- * ============================================================================= */
-
-quadrature_result_t db_get_artists_page(quadrature_db_t* db,
-                                         const db_page_opts_t* opts,
-                                         db_artist_t** out,
-                                         size_t* out_count,
-                                         size_t* total_count);
-
-quadrature_result_t db_get_albums_page(quadrature_db_t* db,
-                                        const db_page_opts_t* opts,
-                                        db_album_t** out,
-                                        size_t* out_count,
-                                        size_t* total_count);
-
 /* =============================================================================
  * Transaction Operations (for indexer)
  * ============================================================================= */
@@ -338,12 +284,6 @@ quadrature_result_t db_rollback(quadrature_db_t* db);
 quadrature_result_t db_begin_batch(quadrature_db_t* db);
 quadrature_result_t db_commit_batch(quadrature_db_t* db);
 
-/**
- * Iterate all artist (id, name) pairs — used by indexer to pre-load name cache.
- */
-typedef void (*db_artist_name_iter_cb)(int64_t id, const char *name, void *user_data);
-quadrature_result_t db_iter_artist_names(quadrature_db_t *db, db_artist_name_iter_cb cb, void *user_data);
-
 /* =============================================================================
  * MusicBrainz Resolution (read side)
  * ============================================================================= */
@@ -354,12 +294,6 @@ quadrature_result_t db_iter_artist_names(quadrature_db_t *db, db_artist_name_ite
 #define MB_STATUS_RESOLVED       2   /* Fully resolved: MB PG data fetched and written to SQLite */
 #define MB_STATUS_NO_MATCH       3   /* Resolution attempted but no MB match found */
 #define MB_STATUS_FAILED         4   /* Resolution attempted but errored */
-
-/**
- * Get musicbrainz_release_id for an album (stored by Phase 2 from file tags).
- * Returns NULL if not set. Caller must g_free().
- */
-char* db_get_album_musicbrainz_release_id(quadrature_db_t* db, int64_t album_id);
 
 /**
  * Get album IDs eligible for MB resolution.
@@ -377,35 +311,8 @@ quadrature_result_t db_begin_read(quadrature_db_t *db);
 quadrature_result_t db_end_read(quadrature_db_t *db);
 
 /* =============================================================================
- * Indexer Error Types (write ops in <quadrature/db_write.h>)
+ * Indexer Error Queries (write ops in <quadrature/db_write.h>)
  * ============================================================================= */
-
-/* Structured error codes for indexer_errors.error_code */
-typedef enum {
-    INDEXER_ERR_UNKNOWN          = 0,
-    /* 1xx — file access */
-    INDEXER_ERR_FILE_UNREADABLE  = 100,
-    INDEXER_ERR_PERMISSION       = 101,
-    /* 2xx — FFmpeg / metadata */
-    INDEXER_ERR_FFMPEG_DECODE    = 200,
-    INDEXER_ERR_FFMPEG_NO_STREAM = 201,
-    INDEXER_ERR_TRACK_NUMBERING  = 202,
-    /* 3xx — artwork */
-    INDEXER_ERR_ARTWORK_MISSING  = 300,
-    INDEXER_ERR_ARTWORK_CORRUPT  = 301,
-    /* 4xx — MusicBrainz */
-    INDEXER_ERR_MB_NO_MATCH      = 400,
-    INDEXER_ERR_MB_PG_ERROR      = 401,
-    /* 5xx — network (phases 7-8) */
-    INDEXER_ERR_NETWORK          = 500,
-} indexer_error_code_t;
-
-/* Error severity for indexer_errors.severity */
-typedef enum {
-    INDEXER_SEV_WARN  = 1,
-    INDEXER_SEV_ERROR = 2,
-    INDEXER_SEV_FATAL = 3,
-} indexer_error_severity_t;
 
 /**
  * Get the next scan generation number (MAX(scan_generation) + 1).
@@ -504,15 +411,9 @@ quadrature_result_t db_get_albums_with_release_group_id(quadrature_db_t* db,
  * ============================================================================= */
 
 /**
- * Get total number of tracks in the database.
- *
- * @param db Database handle
- * @param count Output count
- * @return QUADRATURE_OK on success
+ * Get total count for an entity table (artists, albums, or tracks).
  */
-quadrature_result_t db_get_total_track_count(quadrature_db_t* db, size_t* count);
-quadrature_result_t db_get_total_album_count(quadrature_db_t* db, size_t* count);
-quadrature_result_t db_get_total_artist_count(quadrature_db_t* db, size_t* count);
+quadrature_result_t db_get_entity_count(quadrature_db_t* db, db_entity_t entity, size_t* count);
 
 /**
  * Unix timestamp (seconds) of the most recently indexed album (MAX last_updated_at).

@@ -100,7 +100,7 @@ typedef struct {
     // Per-album breakdown (accumulated across all albums)
     int64_t get_tracks_ns;
     int64_t match_tracks_ns;
-    int64_t artist_lookup_ns;    // all db_get_or_create_artist_mb calls
+    int64_t artist_lookup_ns;    // all db_get_or_create_artist calls
     int64_t album_update_ns;     // db_update_album_artist + db_update_album_mb
     int64_t track_update_ns;     // db_update_track_title + db_set_track_artists
     int64_t fts_sync_ns;
@@ -166,7 +166,7 @@ static void mb_credits_to_track_artists(
         }
 
         if (artist_id == 0) {
-            artist_id = db_get_or_create_artist_mb(
+            artist_id = db_get_or_create_artist(
                 db, credits[i].name, credits[i].sort_name, credits[i].id);
 
             // Populate cache
@@ -758,39 +758,89 @@ static uint16_t parse_mb_year(const char* date) {
 }
 
 // =============================================================================
-// Write resolved album to SQLite (extracted from old resolve_album)
+// Resolved-album work item — prepare phase outputs these so the full batch
+// can be passed to db_reconcile_albums in one call.
 // =============================================================================
 
 /**
- * Write a resolved album's MB metadata to the database via the reconciler.
+ * All per-album state needed across prepare → reconcile → meta-write.
+ * Owned memory is freed by album_work_free.
+ */
+typedef struct {
+    bool                valid;          /* false → skip reconcile (failed/no-tracks) */
+    int64_t             album_id;
+    mb_release_t*       release;        /* borrowed from releases hashtable */
+    mb_recording_link_row_t** links;    /* borrowed */
+    size_t              link_count;
+
+    /* Owned memory that must outlive the batch reconcile. */
+    db_track_t*                tracks;
+    size_t                     track_count;
+    track_match_t*             matches;
+    size_t                     match_count;
+    desired_track_t*           desired_tracks;       /* references strings in tracks/release */
+    desired_track_artist_t**   owned_credits;        /* per-matched-track credits */
+    size_t*                    owned_credit_counts;
+
+    desired_album_state_t      desired;              /* ready to hand to reconciler */
+} album_work_t;
+
+static void album_work_free(album_work_t* w) {
+    if (!w) return;
+    if (w->owned_credits) {
+        for (size_t m = 0; m < w->match_count; m++) {
+            if (!w->owned_credits[m]) continue;
+            for (size_t k = 0; k < w->owned_credit_counts[m]; k++) {
+                g_free((char*)w->owned_credits[m][k].name);
+                g_free((char*)w->owned_credits[m][k].join_phrase);
+            }
+            g_free(w->owned_credits[m]);
+        }
+        g_free(w->owned_credits);
+    }
+    g_free(w->owned_credit_counts);
+    g_free(w->desired_tracks);
+    if (w->tracks) db_tracks_free(w->tracks, w->track_count);
+    g_free(w->matches);
+}
+
+/**
+ * Prepare one album's desired state from an MB release.
  *
- * Builds a desired_album_state_t describing the MB truth, then calls
- * db_reconcile_album which diffs against current state and emits only the
- * deltas. This is the single writer for MB-sourced updates — no scattered
- * db_update_* calls.
+ * Does all read/match/artist-resolve work. Does NOT call the reconciler — the
+ * batch caller accumulates prepared works and calls db_reconcile_albums once.
+ *
+ * On unrecoverable failure (tracks missing), marks album MB_STATUS_FAILED via
+ * the fast path and leaves work->valid = false.
  *
  * Confidence for track position writeback:
  *   - Pass 1 (exact disc+position match) → EXACT confidence
  *   - Pass 2 (duration + title similarity) → FUZZY confidence
- *   RECONCILE_POLICY_MB accepts both (user's choice: pass 1+2 authoritative).
+ *   RECONCILE_POLICY_MB accepts both.
  */
-static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
-                                 mb_release_t* release,
-                                 mb_recording_link_row_t** links, size_t link_count,
-                                 GHashTable* artist_cache,
-                                 mb_profile_stats_t* stats) {
+static void resolve_album_prepare(mb_resolver_t* ctx, int64_t album_id,
+                                   mb_release_t* release,
+                                   mb_recording_link_row_t** links, size_t link_count,
+                                   GHashTable* artist_cache,
+                                   mb_profile_stats_t* stats,
+                                   album_work_t* work) {
     int64_t t0, t1;
+    work->album_id = album_id;
+    work->release = release;
+    work->links = links;
+    work->link_count = link_count;
+    work->valid = false;
 
     /* --- Load local tracks --- */
-    db_track_t* tracks = NULL;
-    size_t track_count = 0;
     t0 = profile_now_ns();
-    quadrature_result_t res = db_get_tracks_by_album(ctx->db, album_id, &tracks, &track_count);
+    quadrature_result_t res = db_get_tracks_by_album(ctx->db, album_id,
+                                                      &work->tracks, &work->track_count);
     t1 = profile_now_ns();
     stats->get_tracks_ns += (t1 - t0);
-    if (res != QUADRATURE_OK || track_count == 0) {
-        db_set_album_mb_status(ctx->db, album_id, MB_STATUS_FAILED, (int64_t)time(NULL));
-        if (tracks) db_tracks_free(tracks, track_count);
+    if (res != QUADRATURE_OK || work->track_count == 0) {
+        db_reconcile_album_mb_status(ctx->db, album_id, MB_STATUS_FAILED, (int64_t)time(NULL));
+        if (work->tracks) { db_tracks_free(work->tracks, work->track_count); work->tracks = NULL; }
+        work->track_count = 0;
         g_mutex_lock(&ctx->progress_mutex);
         ctx->progress.albums_failed++;
         g_mutex_unlock(&ctx->progress_mutex);
@@ -798,10 +848,9 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
     }
 
     /* --- Match MB recordings to local tracks --- */
-    track_match_t* matches = NULL;
-    size_t match_count = 0;
     t0 = profile_now_ns();
-    match_tracks(release, tracks, track_count, &matches, &match_count);
+    match_tracks(release, work->tracks, work->track_count,
+                 &work->matches, &work->match_count);
     t1 = profile_now_ns();
     stats->match_tracks_ns += (t1 - t0);
 
@@ -818,7 +867,7 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
             if (cached) album_artist_id = (int64_t)GPOINTER_TO_SIZE(cached);
         }
         if (album_artist_id == 0) {
-            album_artist_id = db_get_or_create_artist_mb(
+            album_artist_id = db_get_or_create_artist(
                 ctx->db, release->artists[0].name,
                 release->artists[0].sort_name, mbid);
             if (artist_cache && mbid && mbid[0] && album_artist_id > 0)
@@ -831,7 +880,7 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
             if (cached) album_artist_id = (int64_t)GPOINTER_TO_SIZE(cached);
         }
         if (album_artist_id == 0) {
-            album_artist_id = db_get_or_create_artist_mb(
+            album_artist_id = db_get_or_create_artist(
                 ctx->db, "Various Artists", "Various Artists", VA_MUSICBRAINZ_ID);
             if (artist_cache && album_artist_id > 0)
                 g_hash_table_insert(artist_cache,
@@ -842,17 +891,14 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
     stats->artist_lookup_ns += (t1 - t0);
 
     /* --- Build per-track desired state (matched tracks only) --- */
-    t0 = profile_now_ns();
-    desired_track_t* desired_tracks = g_new0(desired_track_t, match_count);
-    /* Arrays of artist-credit arrays we own, one per matched track, freed below. */
-    desired_track_artist_t** owned_credits = g_new0(desired_track_artist_t*, match_count);
-    size_t* owned_credit_counts = g_new0(size_t, match_count);
+    work->desired_tracks       = g_new0(desired_track_t, work->match_count);
+    work->owned_credits        = g_new0(desired_track_artist_t*, work->match_count);
+    work->owned_credit_counts  = g_new0(size_t, work->match_count);
 
-    for (size_t m = 0; m < match_count; m++) {
-        mb_recording_t* rec = &release->recordings[matches[m].mb_idx];
-        db_track_t* local   = &tracks[matches[m].local_idx];
+    for (size_t m = 0; m < work->match_count; m++) {
+        mb_recording_t* rec = &release->recordings[work->matches[m].mb_idx];
+        db_track_t* local   = &work->tracks[work->matches[m].local_idx];
 
-        /* Convert MB credits → desired_track_artist_t (artist_ids resolved via cache) */
         desired_track_artist_t* credits = NULL;
         size_t credit_count = 0;
         if (rec->artist_count > 0) {
@@ -872,18 +918,18 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
                 credits[k].position    = ta[k].position;
             }
             credit_count = ta_count;
-            g_free(ta);  /* name/join_phrase now owned by `credits` entries */
+            g_free(ta);
         }
-        owned_credits[m] = credits;
-        owned_credit_counts[m] = credit_count;
+        work->owned_credits[m]       = credits;
+        work->owned_credit_counts[m] = credit_count;
 
-        desired_track_t* dt = &desired_tracks[m];
-        dt->path = local->path;  /* borrowed — valid until db_tracks_free below */
+        desired_track_t* dt = &work->desired_tracks[m];
+        dt->path = local->path;  /* borrowed — valid until album_work_free */
         dt->present_fields = DESIRED_TRACK_TITLE | DESIRED_TRACK_NUM | DESIRED_TRACK_DISC;
         dt->title     = rec->title;
         dt->track_num = (uint16_t)rec->position;
         dt->disc_num  = (uint16_t)(rec->disc_number > 0 ? rec->disc_number : 1);
-        dt->position_confidence = matches[m].confidence;
+        dt->position_confidence = work->matches[m].confidence;
 
         if (credit_count > 0) {
             dt->present_fields |= DESIRED_TRACK_ARTISTS;
@@ -899,7 +945,7 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
 
     /* --- Album-level desired state --- */
     uint16_t year = parse_mb_year(release->date);
-    desired_album_state_t desired = {
+    work->desired = (desired_album_state_t){
         .source         = RECONCILE_SOURCE_MB,
         .present_fields =
             DESIRED_ALBUM_TITLE            |
@@ -917,81 +963,54 @@ static void resolve_album_write(mb_resolver_t* ctx, int64_t album_id,
         .musicbrainz_release_group_id = release->release_group_id,
         .mb_status                    = MB_STATUS_RESOLVED,
         .mb_resolved_at               = (int64_t)time(NULL),
-        .tracks                       = desired_tracks,
-        .track_count                  = match_count,
+        .tracks                       = work->desired_tracks,
+        .track_count                  = work->match_count,
     };
 
-    /* --- Reconcile (single writer) --- */
-    reconcile_summary_t summary = {0};
-    db_reconcile_album(ctx->db, album_id, &desired, &RECONCILE_POLICY_MB, &summary);
+    work->valid = true;
+}
 
-    t1 = profile_now_ns();
-    stats->album_update_ns += (t1 - t0);
-    stats->track_update_ns += 0;  /* folded into album_update_ns above */
-    if (summary.fts_synced) stats->fts_sync_ns += 0;
+/**
+ * Post-reconcile: write release + recording relations to quadrature-metadata.sqlite.
+ * Non-fatal; runs inside the batch meta_db transaction.
+ */
+static void resolve_album_write_meta(mb_resolver_t* ctx, const album_work_t* w,
+                                      mb_profile_stats_t* stats) {
+    if (!ctx->meta_db || !w->valid) return;
 
-    /* Free owned artist-credit memory */
-    for (size_t m = 0; m < match_count; m++) {
-        if (owned_credits[m]) {
-            for (size_t k = 0; k < owned_credit_counts[m]; k++) {
-                g_free((char*)owned_credits[m][k].name);
-                g_free((char*)owned_credits[m][k].join_phrase);
-            }
-            g_free(owned_credits[m]);
-        }
+    int64_t t0 = profile_now_ns();
+    mb_release_t* release = w->release;
+    db_meta_upsert_release(ctx->meta_db, release->id,
+        release->date, release->type, release->label,
+        release->catalog_number, release->barcode, release->genres);
+    for (size_t m = 0; m < w->match_count; m++) {
+        mb_recording_t* rec = &release->recordings[w->matches[m].mb_idx];
+        db_meta_upsert_recording(ctx->meta_db,
+            rec->id, release->id, rec->disc_number, rec->position);
+        db_meta_delete_recording_links(ctx->meta_db, rec->id);
     }
-    g_free(owned_credits);
-    g_free(owned_credit_counts);
-    g_free(desired_tracks);
-
-    /* Write release + recording relations to quadrature-metadata.sqlite (non-fatal).
-     * Transaction is managed at the batch level by write_resolve_batch(). */
-    t0 = profile_now_ns();
-    if (ctx->meta_db) {
-        db_meta_upsert_release(ctx->meta_db, release->id,
-            release->date, release->type, release->label,
-            release->catalog_number, release->barcode, release->genres);
-        for (size_t m = 0; m < match_count; m++) {
-            mb_recording_t* rec = &release->recordings[matches[m].mb_idx];
-            db_meta_upsert_recording(ctx->meta_db,
-                rec->id, release->id, rec->disc_number, rec->position);
-            db_meta_delete_recording_links(ctx->meta_db, rec->id);
+    GHashTable* seen_link_types = g_hash_table_new(g_str_hash, g_str_equal);
+    GHashTable* seen_artists    = g_hash_table_new(g_str_hash, g_str_equal);
+    for (size_t i = 0; i < w->link_count; i++) {
+        mb_recording_link_row_t* l = w->links[i];
+        if (!g_hash_table_contains(seen_link_types, l->link_type_gid)) {
+            db_meta_upsert_link_type(ctx->meta_db,
+                l->link_type_gid, l->link_type_name, l->link_type_desc);
+            g_hash_table_add(seen_link_types, (gpointer)l->link_type_gid);
         }
-        /* Pre-deduplicate link_types and artists: a release with 30 links
-         * often has only ~5 unique link_types and ~8 unique artists.
-         * Skipping redundant INSERT OR REPLACE saves B-tree lookups. */
-        GHashTable* seen_link_types = g_hash_table_new(g_str_hash, g_str_equal);
-        GHashTable* seen_artists = g_hash_table_new(g_str_hash, g_str_equal);
-        for (size_t i = 0; i < link_count; i++) {
-            if (!g_hash_table_contains(seen_link_types, links[i]->link_type_gid)) {
-                db_meta_upsert_link_type(ctx->meta_db,
-                    links[i]->link_type_gid, links[i]->link_type_name, links[i]->link_type_desc);
-                g_hash_table_add(seen_link_types, (gpointer)links[i]->link_type_gid);
-            }
-            if (!g_hash_table_contains(seen_artists, links[i]->artist_mbid)) {
-                db_meta_upsert_artist(ctx->meta_db,
-                    links[i]->artist_mbid, links[i]->artist_name,
-                    links[i]->artist_sort_name, links[i]->artist_type);
-                g_hash_table_add(seen_artists, (gpointer)links[i]->artist_mbid);
-            }
-            db_meta_insert_recording_link(ctx->meta_db,
-                links[i]->recording_mbid, links[i]->artist_mbid, links[i]->link_type_gid,
-                links[i]->entity0_credit, links[i]->attributes);
+        if (!g_hash_table_contains(seen_artists, l->artist_mbid)) {
+            db_meta_upsert_artist(ctx->meta_db,
+                l->artist_mbid, l->artist_name, l->artist_sort_name, l->artist_type);
+            g_hash_table_add(seen_artists, (gpointer)l->artist_mbid);
         }
-        g_hash_table_destroy(seen_link_types);
-        g_hash_table_destroy(seen_artists);
+        db_meta_insert_recording_link(ctx->meta_db,
+            l->recording_mbid, l->artist_mbid, l->link_type_gid,
+            l->entity0_credit, l->attributes);
     }
-    t1 = profile_now_ns();
+    g_hash_table_destroy(seen_link_types);
+    g_hash_table_destroy(seen_artists);
+    int64_t t1 = profile_now_ns();
     stats->meta_album_ns += (t1 - t0);
-
-    db_tracks_free(tracks, track_count);
-    g_free(matches);
-
-    stats->albums_written++;
-
-    g_mutex_lock(&ctx->progress_mutex);
-    ctx->progress.albums_resolved++;
-    g_mutex_unlock(&ctx->progress_mutex);
 }
 
 // =============================================================================
@@ -1097,14 +1116,14 @@ static size_t triage_batch(mb_resolver_t* ctx,
             album_ids[release_count] = batch[i]->album_id;
             release_count++;
         } else if (batch[i]->service_error) {
-            db_set_album_mb_status(ctx->db, batch[i]->album_id,
+            db_reconcile_album_mb_status(ctx->db, batch[i]->album_id,
                                     MB_STATUS_FAILED, (int64_t)time(NULL));
             g_mutex_lock(&ctx->progress_mutex);
             ctx->progress.albums_failed++;
             ctx->progress.albums_processed++;
             g_mutex_unlock(&ctx->progress_mutex);
         } else {
-            db_set_album_mb_status(ctx->db, batch[i]->album_id,
+            db_reconcile_album_mb_status(ctx->db, batch[i]->album_id,
                                     MB_STATUS_NO_MATCH, (int64_t)time(NULL));
             g_mutex_lock(&ctx->progress_mutex);
             ctx->progress.albums_no_match++;
@@ -1125,22 +1144,27 @@ static void triage_free(char** release_ids, int64_t* album_ids, size_t count) {
 }
 
 /**
- * Write batch results to SQLite. Accepts pre-fetched releases/links
- * (from prefetch thread or inline fetch).
+ * Write batch results to SQLite.
+ *
+ * Three phases inside one SQLite transaction:
+ *   1. Prepare — per album: load tracks, match recordings, resolve artists,
+ *      build desired_album_state. Albums with no local tracks are marked
+ *      MB_STATUS_FAILED via the fast path; they don't enter the batch.
+ *   2. Reconcile — single db_reconcile_albums call drives three bulk SELECTs
+ *      (albums/tracks/track_artists via json_each) + per-album diff/UPDATE
+ *      using cached prepared statements.
+ *   3. Meta — per album: upsert release/recording/link rows into the
+ *      quadrature-metadata.sqlite side-DB (separate transaction).
  */
 static void write_resolve_batch(mb_resolver_t* ctx,
                                  const char* const* release_ids, int64_t* album_ids,
                                  size_t release_count,
                                  GHashTable* releases, GHashTable* all_links,
                                  mb_profile_stats_t* stats) {
-    // Artist MBID → artist_id cache: avoids repeated SQLite lookups for the
-    // same artist across albums in this batch (e.g. album artist + track credits).
     GHashTable* artist_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
-    // Batch meta DB transaction — one BEGIN/COMMIT for all albums instead of per-album
     if (ctx->meta_db) db_meta_begin(ctx->meta_db);
 
-    // Batch SQLite transaction — one fsync for the entire batch instead of per-album
     quadrature_result_t txn_res = db_begin_transaction(ctx->db);
     if (txn_res != QUADRATURE_OK) {
         g_warning("write_resolve_batch: failed to begin transaction");
@@ -1149,18 +1173,20 @@ static void write_resolve_batch(mb_resolver_t* ctx,
         return;
     }
 
+    album_work_t* works = g_new0(album_work_t, release_count);
+
+    /* --- Phase 1: prepare desired states --- */
     for (size_t i = 0; i < release_count && !ctx->cancelled; i++) {
         mb_release_t* release = releases
             ? g_hash_table_lookup(releases, release_ids[i]) : NULL;
 
         if (!release) {
-            db_set_album_mb_status(ctx->db, album_ids[i],
-                                    MB_STATUS_FAILED, (int64_t)time(NULL));
+            db_reconcile_album_mb_status(ctx->db, album_ids[i],
+                                         MB_STATUS_FAILED, (int64_t)time(NULL));
             g_mutex_lock(&ctx->progress_mutex);
             ctx->progress.albums_failed++;
             ctx->progress.albums_processed++;
             g_mutex_unlock(&ctx->progress_mutex);
-            resolver_update_progress(ctx);
             continue;
         }
 
@@ -1174,24 +1200,54 @@ static void write_resolve_batch(mb_resolver_t* ctx,
             }
         }
 
-        resolve_album_write(ctx, album_ids[i], release, links, link_count, artist_cache, stats);
-
-        g_mutex_lock(&ctx->progress_mutex);
-        ctx->progress.albums_processed++;
-        ctx->progress.progress = ctx->progress.albums_total > 0
-            ? (double)ctx->progress.albums_processed / (double)ctx->progress.albums_total
-            : 1.0;
-        g_mutex_unlock(&ctx->progress_mutex);
-        resolver_update_progress(ctx);
+        resolve_album_prepare(ctx, album_ids[i], release, links, link_count,
+                              artist_cache, stats, &works[i]);
     }
 
-    // Commit batch SQLite transaction — single WAL fsync for all albums
+    /* --- Phase 2: single batched reconcile --- */
+    int64_t t0 = profile_now_ns();
+    int64_t* batch_ids = g_new(int64_t, release_count);
+    desired_album_state_t* batch_desireds = g_new(desired_album_state_t, release_count);
+    size_t batch_n = 0;
+    for (size_t i = 0; i < release_count; i++) {
+        if (!works[i].valid) continue;
+        batch_ids[batch_n] = works[i].album_id;
+        batch_desireds[batch_n] = works[i].desired;
+        batch_n++;
+    }
+    if (batch_n > 0) {
+        db_reconcile_albums(ctx->db, batch_ids, batch_desireds, batch_n,
+                             &RECONCILE_POLICY_MB, NULL);
+    }
+    g_free(batch_ids);
+    g_free(batch_desireds);
+    int64_t t1 = profile_now_ns();
+    stats->album_update_ns += (t1 - t0);
+
+    /* --- Phase 3: meta DB writes + progress/cleanup --- */
+    for (size_t i = 0; i < release_count; i++) {
+        if (works[i].valid) {
+            resolve_album_write_meta(ctx, &works[i], stats);
+            stats->albums_written++;
+            g_mutex_lock(&ctx->progress_mutex);
+            ctx->progress.albums_resolved++;
+            ctx->progress.albums_processed++;
+            ctx->progress.progress = ctx->progress.albums_total > 0
+                ? (double)ctx->progress.albums_processed / (double)ctx->progress.albums_total
+                : 1.0;
+            g_mutex_unlock(&ctx->progress_mutex);
+        }
+        album_work_free(&works[i]);
+    }
+    g_free(works);
+
+    resolver_update_progress(ctx);
+
     if (db_commit(ctx->db) != QUADRATURE_OK) {
         db_rollback(ctx->db);
         g_warning("write_resolve_batch: commit failed, batch rolled back");
     }
 
-    // Commit batch meta transaction
     if (ctx->meta_db) db_meta_commit(ctx->meta_db);
 
     g_hash_table_destroy(artist_cache);
@@ -1351,17 +1407,21 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
     GPtrArray* untagged_ids = g_ptr_array_new();      // int64_t* (just album_ids)
 
     for (size_t i = 0; i < album_count && !ctx->cancelled; i++) {
-        char* release_id = db_get_album_musicbrainz_release_id(ctx->db, album_ids[i]);
-        if (release_id) {
+        db_album_t* album = NULL;
+        db_get_album_by_id(ctx->db, album_ids[i], &album);
+        const char* rid = (album && album->musicbrainz_release_id && album->musicbrainz_release_id[0])
+                            ? album->musicbrainz_release_id : NULL;
+        if (rid) {
             resolve_queue_item_t* item = g_new0(resolve_queue_item_t, 1);
             item->album_id = album_ids[i];
-            item->release_id = release_id;
+            item->release_id = g_strdup(rid);
             g_ptr_array_add(tagged_items, item);
         } else {
             int64_t* id_copy = g_new(int64_t, 1);
             *id_copy = album_ids[i];
             g_ptr_array_add(untagged_ids, id_copy);
         }
+        if (album) db_albums_free(album, 1);
     }
     g_free(album_ids);
 
@@ -1824,10 +1884,6 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
     resolver_set_phase(ctx, MB_RESOLVE_COMPLETE);
 
     return ctx->cancelled ? QUADRATURE_ERROR_CANCELLED : QUADRATURE_OK;
-}
-
-void mb_resolver_cancel(mb_resolver_t* ctx) {
-    if (ctx) ctx->cancelled = true;
 }
 
 void mb_resolver_destroy(mb_resolver_t* ctx) {

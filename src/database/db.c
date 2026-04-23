@@ -100,7 +100,7 @@ static const stmt_entry_t PREPARED_STMTS[] = {
         "SELECT t.id, t.title, COALESCE(t.artist_display,''), COALESCE(al.title,'') "
         "FROM tracks t JOIN albums al ON t.album_id = al.id WHERE t.album_id = ?"),
 
-    /* ── MB artist resolution (db_get_or_create_artist_mb) ─────────────── */
+    /* ── MB artist resolution (db_get_or_create_artist) ─────────────── */
     STMT(select_artist_by_mb_id,
         "SELECT id FROM artists WHERE musicbrainz_id = ?"),
     STMT(update_artist_sort_name,
@@ -132,10 +132,6 @@ static const stmt_entry_t PREPARED_STMTS[] = {
     STMT(delete_artist,
         "DELETE FROM artists WHERE id = ?"),
 
-    /* ── MB resolver status-only writes ────────────────────────────────── */
-    STMT(set_album_mb_status,
-        "UPDATE albums SET mb_status = ?, mb_resolved_at = ? WHERE id = ?"),
-
     /* ── Cached reads ──────────────────────────────────────────────────── */
     STMT(read_track_by_id,
         "SELECT t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, "
@@ -146,14 +142,6 @@ static const stmt_entry_t PREPARED_STMTS[] = {
         "LEFT JOIN artists a ON a.id = ta.artist_id "
         "LEFT JOIN albums al ON t.album_id = al.id "
         "WHERE t.id = ?"),
-    STMT(read_artist_by_id,
-        "SELECT a.id, a.name, a.musicbrainz_id, "
-        "COUNT(DISTINCT al.id), COUNT(DISTINCT ta.track_id) "
-        "FROM artists a "
-        "LEFT JOIN albums al ON al.artist_id = a.id "
-        "LEFT JOIN track_artists ta ON ta.artist_id = a.id "
-        "WHERE a.id = ? "
-        "GROUP BY a.id"),
     STMT(read_album_by_id,
         "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
         "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
@@ -163,31 +151,10 @@ static const stmt_entry_t PREPARED_STMTS[] = {
         "FROM albums al "
         "LEFT JOIN artists a ON al.artist_id = a.id "
         "WHERE al.id = ?"),
-    STMT(read_albums_by_artist_count,
-        "SELECT COUNT(*) FROM albums WHERE artist_id = ?"),
-    STMT(read_albums_by_artist,
-        "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
-        "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "
-        "  (SELECT GROUP_CONCAT(g, ';') FROM (SELECT DISTINCT LOWER(genre) AS g "
-        "   FROM tracks WHERE album_id = al.id AND genre IS NOT NULL AND genre != '')) AS genres, "
-        "  al.path, al.musicbrainz_release_id "
-        "FROM albums al "
-        "LEFT JOIN artists a ON al.artist_id = a.id "
-        "WHERE al.artist_id = ? "
-        "ORDER BY al.year, al.title COLLATE NOCASE"),
     STMT(read_tracks_by_album,
         "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM
         " WHERE t.album_id = ?"
         " ORDER BY t.disc_num, t.track_num, t.title COLLATE NOCASE"),
-    STMT(read_track_artists_count,
-        "SELECT COUNT(*) FROM track_artists WHERE track_id = ?"),
-    STMT(read_track_artists,
-        "SELECT ta.artist_id, a.name, ta.join_phrase, ta.position "
-        "FROM track_artists ta "
-        "LEFT JOIN artists a ON a.id = ta.artist_id "
-        "WHERE ta.track_id = ? "
-        "ORDER BY ta.position"),
-
     /* ── Warming iterators (no JOINs, sequential rowid scan) ───────────── */
     STMT(iter_all_artists,
         "SELECT a.id, a.name, a.musicbrainz_id FROM artists a ORDER BY a.id"),
@@ -206,6 +173,47 @@ static const stmt_entry_t PREPARED_STMTS[] = {
         "SELECT (SELECT MAX(id) FROM artists),"
         "       (SELECT MAX(id) FROM albums),"
         "       (SELECT MAX(id) FROM tracks)"),
+
+    /* ── Reconciler: fast-path status UPDATE ───────────────────────────── */
+    STMT(update_album_mb_status,
+        "UPDATE albums SET mb_status = ?, mb_resolved_at = ? WHERE id = ?"),
+
+    /* ── Reconciler: batch loads via json_each(?) ──────────────────────── */
+    STMT(reconcile_load_albums_batch,
+        "SELECT id, path, title, artist_id, is_compilation, year, "
+        "musicbrainz_release_id, musicbrainz_release_group_id, "
+        "mb_status, mb_resolved_at "
+        "FROM albums "
+        "WHERE id IN (SELECT value FROM json_each(?))"),
+    STMT(reconcile_load_tracks_batch,
+        "SELECT id, album_id, path, title, track_num, disc_num, "
+        "duration_ms, year, genre, artist_display, mtime "
+        "FROM tracks "
+        "WHERE album_id IN (SELECT value FROM json_each(?))"),
+    STMT(reconcile_load_track_artists_batch,
+        "SELECT ta.track_id, ta.artist_id, a.name, ta.join_phrase, ta.position "
+        "FROM track_artists ta LEFT JOIN artists a ON a.id = ta.artist_id "
+        "WHERE ta.track_id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY ta.track_id, ta.position"),
+
+    /* ── Reconciler: canonical full-field writes ───────────────────────── */
+    STMT(reconcile_update_album,
+        "UPDATE albums SET "
+        "  title = ?, artist_id = ?, is_compilation = ?, year = ?, "
+        "  musicbrainz_release_id = ?, musicbrainz_release_group_id = ?, "
+        "  mb_status = ?, mb_resolved_at = ? "
+        "WHERE id = ?"),
+    STMT(reconcile_update_track,
+        "UPDATE tracks SET "
+        "  title = ?, track_num = ?, disc_num = ?, duration_ms = ?, "
+        "  year = ?, mtime = ?, genre = ?, artist_display = ? "
+        "WHERE id = ?"),
+    STMT(reconcile_insert_track,
+        "INSERT INTO tracks(title, album_id, path, duration_ms, track_num, "
+        "disc_num, mtime, year, genre, artist_display) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+    STMT(reconcile_delete_track_by_id,
+        "DELETE FROM tracks WHERE id = ?"),
 };
 
 static inline sqlite3_stmt** stmt_slot(quadrature_db_t* db, size_t offset) {
@@ -231,9 +239,7 @@ void db_finalize_stmts(quadrature_db_t* db) {
 // Lifecycle
 // =============================================================================
 
-quadrature_result_t db_open(const char* path, quadrature_db_t** out) {
-    if (!out) return QUADRATURE_ERROR_INVALID_PARAM;
-
+static quadrature_result_t db_open_rw(const char* path, quadrature_db_t** out) {
     quadrature_db_t* db = calloc(1, sizeof(quadrature_db_t));
     if (!db) return QUADRATURE_ERROR_OUT_OF_MEMORY;
 
@@ -279,13 +285,7 @@ quadrature_result_t db_open(const char* path, quadrature_db_t** out) {
     return QUADRATURE_OK;
 }
 
-quadrature_result_t db_open_memory(quadrature_db_t** out) {
-    return db_open(NULL, out);
-}
-
-quadrature_result_t db_open_readonly(const char* path, quadrature_db_t** out) {
-    if (!out || !path) return QUADRATURE_ERROR_INVALID_PARAM;
-
+static quadrature_result_t db_open_ro(const char* path, quadrature_db_t** out) {
     quadrature_db_t* db = calloc(1, sizeof(quadrature_db_t));
     if (!db) return QUADRATURE_ERROR_OUT_OF_MEMORY;
 
@@ -326,6 +326,12 @@ quadrature_result_t db_open_readonly(const char* path, quadrature_db_t** out) {
 
     *out = db;
     return QUADRATURE_OK;
+}
+
+quadrature_result_t db_open(const char* path, bool readonly, quadrature_db_t** out) {
+    if (!out) return QUADRATURE_ERROR_INVALID_PARAM;
+    if (readonly && !path) return QUADRATURE_ERROR_INVALID_PARAM;
+    return readonly ? db_open_ro(path, out) : db_open_rw(path, out);
 }
 
 void db_close(quadrature_db_t* db) {

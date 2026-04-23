@@ -123,13 +123,12 @@ struct _UiChannelStrip {
     /* Device name (for invalid state message) */
     char *device_name;
 
-    /* Cached for seek */
-    uint32_t sample_rate;
-    uint64_t length_samples;
+    /* Cached length in seconds (0 until real audio buffer loads) */
+    double length_seconds;
 
     /* UI-estimated length from cache duration_ms (used while decode pending) */
-    uint64_t ui_length_samples;
-    uint64_t deferred_seek_pos;   /* Queued seek position (applied when buffer ready) */
+    double ui_length_seconds;
+    double deferred_seek_frac;    /* Queued seek fraction [0,1] (applied when buffer ready) */
     gboolean has_deferred_seek;
 
     /* Cached time display strings — avoid per-frame snprintf + gtk_label_set_text */
@@ -454,21 +453,17 @@ static void on_play_pause(GtkButton *btn, gpointer data) {
 
     /* If the strip has a track but the pipeline player doesn't (e.g. device was
      * inactive when the track was loaded), retry set_player_track now. */
-    if (s->current_track_id > 0 && s->pipeline->cache) {
-        int64_t pipeline_track = audio_pipeline_get_player_track_id(s->pipeline, s->channel_id);
-        if (pipeline_track <= 0) {
-            gboolean streams = audio_pipeline_player_streams_active(s->pipeline, s->channel_id);
-            g_info("Playback → Channel %d: retrying set_player_track for %" G_GINT64_FORMAT
-                   " (streams_active=%d, device_state=%d)",
-                   s->channel_id + 1, s->current_track_id, streams, s->device_state);
-            audio_cache_load(s->pipeline->cache, s->current_track_id);
-            quadrature_result_t retry = audio_pipeline_set_player_track(
-                s->pipeline, s->channel_id, s->current_track_id);
-            if (retry != QUADRATURE_OK) {
-                g_warning("Playback → Channel %d: retry set_player_track FAILED - result=%d",
-                          s->channel_id + 1, retry);
-                return;
-            }
+    if (s->current_track_id > 0 && s->pipeline->cache &&
+        audio_pipeline_get_player_track_id(s->pipeline, s->channel_id) <= 0) {
+        g_info("Playback → Channel %d: retrying set_player_track for %" G_GINT64_FORMAT,
+               s->channel_id + 1, s->current_track_id);
+        audio_cache_load(s->pipeline->cache, s->current_track_id);
+        quadrature_result_t retry = audio_pipeline_set_player_track(
+            s->pipeline, s->channel_id, s->current_track_id);
+        if (retry != QUADRATURE_OK) {
+            g_warning("Playback → Channel %d: retry set_player_track FAILED - result=%d",
+                      s->channel_id + 1, retry);
+            return;
         }
     }
 
@@ -505,41 +500,28 @@ static void on_preview(GtkToggleButton *btn, gpointer data) {
     }
 }
 
+/* The repeat and autoplay toggle buttons both drive the single end-mode enum;
+ * mutual exclusion falls out of the enum having only one active value. */
+static void set_end_mode_and_sync_buttons(UiChannelStrip *s, track_end_mode_t mode) {
+    if (s->pipeline) audio_pipeline_player_set_end_mode(s->pipeline, s->channel_id, mode);
+    if (s->repeat_btn)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->repeat_btn),   mode == TRACK_END_REPEAT);
+    if (s->autoplay_btn)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->autoplay_btn), mode == TRACK_END_AUTOPLAY);
+}
+
 static void on_repeat(GtkToggleButton *btn, gpointer data) {
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
-    gboolean on = gtk_toggle_button_get_active(btn);
-
-    if (s->pipeline) {
-        audio_pipeline_player_set_repeat(s->pipeline, s->channel_id, on);
-
-        /* Repeat and autoplay are mutually exclusive */
-        if (on && audio_pipeline_player_get_autoplay(s->pipeline, s->channel_id)) {
-            audio_pipeline_player_set_autoplay(s->pipeline, s->channel_id, false);
-            if (s->autoplay_btn) {
-                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->autoplay_btn), FALSE);
-            }
-        }
-    }
-
+    set_end_mode_and_sync_buttons(s,
+        gtk_toggle_button_get_active(btn) ? TRACK_END_REPEAT : TRACK_END_STOP);
     /* Update next track label when repeat changes */
     update_album_display(s);
 }
 
 static void on_autoplay(GtkToggleButton *btn, gpointer data) {
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
-    gboolean on = gtk_toggle_button_get_active(btn);
-
-    if (s->pipeline) {
-        audio_pipeline_player_set_autoplay(s->pipeline, s->channel_id, on);
-
-        /* Repeat and autoplay are mutually exclusive */
-        if (on && audio_pipeline_player_get_repeat(s->pipeline, s->channel_id)) {
-            audio_pipeline_player_set_repeat(s->pipeline, s->channel_id, false);
-            if (s->repeat_btn) {
-                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->repeat_btn), FALSE);
-            }
-        }
-    }
+    set_end_mode_and_sync_buttons(s,
+        gtk_toggle_button_get_active(btn) ? TRACK_END_AUTOPLAY : TRACK_END_STOP);
 }
 
 static void on_queue(GtkButton *btn, gpointer data) {
@@ -561,8 +543,12 @@ static void on_queue(GtkButton *btn, gpointer data) {
         
     case CHANNEL_MODE_IDLE: {
         /* If already playing, go straight to ON_AIR; otherwise QUEUED */
-        gboolean playing = s->pipeline &&
-            (audio_pipeline_get_player_state(s->pipeline, s->channel_id) == CHANNEL_PLAYING);
+        gboolean playing = FALSE;
+        if (s->pipeline) {
+            audio_player_display_t d;
+            audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+            playing = (d.state == CHANNEL_PLAYING);
+        }
         if (playing) {
             ui_channel_strip_set_mode(s, CHANNEL_MODE_ON_AIR);
         } else {
@@ -595,11 +581,11 @@ static void on_queue(GtkButton *btn, gpointer data) {
 static void on_seek(UiWaveformSeekBar *waveform, double value, gpointer data) {
     (void)waveform;
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
-    if (s->length_samples > 0) {
-        uint64_t target = (uint64_t)(value * (double)s->length_samples);
-        audio_pipeline_player_seek(s->pipeline, s->channel_id, target);
-    } else if (s->ui_length_samples > 0) {
-        s->deferred_seek_pos = (uint64_t)(value * (double)s->ui_length_samples);
+    if (s->length_seconds > 0.0) {
+        audio_pipeline_player_seek_seconds(s->pipeline, s->channel_id,
+                                           value * s->length_seconds);
+    } else if (s->ui_length_seconds > 0.0) {
+        s->deferred_seek_frac = value;
         s->has_deferred_seek = TRUE;
     }
 }
@@ -619,18 +605,15 @@ static void on_seek(UiWaveformSeekBar *waveform, double value, gpointer data) {
 static void do_skip(UiChannelStrip *s, int seconds) {
     if (!s->pipeline) return;
 
-    uint64_t pos = audio_pipeline_get_player_position(s->pipeline, s->channel_id);
-    uint64_t len = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
-    uint32_t rate = audio_pipeline_get_sample_rate(s->pipeline);
-    if (rate == 0 || len == 0) return;
+    audio_player_display_t d;
+    audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+    if (d.length_seconds <= 0.0) return;
 
-    int64_t delta = (int64_t)seconds * rate;
-    int64_t new_pos = (int64_t)pos + delta;
+    double target = d.position_seconds + (double)seconds;
+    if (target < 0.0) target = 0.0;
+    if (target > d.length_seconds) target = d.length_seconds;
 
-    if (new_pos < 0) new_pos = 0;
-    if ((uint64_t)new_pos >= len) new_pos = (int64_t)len - 1;
-
-    audio_pipeline_player_seek(s->pipeline, s->channel_id, (uint64_t)new_pos);
+    audio_pipeline_player_seek_seconds(s->pipeline, s->channel_id, target);
 }
 
 static void on_skip_clicked(GtkButton *btn, gpointer data) {
@@ -878,9 +861,9 @@ static void update_album_display(UiChannelStrip *s) {
             gtk_label_set_text(GTK_LABEL(s->track_position_label), "");
         }
 
-        /* Next track preview - query engine for repeat state */
-        gboolean repeat = s->pipeline ?
-            audio_pipeline_player_get_repeat(s->pipeline, s->channel_id) : FALSE;
+        /* Next track preview - query engine for end-of-track mode */
+        gboolean repeat = s->pipeline &&
+            audio_pipeline_player_get_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT;
 
         if (repeat) {
             next_loop = marquee_setup_label(s->next_track_scroll, s->next_track_label, "Repeating");
@@ -1150,10 +1133,9 @@ static void on_next_track_label_clicked(GtkGestureClick *g, int n, double x, dou
     if (!can_go_next(s))
         return;
 
-    /* Check if repeat is on (query engine) */
-    gboolean repeat = s->pipeline ?
-        audio_pipeline_player_get_repeat(s->pipeline, s->channel_id) : FALSE;
-    if (repeat)
+    /* Don't auto-advance when in repeat mode */
+    if (s->pipeline &&
+        audio_pipeline_player_get_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT)
         return;
 
     ui_channel_strip_next_track(s);
@@ -1346,10 +1328,9 @@ static void ui_channel_strip_init(UiChannelStrip *s) {
     s->pipeline = NULL;
     s->show_spectrum = TRUE;
     s->time_state = TIME_STATE_NONE;
-    s->sample_rate = 0;
-    s->length_samples = 0;
-    s->ui_length_samples = 0;
-    s->deferred_seek_pos = 0;
+    s->length_seconds = 0.0;
+    s->ui_length_seconds = 0.0;
+    s->deferred_seek_frac = 0.0;
     s->has_deferred_seek = FALSE;
     s->spectrum = NULL;
     s->status_scroll = NULL;
@@ -1492,7 +1473,9 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
     g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
     g_assert(pipeline != NULL);  /* Caller must provide valid pipeline */
 
-    channel_state_t st = audio_pipeline_get_player_state(pipeline, s->channel_id);
+    audio_player_display_t disp;
+    audio_pipeline_get_player_display(pipeline, s->channel_id, &disp);
+    channel_state_t st = disp.state;
 
     /* Fast path: no track loaded and stopped — skip per-frame work for idle channels */
     if (!s->filepath && st == CHANNEL_STOPPED && !s->has_deferred_seek) {
@@ -1503,49 +1486,45 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
         return;
     }
 
-    uint64_t len = audio_pipeline_get_player_length(pipeline, s->channel_id);
-    uint64_t effective_len = (len > 0) ? len : s->ui_length_samples;
+    double effective_len_sec = (disp.length_seconds > 0.0)
+        ? disp.length_seconds : s->ui_length_seconds;
 
     /* Apply deferred seek when real buffer arrives */
-    if (len > 0 && s->has_deferred_seek && s->ui_length_samples > 0) {
-        double ratio = (double)s->deferred_seek_pos / (double)s->ui_length_samples;
-        uint64_t actual_pos = (uint64_t)(ratio * (double)len);
-        if (actual_pos >= len) actual_pos = len - 1;
-        audio_pipeline_player_seek(s->pipeline, s->channel_id, actual_pos);
+    if (disp.length_seconds > 0.0 && s->has_deferred_seek) {
+        audio_pipeline_player_seek_seconds(s->pipeline, s->channel_id,
+                                           s->deferred_seek_frac * disp.length_seconds);
         s->has_deferred_seek = FALSE;
     }
-    if (len > 0) s->ui_length_samples = 0;
+    if (disp.length_seconds > 0.0) s->ui_length_seconds = 0.0;
 
-    s->sample_rate = audio_pipeline_get_sample_rate(pipeline);
-    s->length_samples = len;
+    s->length_seconds = disp.length_seconds;
 
     /* Play state - update icon every frame (GTK4 is idempotent) */
     gboolean playing = (st == CHANNEL_PLAYING);
     update_play_icon(s, playing);
 
-    /* Get interpolated position for smooth display */
-    float speed = 1.0f;
-    double display_pos_d = audio_pipeline_get_player_position_smooth(pipeline, s->channel_id, &speed);
+    double display_pos_sec = disp.position_seconds;
+    float speed = disp.speed;
 
     /* Override with seek bar position if dragging */
     gboolean seek_dragging = s->waveform &&
         ui_waveform_seek_bar_is_dragging(UI_WAVEFORM_SEEK_BAR(s->waveform));
-    if (seek_dragging && effective_len > 0) {
+    if (seek_dragging && effective_len_sec > 0.0) {
         GtkAdjustment *adj = ui_waveform_seek_bar_get_adjustment(
             UI_WAVEFORM_SEEK_BAR(s->waveform));
         double val = gtk_adjustment_get_value(adj);
-        display_pos_d = val * (double)effective_len;
+        display_pos_sec = val * effective_len_sec;
     }
 
-    if (s->sample_rate > 0 && effective_len > 0) {
+    if (effective_len_sec > 0.0) {
         /* Remaining time - floating point throughout */
-        double rem_samples = (double)effective_len - display_pos_d;
-        if (rem_samples < 0.0) rem_samples = 0.0;
+        double raw_rem = effective_len_sec - display_pos_sec;
+        if (raw_rem < 0.0) raw_rem = 0.0;
 
         float abs_speed = fabsf(speed);
         if (abs_speed < 0.01f) abs_speed = 1.0f;
 
-        double rem_sec_d = rem_samples / (double)s->sample_rate / (double)abs_speed;
+        double rem_sec_d = raw_rem / (double)abs_speed;
         unsigned long total_rem_min = (unsigned long)(rem_sec_d / 60.0);
         unsigned long rem_sec = (unsigned long)fmod(rem_sec_d, 60.0);
         unsigned long rem_cs = (unsigned long)(fmod(rem_sec_d, 1.0) * 100.0);
@@ -1590,7 +1569,7 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
         }
 
         /* Elapsed time - floating point with centiseconds */
-        double elapsed_sec_d = display_pos_d / (double)s->sample_rate;
+        double elapsed_sec_d = display_pos_sec;
         unsigned long total_elapsed_min = (unsigned long)(elapsed_sec_d / 60.0);
         unsigned long elapsed_sec = (unsigned long)fmod(elapsed_sec_d, 60.0);
         unsigned long elapsed_cs = (unsigned long)(fmod(elapsed_sec_d, 1.0) * 100.0);
@@ -1608,8 +1587,8 @@ void ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline) {
 
     /* Seek bar - use interpolated position when not dragging */
     double seek_frac = 0.0;
-    if (effective_len > 0) {
-        seek_frac = display_pos_d / (double)effective_len;
+    if (effective_len_sec > 0.0) {
+        seek_frac = display_pos_sec / effective_len_sec;
         if (s->waveform) {
             UiWaveformSeekBar *wsb = UI_WAVEFORM_SEEK_BAR(s->waveform);
             /* Always update playback position (dim trail during drag) */
@@ -1721,9 +1700,8 @@ quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
     s->has_deferred_seek = FALSE;
     if (s->library) {
         const library_track_info_t *ti = library_cache_get_track(s->library, intent->track_id);
-        uint32_t rate = s->pipeline ? audio_pipeline_get_sample_rate(s->pipeline) : 0;
-        s->ui_length_samples = (rate > 0 && ti && ti->duration_ms > 0)
-            ? ((uint64_t)ti->duration_ms * rate) / 1000 : 0;
+        s->ui_length_seconds = (ti && ti->duration_ms > 0)
+            ? (double)ti->duration_ms / 1000.0 : 0.0;
     }
 
     if (s->pipeline && s->pipeline->cache) {
@@ -1735,8 +1713,9 @@ quadrature_result_t ui_channel_strip_load_track(UiChannelStrip *s,
          * on_play_pause will retry set_player_track when the user presses play. */
         res = audio_pipeline_set_player_track(s->pipeline, s->channel_id, intent->track_id);
         if (res == QUADRATURE_OK) {
-            s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
-            s->sample_rate = audio_pipeline_get_sample_rate(s->pipeline);
+            audio_player_display_t d;
+            audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+            s->length_seconds = d.length_seconds;
         } else {
             g_debug("load_track: set_player_track deferred (channel %d, result=%d)",
                     s->channel_id, res);
@@ -1758,8 +1737,9 @@ void ui_channel_strip_update_track_display(UiChannelStrip *s,
     g_free(s->album);    s->album = g_strdup(intent->album);
 
     if (s->pipeline) {
-        s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
-        s->sample_rate = audio_pipeline_get_sample_rate(s->pipeline);
+        audio_player_display_t d;
+        audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+        s->length_seconds = d.length_seconds;
     }
 
     update_display(s);
@@ -1900,30 +1880,32 @@ void ui_channel_strip_play(UiChannelStrip *s) {
     g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
     
     if (!s->pipeline) return;
-    
-    channel_state_t state = audio_pipeline_get_player_state(s->pipeline, s->channel_id);
-    
+
+    audio_player_display_t d;
+    audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+
     /* If already playing, do nothing */
-    if (state == CHANNEL_PLAYING) return;
-    
+    if (d.state == CHANNEL_PLAYING) return;
+
     /* If in QUEUED mode, transition to ON_AIR */
     if (s->mode == CHANNEL_MODE_QUEUED) {
         ui_channel_strip_set_mode(s, CHANNEL_MODE_ON_AIR);
     }
-    
+
     /* Start playback (handles both stopped and paused states) */
     audio_pipeline_player_play(s->pipeline, s->channel_id);
 }
 
 void ui_channel_strip_stop(UiChannelStrip *s) {
     g_return_if_fail(UI_IS_CHANNEL_STRIP(s));
-    
+
     if (!s->pipeline) return;
-    
-    channel_state_t state = audio_pipeline_get_player_state(s->pipeline, s->channel_id);
-    
+
+    audio_player_display_t d;
+    audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+
     /* If already stopped, do nothing */
-    if (state == CHANNEL_STOPPED) return;
+    if (d.state == CHANNEL_STOPPED) return;
     
     /* Stop playback */
     audio_pipeline_player_stop(s->pipeline, s->channel_id);
@@ -1936,10 +1918,12 @@ void ui_channel_strip_stop(UiChannelStrip *s) {
 
 channel_state_t ui_channel_strip_get_player_state(UiChannelStrip *s) {
     g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), CHANNEL_STOPPED);
-    
+
     if (!s->pipeline) return CHANNEL_STOPPED;
-    
-    return audio_pipeline_get_player_state(s->pipeline, s->channel_id);
+
+    audio_player_display_t d;
+    audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+    return d.state;
 }
 
 void ui_channel_strip_set_focused(UiChannelStrip *s, gboolean focused) {
@@ -1987,9 +1971,9 @@ gboolean ui_channel_strip_previous_track(UiChannelStrip *s) {
     if (s->current_track_id <= 0) return FALSE;
 
     /* If more than 3 seconds into the track, restart current track instead */
-    uint64_t pos = audio_pipeline_get_player_position(s->pipeline, s->channel_id);
-    uint32_t rate = audio_pipeline_get_sample_rate(s->pipeline);
-    if (rate > 0 && pos > rate * 3) {
+    audio_player_display_t d;
+    audio_pipeline_get_player_display(s->pipeline, s->channel_id, &d);
+    if (d.position_seconds > 3.0) {
         audio_pipeline_player_seek(s->pipeline, s->channel_id, 0);
         return TRUE;
     }
@@ -2018,17 +2002,18 @@ gboolean ui_channel_strip_previous_track(UiChannelStrip *s) {
         ui_waveform_seek_bar_clear(UI_WAVEFORM_SEEK_BAR(s->waveform));
     s->waveform_track_id = 0;
 
-    /* Estimate duration from cache for instant seek bar (reuse rate from above) */
-    s->ui_length_samples = (rate > 0 && track->duration_ms > 0)
-        ? ((uint64_t)track->duration_ms * rate) / 1000 : 0;
+    /* Estimate duration from cache for instant seek bar */
+    s->ui_length_seconds = (track->duration_ms > 0)
+        ? (double)track->duration_ms / 1000.0 : 0.0;
     s->has_deferred_seek = FALSE;
 
     /* Load and set track (non-blocking) */
     if (s->pipeline->cache) {
         audio_cache_load(s->pipeline->cache, prev_id);
         audio_pipeline_set_player_track(s->pipeline, s->channel_id, prev_id);
-        s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
-        s->sample_rate = audio_pipeline_get_sample_rate(s->pipeline);
+        audio_player_display_t nd;
+        audio_pipeline_get_player_display(s->pipeline, s->channel_id, &nd);
+        s->length_seconds = nd.length_seconds;
     }
 
     return TRUE;
@@ -2039,8 +2024,8 @@ gboolean ui_channel_strip_next_track(UiChannelStrip *s) {
     if (!s->pipeline || !s->library) return FALSE;
     if (s->current_track_id <= 0) return FALSE;
 
-    /* Check repeat mode */
-    gboolean repeat = audio_pipeline_player_get_repeat(s->pipeline, s->channel_id);
+    gboolean repeat =
+        audio_pipeline_player_get_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT;
 
     /* Get next track ID */
     int64_t next_id = library_cache_get_next_track_id(s->library, s->current_track_id);
@@ -2071,17 +2056,17 @@ gboolean ui_channel_strip_next_track(UiChannelStrip *s) {
     s->waveform_track_id = 0;
 
     /* Estimate duration from cache for instant seek bar */
-    uint32_t rate = audio_pipeline_get_sample_rate(s->pipeline);
-    s->ui_length_samples = (rate > 0 && track->duration_ms > 0)
-        ? ((uint64_t)track->duration_ms * rate) / 1000 : 0;
+    s->ui_length_seconds = (track->duration_ms > 0)
+        ? (double)track->duration_ms / 1000.0 : 0.0;
     s->has_deferred_seek = FALSE;
 
     /* Load and set track (non-blocking) */
     if (s->pipeline->cache) {
         audio_cache_load(s->pipeline->cache, next_id);
         audio_pipeline_set_player_track(s->pipeline, s->channel_id, next_id);
-        s->length_samples = audio_pipeline_get_player_length(s->pipeline, s->channel_id);
-        s->sample_rate = audio_pipeline_get_sample_rate(s->pipeline);
+        audio_player_display_t nd;
+        audio_pipeline_get_player_display(s->pipeline, s->channel_id, &nd);
+        s->length_seconds = nd.length_seconds;
     }
 
     return TRUE;

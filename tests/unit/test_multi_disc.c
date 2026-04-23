@@ -250,9 +250,9 @@ Test(multi_disc, disc_number_extraction_separators) {
 // Test: Track upsert with disc_num field
 Test(multi_disc, db_track_disc_num_basic) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music/album", "Album", artist_id, 2024);
     test_insert_track_full(db, album_id, "/music/album/cd1/track1.mp3", "Track 1",        1, 1, 180000, NULL, NULL, NULL, 0);
     test_insert_track_full(db, album_id, "/music/album/cd2/track1.mp3", "Track 1 Disc 2", 1, 2, 200000, NULL, NULL, NULL, 0);
@@ -268,9 +268,9 @@ Test(multi_disc, db_track_disc_num_basic) {
 // Test: Track upsert with disc_num = 0 defaults to 1
 Test(multi_disc, db_track_disc_num_default) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
     int64_t track_id = test_insert_track_full(db, album_id, "/music/track.mp3", "Track",
                                                1, 0 /* should default to 1 */, 180000,
@@ -282,16 +282,16 @@ Test(multi_disc, db_track_disc_num_default) {
     cr_assert_not_null(track);
     cr_assert_eq(track->disc_num, 1, "disc_num=0 should be stored as 1");
 
-    db_track_free(track);
+    db_tracks_free(track, 1);
     db_close(db);
 }
 
 // Test: Track update preserves disc_num
 Test(multi_disc, db_track_disc_num_update) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
     int64_t track_id = test_insert_track_full(db, album_id, "/music/track.mp3", "Original Title",
                                                5, 3, 180000, NULL, NULL, NULL, 0);
@@ -312,16 +312,16 @@ Test(multi_disc, db_track_disc_num_update) {
     cr_assert_eq(track->disc_num, 4, "disc_num should be updated to 4");
     cr_assert_str_eq(track->title, "Updated Title", "title should be updated");
 
-    db_track_free(track);
+    db_tracks_free(track, 1);
     db_close(db);
 }
 
 // Test: Tracks with same track_num but different disc_num
 Test(multi_disc, db_track_multi_disc_same_track_num) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music/album", "Double Album", artist_id, 2024);
     int64_t tid_d1t1 = test_insert_track_full(db, album_id, "/music/album/cd1/01.mp3", "Opening",             1, 1, 180000, NULL, NULL, NULL, 0);
     int64_t tid_d2t1 = test_insert_track_full(db, album_id, "/music/album/cd2/01.mp3", "Second Half Opening", 1, 2, 200000, NULL, NULL, NULL, 0);
@@ -339,19 +339,19 @@ Test(multi_disc, db_track_multi_disc_same_track_num) {
     cr_assert_eq(track->track_num, 1);
     cr_assert_eq(track->disc_num, 1);
     cr_assert_str_eq(track->title, "Opening");
-    db_track_free(track);
+    db_tracks_free(track, 1);
 
     cr_assert_eq(db_get_track(db, tid_d2t1, &track), QUADRATURE_OK);
     cr_assert_eq(track->track_num, 1);
     cr_assert_eq(track->disc_num, 2);
     cr_assert_str_eq(track->title, "Second Half Opening");
-    db_track_free(track);
+    db_tracks_free(track, 1);
 
     cr_assert_eq(db_get_track(db, tid_d1t2, &track), QUADRATURE_OK);
     cr_assert_eq(track->track_num, 2);
     cr_assert_eq(track->disc_num, 1);
     cr_assert_str_eq(track->title, "Second Track");
-    db_track_free(track);
+    db_tracks_free(track, 1);
 
     db_close(db);
 }
@@ -359,9 +359,9 @@ Test(multi_disc, db_track_multi_disc_same_track_num) {
 // Test: High disc numbers (box sets)
 Test(multi_disc, db_track_high_disc_numbers) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music/boxset", "Complete Works", artist_id, 2024);
 
     int64_t disc15_tid = 0;
@@ -385,7 +385,7 @@ Test(multi_disc, db_track_high_disc_numbers) {
     db_track_t* track = NULL;
     cr_assert_eq(db_get_track(db, disc15_tid, &track), QUADRATURE_OK);
     cr_assert_eq(track->disc_num, 15, "Track 15 should be on disc 15");
-    db_track_free(track);
+    db_tracks_free(track, 1);
 
     db_close(db);
 }
@@ -719,7 +719,7 @@ void validate_album_track_numbering(indexer_t* idx, const metadata_result_t* mr)
 // Test: Continuous numbering - valid (no errors)
 Test(multi_disc, track_validation_continuous_valid) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     // Clear any previous errors
     db_clear_errors_for_path(db, "");
@@ -760,7 +760,7 @@ Test(multi_disc, track_validation_continuous_valid) {
 // Test: Per-disc numbering - valid (no errors)
 Test(multi_disc, track_validation_per_disc_valid) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
@@ -803,7 +803,7 @@ Test(multi_disc, track_validation_per_disc_valid) {
 // TODO: Fix crash in test - actual validation logic works in production
 Test(multi_disc, track_validation_continuous_gaps, .disabled = true) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
@@ -848,7 +848,7 @@ Test(multi_disc, track_validation_continuous_gaps, .disabled = true) {
 // TODO: Fix crash in test - actual validation logic works in production
 Test(multi_disc, track_validation_per_disc_gaps, .disabled = true) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
@@ -899,7 +899,7 @@ Test(multi_disc, track_validation_per_disc_gaps, .disabled = true) {
 // Test: Single disc album - uses per-disc logic
 Test(multi_disc, track_validation_single_disc) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
@@ -936,7 +936,7 @@ Test(multi_disc, track_validation_single_disc) {
 // Test: Empty album (no tracks)
 Test(multi_disc, track_validation_empty) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
@@ -965,7 +965,7 @@ Test(multi_disc, track_validation_empty) {
 // TODO: Fix crash in test - actual validation logic works in production  
 Test(multi_disc, track_validation_continuous_multiple_gaps, .disabled = true) {
     quadrature_db_t* db = NULL;
-    cr_assert_eq(db_open_memory(&db), QUADRATURE_OK);
+    cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 

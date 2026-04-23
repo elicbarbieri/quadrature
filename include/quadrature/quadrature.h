@@ -55,6 +55,16 @@ typedef enum {
 } shuttle_mode_t;
 
 /* =============================================================================
+ * End-of-Track Behavior
+ * ============================================================================= */
+
+typedef enum {
+    TRACK_END_STOP = 0,    /* Stop after the current track */
+    TRACK_END_REPEAT,      /* Restart the current track */
+    TRACK_END_AUTOPLAY,    /* Advance to next track in album */
+} track_end_mode_t;
+
+/* =============================================================================
  * Constants
  * ============================================================================= */
 

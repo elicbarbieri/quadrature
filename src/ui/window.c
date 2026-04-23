@@ -586,7 +586,7 @@ static void on_artist_mbid_navigate(const char *mbid, const char *name, const ch
             const char *dp = app_settings_get_library_data_path(w->settings, i);
             char *db_path = g_build_filename(dp, "quadrature.sqlite", NULL);
             quadrature_db_t *lib_db = NULL;
-            if (db_open_readonly(db_path, &lib_db) == QUADRATURE_OK) {
+            if (db_open(db_path, true, &lib_db) == QUADRATURE_OK) {
                 db_get_artist_by_mbid(lib_db, mbid, &found_id);
                 db_close(lib_db);
             }
@@ -978,11 +978,7 @@ static void build_ui(UiWindow *w) {
     gtk_stack_add_named(GTK_STACK(w->stack), make_libraries_view(w), "libraries");
     gtk_stack_add_named(GTK_STACK(w->stack), make_settings_view(w), "settings");
     gtk_stack_add_named(GTK_STACK(w->stack),
-                        perf_view_new(audio_pipeline_get_perf_dashboard(w->pipeline),
-                                      audio_pipeline_get_audio_cache(w->pipeline),
-                                      w->pipeline,
-                                      w->library_cache,
-                                      w->artwork_mgr),
+                        perf_view_new(w->pipeline, w->library_cache, w->artwork_mgr),
                         "perf");
     gtk_stack_add_named(GTK_STACK(w->stack), make_help_view(), "help");
 

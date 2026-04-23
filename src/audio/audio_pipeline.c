@@ -307,7 +307,8 @@ static size_t process_buffer_audio(audio_player_t* p, float* out, uint32_t frame
 
     /* Check for end of track */
     if (new_pos >= num_frames - 1) {
-        if (atomic_load(&p->repeat)) {
+        track_end_mode_t end_mode = (track_end_mode_t)atomic_load(&p->end_mode);
+        if (end_mode == TRACK_END_REPEAT) {
             /* Repeat mode: restart current track */
             p->current_frame = 0;
             audio_scrubber_set_position(p->scrubber, 0);
@@ -352,11 +353,10 @@ static size_t process_buffer_audio(audio_player_t* p, float* out, uint32_t frame
                     });
                 }
 
-                /* Check autoplay: if disabled, stop after advancing */
-                if (!atomic_load(&p->autoplay)) {
+                /* STOP mode: stop after advancing; AUTOPLAY: continue playing */
+                if (end_mode == TRACK_END_STOP) {
                     atomic_store(&p->state, CHANNEL_STOPPED);
                 }
-                /* Otherwise stay in PLAYING state - continue playback */
             } else {
                 /* No preloaded buffer - check if next track exists */
                 int64_t next_track_id = atomic_load(&p->next_track_id);
@@ -383,11 +383,11 @@ static size_t process_buffer_audio(audio_player_t* p, float* out, uint32_t frame
                         });
                     }
 
-                    /* If autoplay disabled, stop on the new track at 0:00 */
-                    if (!atomic_load(&p->autoplay)) {
+                    /* STOP mode: stop on the new track at 0:00 */
+                    if (end_mode == TRACK_END_STOP) {
                         atomic_store(&p->state, CHANNEL_STOPPED);
                     }
-                    /* Otherwise stay in PLAYING - main thread will load the track */
+                    /* AUTOPLAY: stay in PLAYING - main thread will load the track */
                 } else {
                     /* No next track - stop */
                     atomic_store(&p->state, CHANNEL_STOPPED);
@@ -995,8 +995,7 @@ static quadrature_result_t player_init(audio_player_t* p, int id, uint32_t sampl
     p->prev_scrubber_underflows = 0;
 
     /* Initialize playback options */
-    atomic_store(&p->repeat, false);
-    atomic_store(&p->autoplay, true);  /* Auto-continue on track advance */
+    atomic_store(&p->end_mode, TRACK_END_AUTOPLAY);  /* Default: advance to next */
 
     /* Initialize track_id state */
     atomic_store(&p->current_track_id, 0);
@@ -1317,6 +1316,23 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
         (*pipeline)->players[i].pipeline = *pipeline;
     }
 
+    /* Start PipeWire thread loop and auto-advance timer */
+    if (pw_thread_loop_start((*pipeline)->loop) < 0) {
+        for (int i = 0; i < MAX_AUDIO_PLAYERS; i++) {
+            player_destroy(&(*pipeline)->players[i], (*pipeline)->cache);
+        }
+        if ((*pipeline)->perf)  perf_dashboard_destroy((*pipeline)->perf);
+        if ((*pipeline)->cache) audio_cache_destroy((*pipeline)->cache);
+        pw_core_disconnect((*pipeline)->core);
+        pw_context_destroy((*pipeline)->pw_ctx);
+        pw_thread_loop_destroy((*pipeline)->loop);
+        free(*pipeline);
+        *pipeline = NULL;
+        return QUADRATURE_ERROR_INTERNAL;
+    }
+    atomic_store(&(*pipeline)->system_active, true);
+    (*pipeline)->advance_timeout_id = g_timeout_add(50, advance_timeout_callback, *pipeline);
+
     g_message("Pipeline created (%d players, %uHz)", MAX_AUDIO_PLAYERS, sample_rate);
     return QUADRATURE_OK;
 }
@@ -1367,38 +1383,6 @@ void audio_pipeline_destroy(audio_pipeline_t* pipeline) {
 
     free(pipeline);
     g_message("Pipeline destroyed");
-}
-
-quadrature_result_t audio_pipeline_start(audio_pipeline_t* pipeline) {
-    if (!pipeline) return QUADRATURE_ERROR_INVALID_PARAM;
-
-    if (pw_thread_loop_start(pipeline->loop) < 0) {
-        return QUADRATURE_ERROR_INTERNAL;
-    }
-
-    atomic_store(&pipeline->system_active, true);
-
-    /* Start auto-advance timeout (50ms interval on main thread) */
-    pipeline->advance_timeout_id = g_timeout_add(50, advance_timeout_callback, pipeline);
-
-    g_message("Pipeline started");
-    return QUADRATURE_OK;
-}
-
-quadrature_result_t audio_pipeline_stop(audio_pipeline_t* pipeline) {
-    if (!pipeline) return QUADRATURE_ERROR_INVALID_PARAM;
-
-    /* Stop auto-advance timeout */
-    if (pipeline->advance_timeout_id > 0) {
-        g_source_remove(pipeline->advance_timeout_id);
-        pipeline->advance_timeout_id = 0;
-    }
-
-    pw_thread_loop_stop(pipeline->loop);
-
-    atomic_store(&pipeline->system_active, false);
-    g_message("Pipeline stopped");
-    return QUADRATURE_OK;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1489,7 +1473,7 @@ quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline,
         }
 
         /* Preload NEXT track (async - this is where set_player_track does call load) */
-        if (!atomic_load(&p->repeat) && pipeline->library) {
+        if ((track_end_mode_t)atomic_load(&p->end_mode) != TRACK_END_REPEAT && pipeline->library) {
             int64_t next_id = library_cache_get_next_track_id(pipeline->library, track_id);
             if (next_id > 0) {
                 atomic_store(&p->next_track_id, next_id);
@@ -1510,7 +1494,7 @@ quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline,
         g_debug("Player %d: track %" G_GINT64_FORMAT " still decoding, will poll", player_id, track_id);
 
         /* Still preload next track (async) */
-        if (!atomic_load(&p->repeat) && pipeline->library) {
+        if ((track_end_mode_t)atomic_load(&p->end_mode) != TRACK_END_REPEAT && pipeline->library) {
             int64_t next_id = library_cache_get_next_track_id(pipeline->library, track_id);
             if (next_id > 0) {
                 atomic_store(&p->next_track_id, next_id);
@@ -1645,7 +1629,7 @@ static void process_pending_advances_internal(audio_pipeline_t* pipeline) {
         }
 
         /* Preload new next track */
-        if (!atomic_load(&p->repeat) && pipeline->library && pipeline->cache) {
+        if ((track_end_mode_t)atomic_load(&p->end_mode) != TRACK_END_REPEAT && pipeline->library && pipeline->cache) {
             int64_t new_next_id = library_cache_get_next_track_id(pipeline->library, current_id);
             if (new_next_id > 0) {
                 atomic_store(&p->next_track_id, new_next_id);
@@ -1805,6 +1789,14 @@ quadrature_result_t audio_pipeline_player_seek(audio_pipeline_t* pipeline, int p
     return QUADRATURE_OK;
 }
 
+quadrature_result_t audio_pipeline_player_seek_seconds(audio_pipeline_t* pipeline,
+                                                       int player_id, double seconds) {
+    if (!pipeline || !valid_player(player_id)) return QUADRATURE_ERROR_INVALID_PARAM;
+    if (seconds < 0.0) seconds = 0.0;
+    uint64_t target = (uint64_t)(seconds * (double)pipeline->sample_rate);
+    return audio_pipeline_player_seek(pipeline, player_id, target);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Playback Speed Control
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -1854,26 +1846,18 @@ quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t* pip
  * Repeat Control
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-quadrature_result_t audio_pipeline_player_set_repeat(audio_pipeline_t* pipeline, int player_id, bool repeat) {
+quadrature_result_t audio_pipeline_player_set_end_mode(audio_pipeline_t* pipeline,
+                                                       int player_id,
+                                                       track_end_mode_t mode) {
     if (!pipeline || !valid_player(player_id)) return QUADRATURE_ERROR_INVALID_PARAM;
-    atomic_store(&pipeline->players[player_id].repeat, repeat);
+    atomic_store(&pipeline->players[player_id].end_mode, (int)mode);
     return QUADRATURE_OK;
 }
 
-bool audio_pipeline_player_get_repeat(audio_pipeline_t* pipeline, int player_id) {
-    if (!pipeline || !valid_player(player_id)) return false;
-    return atomic_load(&pipeline->players[player_id].repeat);
-}
-
-quadrature_result_t audio_pipeline_player_set_autoplay(audio_pipeline_t* pipeline, int player_id, bool autoplay) {
-    if (!pipeline || !valid_player(player_id)) return QUADRATURE_ERROR_INVALID_PARAM;
-    atomic_store(&pipeline->players[player_id].autoplay, autoplay);
-    return QUADRATURE_OK;
-}
-
-bool audio_pipeline_player_get_autoplay(audio_pipeline_t* pipeline, int player_id) {
-    if (!pipeline || !valid_player(player_id)) return true;  /* Default: autoplay enabled */
-    return atomic_load(&pipeline->players[player_id].autoplay);
+track_end_mode_t audio_pipeline_player_get_end_mode(audio_pipeline_t* pipeline,
+                                                   int player_id) {
+    if (!pipeline || !valid_player(player_id)) return TRACK_END_AUTOPLAY;
+    return (track_end_mode_t)atomic_load(&pipeline->players[player_id].end_mode);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1943,80 +1927,66 @@ quadrature_result_t audio_pipeline_set_player_quantum(audio_pipeline_t* pipeline
  * Monitoring
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-channel_state_t audio_pipeline_get_player_state(audio_pipeline_t* pipeline, int player_id) {
-    if (!pipeline || !valid_player(player_id)) return CHANNEL_ERROR;
-    return atomic_load(&pipeline->players[player_id].state);
-}
+void audio_pipeline_get_player_display(audio_pipeline_t* pipeline,
+                                       int player_id,
+                                       audio_player_display_t* out) {
+    if (!out) return;
+    *out = (audio_player_display_t){0};
 
-uint64_t audio_pipeline_get_player_position(audio_pipeline_t* pipeline, int player_id) {
-    if (!pipeline || !valid_player(player_id)) return 0;
-    return atomic_load(&pipeline->players[player_id].position_samples);
-}
-
-uint64_t audio_pipeline_get_player_length(audio_pipeline_t* pipeline, int player_id) {
-    if (!pipeline || !valid_player(player_id)) return 0;
-    return atomic_load(&pipeline->players[player_id].length_samples);
-}
-
-uint32_t audio_pipeline_get_sample_rate(audio_pipeline_t* pipeline) {
-    if (!pipeline) return 0;
-    return pipeline->sample_rate;
-}
-
-double audio_pipeline_get_player_position_smooth(audio_pipeline_t* pipeline,
-                                                  int player_id,
-                                                  float* out_speed) {
     if (!pipeline || !valid_player(player_id)) {
-        if (out_speed) *out_speed = 1.0f;
-        return 0.0;
+        out->state = CHANNEL_ERROR;
+        out->speed = 1.0f;
+        return;
     }
 
     audio_player_t* p = &pipeline->players[player_id];
+    const double inv_rate = 1.0 / (double)pipeline->sample_rate;
+
+    out->state = atomic_load(&p->state);
+
     position_snapshot_t snap = {0};
     uint32_t seq1, seq2 = 0;
 
-    /* Seqlock read with retry limit.
-     * If the writer is pathologically active (shouldn't happen in practice),
-     * return the last snapshot — stale data for one UI frame is acceptable. */
+    /* Seqlock read with retry limit. If the writer is pathologically active
+     * (shouldn't happen in practice), fall through with the last snapshot —
+     * stale data for one UI frame is acceptable. */
     #define SEQLOCK_MAX_RETRIES 4
     for (int attempt = 0; attempt < SEQLOCK_MAX_RETRIES; attempt++) {
         seq1 = atomic_load_explicit(&p->position_seq, memory_order_acquire);
-        if (seq1 & 1)
-            continue;  /* Writer is active, spin */
+        if (seq1 & 1) continue;  /* Writer is active, spin */
         snap = p->position_snap;
         atomic_thread_fence(memory_order_acquire);
         seq2 = atomic_load_explicit(&p->position_seq, memory_order_relaxed);
         if (seq1 == seq2) break;
     }
 
-    if (out_speed) *out_speed = snap.speed;
+    out->speed = snap.speed;
 
-    /* No interpolation if not playing */
+    double pos_samples;
     if (!snap.playing || fabsf(snap.speed) < 0.01f) {
-        return (double)snap.position;
+        pos_samples = (double)snap.position;
+    } else {
+        /* Sample-count based interpolation (RT-safe — no syscalls) */
+        uint64_t current_count = atomic_load(&p->callback_sample_count);
+        uint64_t elapsed_samples = current_count - snap.sample_count;
+
+        /* Clamp to prevent stale data (max ~50ms at any sample rate) */
+        uint64_t max_elapsed = pipeline->sample_rate / 20;
+        if (elapsed_samples > max_elapsed) {
+            g_debug("Stale snapshot: elapsed=%" G_GUINT64_FORMAT " max=%" G_GUINT64_FORMAT,
+                    elapsed_samples, max_elapsed);
+            elapsed_samples = max_elapsed;
+        }
+
+        pos_samples = (double)snap.position + (double)elapsed_samples * snap.speed;
     }
 
-    /* Sample-count based interpolation (RT-safe - no syscalls in audio callback) */
-    uint64_t current_count = atomic_load(&p->callback_sample_count);
-    uint64_t elapsed_samples = current_count - snap.sample_count;
+    uint64_t length_samples = atomic_load(&p->length_samples);
+    if (pos_samples < 0.0) pos_samples = 0.0;
+    if (pos_samples > (double)length_samples) pos_samples = (double)length_samples;
 
-    /* Clamp to prevent stale data (max ~50ms at any sample rate) */
-    uint64_t max_elapsed = pipeline->sample_rate / 20;
-    if (elapsed_samples > max_elapsed) {
-        g_debug("Stale snapshot: elapsed=%" G_GUINT64_FORMAT " max=%" G_GUINT64_FORMAT,
-                elapsed_samples, max_elapsed);
-        elapsed_samples = max_elapsed;
-    }
-
-    double delta = (double)elapsed_samples * snap.speed;
-    double result = (double)snap.position + delta;
-
-    /* Clamp to track bounds */
-    uint64_t length = atomic_load(&p->length_samples);
-    if (result < 0.0) result = 0.0;
-    if (result > (double)length) result = (double)length;
-
-    return result;
+    out->position_seconds = pos_samples * inv_rate;
+    out->length_seconds   = (double)length_samples * inv_rate;
 }
 
 void audio_pipeline_get_player_spectrum(audio_pipeline_t* pipeline, int player_id,
@@ -2094,112 +2064,6 @@ void audio_pipeline_get_player_stats(audio_pipeline_t* pipeline,
     uint64_t total_advances = instant + deferred;
     stats->advance_hit_rate_pct = total_advances > 0
         ? (float)((double)instant / (double)total_advances * 100.0) : 100.0f;
-}
-
-perf_dashboard_t* audio_pipeline_get_perf_dashboard(audio_pipeline_t* pipeline) {
-    g_assert(pipeline != NULL);
-    return pipeline->perf;
-}
-
-audio_cache_t* audio_pipeline_get_audio_cache(audio_pipeline_t* pipeline) {
-    g_assert(pipeline != NULL);
-    return pipeline->cache;
-}
-
-void audio_pipeline_get_budget_histogram(audio_pipeline_t* pipeline, int player_id,
-                                          uint32_t out_buckets[10]) {
-    g_assert(pipeline != NULL);
-    g_assert(valid_player(player_id));
-    g_assert(out_buckets != NULL);
-
-    memset(out_buckets, 0, 10 * sizeof(uint32_t));
-
-    const budget_rb_t* rb = pipeline->players[player_id].budget_rb;
-    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
-
-    /* Read up to BUDGET_RB_CAPACITY samples (or all written so far) */
-    uint32_t total = write_pos < BUDGET_RB_CAPACITY ? write_pos : BUDGET_RB_CAPACITY;
-    uint32_t start = write_pos - total;  /* wraps naturally with unsigned arithmetic */
-
-    for (uint32_t i = 0; i < total; i++) {
-        uint16_t cpct = rb->samples[(start + i) & (BUDGET_RB_CAPACITY - 1)];
-        int bucket = cpct / 1000;  /* centipercent → 10% buckets */
-        if (bucket >= 10) bucket = 9;
-        out_buckets[bucket]++;
-    }
-}
-
-double audio_pipeline_get_budget_max(audio_pipeline_t* pipeline, int player_id) {
-    g_assert(pipeline != NULL);
-    g_assert(valid_player(player_id));
-
-    const budget_rb_t* rb = pipeline->players[player_id].budget_rb;
-    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
-
-    /* ~1 second of samples at ~10ms intervals */
-    uint32_t window = 100;
-    uint32_t available = write_pos < BUDGET_RB_CAPACITY ? write_pos : BUDGET_RB_CAPACITY;
-    if (available == 0) return 0.0;
-    if (window > available) window = available;
-
-    uint32_t start = write_pos - window;
-    uint16_t max_cpct = 0;
-    for (uint32_t i = 0; i < window; i++) {
-        uint16_t v = rb->samples[(start + i) & (BUDGET_RB_CAPACITY - 1)];
-        if (v > max_cpct) max_cpct = v;
-    }
-
-    return (double)max_cpct / 100.0;
-}
-
-uint32_t audio_pipeline_get_latency_samples(audio_pipeline_t* pipeline, int player_id,
-                                              uint16_t* out, uint32_t max_samples) {
-    g_assert(pipeline != NULL);
-    g_assert(valid_player(player_id));
-    g_assert(out != NULL);
-
-    const latency_rb_t* rb = pipeline->players[player_id].latency_rb;
-    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
-
-    uint32_t total = write_pos < LATENCY_RB_CAPACITY ? write_pos : LATENCY_RB_CAPACITY;
-    if (total > max_samples) total = max_samples;
-
-    uint32_t start = write_pos - total;
-    for (uint32_t i = 0; i < total; i++) {
-        out[i] = rb->samples[(start + i) & (LATENCY_RB_CAPACITY - 1)];
-    }
-    return total;
-}
-
-uint32_t audio_pipeline_get_interval_samples(audio_pipeline_t* pipeline, int player_id,
-                                               int64_t* out, uint32_t max_samples,
-                                               uint32_t* out_write_pos) {
-    g_assert(pipeline != NULL);
-    g_assert(valid_player(player_id));
-    g_assert(out != NULL);
-
-    const interval_rb_t* rb = pipeline->players[player_id].interval_rb;
-    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
-
-    uint32_t total = write_pos < INTERVAL_RB_CAPACITY ? write_pos : INTERVAL_RB_CAPACITY;
-    if (total > max_samples) total = max_samples;
-
-    uint32_t start = write_pos - total;
-    for (uint32_t i = 0; i < total; i++) {
-        out[i] = rb->samples[(start + i) & (INTERVAL_RB_CAPACITY - 1)];
-    }
-    if (out_write_pos) *out_write_pos = write_pos;
-    return total;
-}
-
-bool audio_pipeline_player_has_device_error(audio_pipeline_t* pipeline, int player_id) {
-    if (!pipeline || !valid_player(player_id)) return false;
-    return atomic_load_explicit(&pipeline->players[player_id].device_error, memory_order_acquire);
-}
-
-bool audio_pipeline_player_streams_active(audio_pipeline_t* pipeline, int player_id) {
-    if (!pipeline || !valid_player(player_id)) return false;
-    return atomic_load(&pipeline->players[player_id].streams_active);
 }
 
 void audio_pipeline_player_reconnect(audio_pipeline_t* pipeline, int player_id) {

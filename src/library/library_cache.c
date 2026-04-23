@@ -1222,7 +1222,7 @@ static quadrature_result_t init_slot(LibrarySlot *slot,
     atomic_init(&slot->warm_state, LIBRARY_CACHE_IDLE);
     atomic_init(&slot->available, true);
 
-    quadrature_result_t res = db_open_readonly(db_path_str, &slot->db);
+    quadrature_result_t res = db_open(db_path_str, true, &slot->db);
     if (res != QUADRATURE_OK) {
         /* DB doesn't exist yet (first run / post-db-clean). Cache is valid but
          * queries return empty until ensure_slot_db_open() succeeds after indexing. */
@@ -1231,7 +1231,7 @@ static quadrature_result_t init_slot(LibrarySlot *slot,
         return QUADRATURE_OK;
     }
 
-    res = db_open_readonly(db_path_str, &slot->db_warm);
+    res = db_open(db_path_str, true, &slot->db_warm);
     if (res != QUADRATURE_OK) {
         db_close(slot->db);
         slot->db      = NULL;
@@ -1272,11 +1272,11 @@ static void destroy_slot_internals(LibrarySlot *slot) {
 static void ensure_slot_db_open(LibrarySlot *slot) {
     if (slot->db) return;  /* Already open */
 
-    if (db_open_readonly(slot->db_path, &slot->db) != QUADRATURE_OK) {
+    if (db_open(slot->db_path, true, &slot->db) != QUADRATURE_OK) {
         slot->db = NULL;
         return;
     }
-    if (db_open_readonly(slot->db_path, &slot->db_warm) != QUADRATURE_OK) {
+    if (db_open(slot->db_path, true, &slot->db_warm) != QUADRATURE_OK) {
         db_close(slot->db);
         slot->db      = NULL;
         slot->db_warm = NULL;
@@ -1645,7 +1645,7 @@ static gpointer cow_refresh_thread_func(gpointer data) {
     /* Reopen the warming connection. slot->db stays untouched — UI reads
      * from it concurrently via WAL. */
     if (slot->db_warm) { db_close(slot->db_warm); slot->db_warm = NULL; }
-    if (db_open_readonly(slot->db_path, &slot->db_warm) != QUADRATURE_OK) {
+    if (db_open(slot->db_path, true, &slot->db_warm) != QUADRATURE_OK) {
         g_warning("COW refresh [bitmap=%d]: failed to reopen db_warm", slot->bitmap_index);
         goto done;
     }
@@ -2929,40 +2929,6 @@ GPtrArray *library_cache_get_albums_filtered(library_cache_t *cache,
 /* =============================================================================
  * Prefetch API
  * ============================================================================= */
-
-void library_cache_prefetch_fullsize_artwork(library_cache_t *cache,
-                                             int64_t album_id) {
-    if (!cache || album_id <= 0) return;
-
-    int64_t local_album_id;
-    LibrarySlot *slot = decode_slot(cache, album_id, &local_album_id);
-    if (!slot) return;
-
-    const library_album_info_t *album = slot_get_album(slot, local_album_id);
-    if (!album || !album->path || !album->path[0]) return;
-
-    char *abs_album_path;
-    if (album->path[0] == '/') {
-        abs_album_path = g_strdup(album->path);
-    } else if (slot->music_base) {
-        abs_album_path = g_build_filename(slot->music_base, album->path, NULL);
-    } else {
-        abs_album_path = g_strdup(album->path);
-    }
-
-    const char *art_names[] = {
-        "art.jpg", "cover.jpg", "folder.jpg", "album.jpg", "front.jpg",
-        "art.png", "cover.png", "folder.png", "album.png", "front.png",
-        NULL
-    };
-
-    for (const char **name = art_names; *name; name++) {
-        char *art_path = g_build_filename(abs_album_path, *name, NULL);
-        g_async_queue_push(cache->prefetch_queue, art_path);
-    }
-
-    g_free(abs_album_path);
-}
 
 void library_cache_prefetch_audio_files(library_cache_t *cache,
                                         const int64_t *track_ids,

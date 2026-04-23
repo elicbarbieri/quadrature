@@ -968,7 +968,8 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
             bool has_no_images = g_file_test(no_images_path, G_FILE_TEST_EXISTS);
 
             if (has_thumb) {
-                // Load and resize thumb, add to atlas
+                /* Load + resize; require a strict 3-band RGB result so atlas
+                 * rows stay well-formed. Grayscale/RGBA inputs are skipped. */
                 VipsImage* img = NULL;
                 if (vips_thumbnail(thumb_path, &img, atlas_thumb,
                                     "height", atlas_thumb,
@@ -976,16 +977,13 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
                                     NULL) == 0) {
                     size_t pixel_size = 0;
                     void* pixel_data = vips_image_write_to_memory(img, &pixel_size);
-                    if (pixel_data) {
-                        size_t expected = (size_t)atlas_thumb * atlas_thumb * ARTWORK_ATLAS_CHANNELS;
-                        if (pixel_size >= expected) {
-                            if (artist_atlas_builder_add_art(atlas, uuid_bin,
-                                    pixel_data, expected) == QUADRATURE_OK) {
-                                dirty = true;
-                            }
-                        }
-                        g_free(pixel_data);
+                    size_t expected = (size_t)atlas_thumb * atlas_thumb * ARTWORK_ATLAS_CHANNELS;
+                    if (pixel_data && pixel_size == expected &&
+                        artist_atlas_builder_add_art(atlas, uuid_bin,
+                                pixel_data, expected) == QUADRATURE_OK) {
+                        dirty = true;
                     }
+                    g_free(pixel_data);
                     g_object_unref(img);
                 } else {
                     vips_error_clear();

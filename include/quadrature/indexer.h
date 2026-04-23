@@ -319,11 +319,6 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
 quadrature_result_t mb_resolver_run(mb_resolver_t* ctx);
 
 /**
- * Cancel in-progress resolution. Safe to call from any thread.
- */
-void mb_resolver_cancel(mb_resolver_t* ctx);
-
-/**
  * Destroy resolver context.
  */
 void mb_resolver_destroy(mb_resolver_t* ctx);
@@ -473,16 +468,34 @@ quadrature_result_t db_create_or_get_album_by_path(
     quadrature_db_t* db, const char* path, const char* title,
     int64_t artist_id, uint16_t year, int64_t* album_id_out);
 
-/* Reconcile one album's state to match `desired`. Must run inside a txn.
- * summary_out may be NULL. */
-quadrature_result_t db_reconcile_album(
-    quadrature_db_t* db, int64_t album_id,
-    const desired_album_state_t* desired,
+/* Reconcile a batch of albums' state to match their desired states. Must run
+ * inside a txn. `album_ids` and `desireds` are parallel arrays of length
+ * `count`. Pass count=1 for single-album reconciliation — there is no separate
+ * single-album API.
+ *
+ * Implementation: three bulk SELECTs via json_each(?) load current album,
+ * track, and track_artist state for the entire batch, then per-album
+ * diff-and-update uses cached prepared statements. Per-album failures
+ * (missing album row) are skipped; the remainder of the batch still commits.
+ *
+ * summaries_out may be NULL, or point to a parallel array of `count` entries. */
+quadrature_result_t db_reconcile_albums(
+    quadrature_db_t* db,
+    const int64_t* album_ids,
+    const desired_album_state_t* desireds,
+    size_t count,
     const reconcile_policy_t* policy,
-    reconcile_summary_t* summary_out);
+    reconcile_summary_t* summaries_out);
 
 /* Delete an album and all its tracks (orphan sweep). Must run inside a txn. */
 quadrature_result_t db_delete_album(quadrature_db_t* db, int64_t album_id);
+
+/* Status-only convenience: reconcile mb_status + mb_resolved_at with
+ * RECONCILE_POLICY_MB. Used by the MB resolver to record FAILED / NO_MATCH
+ * outcomes without building a full desired_album_state_t. Reconciler writes
+ * only differing fields, so this is ~1 SELECT + 0-1 UPDATE. */
+quadrature_result_t db_reconcile_album_mb_status(
+    quadrature_db_t* db, int64_t album_id, int mb_status, int64_t mb_resolved_at);
 
 #ifdef __cplusplus
 }

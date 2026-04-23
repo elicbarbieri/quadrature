@@ -36,7 +36,7 @@ static int64_t build_untagged_album(quadrature_db_t *db,
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
 
     /* Artist */
-    int64_t artist_id = db_get_or_create_artist(db, artist_name);
+    int64_t artist_id = db_get_or_create_artist(db, artist_name, NULL, NULL);
     cr_assert_gt(artist_id, 0);
     if (artist_id_out) *artist_id_out = artist_id;
 
@@ -132,7 +132,7 @@ Test(reconciler, bronson_untagged_tracks_get_positions_from_mb) {
     unlink(db_path);
 
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(db_path, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(db_path, false, &db), QUADRATURE_OK);
 
     /* Canonical BRONSON tracklist (release 5ed617d7-898f-4e05-82a1-bfc586a4b013) */
     const char *filenames[] = {
@@ -192,8 +192,8 @@ Test(reconciler, bronson_untagged_tracks_get_positions_from_mb) {
     /* --- Reconcile --- */
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     reconcile_summary_t summary = {0};
-    cr_assert_eq(db_reconcile_album(db, album_id, &desired,
-                                     &RECONCILE_POLICY_MB, &summary),
+    cr_assert_eq(db_reconcile_albums(db, &album_id, &desired, 1,
+                                      &RECONCILE_POLICY_MB, &summary),
                  QUADRATURE_OK);
     cr_assert_eq(db_commit(db), QUADRATURE_OK);
 
@@ -272,7 +272,7 @@ Test(reconciler, idempotent_when_already_consistent) {
     unlink(db_path);
 
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(db_path, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(db_path, false, &db), QUADRATURE_OK);
 
     const char *filenames[] = { "01.flac", "02.flac", "03.flac" };
     const char *titles[]    = { "A", "B", "C" };
@@ -299,8 +299,8 @@ Test(reconciler, idempotent_when_already_consistent) {
     /* First reconcile: everything changes. */
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     reconcile_summary_t s1 = {0};
-    cr_assert_eq(db_reconcile_album(db, album_id, &desired,
-                                     &RECONCILE_POLICY_MB, &s1),
+    cr_assert_eq(db_reconcile_albums(db, &album_id, &desired, 1,
+                                      &RECONCILE_POLICY_MB, &s1),
                  QUADRATURE_OK);
     cr_assert_eq(db_commit(db), QUADRATURE_OK);
     cr_assert_gt(s1.tracks_updated, 0);
@@ -308,8 +308,8 @@ Test(reconciler, idempotent_when_already_consistent) {
     /* Second reconcile with identical desired state: zero writes. */
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     reconcile_summary_t s2 = {0};
-    cr_assert_eq(db_reconcile_album(db, album_id, &desired,
-                                     &RECONCILE_POLICY_MB, &s2),
+    cr_assert_eq(db_reconcile_albums(db, &album_id, &desired, 1,
+                                      &RECONCILE_POLICY_MB, &s2),
                  QUADRATURE_OK);
     cr_assert_eq(db_commit(db), QUADRATURE_OK);
 
@@ -335,7 +335,7 @@ Test(reconciler, confidence_gate_blocks_low_confidence_position_writeback) {
     unlink(db_path);
 
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(db_path, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(db_path, false, &db), QUADRATURE_OK);
 
     const char *filenames[] = { "01.flac", "02.flac" };
     const char *titles[]    = { "One", "Two" };
@@ -361,7 +361,7 @@ Test(reconciler, confidence_gate_blocks_low_confidence_position_writeback) {
 
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     reconcile_summary_t s = {0};
-    cr_assert_eq(db_reconcile_album(db, album_id, &desired, &strict, &s),
+    cr_assert_eq(db_reconcile_albums(db, &album_id, &desired, 1, &strict, &s),
                  QUADRATURE_OK);
     cr_assert_eq(db_commit(db), QUADRATURE_OK);
 

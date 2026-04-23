@@ -30,17 +30,17 @@ Full-text search with type filtering and optional metadata mode.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ [🔍 Search...              ] [*ALL*] [Artists] [Albums] [Songs] [Meta] │
+│ [🔍 Search...              ] [*ALL*] [Artists] [Albums] [Songs] [Meta]  │
 │ [Genre ▼▼] [Year ▼▼]                                                    │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ ARTISTS (3)                                                             │
-│   The Beatles        4 albums   [art][art][art][art]               [>]  │
+│   Daft Punk          4 albums   [art][art][art][art]               [>]  │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ ALBUMS (5)                                                              │
-│   [art] Abbey Road              The Beatles · 1969                 [>]  │
+│   [art] Random Access Memories  Daft Punk · 2013                   [>]  │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ SONGS (42)                                                              │
-│   [art] Here Comes the Sun  Abbey Road  The Beatles          1969 3:06  │
+│   [art] Get Lucky    Random Access Memories  Daft Punk       2013 6:08  │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,18 +49,20 @@ Full-text search with type filtering and optional metadata mode.
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ [🔍 Search...              ] [*ALL*] [Artists] [Albums] [Songs] [*Meta*]│
-│ [Genre ▼▼] [Year ▼▼] [Role ▼▼]                                         │
+│ [Genre ▼▼] [Year ▼▼] [Role ▼▼]                                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ ...                                                                     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Row 1 — Search & type toggles:**
+
 - **Search:** 200ms debounce, auto-focus on view activation, `Escape` clears
 - **Type toggles:** All, Artists, Albums, Songs. `Ctrl+F/A/B/S` to switch
 - **Metadata toggle:** `Ctrl+M`. Switches search to credit/metadata matching
 
 **Row 2 — Facet filters:**
+
 - **Genre and Year** are always visible — multi-select, stay open until click-away (same behavior as filter bar)
 - **Role** appears when Metadata is active, hidden otherwise — multi-select dropdown of credit roles (Producer, Engineer, Composer, Mixer, etc.). Stays open until click-away; multiple roles can be selected; results match any selected role
 
@@ -74,8 +76,8 @@ Full-text search with type filtering and optional metadata mode.
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ Artists · 89 artists                                     [Filter bar]   │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ The Beatles                   [art][art][art][art]                 [>]  │
-│   4 albums, 89 tracks                                                   │
+│ Daft Punk                     [art][art][art][art]                 [>]  │
+│   4 albums, 56 tracks                                                   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -87,10 +89,10 @@ Art strip shows up to 6 album thumbnails.
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Albums · 247 albums                        [Filter bar]     │
+│ Albums · 247 albums                        [Filter bar]    │
 ├────────────────────────────────────────────────────────────┤
-│ [48px] Abbey Road                                   17 trk │
-│        The Beatles · 1969                                   │
+│ [48px] Random Access Memories                       13 trk │
+│        Daft Punk · 2013                                    │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -102,32 +104,37 @@ Unified filter bar shared by Artists and Albums views. Two rows.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│ [Genre ▼] [Year ▼]                          ...padding...  [Clear]   [Sort ▼]  │
-│ [Search [____________________________]]  [Default ▼]                            │
+│ [Genre ▼] [Year ▼]                          ...padding...  [Clear]   [Sort ▼]    │
+│ [Search [____________________________]]  [Default ▼]                             │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Row 1 — Filters & Sort:**
+
 - **Genre:** Multi-select dropdown populated from library genres. Stays open until click-away.
 - **Year:** Multi-select dropdown, decade buckets (2020s, 2010s, ..., Pre-1960). Stays open until click-away.
 - **Clear:** Resets all filters to default (right-aligned)
 - **Sort:** Single-select dropdown, closes on selection (right-aligned, after Clear)
 
 **Row 2 — Search:**
+
 - **Search:** 200ms debounce, case-insensitive substring
 - **Search mode** (`[Default ▼]`): Single-select dropdown, closes on selection
   - *Default:* Plaintext search across names/titles
   - *Metadata:* Searches credits, labels, and other metadata fields
 
 **Metadata mode** (search mode set to Metadata):
+
 - Role dropdown appears alongside Genre and Year on row 1
 - All three facets (Genre, Year, Role) visible simultaneously
 
 **Dropdown behavior:**
+
 - Multi-select (Genre, Year, Role): popover stays open until user clicks outside — allows toggling multiple values
 - Single-select (Sort, Search mode): popover closes immediately on selection
 
 **Behavior:**
+
 - All filters AND together
 - `/` focuses search box, `Escape` clears
 - Active indicator: filter button shows cyan dot, count shows "(filtered)"
@@ -142,15 +149,15 @@ Context-aware view showing Album or Artist detail based on navigation.
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ [<] Back to Albums                                                      │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ ┌──────────┐  ABBEY ROAD                                                │
-│ │  250px   │  The Beatles                   (artist button > popover)   │
-│ │   art    │  Album · September 26, 1969                                │
-│ │          │  Label: Apple Records                                      │
-│ └──────────┘  17 songs · 47:23                                          │
+│ ┌──────────┐  RANDOM ACCESS MEMORIES                                    │
+│ │  250px   │  Daft Punk                     (artist button > popover)   │
+│ │   art    │  Album · May 17, 2013                                      │
+│ │          │  Label: Columbia Records                                   │
+│ └──────────┘  13 songs · 74:33                                          │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  1. Come Together        The Beatles                        [i]  4:19  │
-│  2. Something            The Beatles                        [i]  3:02  │
-│  3. Maxwell's Silver...  The Beatles                        [i]  3:27  │
+│  1. Give Life Back to...  Daft Punk                         [i]  4:34   │
+│  2. The Game of Love     Daft Punk                          [i]  5:21   │
+│  3. Giorgio by Moroder   Daft Punk                          [i]  9:04   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -162,22 +169,22 @@ Track list uses compact track items with inline artist buttons. Multi-disc album
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ [<] Back to Artists                                                     │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ THE BEATLES                                                             │
-│ 4 albums · 89 tracks · 5h 23m                                           │
+│ DAFT PUNK                                                               │
+│ 4 albums · 56 tracks · 4h 12m                                           │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ ALBUMS                                                                  │
-│ ┌─────────┐  ABBEY ROAD                                            [>] │
-│ │ 250x250 │  Album · September 26, 1969                                 │
-│ │         │  Label: Apple Records                                       │
-│ └─────────┘  17 tracks · 47:23                                          │
-│   1. Come Together       The Beatles                             4:19  │
-│   2. Something           The Beatles                             3:02  │
-│      ...see all 17 tracks                                              │
+│ ┌─────────┐  RANDOM ACCESS MEMORIES                                     │
+│ │ 250x250 │  Album · May 17, 2013                                       │
+│ │         │  Label: Columbia Records                                    │
+│ └─────────┘  13 tracks · 74:33                                          │
+│   1. Give Life Back to... Daft Punk                              4:34   │
+│   2. The Game of Love    Daft Punk                               5:21   │
+│      ...see all 13 tracks                                               │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ APPEARS ON                                        [ Albums | Tracks ]   │
-│ ┌─────────┐  CONCERT FOR BANGLADESH                               [>] │
-│ │ 250x250 │  Various Artists · 1971                                    │
-│ └─────────┘                                                            │
+│ ┌─────────┐  TRON: LEGACY RECONFIGURED                                  │
+│ │ 250x250 │  Various Artists · 2011                                     │
+│ └─────────┘                                                             │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -203,10 +210,10 @@ Manages library sources. Each library is a LibraryCard, a self-contained card th
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │ ┌──────────────────────────────────────────────────────┐ │
-│ │ Eli's EC (click to rename)      * Online  [Rescan]  │ │
+│ │ Eli's EC (click to rename)      * Online  [Rescan]   │ │
 │ │ /mnt/elicb/drive                                     │ │
 │ ├──────────────────────────────────────────────────────┤ │
-│ │  45,231 tracks · 312 albums · 89 artists · 2d 14h   │ │
+│ │  45,231 tracks · 312 albums · 89 artists · 2d 14h    │ │
 │ │  Last scanned Feb 18, 2026                           │ │
 │ └──────────────────────────────────────────────────────┘ │
 │                                                          │
@@ -250,27 +257,27 @@ Shown while indexing. Four vertically stacked phase rows, always present. Visual
 
 Each phase row has: phase title (left) + status text (right), a progress bar, and a rate/ETA label below. The Scan phase pulses (indeterminate); Metadata and Artwork show fractional fill; MusicBrainz pulses.
 
-| Phase state | Visual |
-|---|---|
-| Not yet reached | Dimmed |
-| Active | Full opacity, cyan title |
-| Complete | Green bar fill |
-| Error | Red tint |
+| Phase state     | Visual                   |
+| --------------- | ------------------------ |
+| Not yet reached | Dimmed                   |
+| Active          | Full opacity, cyan title |
+| Complete        | Green bar fill           |
+| Error           | Red tint                 |
 
 ### Card States and Actions
 
-| State | Body | Actions |
-|-------|------|---------|
-| Online / Ready | stats | [Rescan] [Remove] |
-| Indexing | progress | [Cancel] |
-| Error | stats (with error btn) | [Retry] [Remove] |
-| Offline | stats (dim) | [Remove] |
+| State          | Body                   | Actions           |
+| -------------- | ---------------------- | ----------------- |
+| Online / Ready | stats                  | [Rescan] [Remove] |
+| Indexing       | progress               | [Cancel]          |
+| Error          | stats (with error btn) | [Retry] [Remove]  |
+| Offline        | stats (dim)            | [Remove]          |
 
 ### Transition Sequence
 
 1. **[Rescan]**: all 4 phase rows reset to dimmed, card crossfades to progress panel
-2. **Progress updates**: phase rows update in place (bars, labels, state)
-3. **Complete**: 2s hold, card crossfades back to stats panel with updated counts
+1. **Progress updates**: phase rows update in place (bars, labels, state)
+1. **Complete**: 2s hold, card crossfades back to stats panel with updated counts
 
 ## Gestures and Shortcuts
 

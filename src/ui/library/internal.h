@@ -76,7 +76,6 @@ void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int bitmap_index,
 void artwork_manager_add_library(ArtworkManager *mgr, int bitmap_index,
                                   const char *data_root, const char *music_root);
 void artwork_manager_remove_library(ArtworkManager *mgr, int bitmap_index);
-void artwork_manager_prefetch_fullsize(ArtworkManager *mgr, int64_t album_id);
 
 /* Load full-resolution album art directly from the album directory on disk.
  * Bypasses the thumbnail atlas — intended for detail views where the raw image

@@ -60,7 +60,7 @@ static int64_t insert_album_track(quadrature_db_t *db,
                                   const char *album_title,
                                   const char *track_path,
                                   const char *track_title) {
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist");
+    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     cr_assert(artist_id > 0);
 
     int64_t album_id = test_insert_album(db, album_path, album_title, artist_id, 2024);
@@ -82,7 +82,7 @@ static char *resolve_one(const char *album_path,
     cleanup_test_db();
 
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(test_db_path, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(test_db_path, false, &db), QUADRATURE_OK);
 
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
     int64_t track_id = insert_album_track(db, album_path, "Album",
@@ -160,7 +160,7 @@ Test(path_resolution, nonexistent_track_returns_null) {
 
     /* Create an empty DB so the cache can open it */
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(test_db_path, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(test_db_path, false, &db), QUADRATURE_OK);
     db_close(db);
 
     library_cache_t *cache = NULL;

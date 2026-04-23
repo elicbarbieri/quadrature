@@ -147,11 +147,10 @@ static void on_shutdown(GtkApplication *gtkapp, gpointer data) {
     (void)gtkapp;
     AppData *d = data;
 
-    /* Stop audio pipeline first — halts PipeWire thread loop and removes
+    /* Destroy audio pipeline first — halts PipeWire thread loop and removes
      * the advance timer, ensuring no RT or GLib callbacks fire during
      * subsequent destruction */
     if (d->pipeline) {
-        audio_pipeline_stop(d->pipeline);
         audio_pipeline_destroy(d->pipeline);
         d->pipeline = NULL;
     }
@@ -222,14 +221,6 @@ int main(int argc, char *argv[]) {
     /* Create audio pipeline with library cache */
     if (audio_pipeline_create(data.library_cache, SAMPLE_RATE, &data.pipeline) != QUADRATURE_OK) {
         g_critical("Failed to create audio pipeline");
-        if (data.library_cache) library_cache_destroy(data.library_cache);
-        app_settings_destroy(data.settings);
-        return 1;
-    }
-
-    if (audio_pipeline_start(data.pipeline) != QUADRATURE_OK) {
-        g_critical("Failed to start audio pipeline");
-        audio_pipeline_destroy(data.pipeline);
         if (data.library_cache) library_cache_destroy(data.library_cache);
         app_settings_destroy(data.settings);
         return 1;

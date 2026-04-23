@@ -98,7 +98,7 @@ static inline int64_t test_insert_track_full(quadrature_db_t *db,
 
     bool need_txn = !db->in_transaction;
     if (need_txn) cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    cr_assert_eq(db_reconcile_album(db, album_id, &desired, &policy, NULL),
+    cr_assert_eq(db_reconcile_albums(db, &album_id, &desired, 1, &policy, NULL),
                  QUADRATURE_OK, "reconcile track '%s'", rel_path);
     if (need_txn) cr_assert_eq(db_commit(db), QUADRATURE_OK);
 

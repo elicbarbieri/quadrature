@@ -283,7 +283,7 @@ static void bootstrap_empty_db(const char *data_dir) {
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", data_dir);
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(db_path, &db), QUADRATURE_OK,
+    cr_assert_eq(db_open(db_path, false, &db), QUADRATURE_OK,
         "bootstrap_empty_db: failed at %s", db_path);
     db_close(db);
 }

@@ -47,11 +47,22 @@ typedef struct {
 } ArtworkSlot;
 
 typedef struct {
-    int64_t album_id;
+    int64_t id;          /* album_id or artist_id */
     GdkTexture *texture;
     GList *lru_link;
     uint32_t access_count;
 } CacheEntry;
+
+/* Shared frequency-weighted LRU texture cache (main-thread-only, no lock).
+ * One instance per texture type (album, artist). */
+typedef struct {
+    GHashTable *map;         /* id → CacheEntry* */
+    GQueue      lru;
+    size_t      max_entries;
+    _Atomic size_t hits;
+    _Atomic size_t misses;
+    _Atomic size_t evictions;
+} TextureCache;
 
 typedef struct {
     GtkWidget *image;
@@ -86,46 +97,26 @@ struct _ArtworkManager {
     artist_atlas_reader_t *artist_atlas;
     char *artist_atlas_path;           /* Path for reload detection */
 
-    /* Frequency-weighted LRU texture cache (keyed by global album_id).
+    /* Album + artist texture caches.
      *
      * NO LOCK NEEDED: every access (reads in bind callbacks, writes in
      * complete_on_main idle callbacks, evictions in reload/remove signal
      * handlers) runs on the GTK main thread.  Worker threads never touch
-     * the cache — they post results via g_idle_add(). */
-    GHashTable *cache;
-    GQueue lru;
-    size_t max_entries;
+     * them — they post results via g_idle_add(). */
+    TextureCache album_cache;
+    TextureCache artist_cache;
 
-    /* Artist texture cache (keyed by global artist_id, separate from album cache).
-     * Same main-thread-only invariant as album cache — no lock needed. */
-    GHashTable *artist_cache;
-    GQueue artist_lru;
-    size_t artist_max_entries;
-
-    /* Pending loads (album) */
-    GHashTable *pending;
-    GMutex pending_lock;
-
-    /* Pending loads (artist) */
-    GHashTable *artist_pending;
-    GMutex artist_pending_lock;
-
-    /* Pending loads (fullsize — detail views, no cache) */
-    GHashTable *fullsize_pending;
-    GMutex fullsize_pending_lock;
+    /* Pending loads — indexed by LoadTaskType (ALBUM / ARTIST / FULLSIZE). */
+    GHashTable *pending[3];
+    GMutex pending_locks[3];
 
     /* Worker pool (shared between album and artist loads) */
     GAsyncQueue *load_queue;
     GThread *workers[ARTWORK_MANAGER_DEFAULT_WORKERS];
     gboolean shutdown;
 
-    /* Stats (atomic) */
-    _Atomic size_t hits;
-    _Atomic size_t misses;
-    _Atomic size_t evictions;
+    /* Stats (atomic) — atlas_hits counts atlas-decode successes from workers */
     _Atomic size_t atlas_hits;
-    _Atomic size_t artist_hits;
-    _Atomic size_t artist_misses;
 
     /* Latency histograms (µs scale, lock-free recording) */
     perf_histogram_us_t texture_hit_hist;   /* lookup + LRU touch time */
@@ -197,59 +188,81 @@ static char *find_latest_atlas(const char *library_root, int thumb_size) {
 #define EVICTION_SCAN_MIN 16
 #define EVICTION_SCAN_PERCENT 10
 
-/**
- * Frequency-weighted eviction: scan bottom EVICTION_SCAN_PERCENT% of the LRU,
- * evict the entry with the lowest access_count. Shared between album and artist caches.
- * Caller must hold the corresponding cache mutex.
- */
-static void cache_evict_if_needed(GHashTable *cache, GQueue *lru, size_t max_entries) {
-    while (g_hash_table_size(cache) > max_entries && !g_queue_is_empty(lru)) {
-        guint queue_len = g_queue_get_length(lru);
-        guint scan_count = queue_len * EVICTION_SCAN_PERCENT / 100;
-        if (scan_count < EVICTION_SCAN_MIN) scan_count = EVICTION_SCAN_MIN;
-        if (scan_count > queue_len) scan_count = queue_len;
-
-        GList *best_to_evict = NULL;
-        uint32_t min_count = UINT32_MAX;
-
-        GList *l = lru->tail;
-        for (guint i = 0; l && i < scan_count; i++, l = l->prev) {
-            CacheEntry *e = l->data;
-            if (e->access_count < min_count) {
-                min_count = e->access_count;
-                best_to_evict = l;
-            }
-        }
-
-        if (!best_to_evict) best_to_evict = lru->tail;
-
-        CacheEntry *e = best_to_evict->data;
-        g_hash_table_remove(cache, &e->album_id);
-        g_queue_delete_link(lru, best_to_evict);
-        cache_entry_free(e);
-    }
+static void texture_cache_init(TextureCache *tc, size_t max_entries) {
+    tc->map = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, NULL);
+    g_queue_init(&tc->lru);
+    tc->max_entries = max_entries;
+    atomic_store(&tc->hits, 0);
+    atomic_store(&tc->misses, 0);
+    atomic_store(&tc->evictions, 0);
 }
 
-static void touch_entry(GQueue *lru, CacheEntry *e) {
+static void texture_cache_clear(TextureCache *tc) {
+    for (GList *l = tc->lru.head; l; l = l->next) cache_entry_free(l->data);
+    g_queue_clear(&tc->lru);
+    g_hash_table_remove_all(tc->map);
+}
+
+static void texture_cache_destroy(TextureCache *tc) {
+    texture_cache_clear(tc);
+    g_hash_table_destroy(tc->map);
+}
+
+/* Look up id (main-thread only) and bump hit/miss counters.
+ * On hit, promotes entry to MRU and increments access_count. */
+static GdkTexture *texture_cache_touch(TextureCache *tc, int64_t id) {
+    CacheEntry *e = g_hash_table_lookup(tc->map, &id);
+    if (!e) { atomic_fetch_add(&tc->misses, 1); return NULL; }
+    atomic_fetch_add(&tc->hits, 1);
     e->access_count++;
-    if (e->lru_link) {
-        g_queue_unlink(lru, e->lru_link);
-        g_queue_push_head_link(lru, e->lru_link);
+    g_queue_unlink(&tc->lru, e->lru_link);
+    g_queue_push_head_link(&tc->lru, e->lru_link);
+    return e->texture;
+}
+
+/* Insert + evict down to max_entries via frequency-weighted LRU scan.
+ * No-op if id already cached or texture is NULL. Refs the texture. */
+static void texture_cache_insert(TextureCache *tc, int64_t id, GdkTexture *texture) {
+    if (!texture || g_hash_table_contains(tc->map, &id)) return;
+
+    CacheEntry *e = g_new0(CacheEntry, 1);
+    e->id = id;
+    e->texture = g_object_ref(texture);
+    e->access_count = 1;
+    g_hash_table_insert(tc->map, &e->id, e);
+    g_queue_push_head(&tc->lru, e);
+    e->lru_link = tc->lru.head;
+
+    while (g_hash_table_size(tc->map) > tc->max_entries && !g_queue_is_empty(&tc->lru)) {
+        guint qlen = g_queue_get_length(&tc->lru);
+        guint scan = qlen * EVICTION_SCAN_PERCENT / 100;
+        if (scan < EVICTION_SCAN_MIN) scan = EVICTION_SCAN_MIN;
+        if (scan > qlen) scan = qlen;
+
+        GList *victim = tc->lru.tail;
+        uint32_t min_count = UINT32_MAX;
+        GList *l = tc->lru.tail;
+        for (guint i = 0; l && i < scan; i++, l = l->prev) {
+            CacheEntry *c = l->data;
+            if (c->access_count < min_count) { min_count = c->access_count; victim = l; }
+        }
+        CacheEntry *v = victim->data;
+        g_hash_table_remove(tc->map, &v->id);
+        g_queue_delete_link(&tc->lru, victim);
+        cache_entry_free(v);
+        atomic_fetch_add(&tc->evictions, 1);
     }
 }
 
-/**
- * Evict all texture cache entries belonging to a specific library.
- * Caller must hold the corresponding cache mutex.
- */
-static void cache_evict_library(GHashTable *cache, GQueue *lru, int bitmap_index) {
-    GList *l = lru->head;
+/* Drop every entry whose id decodes to the given library bitmap_index. */
+static void texture_cache_evict_library(TextureCache *tc, int bitmap_index) {
+    GList *l = tc->lru.head;
     while (l) {
         GList *next = l->next;
         CacheEntry *e = l->data;
-        if (LIBRARY_GLOBAL_ID_LIB(e->album_id) == bitmap_index) {
-            g_hash_table_remove(cache, &e->album_id);
-            g_queue_delete_link(lru, l);
+        if (LIBRARY_GLOBAL_ID_LIB(e->id) == bitmap_index) {
+            g_hash_table_remove(tc->map, &e->id);
+            g_queue_delete_link(&tc->lru, l);
             cache_entry_free(e);
         }
         l = next;
@@ -317,33 +330,8 @@ static gboolean complete_on_main(gpointer data) {
         return G_SOURCE_REMOVE;  /* load_complete_free handles struct cleanup */
     }
 
-    GHashTable *tex_cache;
-    GQueue *lru;
-    if (lc->type == LOAD_ARTIST) {
-        tex_cache = mgr->artist_cache;
-        lru = &mgr->artist_lru;
-    } else {
-        tex_cache = mgr->cache;
-        lru = &mgr->lru;
-    }
-
-    /* No lock needed — this idle callback runs on the main thread,
-     * as do all other cache accessors (bind callbacks, reload handlers). */
-    if (lc->texture) {
-        if (!g_hash_table_contains(tex_cache, &lc->id)) {
-            CacheEntry *e = g_new0(CacheEntry, 1);
-            e->album_id = lc->id;
-            e->texture = g_object_ref(lc->texture);
-            e->access_count = 1;
-            g_hash_table_insert(tex_cache, &e->album_id, e);
-            g_queue_push_head(lru, e);
-            e->lru_link = lru->head;
-            if (lc->type == LOAD_ARTIST)
-                cache_evict_if_needed(tex_cache, lru, mgr->artist_max_entries);
-            else
-                cache_evict_if_needed(tex_cache, lru, mgr->max_entries);
-        }
-    }
+    TextureCache *tc = (lc->type == LOAD_ARTIST) ? &mgr->artist_cache : &mgr->album_cache;
+    texture_cache_insert(tc, lc->id, lc->texture);
 
     for (GSList *l = lc->callbacks; l; l = l->next) {
         CallbackReg *reg = l->data;
@@ -398,19 +386,8 @@ static gpointer worker_func(gpointer data) {
         if (!task) continue;
         if (g_atomic_int_get(&mgr->shutdown)) { load_task_free(task); break; }
 
-        /* Select the correct pending table based on task type */
-        GMutex *pending_lock;
-        GHashTable *pending_table;
-        if (task->type == LOAD_FULLSIZE) {
-            pending_lock = &mgr->fullsize_pending_lock;
-            pending_table = mgr->fullsize_pending;
-        } else if (task->type == LOAD_ARTIST) {
-            pending_lock = &mgr->artist_pending_lock;
-            pending_table = mgr->artist_pending;
-        } else {
-            pending_lock = &mgr->pending_lock;
-            pending_table = mgr->pending;
-        }
+        GMutex *pending_lock   = &mgr->pending_locks[task->type];
+        GHashTable *pending_table = mgr->pending[task->type];
 
         g_mutex_lock(pending_lock);
         PendingLoad *p = g_hash_table_lookup(pending_table, &task->id);
@@ -577,8 +554,9 @@ ArtworkManager *artwork_manager_new(library_cache_t *library,
     ArtworkManager *mgr = g_new0(ArtworkManager, 1);
     mgr->library = library;
     mgr->thumb_size = thumb_size > 0 ? thumb_size : 96;
-    mgr->max_entries = cache_count > 0 ? cache_count : ARTWORK_CACHE_DEFAULT_MAX_ENTRIES;
-    mgr->artist_max_entries = ARTIST_CACHE_DEFAULT_MAX_ENTRIES;
+    texture_cache_init(&mgr->album_cache,
+                   cache_count > 0 ? cache_count : ARTWORK_CACHE_DEFAULT_MAX_ENTRIES);
+    texture_cache_init(&mgr->artist_cache, ARTIST_CACHE_DEFAULT_MAX_ENTRIES);
 
     /* Allocate per-library slots + bitmap_map (mirrors library_cache init) */
     int n = source_count > 0 ? source_count : 0;
@@ -604,23 +582,12 @@ ArtworkManager *artwork_manager_new(library_cache_t *library,
         g_atomic_pointer_set(&mgr->bitmap_map[s->bitmap_index], s);
     }
 
-    g_mutex_init(&mgr->pending_lock);
     g_rw_lock_init(&mgr->atlas_rwlock);
-    g_mutex_init(&mgr->artist_pending_lock);
-
-    mgr->cache = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, NULL);
-    g_queue_init(&mgr->lru);
-    mgr->pending = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL,
-                                          (GDestroyNotify)pending_load_free);
-
-    mgr->artist_cache = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, NULL);
-    g_queue_init(&mgr->artist_lru);
-    mgr->artist_pending = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL,
-                                                  (GDestroyNotify)pending_load_free);
-
-    g_mutex_init(&mgr->fullsize_pending_lock);
-    mgr->fullsize_pending = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL,
-                                                    (GDestroyNotify)pending_load_free);
+    for (int i = 0; i < 3; i++) {
+        g_mutex_init(&mgr->pending_locks[i]);
+        mgr->pending[i] = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL,
+                                                 (GDestroyNotify)pending_load_free);
+    }
 
     mgr->load_queue = g_async_queue_new_full((GDestroyNotify)load_task_free);
 
@@ -666,27 +633,14 @@ void artwork_manager_free(ArtworkManager *mgr) {
     while (g_main_context_pending(NULL))
         g_main_context_iteration(NULL, FALSE);
 
-    g_mutex_lock(&mgr->pending_lock);
-    g_hash_table_destroy(mgr->pending);
-    g_mutex_unlock(&mgr->pending_lock);
+    for (int i = 0; i < 3; i++) {
+        g_mutex_lock(&mgr->pending_locks[i]);
+        g_hash_table_destroy(mgr->pending[i]);
+        g_mutex_unlock(&mgr->pending_locks[i]);
+    }
 
-    g_mutex_lock(&mgr->artist_pending_lock);
-    g_hash_table_destroy(mgr->artist_pending);
-    g_mutex_unlock(&mgr->artist_pending_lock);
-
-    g_mutex_lock(&mgr->fullsize_pending_lock);
-    g_hash_table_destroy(mgr->fullsize_pending);
-    g_mutex_unlock(&mgr->fullsize_pending_lock);
-
-    GList *l = mgr->lru.head;
-    while (l) { cache_entry_free(l->data); l = l->next; }
-    g_queue_clear(&mgr->lru);
-    g_hash_table_destroy(mgr->cache);
-
-    l = mgr->artist_lru.head;
-    while (l) { cache_entry_free(l->data); l = l->next; }
-    g_queue_clear(&mgr->artist_lru);
-    g_hash_table_destroy(mgr->artist_cache);
+    texture_cache_destroy(&mgr->album_cache);
+    texture_cache_destroy(&mgr->artist_cache);
 
     g_rw_lock_writer_lock(&mgr->atlas_rwlock);
     for (int i = 0; i < mgr->slot_count; i++) {
@@ -701,16 +655,47 @@ void artwork_manager_free(ArtworkManager *mgr) {
     g_rw_lock_writer_unlock(&mgr->atlas_rwlock);
 
     g_async_queue_unref(mgr->load_queue);
-    g_mutex_clear(&mgr->pending_lock);
+    for (int i = 0; i < 3; i++) g_mutex_clear(&mgr->pending_locks[i]);
     g_rw_lock_clear(&mgr->atlas_rwlock);
-    g_mutex_clear(&mgr->artist_pending_lock);
-    g_mutex_clear(&mgr->fullsize_pending_lock);
     g_free(mgr);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Public API - Thumbnails
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Register `widget` as a listener for id (coalesce with existing pending) and
+ * queue a load task if this is the first request. Thread-safe: takes the
+ * per-type pending lock internally.
+ */
+static void queue_load(ArtworkManager *mgr, int64_t id, GtkWidget *widget,
+                       LoadTaskType type) {
+    GMutex *lock = &mgr->pending_locks[type];
+    GHashTable *table = mgr->pending[type];
+
+    g_mutex_lock(lock);
+    PendingLoad *p = g_hash_table_lookup(table, &id);
+    bool first = (p == NULL);
+    if (first) {
+        p = g_new0(PendingLoad, 1);
+        p->id = id;
+        g_hash_table_insert(table, &p->id, p);
+    }
+    CallbackReg *reg = g_new0(CallbackReg, 1);
+    reg->image = widget;
+    g_object_add_weak_pointer(G_OBJECT(widget), (gpointer *)&reg->image);
+    p->callbacks = g_slist_prepend(p->callbacks, reg);
+    g_mutex_unlock(lock);
+
+    if (first) {
+        LoadTask *task = g_new0(LoadTask, 1);
+        task->mgr = mgr;
+        task->id = id;
+        task->type = type;
+        g_async_queue_push(mgr->load_queue, task);
+    }
+}
 
 void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWidget *image) {
     g_assert(mgr != NULL);
@@ -723,12 +708,10 @@ void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWid
     if (do_sample) clock_gettime(CLOCK_MONOTONIC, &_t0);
 
     /* Main-thread only — no lock needed (see struct comment). */
-    CacheEntry *e = g_hash_table_lookup(mgr->cache, &album_id);
-    if (e) {
-        touch_entry(&mgr->lru, e);
-        atomic_fetch_add(&mgr->hits, 1);
+    GdkTexture *tex = texture_cache_touch(&mgr->album_cache, album_id);
+    if (tex) {
         gtk_widget_remove_css_class(image, "artwork-loading");
-        gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(e->texture));
+        gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(tex));
 
         if (do_sample) {
             clock_gettime(CLOCK_MONOTONIC, &_t1);
@@ -741,33 +724,7 @@ void artwork_manager_get_thumbnail(ArtworkManager *mgr, int64_t album_id, GtkWid
 
     gtk_image_set_from_icon_name(GTK_IMAGE(image), "media-optical-symbolic");
     gtk_widget_add_css_class(image, "artwork-loading");
-    atomic_fetch_add(&mgr->misses, 1);
-
-    g_mutex_lock(&mgr->pending_lock);
-    PendingLoad *p = g_hash_table_lookup(mgr->pending, &album_id);
-    if (p) {
-        CallbackReg *reg = g_new0(CallbackReg, 1);
-        reg->image = image;
-        g_object_add_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
-        p->callbacks = g_slist_prepend(p->callbacks, reg);
-        g_mutex_unlock(&mgr->pending_lock);
-        return;
-    }
-
-    p = g_new0(PendingLoad, 1);
-    p->id = album_id;
-    CallbackReg *reg = g_new0(CallbackReg, 1);
-    reg->image = image;
-    g_object_add_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
-    p->callbacks = g_slist_prepend(NULL, reg);
-    g_hash_table_insert(mgr->pending, &p->id, p);
-    g_mutex_unlock(&mgr->pending_lock);
-
-    LoadTask *task = g_new0(LoadTask, 1);
-    task->mgr = mgr;
-    task->id = album_id;
-    task->type = LOAD_ALBUM;
-    g_async_queue_push(mgr->load_queue, task);
+    queue_load(mgr, album_id, image, LOAD_ALBUM);
 }
 
 int artwork_manager_get_thumb_size(ArtworkManager *mgr) {
@@ -782,7 +739,7 @@ void artwork_manager_reload_library_atlas(ArtworkManager *mgr, int bitmap_index,
 
     /* Evict only texture cache entries belonging to this library —
      * preserves warm textures for other libraries during multi-library indexing */
-    cache_evict_library(mgr->cache, &mgr->lru, bitmap_index);
+    texture_cache_evict_library(&mgr->album_cache, bitmap_index);
 
     /* Swap in the new atlas for this library */
     g_rw_lock_writer_lock(&mgr->atlas_rwlock);
@@ -838,8 +795,8 @@ void artwork_manager_remove_library(ArtworkManager *mgr, int bitmap_index) {
 
     /* Evict only this library's texture cache entries.
      * bitmap_index is stable — no global ID shift, so other libraries' entries stay valid. */
-    cache_evict_library(mgr->cache, &mgr->lru, bitmap_index);
-    cache_evict_library(mgr->artist_cache, &mgr->artist_lru, bitmap_index);
+    texture_cache_evict_library(&mgr->album_cache, bitmap_index);
+    texture_cache_evict_library(&mgr->artist_cache, bitmap_index);
 
     /* Remove the slot, compact, and re-register bitmap_map pointers */
     g_rw_lock_writer_lock(&mgr->atlas_rwlock);
@@ -884,58 +841,23 @@ void artwork_manager_get_artist_thumbnail(ArtworkManager *mgr, int64_t artist_id
     g_assert(image != NULL);
 
     /* Main-thread only — no lock needed (see struct comment). */
-    CacheEntry *e = g_hash_table_lookup(mgr->artist_cache, &artist_id);
-    if (e) {
-        touch_entry(&mgr->artist_lru, e);
-        atomic_fetch_add(&mgr->artist_hits, 1);
+    GdkTexture *tex = texture_cache_touch(&mgr->artist_cache, artist_id);
+    if (tex) {
         gtk_widget_remove_css_class(image, "artwork-loading");
-        gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(e->texture));
+        gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(tex));
         return;
     }
 
     gtk_image_set_from_icon_name(GTK_IMAGE(image), "avatar-default-symbolic");
     gtk_widget_add_css_class(image, "artwork-loading");
-    atomic_fetch_add(&mgr->artist_misses, 1);
-
-    g_mutex_lock(&mgr->artist_pending_lock);
-    PendingLoad *p = g_hash_table_lookup(mgr->artist_pending, &artist_id);
-    if (p) {
-        CallbackReg *reg = g_new0(CallbackReg, 1);
-        reg->image = image;
-        g_object_add_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
-        p->callbacks = g_slist_prepend(p->callbacks, reg);
-        g_mutex_unlock(&mgr->artist_pending_lock);
-        return;
-    }
-
-    p = g_new0(PendingLoad, 1);
-    p->id = artist_id;
-    CallbackReg *reg = g_new0(CallbackReg, 1);
-    reg->image = image;
-    g_object_add_weak_pointer(G_OBJECT(image), (gpointer *)&reg->image);
-    p->callbacks = g_slist_prepend(NULL, reg);
-    g_hash_table_insert(mgr->artist_pending, &p->id, p);
-    g_mutex_unlock(&mgr->artist_pending_lock);
-
-    LoadTask *task = g_new0(LoadTask, 1);
-    task->mgr = mgr;
-    task->id = artist_id;
-    task->type = LOAD_ARTIST;
-    g_async_queue_push(mgr->load_queue, task);
+    queue_load(mgr, artist_id, image, LOAD_ARTIST);
 }
 
 void artwork_manager_reload_artist_atlas(ArtworkManager *mgr) {
     g_assert(mgr != NULL);
 
     /* Evict ALL artist texture cache entries (global atlas changed) */
-    GList *l = mgr->artist_lru.head;
-    while (l) {
-        GList *next = l->next;
-        cache_entry_free(l->data);
-        l = next;
-    }
-    g_queue_clear(&mgr->artist_lru);
-    g_hash_table_remove_all(mgr->artist_cache);
+    texture_cache_clear(&mgr->artist_cache);
 
     /* Re-open the global artist atlas */
     g_rw_lock_writer_lock(&mgr->atlas_rwlock);
@@ -958,37 +880,7 @@ void artwork_manager_get_fullsize_album_art(ArtworkManager *mgr,
     if (parent)
         gtk_widget_add_css_class(parent, "artwork-loading");
 
-    /* Coalesce: if already pending for this album, just add the callback */
-    g_mutex_lock(&mgr->fullsize_pending_lock);
-    PendingLoad *p = g_hash_table_lookup(mgr->fullsize_pending, &album_id);
-    if (p) {
-        CallbackReg *reg = g_new0(CallbackReg, 1);
-        reg->image = picture;
-        g_object_add_weak_pointer(G_OBJECT(picture), (gpointer *)&reg->image);
-        p->callbacks = g_slist_prepend(p->callbacks, reg);
-        g_mutex_unlock(&mgr->fullsize_pending_lock);
-        return;
-    }
-
-    p = g_new0(PendingLoad, 1);
-    p->id = album_id;
-    CallbackReg *reg = g_new0(CallbackReg, 1);
-    reg->image = picture;
-    g_object_add_weak_pointer(G_OBJECT(picture), (gpointer *)&reg->image);
-    p->callbacks = g_slist_prepend(NULL, reg);
-    g_hash_table_insert(mgr->fullsize_pending, &p->id, p);
-    g_mutex_unlock(&mgr->fullsize_pending_lock);
-
-    LoadTask *task = g_new0(LoadTask, 1);
-    task->mgr = mgr;
-    task->id = album_id;
-    task->type = LOAD_FULLSIZE;
-    g_async_queue_push(mgr->load_queue, task);
-}
-
-void artwork_manager_prefetch_fullsize(ArtworkManager *mgr, int64_t album_id) {
-    if (!mgr || !mgr->library || album_id <= 0) return;
-    library_cache_prefetch_fullsize_artwork(mgr->library, album_id);
+    queue_load(mgr, album_id, picture, LOAD_FULLSIZE);
 }
 
 void artwork_manager_get_stats(ArtworkManager *mgr, artwork_manager_stats_t *out) {
@@ -996,7 +888,8 @@ void artwork_manager_get_stats(ArtworkManager *mgr, artwork_manager_stats_t *out
     memset(out, 0, sizeof(*out));
 
     /* Main-thread only — no lock needed */
-    out->texture_cache_count = g_hash_table_size(mgr->cache);
+    out->texture_cache_count = g_hash_table_size(mgr->album_cache.map)
+                             + g_hash_table_size(mgr->artist_cache.map);
     size_t px = (size_t)mgr->thumb_size * mgr->thumb_size * 4;  /* RGBA */
     out->texture_cache_bytes = out->texture_cache_count * px;
 
@@ -1008,15 +901,21 @@ void artwork_manager_get_stats(ArtworkManager *mgr, artwork_manager_stats_t *out
         out->atlas_mmap_bytes[i] = artwork_atlas_reader_get_file_size(mgr->slots[i].reader);
 
     /* Atomic counters — relaxed reads are fine for dashboard display */
-    out->total_hits   = atomic_load(&mgr->hits);
-    out->total_misses = atomic_load(&mgr->misses);
+    out->total_hits   = atomic_load(&mgr->album_cache.hits)
+                      + atomic_load(&mgr->artist_cache.hits);
+    out->total_misses = atomic_load(&mgr->album_cache.misses)
+                      + atomic_load(&mgr->artist_cache.misses);
     out->atlas_hits   = atomic_load(&mgr->atlas_hits);
-    out->evictions    = atomic_load(&mgr->evictions);
+    out->evictions    = atomic_load(&mgr->album_cache.evictions)
+                      + atomic_load(&mgr->artist_cache.evictions);
 
-    /* Pending load queue depth */
-    g_mutex_lock(&mgr->pending_lock);
-    out->pending_load_count = g_hash_table_size(mgr->pending);
-    g_mutex_unlock(&mgr->pending_lock);
+    /* Pending load queue depth — sum across all load types */
+    out->pending_load_count = 0;
+    for (int i = 0; i < 3; i++) {
+        g_mutex_lock(&mgr->pending_locks[i]);
+        out->pending_load_count += g_hash_table_size(mgr->pending[i]);
+        g_mutex_unlock(&mgr->pending_locks[i]);
+    }
 }
 
 const void *artwork_manager_get_texture_hit_hist(ArtworkManager *mgr) {

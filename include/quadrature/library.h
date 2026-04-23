@@ -524,17 +524,6 @@ GPtrArray* library_cache_get_albums_filtered(library_cache_t* cache,
  * ============================================================================= */
 
 /**
- * Prefetch full-size album artwork into kernel page cache.
- * Resolves album_id -> album path, tries artwork files in discovery order.
- * Called by ArtworkManager when user clicks album row.
- *
- * @param cache Library cache
- * @param album_id Album ID
- */
-void library_cache_prefetch_fullsize_artwork(library_cache_t* cache,
-                                             int64_t album_id);
-
-/**
  * Prefetch audio files into kernel page cache.
  * Resolves track_ids -> file paths, prefetches each file.
  * Called by AudioCache for visible search results / track lists.

@@ -34,7 +34,7 @@ struct quadrature_db {
     sqlite3_stmt* select_album_by_path;
     sqlite3_stmt* insert_folder_album;
     sqlite3_stmt* sync_album_tracks_fts;       /* Bulk INSERT OR REPLACE INTO tracks_fts for all tracks in an album */
-    /* MB artist statements -- used in db_get_or_create_artist_mb() */
+    /* MB artist statements -- used in db_get_or_create_artist() */
     sqlite3_stmt* select_artist_by_mb_id;
     sqlite3_stmt* update_artist_sort_name;
     /* Step 2: exact name match, only for rows with NULL or same MBID */
@@ -49,23 +49,27 @@ struct quadrature_db {
     sqlite3_stmt* move_track_artists;          /* UPDATE OR IGNORE track_artists SET artist_id=? WHERE artist_id=? */
     sqlite3_stmt* delete_track_artists_artist_id; /* DELETE FROM track_artists WHERE artist_id=? */
 
-    /* MB resolver hot-path statements (avoid prepare/finalize per call) */
-    sqlite3_stmt* set_album_mb_status;         /* UPDATE albums SET mb_status=?,mb_resolved_at=? WHERE id=? */
-
     // Cached read statements (pre-compiled for warming + merged-count hot paths)
     sqlite3_stmt* read_track_by_id;
-    sqlite3_stmt* read_artist_by_id;
     sqlite3_stmt* read_album_by_id;
-    sqlite3_stmt* read_albums_by_artist_count;
-    sqlite3_stmt* read_albums_by_artist;
     sqlite3_stmt* read_tracks_by_album;
-    sqlite3_stmt* read_track_artists_count;
-    sqlite3_stmt* read_track_artists;
     sqlite3_stmt* iter_all_artists;           /* SELECT id, name, musicbrainz_id FROM artists */
     sqlite3_stmt* iter_all_albums;            /* SELECT id, title, artist_id, year, path, mb_release_id FROM albums */
     sqlite3_stmt* iter_all_tracks;            /* SELECT id, title, path, ... FROM tracks (no JOINs) */
     sqlite3_stmt* iter_all_track_artists;     /* SELECT track_id, artist_id, join_phrase, position (no JOIN) */
     sqlite3_stmt* get_max_ids;               /* SELECT MAX(id) from each entity table */
+
+    // Reconciler: batch loads (json_each over an id array) and canonical writes.
+    // All used inside db_reconcile_albums. Fast path for mb_status-only updates
+    // bypasses the reconciler entirely and uses update_album_mb_status.
+    sqlite3_stmt* update_album_mb_status;            /* UPDATE albums SET mb_status=?, mb_resolved_at=? WHERE id=? */
+    sqlite3_stmt* reconcile_load_albums_batch;       /* WHERE id IN (SELECT value FROM json_each(?)) */
+    sqlite3_stmt* reconcile_load_tracks_batch;       /* WHERE album_id IN (SELECT value FROM json_each(?)) */
+    sqlite3_stmt* reconcile_load_track_artists_batch;/* WHERE track_id IN (SELECT value FROM json_each(?)) */
+    sqlite3_stmt* reconcile_update_album;            /* Canonical full-field UPDATE */
+    sqlite3_stmt* reconcile_update_track;            /* Canonical full-field UPDATE */
+    sqlite3_stmt* reconcile_insert_track;            /* Canonical INSERT */
+    sqlite3_stmt* reconcile_delete_track_by_id;      /* DELETE FROM tracks WHERE id=? */
 
     // Transaction state
     bool in_transaction;
@@ -103,12 +107,5 @@ void db_unlock(quadrature_db_t* db);
 // Statement preparation
 void db_prepare_stmts(quadrature_db_t* db);
 void db_finalize_stmts(quadrature_db_t* db);
-
-// =============================================================================
-// Internal Functions (db_write.c)
-// =============================================================================
-
-// Get or create artist, returning ID
-int64_t db_get_or_create_artist(quadrature_db_t* db, const char* name);
 
 #endif // QUADRATURE_DB_INTERNAL_H

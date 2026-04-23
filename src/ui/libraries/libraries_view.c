@@ -122,7 +122,7 @@ static void on_errors(GtkButton *btn, gpointer data) {
     /* Open the library's DB (use data_path if set, else library path) */
     const char *db_root = e->data_path ? e->data_path : e->path;
     char *dbpath = g_build_filename(db_root, "quadrature.sqlite", NULL);
-    if (db_open(dbpath, &w->errors_lib_db) != QUADRATURE_OK) {
+    if (db_open(dbpath, false, &w->errors_lib_db) != QUADRATURE_OK) {
         g_warning("on_errors: failed to open DB for %s", db_root);
         w->errors_lib_db = NULL;
     }

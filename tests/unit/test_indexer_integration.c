@@ -300,10 +300,10 @@ Test(indexer, fresh_library_scan,
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", s1_data);
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(db_path, &db), QUADRATURE_OK);
+    cr_assert_eq(db_open(db_path, false, &db), QUADRATURE_OK);
 
     size_t track_count = 0;
-    cr_assert_eq(db_get_total_track_count(db, &track_count), QUADRATURE_OK);
+    cr_assert_eq(db_get_entity_count(db, DB_ENTITY_TRACK, &track_count), QUADRATURE_OK);
     cr_assert_eq(track_count, 5, "Should have 5 tracks");
     db_close(db);
 

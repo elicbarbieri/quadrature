@@ -116,9 +116,9 @@ typedef void (*audio_track_changed_cb)(int player_id, int64_t track_id, void* us
  * ============================================================================= */
 
 /**
- * Create an audio pipeline with LibraryCache for track ID support.
+ * Create a pipewire audio pipeline.
  *
- * @param library      Library cache for track_id -> path resolution (may be NULL)
+ * @param library      Library cache for track_id -> path resolution
  * @param sample_rate  Output sample rate
  * @param pipeline     Output pointer to created pipeline
  * @return QUADRATURE_OK on success
@@ -128,8 +128,6 @@ quadrature_result_t audio_pipeline_create(library_cache_t* library,
                                            audio_pipeline_t** pipeline);
 
 void audio_pipeline_destroy(audio_pipeline_t* pipeline);
-quadrature_result_t audio_pipeline_start(audio_pipeline_t* pipeline);
-quadrature_result_t audio_pipeline_stop(audio_pipeline_t* pipeline);
 
 /* =============================================================================
  * Player Control - Track ID Based
@@ -182,6 +180,15 @@ quadrature_result_t audio_pipeline_player_stop(audio_pipeline_t* pipeline, int p
 quadrature_result_t audio_pipeline_player_seek(audio_pipeline_t* pipeline, int player_id, uint64_t position);
 
 /**
+ * Seek a player to an absolute position in seconds.
+ * Clamps to [0, length_seconds).
+ *
+ * @return QUADRATURE_OK on success
+ */
+quadrature_result_t audio_pipeline_player_seek_seconds(audio_pipeline_t* pipeline,
+                                                       int player_id, double seconds);
+
+/**
  * Toggle between play and pause.
  * If playing, pauses. If stopped/paused, plays.
  * @return QUADRATURE_OK on success
@@ -223,13 +230,16 @@ quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t* pip
                                                            int player_id, shuttle_mode_t mode);
 
 /* =============================================================================
- * Repeat Control
+ * End-of-Track Behavior
+ *
+ * Single enum replaces the old mutually-exclusive repeat/autoplay booleans.
  * ============================================================================= */
 
-quadrature_result_t audio_pipeline_player_set_repeat(audio_pipeline_t* pipeline, int player_id, bool repeat);
-bool audio_pipeline_player_get_repeat(audio_pipeline_t* pipeline, int player_id);
-quadrature_result_t audio_pipeline_player_set_autoplay(audio_pipeline_t* pipeline, int player_id, bool autoplay);
-bool audio_pipeline_player_get_autoplay(audio_pipeline_t* pipeline, int player_id);
+quadrature_result_t audio_pipeline_player_set_end_mode(audio_pipeline_t* pipeline,
+                                                       int player_id,
+                                                       track_end_mode_t mode);
+track_end_mode_t    audio_pipeline_player_get_end_mode(audio_pipeline_t* pipeline,
+                                                       int player_id);
 
 /* =============================================================================
  * Device Routing
@@ -262,23 +272,32 @@ quadrature_result_t audio_pipeline_set_player_quantum(audio_pipeline_t* pipeline
  * Monitoring
  * ============================================================================= */
 
-channel_state_t audio_pipeline_get_player_state(audio_pipeline_t* pipeline, int player_id);
-uint64_t audio_pipeline_get_player_position(audio_pipeline_t* pipeline, int player_id);
-uint64_t audio_pipeline_get_player_length(audio_pipeline_t* pipeline, int player_id);
-uint32_t audio_pipeline_get_sample_rate(audio_pipeline_t* pipeline);
+/**
+ * UI-facing snapshot of a player's current display state.
+ *
+ * All times are in seconds (pre-converted from samples) and `position_seconds`
+ * is smooth-interpolated between audio callbacks using sample-count elapsed
+ * since the last RT update. The UI never needs sample rate.
+ *
+ * On invalid pipeline/player_id the struct is zero-filled and `state` is
+ * CHANNEL_ERROR.
+ */
+typedef struct {
+    channel_state_t state;
+    double  position_seconds;   /**< Smooth-interpolated position */
+    double  length_seconds;     /**< Track length, 0 if not loaded */
+    float   speed;              /**< Signed playback speed (-4.0..+4.0) */
+} audio_player_display_t;
 
 /**
- * Get interpolated player position for smooth UI display.
- * Interpolates between audio updates using wall-clock time.
+ * Fetch a UI display snapshot for a player.
  *
- * @param pipeline   Pipeline instance
- * @param player_id  Player index (0-3)
- * @param out_speed  Optional: receives current playback speed
- * @return Position in samples (double for sub-sample accuracy)
+ * Thread-safe; reads atomics and a seqlocked position snapshot. Intended to
+ * be called once per UI frame per channel strip.
  */
-double audio_pipeline_get_player_position_smooth(audio_pipeline_t* pipeline,
-                                                  int player_id,
-                                                  float* out_speed);
+void audio_pipeline_get_player_display(audio_pipeline_t* pipeline,
+                                       int player_id,
+                                       audio_player_display_t* out);
 
 /* =============================================================================
  * Spectrum Analyzer

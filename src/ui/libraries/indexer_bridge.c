@@ -252,10 +252,10 @@ static void lib_stats_thread(GTask *task, gpointer src, gpointer data, GCancella
     quadrature_db_t *lib_db = NULL;
 
     if (g_file_test(dbpath, G_FILE_TEST_EXISTS) &&
-        db_open_readonly(dbpath, &lib_db) == QUADRATURE_OK) {
-        db_get_total_track_count(lib_db, &d->tracks);
-        db_get_total_album_count(lib_db, &d->albums);
-        db_get_total_artist_count(lib_db, &d->artists);
+        db_open(dbpath, true, &lib_db) == QUADRATURE_OK) {
+        db_get_entity_count(lib_db, DB_ENTITY_TRACK, &d->tracks);
+        db_get_entity_count(lib_db, DB_ENTITY_ALBUM, &d->albums);
+        db_get_entity_count(lib_db, DB_ENTITY_ARTIST, &d->artists);
         db_get_last_indexed_time(lib_db, &d->last_indexed_time);
         db_get_error_count(lib_db, "", &d->errors);
         db_close(lib_db);

@@ -106,7 +106,6 @@ void db_meta_close(quadrature_meta_db_t* db);
 
 quadrature_result_t db_meta_begin(quadrature_meta_db_t* db);
 quadrature_result_t db_meta_commit(quadrature_meta_db_t* db);
-quadrature_result_t db_meta_rollback(quadrature_meta_db_t* db);
 
 /* =============================================================================
  * Write Operations (Phase 4 only)
@@ -192,18 +191,6 @@ quadrature_result_t db_meta_get_recording_mbid(quadrature_meta_db_t* db,
 quadrature_result_t db_meta_get_links(quadrature_meta_db_t* db,
     const char* recording_mbid,
     db_meta_link_t** out,
-    size_t* count);
-
-/**
- * Fetch recording_mbids linked to a given artist, optionally filtered by
- * link_type_gid (pass NULL for all link types).
- * *out_recording_mbids is a NULL-terminated array of g_malloc'd strings;
- * caller must g_free each element and g_free the array.
- */
-quadrature_result_t db_meta_get_recordings_by_artist(quadrature_meta_db_t* db,
-    const char* artist_mbid,
-    const char* link_type_gid_filter,
-    char*** out_recording_mbids,
     size_t* count);
 
 /**

@@ -311,13 +311,6 @@ quadrature_result_t db_meta_commit(quadrature_meta_db_t* db) {
     return QUADRATURE_OK;
 }
 
-quadrature_result_t db_meta_rollback(quadrature_meta_db_t* db) {
-    if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
-    if (db->attached_to) return QUADRATURE_OK;
-    sqlite3_exec(db->db, "ROLLBACK", NULL, NULL, NULL);
-    return QUADRATURE_OK;
-}
-
 // =============================================================================
 // Write Operations
 // =============================================================================
@@ -536,49 +529,6 @@ quadrature_result_t db_meta_get_links(quadrature_meta_db_t* db,
 
     *count = rows->len;
     *out = (db_meta_link_t*)g_array_free(rows, FALSE);
-    return QUADRATURE_OK;
-}
-
-quadrature_result_t db_meta_get_recordings_by_artist(quadrature_meta_db_t* db,
-    const char* artist_mbid,
-    const char* link_type_gid_filter,
-    char*** out_recording_mbids,
-    size_t* count) {
-
-    if (!db || !artist_mbid || !out_recording_mbids || !count)
-        return QUADRATURE_ERROR_INVALID_PARAM;
-
-    *out_recording_mbids = NULL;
-    *count = 0;
-
-    sqlite3_stmt* stmt = NULL;
-    if (link_type_gid_filter) {
-        sqlite3_prepare_v2(db->db,
-            "SELECT DISTINCT recording_mbid FROM recording_links"
-            " WHERE artist_mbid=? AND link_type_gid=?",
-            -1, &stmt, NULL);
-        sqlite3_bind_text(stmt, 1, artist_mbid,          -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, link_type_gid_filter, -1, SQLITE_STATIC);
-    } else {
-        sqlite3_prepare_v2(db->db,
-            "SELECT DISTINCT recording_mbid FROM recording_links"
-            " WHERE artist_mbid=?",
-            -1, &stmt, NULL);
-        sqlite3_bind_text(stmt, 1, artist_mbid, -1, SQLITE_STATIC);
-    }
-
-    GPtrArray* ids = g_ptr_array_new();
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* v = (const char*)sqlite3_column_text(stmt, 0);
-        g_ptr_array_add(ids, v ? g_strdup(v) : NULL);
-    }
-    sqlite3_finalize(stmt);
-
-    /* NULL-terminate the array */
-    g_ptr_array_add(ids, NULL);
-
-    *count = ids->len - 1;  /* exclude the NULL terminator */
-    *out_recording_mbids = (char**)g_ptr_array_free(ids, FALSE);
     return QUADRATURE_OK;
 }
 

@@ -53,18 +53,15 @@ Test(audio_pipeline, lifecycle_null_safety) {
     audio_pipeline_destroy(NULL);
 
     /* --- Queries on null pipeline return error states --- */
-    /* Note: get_player_state returns CHANNEL_ERROR for NULL pipeline */
-    cr_assert_eq(audio_pipeline_get_player_state(NULL, 0), CHANNEL_ERROR);
-    cr_assert_eq(audio_pipeline_get_player_position(NULL, 0), 0);
-    cr_assert_eq(audio_pipeline_get_player_length(NULL, 0), 0);
-    cr_assert_eq(audio_pipeline_get_sample_rate(NULL), 0);
+    audio_player_display_t disp;
+    audio_pipeline_get_player_display(NULL, 0, &disp);
+    cr_assert_eq(disp.state, CHANNEL_ERROR);
+    cr_assert_float_eq(disp.position_seconds, 0.0, 1e-9);
+    cr_assert_float_eq(disp.length_seconds, 0.0, 1e-9);
 
     /* --- Create pipeline --- */
     cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
     cr_assert_not_null(pipeline);
-
-    /* Verify sample rate stored */
-    cr_assert_eq(audio_pipeline_get_sample_rate(pipeline), TEST_SAMPLE_RATE);
 
     audio_pipeline_destroy(pipeline);
 }
@@ -99,17 +96,20 @@ Test(audio_pipeline, player_id_bounds_checking) {
                      QUADRATURE_ERROR_INVALID_PARAM);
 
         /* Queries should return error states */
-        cr_assert_eq(audio_pipeline_get_player_state(pipeline, id), CHANNEL_ERROR);
-        cr_assert_eq(audio_pipeline_get_player_position(pipeline, id), 0);
-        cr_assert_eq(audio_pipeline_get_player_length(pipeline, id), 0);
+        audio_player_display_t d;
+        audio_pipeline_get_player_display(pipeline, id, &d);
+        cr_assert_eq(d.state, CHANNEL_ERROR);
+        cr_assert_float_eq(d.position_seconds, 0.0, 1e-9);
+        cr_assert_float_eq(d.length_seconds, 0.0, 1e-9);
     }
 
     /* --- Test valid player IDs (0-3) return valid states --- */
     for (int id = 0; id < 4; id++) {
-        channel_state_t state = audio_pipeline_get_player_state(pipeline, id);
+        audio_player_display_t d;
+        audio_pipeline_get_player_display(pipeline, id, &d);
         /* Initial state should be STOPPED */
-        cr_assert_eq(state, CHANNEL_STOPPED,
-                    "Player %d should start STOPPED, got %d", id, state);
+        cr_assert_eq(d.state, CHANNEL_STOPPED,
+                    "Player %d should start STOPPED, got %d", id, d.state);
     }
 
     audio_pipeline_destroy(pipeline);
@@ -130,13 +130,15 @@ Test(audio_pipeline, initial_player_state) {
     cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
 
     for (int id = 0; id < 4; id++) {
+        audio_player_display_t d;
+        audio_pipeline_get_player_display(pipeline, id, &d);
         /* State is STOPPED */
-        cr_assert_eq(audio_pipeline_get_player_state(pipeline, id), CHANNEL_STOPPED,
+        cr_assert_eq(d.state, CHANNEL_STOPPED,
                     "Player %d should start STOPPED", id);
 
         /* Position and length are 0 */
-        cr_assert_eq(audio_pipeline_get_player_position(pipeline, id), 0);
-        cr_assert_eq(audio_pipeline_get_player_length(pipeline, id), 0);
+        cr_assert_float_eq(d.position_seconds, 0.0, 1e-9);
+        cr_assert_float_eq(d.length_seconds, 0.0, 1e-9);
     }
 
     audio_pipeline_destroy(pipeline);
@@ -150,19 +152,24 @@ Test(audio_pipeline, initial_player_state) {
  * 2. Setting repeat is per-player
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_pipeline, repeat_control) {
+Test(audio_pipeline, end_mode_control) {
     audio_pipeline_t *pipeline = NULL;
     cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
 
-    /* Enable repeat on player 0 */
-    cr_assert_eq(audio_pipeline_player_set_repeat(pipeline, 0, true), QUADRATURE_OK);
+    /* Default is AUTOPLAY */
+    cr_assert_eq(audio_pipeline_player_get_end_mode(pipeline, 0), TRACK_END_AUTOPLAY);
 
-    /* Disable repeat on player 0 */
-    cr_assert_eq(audio_pipeline_player_set_repeat(pipeline, 0, false), QUADRATURE_OK);
+    /* Set all three modes on player 0 */
+    cr_assert_eq(audio_pipeline_player_set_end_mode(pipeline, 0, TRACK_END_REPEAT), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_player_get_end_mode(pipeline, 0), TRACK_END_REPEAT);
 
-    /* Enable repeat on all players */
+    cr_assert_eq(audio_pipeline_player_set_end_mode(pipeline, 0, TRACK_END_STOP), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_player_get_end_mode(pipeline, 0), TRACK_END_STOP);
+
+    /* Each player holds its own mode */
     for (int id = 0; id < 4; id++) {
-        cr_assert_eq(audio_pipeline_player_set_repeat(pipeline, id, true), QUADRATURE_OK);
+        cr_assert_eq(audio_pipeline_player_set_end_mode(pipeline, id, TRACK_END_REPEAT),
+                     QUADRATURE_OK);
     }
 
     audio_pipeline_destroy(pipeline);
@@ -229,20 +236,17 @@ Test(audio_pipeline, smooth_position_query) {
     cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
 
     for (int id = 0; id < 4; id++) {
-        float speed;
-        double pos = audio_pipeline_get_player_position_smooth(pipeline, id, &speed);
+        audio_player_display_t d;
+        audio_pipeline_get_player_display(pipeline, id, &d);
 
         /* Position should be non-negative */
-        cr_assert(pos >= 0.0, "Smooth position negative for player %d: %f", id, pos);
+        cr_assert(d.position_seconds >= 0.0,
+                 "Position negative for player %d: %f", id, d.position_seconds);
 
         /* Speed should be in valid range */
-        cr_assert(speed >= -4.0f && speed <= 4.0f,
-                 "Speed out of range for player %d: %f", id, speed);
+        cr_assert(d.speed >= -4.0f && d.speed <= 4.0f,
+                 "Speed out of range for player %d: %f", id, d.speed);
     }
-
-    /* NULL speed parameter is OK */
-    double pos = audio_pipeline_get_player_position_smooth(pipeline, 0, NULL);
-    cr_assert(pos >= 0.0);
 
     audio_pipeline_destroy(pipeline);
 }
@@ -330,12 +334,10 @@ static void *pipeline_query_thread(void *arg) {
     for (int i = 0; i < PIPELINE_ITERATIONS; i++) {
         for (int id = 0; id < 4; id++) {
             /* Query all properties */
-            channel_state_t state = audio_pipeline_get_player_state(ctx->pipeline, id);
-            cr_assert(state == CHANNEL_STOPPED || state == CHANNEL_PLAYING ||
-                      state == CHANNEL_PAUSED || state == CHANNEL_ERROR);
-
-            audio_pipeline_get_player_position(ctx->pipeline, id);
-            audio_pipeline_get_player_length(ctx->pipeline, id);
+            audio_player_display_t d;
+            audio_pipeline_get_player_display(ctx->pipeline, id, &d);
+            cr_assert(d.state == CHANNEL_STOPPED || d.state == CHANNEL_PLAYING ||
+                      d.state == CHANNEL_PAUSED || d.state == CHANNEL_ERROR);
 
             float left[24], right[24];
             audio_pipeline_get_player_spectrum(ctx->pipeline, id, left, right, 24);
@@ -363,7 +365,9 @@ Test(audio_pipeline, concurrent_queries) {
     }
 
     /* Pipeline should still be functional */
-    cr_assert_eq(audio_pipeline_get_sample_rate(pipeline), TEST_SAMPLE_RATE);
+    audio_player_display_t d;
+    audio_pipeline_get_player_display(pipeline, 0, &d);
+    cr_assert_neq(d.state, CHANNEL_ERROR);
 
     audio_pipeline_destroy(pipeline);
 }

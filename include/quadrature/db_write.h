@@ -23,17 +23,18 @@ extern "C" {
  * Artist Writes
  * ============================================================================= */
 
-/** Get or create artist by name. Returns artist_id (0 on error). */
-int64_t db_get_or_create_artist(quadrature_db_t* db, const char* name);
-
 /**
- * Get or create artist with MusicBrainz data.
- * Deduplicates by musicbrainz_id first, then by name. Returns 0 on error.
+ * Get or create artist. Returns artist_id (0 or -1 on error).
+ *
+ * Pass NULL for sort_name and musicbrainz_id to use the fast Phase 2 path
+ * (name-only lookup/insert). Pass a non-NULL musicbrainz_id (and optionally
+ * sort_name) for the full MB-aware dedup path: MBID lookup → name lookup →
+ * normalized name lookup → insert, with in-place rename to canonical values.
  */
-int64_t db_get_or_create_artist_mb(quadrature_db_t* db,
-                                    const char* name,
-                                    const char* sort_name,
-                                    const char* musicbrainz_id);
+int64_t db_get_or_create_artist(quadrature_db_t* db,
+                                 const char* name,
+                                 const char* sort_name,
+                                 const char* musicbrainz_id);
 
 /**
  * Delete artists with no entries in track_artists. Handles the
@@ -42,22 +43,9 @@ int64_t db_get_or_create_artist_mb(quadrature_db_t* db,
 quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db);
 
 /* =============================================================================
- * MusicBrainz Resolution Writes
- * ============================================================================= */
-
-quadrature_result_t db_set_album_mb_status(quadrature_db_t* db,
-    int64_t album_id, int status, int64_t resolved_at);
-
-/* =============================================================================
  * Indexer Error Logging
  * ============================================================================= */
 
-quadrature_result_t db_log_error_ex(quadrature_db_t* db, const char* path,
-                                    indexer_error_code_t error_code, int phase,
-                                    indexer_error_severity_t severity,
-                                    const char* message, int64_t scan_generation);
-
-/** Convenience: logs with error_code=0, phase=0, severity=ERROR. */
 quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const char* message,
                                 int64_t scan_generation);
 
