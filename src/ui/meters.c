@@ -171,6 +171,10 @@ void ui_spectrum_set_bars(UiSpectrum *s, const float *left, const float *right, 
 /* ─── Playhead ────────────────────────────────────────────────────────── */
 
 #define PLAYHEAD_WIDTH       3.0f
+#define PLAYHEAD_EDGE_FADE   1.0f    /* px of soft alpha falloff on each side
+                                      * — eliminates sub-pixel luminance wobble
+                                      * caused by sRGB-space alpha compositing
+                                      * as split_x slides between integer pixels */
 #define PLAYHEAD_HEIGHT_FRAC 0.85f   /* height as fraction of half-widget */
 #define PLAYHEAD_HIT_RADIUS  8.0     /* px — grab zone for drag / hover detection */
 #define PLAYHEAD_LERP_SPEED  0.15f   /* per-frame lerp for playhead color fade */
@@ -350,6 +354,33 @@ static void on_leave(GtkEventControllerMotion *ctrl, gpointer data) {
     }
 }
 
+/* ─── Gamma-correct color lerp ─────────────────────────────────────────────
+ * GSK composites in sRGB-encoded space. Lerping RGB values directly in sRGB
+ * produces a perceptually duller midpoint (e.g. grey→cyan goes muddy halfway).
+ * Round-tripping through linear light gives the perceptually-uniform mix and
+ * removes a slow brightness ripple on the bar that straddles the playhead.
+ * Alpha is treated as linear coverage and not transformed. */
+
+static inline float srgb_to_linear(float c) {
+    return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+}
+
+static inline float linear_to_srgb(float c) {
+    return c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+}
+
+static inline GdkRGBA rgba_lerp_linear(GdkRGBA a, GdkRGBA b, float t) {
+    float ar = srgb_to_linear(a.red),   br = srgb_to_linear(b.red);
+    float ag = srgb_to_linear(a.green), bg = srgb_to_linear(b.green);
+    float ab = srgb_to_linear(a.blue),  bb = srgb_to_linear(b.blue);
+    return (GdkRGBA){
+        linear_to_srgb(ar + t * (br - ar)),
+        linear_to_srgb(ag + t * (bg - ag)),
+        linear_to_srgb(ab + t * (bb - ab)),
+        a.alpha + t * (b.alpha - a.alpha),
+    };
+}
+
 /* ─── Rendering ────────────────────────────────────────────────────────── */
 
 static void ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap) {
@@ -402,13 +433,7 @@ static void ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap) 
 
     /* ── Pre-compute played color (constant across all bars this frame) ── */
     const GdkRGBA *bright = sensitive ? &WAVEFORM_PLAYED : &WAVEFORM_PLAYED_DIM;
-    float dim_t = w->bar_dim_t;
-    GdkRGBA played_color = {
-        bright->red   + dim_t * (WAVEFORM_PLAYED_DIM.red   - bright->red),
-        bright->green + dim_t * (WAVEFORM_PLAYED_DIM.green - bright->green),
-        bright->blue  + dim_t * (WAVEFORM_PLAYED_DIM.blue  - bright->blue),
-        bright->alpha + dim_t * (WAVEFORM_PLAYED_DIM.alpha - bright->alpha),
-    };
+    GdkRGBA played_color = rgba_lerp_linear(*bright, WAVEFORM_PLAYED_DIM, w->bar_dim_t);
 
     /* ── Waveform bars ───────────────────────────────────────────────── */
     for (int i = 0; i < bar_count; i++) {
@@ -423,20 +448,10 @@ static void ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap) 
         float drag_fill = CLAMP((split_x - x) / WAVEFORM_BAR_WIDTH, 0.0f, 1.0f);
         GdkRGBA color;
         if (drag_fill > 0.0f) {
-            color = (GdkRGBA){
-                WAVEFORM_UNPLAYED.red   + drag_fill * (played_color.red   - WAVEFORM_UNPLAYED.red),
-                WAVEFORM_UNPLAYED.green + drag_fill * (played_color.green - WAVEFORM_UNPLAYED.green),
-                WAVEFORM_UNPLAYED.blue  + drag_fill * (played_color.blue  - WAVEFORM_UNPLAYED.blue),
-                WAVEFORM_UNPLAYED.alpha + drag_fill * (played_color.alpha - WAVEFORM_UNPLAYED.alpha),
-            };
+            color = rgba_lerp_linear(WAVEFORM_UNPLAYED, played_color, drag_fill);
         } else if (w->dragging) {
             float play_fill = CLAMP((play_x - x) / WAVEFORM_BAR_WIDTH, 0.0f, 1.0f);
-            color = (GdkRGBA){
-                WAVEFORM_UNPLAYED.red   + play_fill * (WAVEFORM_PLAYED_DIM.red   - WAVEFORM_UNPLAYED.red),
-                WAVEFORM_UNPLAYED.green + play_fill * (WAVEFORM_PLAYED_DIM.green - WAVEFORM_UNPLAYED.green),
-                WAVEFORM_UNPLAYED.blue  + play_fill * (WAVEFORM_PLAYED_DIM.blue  - WAVEFORM_UNPLAYED.blue),
-                WAVEFORM_UNPLAYED.alpha + play_fill * (WAVEFORM_PLAYED_DIM.alpha - WAVEFORM_UNPLAYED.alpha),
-            };
+            color = rgba_lerp_linear(WAVEFORM_UNPLAYED, WAVEFORM_PLAYED_DIM, play_fill);
         } else {
             color = WAVEFORM_UNPLAYED;
         }
@@ -445,10 +460,7 @@ static void ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap) 
         if (cursor_bar >= 0 && i == cursor_bar) {
             float boosted = fmaxf(bar_h * (1.0f + SPOTLIGHT_SCALE), max_h * SPOTLIGHT_MIN_H_FRAC);
             bar_h = bar_h + w->spotlight_t * (fminf(boosted, max_h) - bar_h);
-            color.red   += w->spotlight_t * (PLAYHEAD_DEFAULT.red   - color.red);
-            color.green += w->spotlight_t * (PLAYHEAD_DEFAULT.green - color.green);
-            color.blue  += w->spotlight_t * (PLAYHEAD_DEFAULT.blue  - color.blue);
-            color.alpha += w->spotlight_t * (PLAYHEAD_DEFAULT.alpha - color.alpha);
+            color = rgba_lerp_linear(color, PLAYHEAD_DEFAULT, w->spotlight_t);
         }
 
         graphene_rect_t rect = GRAPHENE_RECT_INIT(x, cy - bar_h, WAVEFORM_BAR_WIDTH, bar_h * 2.0f);
@@ -459,23 +471,33 @@ static void ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap) 
         gtk_snapshot_pop(snap);
     }
 
-    /* ── Playhead ────────────────────────────────────────────────────── */
+    /* ── Playhead (soft-edge gradient for sub-pixel-stable luminance) ── */
     if (split_x > 0.0f && split_x < (float)width) {
-        float t = w->playhead_hover_t;
-        GdkRGBA pc = {
-            PLAYHEAD_DEFAULT.red   + t * (PLAYHEAD_HOVER.red   - PLAYHEAD_DEFAULT.red),
-            PLAYHEAD_DEFAULT.green + t * (PLAYHEAD_HOVER.green - PLAYHEAD_DEFAULT.green),
-            PLAYHEAD_DEFAULT.blue  + t * (PLAYHEAD_HOVER.blue  - PLAYHEAD_DEFAULT.blue),
-            PLAYHEAD_DEFAULT.alpha + t * (PLAYHEAD_HOVER.alpha - PLAYHEAD_DEFAULT.alpha),
-        };
+        GdkRGBA pc = rgba_lerp_linear(PLAYHEAD_DEFAULT, PLAYHEAD_HOVER, w->playhead_hover_t);
 
         if (w->playhead_hover_t != ph_target || w->bar_dim_t != dim_target)
             gtk_widget_queue_draw(widget);
 
+        /* A hard-edged rect of fractional X position pulses in brightness as
+         * sub-pixel coverage is composited in sRGB space. A 1 px alpha ramp on
+         * each side spreads the partial coverage over a smooth gradient, so
+         * the integrated luminance stays nearly invariant to pixel phase. */
         float ph_h = max_h * PLAYHEAD_HEIGHT_FRAC;
+        float ph_full_w = PLAYHEAD_WIDTH + 2.0f * PLAYHEAD_EDGE_FADE;
         graphene_rect_t line = GRAPHENE_RECT_INIT(
-            split_x - PLAYHEAD_WIDTH * 0.5f, cy - ph_h, PLAYHEAD_WIDTH, ph_h * 2.0f);
-        gtk_snapshot_append_color(snap, &pc, &line);
+            split_x - ph_full_w * 0.5f, cy - ph_h, ph_full_w, ph_h * 2.0f);
+
+        graphene_point_t gstart = GRAPHENE_POINT_INIT(line.origin.x, 0);
+        graphene_point_t gend   = GRAPHENE_POINT_INIT(line.origin.x + ph_full_w, 0);
+        float ramp = PLAYHEAD_EDGE_FADE / ph_full_w;
+        GdkRGBA edge = { pc.red, pc.green, pc.blue, 0.0f };
+        GskColorStop stops[4] = {
+            { 0.0f,        edge },
+            { ramp,        pc   },
+            { 1.0f - ramp, pc   },
+            { 1.0f,        edge },
+        };
+        gtk_snapshot_append_linear_gradient(snap, &line, &gstart, &gend, stops, 4);
     }
 
     /* Keep redrawing while spotlight is fading */
