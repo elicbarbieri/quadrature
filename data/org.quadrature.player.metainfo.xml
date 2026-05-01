@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.quadrature.Player</id>
+
+  <name>Quadrature</name>
+  <summary>Four-channel broadcast audio player</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <developer id="io.nethermind.eli">
+    <name>Eli Barbieri</name>
+  </developer>
+
+  <description>
+    <p>
+      Quadrature is a four-channel audio player designed for broadcast studios
+      and DJ workflows. Each channel has independent transport, monitoring, and
+      cue, with a SQLite-backed music library, real-time spectrum visualization,
+      and PipeWire output.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Four independent channels with PFL/cue monitoring</li>
+      <li>Pitch-preserving variable-speed playback (Rubberband)</li>
+      <li>SQLite music library with full-text search</li>
+      <li>MusicBrainz metadata enrichment over the public REST API</li>
+      <li>AcoustID fingerprint matching (requires user-supplied API key)</li>
+      <li>Real-time FFT spectrum analyzer per channel</li>
+    </ul>
+    <p>
+      The Flatpak distribution targets casual users and small libraries.
+      For studio deployments and large libraries (50,000+ tracks), see the
+      native install path documented in the project README.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">org.quadrature.Player.desktop</launchable>
+
+  <url type="homepage">https://github.com/elibarbieri/quadrature</url>
+  <url type="bugtracker">https://github.com/elibarbieri/quadrature/issues</url>
+  <url type="vcs-browser">https://github.com/elibarbieri/quadrature</url>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#3a6478</color>
+    <color type="primary" scheme_preference="dark">#0f1c24</color>
+  </branding>
+
+  <content_rating type="oars-1.1" />
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+    <category>Music</category>
+  </categories>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Four-channel mixing surface with library and spectrum analyzer</caption>
+      <image>https://github.com/elibarbieri/quadrature/raw/master/data/screenshots/main.png</image>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release version="0.1.0" date="2026-05-04">
+      <description>
+        <p>Initial Flatpak release. HTTP-based MusicBrainz integration. Public PipeWire output.</p>
+      </description>
+    </release>
+  </releases>
+</component>

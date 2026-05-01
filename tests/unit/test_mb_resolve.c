@@ -15,6 +15,7 @@
 #include <criterion/criterion.h>
 #include "quadrature/indexer.h"
 #include "test_helpers.h"
+#include "mb_test_env.h"
 #include "quadrature/database.h"
 #include "internal.h"   /* mb_pg_client_t, mb_pg_exec, mb_pg_client_create/destroy */
 #include <libpq-fe.h>
@@ -32,6 +33,8 @@ static const char* env_or(const char* name, const char* fallback) {
 }
 
 static const char* mb_pg_conninfo(void) {
+    /* HTTP mode: return NULL → mb_resolver dispatches to HTTP backend. */
+    if (quad_test_use_http()) return NULL;
     const char* pw = getenv("MB_PG_PASSWORD");
     if (!pw || !pw[0]) return NULL;
     static char buf[512];
@@ -46,6 +49,7 @@ static const char* mb_pg_conninfo(void) {
 }
 
 static const char* acoustid_pg_conninfo(void) {
+    if (quad_test_use_http()) return NULL;  /* HTTP backend has no AcoustID PG */
     const char* pw = getenv("ACOUSTID_PG_PASSWORD");
     if (!pw || !pw[0]) return NULL;
     static char buf[512];
@@ -72,6 +76,7 @@ static const char* acoustid_index_url(void) {
 // It also exercises the HTTP POST path end-to-end and verifies PG connectivity.
 
 Test(mb_resolve, acoustid_http_post) {
+    QUAD_TEST_REQUIRE(QUAD_TEST_NEEDS_DIRECT_PG);
     const char* ac_conninfo = acoustid_pg_conninfo();
     if (!ac_conninfo) {
         cr_skip("ACOUSTID_PG_PASSWORD not set");
@@ -127,6 +132,7 @@ Test(mb_resolve, acoustid_http_post) {
 // =============================================================================
 
 Test(mb_resolve, acoustid_pg_lookup) {
+    QUAD_TEST_REQUIRE(QUAD_TEST_NEEDS_DIRECT_PG);
     const char* conninfo = acoustid_pg_conninfo();
     if (!conninfo) {
         cr_skip("ACOUSTID_PG_PASSWORD not set");
@@ -187,6 +193,7 @@ Test(mb_resolve, acoustid_pg_lookup) {
 // =============================================================================
 
 Test(mb_resolve, mb_fetch_all_batch_test) {
+    QUAD_TEST_REQUIRE(QUAD_TEST_NEEDS_DIRECT_PG);
     const char* conninfo = mb_pg_conninfo();
     if (!conninfo) {
         cr_skip("MB_PG_PASSWORD not set");
@@ -253,6 +260,8 @@ Test(mb_resolve, mb_fetch_all_batch_test) {
 // mb_resolver_run and verifies the album transitions from unresolved → resolved.
 
 Test(mb_resolve, full_resolve) {
+    /* Test seeds release_uuid via raw mb_pg_exec — direct-PG only. */
+    QUAD_TEST_REQUIRE(QUAD_TEST_NEEDS_DIRECT_PG);
     const char* mb_conninfo = mb_pg_conninfo();
     if (!mb_conninfo) {
         cr_skip("MB_PG_PASSWORD not set");

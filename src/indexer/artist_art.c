@@ -26,7 +26,11 @@
 #include <sys/file.h>
 
 #define FANART_API_URL      "https://webservice.fanart.tv/v3.2/music"
-#define FANART_PROJECT_KEY  "400cfe22b47e1fb93bfeb3ca452059c8"
+/* fanart.tv application key — defined in CMakeLists.txt alongside the other
+ * bundled application identifiers (ACOUSTID_APPLICATION_KEY, MUSICBRAINZ_USER_AGENT). */
+#ifndef FANART_TV_APPLICATION_KEY
+#error "FANART_TV_APPLICATION_KEY must be defined by CMakeLists.txt"
+#endif
 #define MAX_THUMBS 5
 #define MAX_RETRIES 3
 #define MAX_BACKOFF_MS 30000
@@ -674,9 +678,9 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
         // Build API URL — project key always required; personal key optional
         char* api_url = config->personal_api_key
             ? g_strdup_printf("%s/%s?api_key=%s&client_key=%s",
-                              FANART_API_URL, mbid, FANART_PROJECT_KEY, config->personal_api_key)
+                              FANART_API_URL, mbid, FANART_TV_APPLICATION_KEY, config->personal_api_key)
             : g_strdup_printf("%s/%s?api_key=%s",
-                              FANART_API_URL, mbid, FANART_PROJECT_KEY);
+                              FANART_API_URL, mbid, FANART_TV_APPLICATION_KEY);
 
         // Fetch with retry
         SoupMessage* msg = soup_message_new("GET", api_url);
@@ -744,9 +748,9 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
                     g_object_unref(msg);
                     char* retry_url = config->personal_api_key
                         ? g_strdup_printf("%s/%s?api_key=%s&client_key=%s",
-                                          FANART_API_URL, mbid, FANART_PROJECT_KEY, config->personal_api_key)
+                                          FANART_API_URL, mbid, FANART_TV_APPLICATION_KEY, config->personal_api_key)
                         : g_strdup_printf("%s/%s?api_key=%s",
-                                          FANART_API_URL, mbid, FANART_PROJECT_KEY);
+                                          FANART_API_URL, mbid, FANART_TV_APPLICATION_KEY);
                     msg = soup_message_new("GET", retry_url);
                     g_free(retry_url);
                     if (!msg) break;

@@ -86,7 +86,7 @@ typedef struct {
     gboolean wikipedia_bios;          // Fetch artist biographies from Wikipedia
 
     // Integration connection strings
-    char *musicbrainz_pg_conninfo;    // libpq conninfo for MusicBrainz PostgreSQL
+    char *musicbrainz_pg_conninfo;    // libpq conninfo for self-hosted MB PG (NULL → use HTTP)
     char *acoustid_pg_conninfo;       // libpq conninfo for AcoustID PostgreSQL
     char *acoustid_index_url;         // AcoustID index HTTP endpoint URL
     char *mb_solr_url;                // MusicBrainz Solr search URL (e.g., "http://host:8983")

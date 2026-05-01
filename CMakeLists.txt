@@ -30,10 +30,26 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Compiler flags
+#
+# CPU baseline: x86-64-v3 (Haswell-era: AVX2, FMA, BMI1/2, ~2013+).
+# Hot paths that need newer ISAs (AVX-512, etc.) use function multi-versioning
+# via __attribute__((target_clones(...))) or runtime dispatch with
+# __builtin_cpu_supports(). This keeps binaries portable for distribution
+# (Flathub, generic .deb/.rpm) while still using modern SIMD on most hardware.
+#
+# For local development on a known machine, set -DQUADRATURE_NATIVE_BUILD=ON
+# to opt back into -march=native -mtune=native.
+option(QUADRATURE_NATIVE_BUILD "Build for the local CPU (-march=native). Off for distributable builds." OFF)
+
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra)
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        add_compile_options(-O3 -DNDEBUG -march=native -mtune=native -ftree-vectorize)
+        add_compile_options(-O3 -DNDEBUG -ftree-vectorize)
+        if(QUADRATURE_NATIVE_BUILD)
+            add_compile_options(-march=native -mtune=native)
+        else()
+            add_compile_options(-march=x86-64-v3 -mtune=generic)
+        endif()
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)  # LTO: cross-TU inlining
     endif()
 endif()
@@ -55,14 +71,54 @@ pkg_check_modules(VIPS REQUIRED vips)
 pkg_check_modules(RUBBERBAND REQUIRED rubberband>=3.0)
 pkg_check_modules(CHROMAPRINT REQUIRED libchromaprint)
 pkg_check_modules(TAGLIB REQUIRED taglib)
-pkg_check_modules(LIBPQ REQUIRED libpq)
+# PostgreSQL backend — required for talking to a self-hosted MusicBrainz
+# mirror. Native (Nix/distro) builds default ON. Flatpak builds set OFF
+# and the binary uses the HTTP backend exclusively (mb+http:// URI scheme).
+option(QUADRATURE_USE_LIBPQ "Build the PostgreSQL MusicBrainz backend" ON)
+if(QUADRATURE_USE_LIBPQ)
+    pkg_check_modules(LIBPQ REQUIRED libpq)
+    add_compile_definitions(QUADRATURE_USE_LIBPQ)
+endif()
+
 pkg_check_modules(LIBSOUP3 REQUIRED libsoup-3.0)
 pkg_check_modules(JSON_GLIB REQUIRED json-glib-1.0)
+
+# ============================================================================
+# Bundled application identifiers
+#
+# Project-level identifiers that ship in every Quadrature binary. These name
+# the application to the respective services — they are NOT per-user keys.
+# Users do not need accounts or credentials to use any of these endpoints.
+#
+# Downstream distros / forks can swap any of these with their own at build
+# time via -D, e.g. `cmake -DACOUSTID_APPLICATION_KEY="..."`. This keeps
+# quota namespaces separated when a fork ships under a different brand.
+# ============================================================================
+
+if(NOT DEFINED ACOUSTID_APPLICATION_KEY)
+    set(ACOUSTID_APPLICATION_KEY "N3PlLWjzbn"
+        CACHE STRING "AcoustID application key — identifies Quadrature to api.acoustid.org")
+endif()
+
+if(NOT DEFINED FANART_TV_APPLICATION_KEY)
+    set(FANART_TV_APPLICATION_KEY "400cfe22b47e1fb93bfeb3ca452059c8"
+        CACHE STRING "fanart.tv project API key — identifies Quadrature to webservice.fanart.tv")
+endif()
+
+if(NOT DEFINED MUSICBRAINZ_USER_AGENT)
+    set(MUSICBRAINZ_USER_AGENT "quadrature/${PROJECT_VERSION} ( https://github.com/elibarbieri/quadrature )"
+        CACHE STRING "User-Agent string sent to musicbrainz.org (TOS-required identifier)")
+endif()
+
+add_compile_definitions(
+    ACOUSTID_APPLICATION_KEY="${ACOUSTID_APPLICATION_KEY}"
+    FANART_TV_APPLICATION_KEY="${FANART_TV_APPLICATION_KEY}"
+    MUSICBRAINZ_USER_AGENT="${MUSICBRAINZ_USER_AGENT}"
+)
 
 # Include dirs
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/third_party/cava
     ${GLIB_INCLUDE_DIRS}
     ${FFMPEG_INCLUDE_DIRS}
     ${SQLITE3_INCLUDE_DIRS}
@@ -72,7 +128,6 @@ include_directories(
     ${RUBBERBAND_INCLUDE_DIRS}
     ${CHROMAPRINT_INCLUDE_DIRS}
     ${TAGLIB_INCLUDE_DIRS}
-    ${LIBPQ_INCLUDE_DIRS}
     ${LIBSOUP3_INCLUDE_DIRS}
     ${JSON_GLIB_INCLUDE_DIRS}
 )
@@ -85,7 +140,7 @@ set(CORE_SOURCES
     src/audio/audio_spectrum.c
     src/audio/audio_devices.c
     src/core/perf_dashboard.c
-    third_party/cava/cavacore.c
+    src/audio/cavacore.c
 )
 
 # Database sources
@@ -115,9 +170,11 @@ set(INDEXER_CORE_SOURCES
     src/indexer/library_validation.c
     src/indexer/artwork.c
     src/indexer/musicbrainz/mb_fingerprint.c
-    src/indexer/musicbrainz/mb_acoustid.c
-    src/indexer/musicbrainz/mb_postgres.c
+    src/indexer/musicbrainz/mb_backend.c
     src/indexer/musicbrainz/mb_resolver.c
+    # HTTP backend (always built — no libpq dep)
+    src/indexer/musicbrainz/mb_http_backend.c
+    src/indexer/musicbrainz/mb_http_ops.c
     src/indexer/artist_art.c
     src/indexer/artist_atlas.c
     src/indexer/artist_bio.c
@@ -144,6 +201,14 @@ target_link_directories(quadrature_engine PUBLIC ${GLIB_LIBRARY_DIRS} ${FFMPEG_L
 # Indexer core library (shared between daemon and embedded modes)
 # Includes MusicBrainz resolution — chromaprint, taglib, libpq linked here
 add_library(quadrature_indexer_core STATIC ${INDEXER_CORE_SOURCES})
+if(QUADRATURE_USE_LIBPQ)
+    target_sources(quadrature_indexer_core PRIVATE
+        src/indexer/musicbrainz/mb_pg_client.c
+        src/indexer/musicbrainz/mb_pg_acoustid.c
+        src/indexer/musicbrainz/mb_pg_backend.c
+    )
+    target_include_directories(quadrature_indexer_core PRIVATE ${LIBPQ_INCLUDE_DIRS})
+endif()
 target_include_directories(quadrature_indexer_core PRIVATE
     ${CMAKE_SOURCE_DIR}/src/indexer
     ${CMAKE_SOURCE_DIR}/src/indexer/musicbrainz
@@ -156,18 +221,22 @@ target_link_libraries(quadrature_indexer_core
     ${VIPS_LIBRARIES}
     ${CHROMAPRINT_LIBRARIES}
     ${TAGLIB_LIBRARIES}
-    ${LIBPQ_LIBRARIES}
     ${LIBSOUP3_LIBRARIES}
     ${JSON_GLIB_LIBRARIES}
 )
+if(QUADRATURE_USE_LIBPQ)
+    target_link_libraries(quadrature_indexer_core ${LIBPQ_LIBRARIES})
+endif()
 target_link_directories(quadrature_indexer_core PUBLIC
     ${VIPS_LIBRARY_DIRS}
     ${CHROMAPRINT_LIBRARY_DIRS}
     ${TAGLIB_LIBRARY_DIRS}
-    ${LIBPQ_LIBRARY_DIRS}
     ${LIBSOUP3_LIBRARY_DIRS}
     ${JSON_GLIB_LIBRARY_DIRS}
 )
+if(QUADRATURE_USE_LIBPQ)
+    target_link_directories(quadrature_indexer_core PUBLIC ${LIBPQ_LIBRARY_DIRS})
+endif()
 
 # GPIO library (Axia Livewire+ integration)
 set(GPIO_SOURCES
@@ -376,9 +445,13 @@ if(BUILD_UI)
         install(FILES ${CMAKE_BINARY_DIR}/org.quadrature.player.desktop
                 DESTINATION share/applications)
 
-        # Install icons
+        # Install AppStream metainfo (required for Flathub; harmless on native)
+        install(FILES ${CMAKE_SOURCE_DIR}/data/org.quadrature.player.metainfo.xml
+                DESTINATION share/metainfo)
+
+        # Install icons (data/icons/hicolor/... → share/icons/hicolor/...)
         install(DIRECTORY ${CMAKE_SOURCE_DIR}/data/icons/
-                DESTINATION share/icons/hicolor
+                DESTINATION share/icons
                 FILES_MATCHING PATTERN "*.png" PATTERN "*.svg")
     endif()
 endif()

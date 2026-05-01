@@ -1,5 +1,6 @@
 # Build
 build/
+build-http/
 cmake-build-*/
 bin/
 
@@ -33,9 +34,6 @@ Thumbs.db
 *.tmp
 *.temp
 *.log
-
-# Third party (allow cava submodule)
-!third_party/cava/
 
 # Nix
 result

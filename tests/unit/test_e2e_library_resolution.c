@@ -30,6 +30,7 @@
 #include "test_helpers.h"
 #include "quadrature/indexer.h"
 #include "quadrature/database.h"
+#include "mb_test_env.h"
 #include "quadrature/library.h"
 #include "quadrature/library_search.h"
 #include <stdbool.h>
@@ -104,6 +105,8 @@ static const char *env_or(const char *name, const char *fallback) {
 }
 
 static const char *mb_pg_conninfo(void) {
+    /* HTTP test mode: return NULL → resolver picks the HTTP backend. */
+    if (quad_test_use_http()) return NULL;
     const char *pw = getenv("MB_PG_PASSWORD");
     if (!pw || !pw[0]) return NULL;
     static char buf[512];
@@ -118,6 +121,8 @@ static const char *mb_pg_conninfo(void) {
 }
 
 static const char *mb_solr_url(void) {
+    /* HTTP backend has built-in Solr equivalent (ws/2 search) — no env URL. */
+    if (quad_test_use_http()) return NULL;
     return env_or("MB_SOLR_URL", NULL);
 }
 
@@ -630,8 +635,12 @@ static void rm_rf(const char *path) {
 static void story_import_setup(void) {
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
-    if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-    if (!solr) cr_skip("MB_SOLR_URL not set");
+    /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
+     * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
+    if (!quad_test_use_http()) {
+        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
+        if (!solr) cr_skip("MB_SOLR_URL not set");
+    }
 
     story_common_paths_init();
     build_lib_a(lib_a_root);
@@ -947,8 +956,12 @@ Test(e2e, user_imports_two_messy_libraries,
 static void story_picard_setup(void) {
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
-    if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-    if (!solr) cr_skip("MB_SOLR_URL not set");
+    /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
+     * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
+    if (!quad_test_use_http()) {
+        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
+        if (!solr) cr_skip("MB_SOLR_URL not set");
+    }
 
     story_common_paths_init();
     build_lib_a(lib_a_root);
@@ -1288,8 +1301,12 @@ Test(e2e, user_removes_library,
 static void story_mb_credits_setup(void) {
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
-    if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-    if (!solr) cr_skip("MB_SOLR_URL not set");
+    /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
+     * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
+    if (!quad_test_use_http()) {
+        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
+        if (!solr) cr_skip("MB_SOLR_URL not set");
+    }
 
     story_common_paths_init();
     build_lib_a(lib_a_root);
@@ -1480,8 +1497,12 @@ Test(e2e, mb_resolution_updates_featured_credits,
 static void story_fresh_db_clean_setup(void) {
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
-    if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-    if (!solr) cr_skip("MB_SOLR_URL not set");
+    /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
+     * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
+    if (!quad_test_use_http()) {
+        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
+        if (!solr) cr_skip("MB_SOLR_URL not set");
+    }
 
     story_common_paths_init();
     build_lib_a(lib_a_root);

@@ -232,7 +232,7 @@ static inline float soft_limit(float x) {
     float overshoot = abs_x - LIMITER_THRESHOLD;
 
     /* Compute all paths unconditionally — select via ternary (cmov, no branches).
-     * Enables auto-vectorization of caller loops with -O3 -march=native. */
+     * Enables auto-vectorization of caller loops with -O3 + AVX2 baseline. */
     float knee = LIMITER_THRESHOLD + (1.0f - LIMITER_THRESHOLD) * (overshoot / (overshoot + LIMITER_KNEE));
     float x2 = abs_x * abs_x;
     float tanh_approx = abs_x * (27.0f + x2) / (27.0f + 9.0f * x2);

@@ -21,7 +21,9 @@
 #include <adwaita.h>
 #include <errno.h>
 #include <glib-unix.h>
+#ifdef QUADRATURE_USE_LIBPQ
 #include <libpq-fe.h>
+#endif
 #include <sqlite3.h>
 #include <sys/stat.h>
 
@@ -83,7 +85,8 @@ static void startup_health_check(const app_settings_t *settings) {
         sqlite3_close(db);
     }
 
-    /* 3. PostgreSQL connectivity */
+    /* 3. PostgreSQL connectivity (skipped in HTTP-only builds) */
+#ifdef QUADRATURE_USE_LIBPQ
     const char *pg_conninfos[] = {
         settings->musicbrainz_pg_conninfo,
         settings->acoustid_pg_conninfo,
@@ -106,6 +109,9 @@ static void startup_health_check(const app_settings_t *settings) {
                       "MB resolution will be disabled", pg_labels[i]);
         PQfinish(conn);
     }
+#else
+    (void)settings;  /* HTTP-only build — no PG check */
+#endif
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

@@ -187,6 +187,10 @@ typedef struct {
     /* AcoustID fingerprinting (Phase 5) */
     const char* acoustid_pg_conninfo;  /* libpq conninfo for AcoustID PG (NULL = skip fingerprinting) */
     const char* acoustid_index_url;    /* acoustid-index HTTP URL, e.g. "http://host:8081" (NULL = skip) */
+    /* HTTP backend uses a bundled AcoustID application key
+     * (QUADRATURE_BUNDLED_ACOUSTID_KEY in mb_http_backend.c). No user-facing
+     * AcoustID config is needed for fingerprint LOOKUP — the application key
+     * identifies Quadrature itself, not the user. */
 
     /* Artist art (Phase 7) — skipped entirely when false */
     bool fetch_artist_art;
@@ -265,13 +269,19 @@ void indexer_get_progress(indexer_t* indexer, indexer_progress_t* progress);
 typedef struct mb_resolver mb_resolver_t;
 
 typedef struct {
-    const char* pg_conninfo;            /* libpq connection string for self-hosted MusicBrainz database */
-    const char* acoustid_pg_conninfo;  /* libpq connection string for acoustid database (optional) */
-    const char* acoustid_index_url;    /* URL for acoustid-index HTTP service, e.g. "http://host:8081" (optional) */
-    const char* mb_solr_url;           /* MusicBrainz Solr base URL, e.g. "http://host:8983" (optional) */
+    /* Backend selection: if pg_conninfo is non-empty, the resolver builds
+     * a `pg://` backend (self-hosted MB mirror). Otherwise it builds an
+     * `mb+http://` backend that talks to public musicbrainz.org and
+     * api.acoustid.org. The HTTP backend is strict-under the published
+     * rate limits (≤0.91 req/sec MB, ≤2.86 req/sec AcoustID) and uses
+     * the bundled QUADRATURE_BUNDLED_ACOUSTID_KEY for fingerprint lookups. */
+    const char* pg_conninfo;            /* libpq conninfo (PG path); NULL/empty → use HTTP */
+    const char* acoustid_pg_conninfo;   /* libpq conninfo for acoustid DB (PG path; optional) */
+    const char* acoustid_index_url;     /* acoustid-index HTTP URL (PG path; optional) */
+    const char* mb_solr_url;            /* Solr URL (PG path; optional) */
     int parallelism;                    /* 0 = auto */
-    const char* library_root;          /* Absolute path to library root (music files); required for fingerprinting */
-    const char* data_root;             /* Absolute path to data root (DB + meta); NULL = same as library_root */
+    const char* library_root;           /* Absolute path to library root (music files); required for fingerprinting */
+    const char* data_root;              /* Absolute path to data root (DB + meta); NULL = same as library_root */
 } mb_resolver_options_t;
 
 typedef enum {

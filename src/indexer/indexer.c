@@ -2402,10 +2402,13 @@ static void* indexer_worker(void* arg) {
     notify_event(idx, INDEXER_ARTWORK_UPDATED);
 
     // Phase 5+6: FINGERPRINT + RESOLVE (concurrent, background, non-blocking for UI)
+    //
+    // Backend selection happens inside mb_resolver_create():
+    //   pg_conninfo present  → PG backend (self-hosted MB mirror)
+    //   pg_conninfo empty    → HTTP backend (public musicbrainz.org / api.acoustid.org)
+    // Either path is valid; we only skip when mb_resolve is disabled outright.
     if (!idx->mb_resolve) {
         g_message("Phase 4+5: MusicBrainz resolve disabled (enable in settings)");
-    } else if (!idx->pg_conninfo || !idx->pg_conninfo[0]) {
-        g_warning("Phase 4+5: MusicBrainz resolve enabled but pg_conninfo is empty — skipping");
     } else {
         set_phase(idx, INDEXER_PHASE_FINGERPRINT);
         /* Reset artwork counters so stale Phase 3 totals don't appear as initial resolve state */

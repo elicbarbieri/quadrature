@@ -30,7 +30,8 @@ typedef enum {
     QUADRATURE_ERROR_TIMEOUT,
     QUADRATURE_ERROR_CANCELLED,
     QUADRATURE_ERROR_INTERNAL,
-    QUADRATURE_ERROR_SERVICE_UNAVAILABLE
+    QUADRATURE_ERROR_SERVICE_UNAVAILABLE,
+    QUADRATURE_ERROR_NOT_SUPPORTED
 } quadrature_result_t;
 
 /* =============================================================================

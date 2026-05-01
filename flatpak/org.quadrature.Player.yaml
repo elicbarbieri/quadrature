@@ -1,0 +1,205 @@
+# Flatpak manifest for Quadrature.
+#
+# Build locally with the Flathub-aligned builder:
+#   flatpak install flathub org.flatpak.Builder
+#   flatpak run --command=flatpak-builder org.flatpak.Builder \
+#     --user --install --force-clean --ccache build-dir \
+#     flatpak/org.quadrature.Player.yaml
+#
+# Lint:
+#   flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
+#     manifest flatpak/org.quadrature.Player.yaml
+#
+# Notes:
+#   - HTTP-only build (QUADRATURE_USE_LIBPQ=OFF). No libpq, no self-hosted MB
+#     mirror. Talks to public musicbrainz.org and api.acoustid.org with
+#     strict rate limits. See README for the native (Nix) install path
+#     used for studio deployments.
+#   - FFmpeg is built from source as a module (see `modules:` below) rather
+#     than relying on org.freedesktop.Platform.ffmpeg-full. The extension is
+#     not built for freedesktop 25.08 / GNOME 50, and bundling lets us pin
+#     codec coverage independent of Flathub extension lifecycle.
+#   - User-chosen music folders go through the FileChooser portal; we do
+#     NOT request --filesystem=host or --filesystem=home.
+id: org.quadrature.Player
+runtime: org.gnome.Platform
+# GNOME 50 = freedesktop 25.08 base. We bundle our own FFmpeg below (the
+# org.freedesktop.Platform.ffmpeg-full extension is not built for 25.08
+# and was tied to the EOL'd GNOME 48 anyway). Bundling decouples us from
+# Flathub extension churn and lets us pick exactly the codec set we need.
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: quadrature
+
+# Existing files use lowercase `quadrature` / `org.quadrature.player.desktop`;
+# Flathub requires names to match the app-id casing exactly. Flatpak renames
+# at install time so the native build stays unchanged.
+rename-icon: quadrature
+rename-desktop-file: org.quadrature.player.desktop
+rename-appdata-file: org.quadrature.player.metainfo.xml
+
+finish-args:
+  # Display + IPC
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+
+  # Network: HTTPS to musicbrainz.org / acoustid.org / fanart.tv
+  - --share=network
+
+  # PipeWire audio (canonical form — no dedicated --socket=pipewire flag exists)
+  - --filesystem=xdg-run/pipewire-0
+
+  # Real-time scheduling for the audio thread (graceful fallback if denied)
+  - --system-talk-name=org.freedesktop.RealtimeKit1
+
+  # User's Music folder; arbitrary additional folders come via FileChooser portal
+  - --filesystem=xdg-music:ro
+
+  # Note: portals (org.freedesktop.portal.Desktop, FileChooser, etc.) are
+  # auto-permitted by the sandbox — explicit --talk-name=portal.* lines are
+  # rejected by flatpak-builder-lint (finish-args-portal-talk-name).
+
+build-options:
+  env:
+    PKG_CONFIG_PATH: /app/lib/pkgconfig:/usr/lib/pkgconfig
+
+cleanup:
+  - /include
+  - /share/man
+  - /share/aclocal
+  - /share/doc
+  - /share/gtk-doc
+  - /share/info
+  - '*.la'
+  - '*.a'
+
+modules:
+  # FFmpeg — bundled (not an extension) so we control the codec set and
+  # decouple from Flathub's per-runtime extension lifecycle. Audio-focused
+  # config: drop avdevice/postproc/programs/docs but keep avfilter/swscale
+  # since the build links them (CMakeLists.txt FFMPEG pkg_check_modules).
+  # GPL is fine for a downstream application (we ship under MIT but pull
+  # in GPL libraries at runtime — same model as VLC/mpv). Nonfree is OFF
+  # to stay redistributable under Flathub policy.
+  - name: ffmpeg
+    config-opts:
+      - --prefix=/app
+      - --enable-shared
+      - --disable-static
+      - --enable-gpl
+      # `--disable-nonfree` is implicit; `--enable-nonfree` would taint
+      # redistribution. `postproc` was removed in FFmpeg 8.x.
+      - --disable-programs
+      - --disable-doc
+      - --disable-htmlpages
+      - --disable-manpages
+      - --disable-podpages
+      - --disable-txtpages
+      - --disable-debug
+      - --disable-avdevice
+      # Network protocols come from libsoup3, not FFmpeg.
+      - --disable-network
+    cleanup:
+      - /share/ffmpeg
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz
+        sha256: b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a
+
+  # FFTW3 — used by the cavacore spectrum analyzer and Quadrature internals.
+  - name: fftw3-double
+    buildsystem: autotools
+    config-opts:
+      - --enable-shared
+      - --disable-static
+      - --enable-threads
+      - --enable-sse2
+      - --enable-avx
+      - --enable-avx2
+      - --enable-fma
+    sources:
+      - type: archive
+        url: https://www.fftw.org/fftw-3.3.10.tar.gz
+        sha256: 56c932549852cddcfafdab3820b0200c7742675be92179e59e6215b340e26467
+
+  # libvips — image processing (album art resize/composite).
+  - name: libvips
+    buildsystem: meson
+    config-opts:
+      - --buildtype=release
+      - -Dintrospection=disabled
+      - -Dvapi=false
+      - -Dmodules=disabled
+      - -Ddeprecated=false
+      - -Dexamples=false
+    sources:
+      - type: archive
+        url: https://github.com/libvips/libvips/releases/download/v8.18.0/vips-8.18.0.tar.xz
+        sha256: b85ab92280c30d22f5c8fe2f68b809cddb7eaac437d8c33474475dac84ddc574
+
+  # Rubberband — pitch/time stretching for shuttle modes.
+  - name: rubberband
+    buildsystem: meson
+    config-opts:
+      - --buildtype=release
+      - -Ddefault_library=shared
+      - -Dfft=builtin
+      - -Dresampler=builtin
+      - -Dcmdline=disabled
+    sources:
+      - type: archive
+        url: https://breakfastquay.com/files/releases/rubberband-4.0.0.tar.bz2
+        sha256: af050313ee63bc18b35b2e064e5dce05b276aaf6d1aa2b8a82ced1fe2f8028e9
+
+  # Chromaprint — audio fingerprinting (AcoustID).
+  - name: chromaprint
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_TOOLS=OFF
+      - -DBUILD_TESTS=OFF
+      - -DFFT_LIB=fftw3
+    sources:
+      - type: archive
+        url: https://github.com/acoustid/chromaprint/releases/download/v1.6.0/chromaprint-1.6.0.tar.gz
+        sha256: 9d33482e56a1389a37a0d6742c376139fa43e3b8a63d29003222b93db2cb40da
+
+  # TagLib — audio file tag reading.
+  - name: taglib
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DWITH_ZLIB=ON
+    sources:
+      - type: archive
+        url: https://github.com/taglib/taglib/releases/download/v2.1.1/taglib-2.1.1.tar.gz
+        sha256: 3716d31f7c83cbf17b67c8cf44dd82b2a2f17e6780472287a16823e70305ddba
+
+  # Quadrature — built with QUADRATURE_USE_LIBPQ=OFF for the HTTP-only path.
+  # Sources copied from the parent directory at build time. For Flathub
+  # submission, replace `type: dir, path: ..` with a pinned git source.
+  - name: quadrature
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_UI=ON
+      - -DBUILD_CLI=ON
+      - -DBUILD_PRODUCTION=ON
+      - -DBUILD_TESTS=OFF
+      - -DQUADRATURE_USE_LIBPQ=OFF
+    post-install:
+      - mkdir -p ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - build
+          - result
+          - result-1
+          - .direnv
+          - .jj
+          - .git
+          - flatpak/.flatpak-builder

@@ -1,8 +1,11 @@
 /**
- * MusicBrainz PostgreSQL client.
+ * MusicBrainz PostgreSQL client (formerly mb_postgres.c).
  *
  * Queries a self-hosted MusicBrainz PostgreSQL database directly via libpq.
  * Returns mb_release_t / mb_recording_t types for the resolver.
+ *
+ * Compiled only when QUADRATURE_USE_LIBPQ is defined (default ON; OFF for
+ * Flatpak builds, which use the HTTP backend in mb_http_*.c instead).
  */
 
 #define G_LOG_DOMAIN "quadrature"
@@ -109,57 +112,8 @@ static int pg_get_int(PGresult* res, int row, int col, int default_val) {
 // Free Functions
 // =============================================================================
 
-void mb_artist_free(mb_artist_t* artist) {
-    if (!artist) return;
-    g_free(artist->id);
-    g_free(artist->name);
-    g_free(artist->credited_name);
-    g_free(artist->sort_name);
-    g_free(artist->joinphrase);
-}
-
-void mb_recording_free(mb_recording_t* recording) {
-    if (!recording) return;
-    g_free(recording->id);
-    g_free(recording->title);
-
-    if (recording->artists) {
-        for (size_t i = 0; i < recording->artist_count; i++) {
-            mb_artist_free(&recording->artists[i]);
-        }
-        g_free(recording->artists);
-    }
-}
-
-void mb_release_free(mb_release_t* release) {
-    if (!release) return;
-
-    g_free(release->id);
-    g_free(release->release_group_id);
-    g_free(release->title);
-    g_free(release->date);
-    g_free(release->label);
-    g_free(release->catalog_number);
-    g_free(release->barcode);
-    g_free(release->type);
-    g_free(release->genres);
-
-    if (release->artists) {
-        for (size_t i = 0; i < release->artist_count; i++) {
-            mb_artist_free(&release->artists[i]);
-        }
-        g_free(release->artists);
-    }
-
-    if (release->recordings) {
-        for (size_t i = 0; i < release->recording_count; i++) {
-            mb_recording_free(&release->recordings[i]);
-        }
-        g_free(release->recordings);
-    }
-
-    memset(release, 0, sizeof(mb_release_t));
-}
+/* mb_artist_free / mb_recording_free / mb_release_free moved to mb_backend.c
+ * (shared by both backends). */
 
 // =============================================================================
 // UUID Array Formatting

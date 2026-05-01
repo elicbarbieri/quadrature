@@ -1,5 +1,10 @@
 /**
- * AcoustID fingerprint lookup via acoustid-index HTTP + local PostgreSQL.
+ * AcoustID fingerprint lookup via acoustid-index HTTP + local PostgreSQL
+ * (formerly mb_acoustid.c).
+ *
+ * Compiled only when QUADRATURE_USE_LIBPQ is defined. The HTTP backend
+ * (mb_http_acoustid.c) replaces this entire flow with a single
+ * api.acoustid.org REST call.
  *
  * Flow:
  *   1. Decode base64 chromaprint → raw uint32 hashes
@@ -1234,17 +1239,4 @@ char* mb_solr_search_release(mb_pg_client_t* mb_client,
     return best_release_id;
 }
 
-void mb_acoustid_response_free(mb_acoustid_response_t* response) {
-    if (!response) return;
-
-    if (response->results) {
-        for (size_t i = 0; i < response->count; i++) {
-            g_free(response->results[i].recording_id);
-            g_free(response->results[i].release_id);
-            g_free(response->results[i].release_group_id);
-        }
-        g_free(response->results);
-    }
-
-    memset(response, 0, sizeof(mb_acoustid_response_t));
-}
+/* mb_acoustid_response_free moved to mb_backend.c (shared by both backends). */

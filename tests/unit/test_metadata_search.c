@@ -65,6 +65,7 @@
 #include "quadrature/database.h"
 #include "quadrature/library.h"
 #include "quadrature/metadata.h"
+#include "mb_test_env.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -112,6 +113,7 @@ static const char *env_or(const char *name, const char *fallback) {
 }
 
 static const char *mb_pg_conninfo(void) {
+    if (quad_test_use_http()) return NULL;  /* HTTP mode → resolver picks HTTP backend */
     const char *pw = getenv("MB_PG_PASSWORD");
     if (!pw || !pw[0]) return NULL;
     static char buf[512];
@@ -125,9 +127,13 @@ static const char *mb_pg_conninfo(void) {
     return buf;
 }
 
-static const char *mb_solr_url(void) { return env_or("MB_SOLR_URL", NULL); }
+static const char *mb_solr_url(void) {
+    if (quad_test_use_http()) return NULL;  /* HTTP backend has built-in ws/2 search */
+    return env_or("MB_SOLR_URL", NULL);
+}
 
 static const char *acoustid_pg_conninfo(void) {
+    if (quad_test_use_http()) return NULL;  /* HTTP backend uses api.acoustid.org */
     const char *pw = getenv("ACOUSTID_PG_PASSWORD");
     if (!pw || !pw[0]) return NULL;
     static char buf[512];
@@ -465,10 +471,14 @@ static int distinct_recording_mbids(library_cache_t *c, GArray *track_ids,
 /* ── Common skip-guards ───────────────────────────────────────────────── */
 
 static void require_mb_env(void) {
+    /* HTTP mode: pg/solr=NULL is the correct routing signal — don't skip. */
+    if (quad_test_use_http()) return;
     if (!mb_pg_conninfo()) cr_skip("MB_PG_PASSWORD not set");
     if (!mb_solr_url())    cr_skip("MB_SOLR_URL not set");
 }
 static void require_acoustid_env(void) {
+    /* HTTP mode: bundled AcoustID app key is always available — no skip. */
+    if (quad_test_use_http()) return;
     if (!acoustid_pg_conninfo()) cr_skip("ACOUSTID_PG_PASSWORD not set");
     if (!acoustid_index_url())   cr_skip("ACOUSTID_INDEX_URL not set");
 }

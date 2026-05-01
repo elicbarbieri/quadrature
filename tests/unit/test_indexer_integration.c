@@ -21,6 +21,7 @@
 #include <criterion/criterion.h>
 #include <criterion/hooks.h>
 #include "test_helpers.h"
+#include "mb_test_env.h"
 #include "quadrature/indexer.h"
 
 #include <stdlib.h>
@@ -111,6 +112,9 @@ static void tracker_callback(indexer_event_t event,
  * Mirrors the pattern in test_mb_resolve.c.
  */
 static const char *test_mb_pg_conninfo(void) {
+    /* HTTP test mode: NULL conninfo → resolver dispatches to HTTP backend.
+     * Tests using test_config_mb() then run end-to-end against public APIs. */
+    if (quad_test_use_http()) return NULL;
     const char *pw = getenv("MB_PG_PASSWORD");
     if (!pw || !pw[0]) return NULL;
     static char buf[512];
@@ -150,7 +154,7 @@ static indexer_config_t test_config_mb(test_tracker_t *tracker,
                                        const char *pg_conninfo) {
     indexer_config_t c = test_config_basic(tracker);
     c.mb_resolve  = true;
-    c.pg_conninfo = pg_conninfo;
+    c.pg_conninfo = pg_conninfo;  /* NULL in HTTP mode → routes to HTTP backend */
     return c;
 }
 
@@ -1232,7 +1236,10 @@ Test(indexer, non_mb_album_tag_edit_propagates,
      .init = story8a_setup, .fini = story8a_teardown, .timeout = 120) {
 
     const char *pg_conninfo = test_mb_pg_conninfo();
-    if (!pg_conninfo) cr_skip("MB_PG_PASSWORD not set — Phase 6 cannot run");
+    /* HTTP mode returns NULL pg_conninfo intentionally — that's the routing
+     * signal, not a missing-config error. Only skip in PG mode. */
+    if (!pg_conninfo && !quad_test_use_http())
+        cr_skip("MB_PG_PASSWORD not set — Phase 6 cannot run");
 
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", s8a_data);
@@ -1358,7 +1365,10 @@ Test(indexer, mb_tagged_album_edits_are_ignored,
      .init = story8b_setup, .fini = story8b_teardown, .timeout = 180) {
 
     const char *pg_conninfo = test_mb_pg_conninfo();
-    if (!pg_conninfo) cr_skip("MB_PG_PASSWORD not set — Phase 6 cannot run");
+    /* HTTP mode returns NULL pg_conninfo intentionally — that's the routing
+     * signal, not a missing-config error. Only skip in PG mode. */
+    if (!pg_conninfo && !quad_test_use_http())
+        cr_skip("MB_PG_PASSWORD not set — Phase 6 cannot run");
 
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", s8b_data);

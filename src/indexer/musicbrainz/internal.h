@@ -48,6 +48,11 @@
 
 typedef struct mb_pg_client mb_pg_client_t;
 
+// Backend abstraction (mb_backend.c)
+typedef struct mb_backend mb_backend_t;
+typedef struct mb_pool    mb_pool_t;
+typedef struct mb_conn    mb_conn_t;
+
 // =============================================================================
 // Persistent HTTP Connection (mb_acoustid.c)
 // =============================================================================
@@ -336,5 +341,208 @@ quadrature_result_t mb_pg_pool_create(const char* mb_conninfo,
     const char* acoustid_conninfo, const char* acoustid_index_url,
     size_t count, mb_pg_pool_t** out);
 void mb_pg_pool_destroy(mb_pg_pool_t* pool);
+
+// =============================================================================
+// Backend Abstraction (mb_backend.c)
+// =============================================================================
+//
+// Two backends implement this interface:
+//   - PG backend (mb_pg_backend.c):   talks to a self-hosted MusicBrainz PG
+//                                     mirror. Built only when QUADRATURE_USE_LIBPQ.
+//                                     Selected by URI scheme `pg://`.
+//   - HTTP backend (mb_http_backend.c): talks to the public musicbrainz.org and
+//                                     api.acoustid.org REST APIs. Always built.
+//                                     Selected by URI scheme `mb+http://`.
+//
+// All call sites in mb_resolver.c go through mb_backend_t. Slot pointers are
+// opaque — only the backend that produced them knows their concrete type.
+
+/**
+ * Capability bits — let the resolver branch only on what it must.
+ * Set by each backend at pool creation, exposed via mb_backend->caps.
+ *
+ * Most ops are mandatory; capability bits cover:
+ *  - performance hints (BATCH_FETCH: one round-trip vs N serial calls)
+ *  - feature gates (PREFETCH: is overlap profitable for this backend)
+ */
+typedef enum {
+    MB_CAP_BATCH_FETCH    = 1u << 0,  /* batch_fetch is one round-trip (PG only) */
+    MB_CAP_SOLR_SEARCH    = 1u << 1,  /* solr_search supported */
+    MB_CAP_ISRC_LOOKUP    = 1u << 2,  /* isrc_lookup supported */
+    MB_CAP_FINGERPRINT    = 1u << 3,  /* fingerprint_lookup supported */
+    MB_CAP_PREFETCH       = 1u << 4   /* prefetch overlap is profitable */
+} mb_caps_t;
+
+/**
+ * Backend configuration. Discriminated union — each backend reads only the
+ * fields relevant to its URI scheme. Fields ignored by the chosen backend
+ * are tolerated, not validated.
+ */
+typedef struct {
+    /* PG-specific (consumed when uri starts with `pg://`) */
+    const char* mb_conninfo;
+    const char* acoustid_conninfo;
+    const char* acoustid_index_url;
+    const char* mb_solr_url;
+
+    /* HTTP-specific (consumed when uri starts with `mb+http://`) */
+    const char* mb_user_agent;        /* required by mb.org TOS */
+    const char* acoustid_api_key;     /* required by api.acoustid.org */
+    const char* mb_base_url;          /* default https://musicbrainz.org/ws/2 */
+    const char* acoustid_base_url;    /* default https://api.acoustid.org/v2 */
+} mb_backend_config_t;
+
+/**
+ * Vtable: per-op function pointers. Slot pointers (mb_conn_t*) returned by
+ * pool_claim_slot are passed back into ops verbatim — opaque to the caller.
+ */
+typedef struct mb_backend_vtable {
+    /* lifecycle */
+    quadrature_result_t (*pool_create)(const mb_backend_config_t* cfg,
+                                       size_t slot_count,
+                                       mb_pool_t** out);
+    void                (*pool_destroy)(mb_pool_t* pool);
+
+    mb_conn_t*          (*pool_claim_slot)(mb_pool_t* pool, int slot);
+    bool                (*conn_reset)(mb_conn_t* conn);
+
+    /* core resolution ops — return QUADRATURE_OK on success.
+     * Empty results = "no match", not an error. Caller frees output. */
+    quadrature_result_t (*batch_fetch)(mb_conn_t* conn,
+                                       const char** release_ids, size_t n,
+                                       GHashTable** out_releases,
+                                       GHashTable** out_links);
+
+    quadrature_result_t (*isrc_lookup)(mb_conn_t* conn,
+                                       const char** isrcs, size_t n,
+                                       mb_acoustid_response_t* out);
+
+    quadrature_result_t (*fingerprint_lookup)(mb_conn_t* conn,
+                                              const mb_fingerprint_t* fp,
+                                              mb_acoustid_response_t* out);
+
+    quadrature_result_t (*solr_search)(mb_conn_t* conn,
+                                       const char* album_title,
+                                       const char* artist_name,
+                                       size_t local_track_count,
+                                       int64_t local_total_duration_ms,
+                                       char** out_release_id);
+
+    /* pool introspection */
+    size_t              (*pool_count)(const mb_pool_t* pool);
+    int                 (*pool_claim_round_robin)(mb_pool_t* pool); /* atomic, %= count */
+
+    /* introspection */
+    const char*         (*name)(const mb_pool_t* pool);   /* "pg" | "http" — for logs */
+} mb_backend_vtable_t;
+
+/**
+ * Backend handle: bundles vtable + pool + capabilities. Resolver only ever
+ * holds this; it never touches the pool or vtable directly.
+ */
+struct mb_backend {
+    const mb_backend_vtable_t* vt;
+    mb_pool_t*                 pool;
+    mb_caps_t                  caps;     /* cached at create time */
+    char*                      uri;      /* heap-owned, for diagnostics */
+};
+
+/**
+ * URI dispatch + factory.
+ *
+ * Accepted URI schemes:
+ *   - `pg://<libpq conninfo>`     → PG backend (only when QUADRATURE_USE_LIBPQ)
+ *   - `mb+http://`                → HTTP backend (endpoints from cfg or defaults)
+ *
+ * Returns QUADRATURE_ERROR_INVALID_PARAM on unknown scheme,
+ *         QUADRATURE_ERROR_NOT_SUPPORTED if PG requested but not built.
+ */
+quadrature_result_t mb_backend_create(const char* uri,
+                                      const mb_backend_config_t* cfg,
+                                      size_t slot_count,
+                                      mb_backend_t** out);
+
+void mb_backend_destroy(mb_backend_t* backend);
+
+/* Inline call helpers — keep call sites short and assert-checked. */
+
+static inline mb_conn_t* mb_backend_claim_slot(mb_backend_t* be, int slot) {
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->pool_claim_slot);
+    return be->vt->pool_claim_slot(be->pool, slot);
+}
+
+static inline bool mb_backend_reset(mb_backend_t* be, mb_conn_t* c) {
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->conn_reset);
+    return be->vt->conn_reset(c);
+}
+
+static inline quadrature_result_t mb_backend_batch_fetch(
+    mb_backend_t* be, mb_conn_t* c,
+    const char** ids, size_t n,
+    GHashTable** rel, GHashTable** links)
+{
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->batch_fetch);
+    return be->vt->batch_fetch(c, ids, n, rel, links);
+}
+
+static inline quadrature_result_t mb_backend_isrc_lookup(
+    mb_backend_t* be, mb_conn_t* c,
+    const char** isrcs, size_t n, mb_acoustid_response_t* out)
+{
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->isrc_lookup);
+    return be->vt->isrc_lookup(c, isrcs, n, out);
+}
+
+static inline quadrature_result_t mb_backend_fingerprint_lookup(
+    mb_backend_t* be, mb_conn_t* c,
+    const mb_fingerprint_t* fp, mb_acoustid_response_t* out)
+{
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->fingerprint_lookup);
+    return be->vt->fingerprint_lookup(c, fp, out);
+}
+
+static inline quadrature_result_t mb_backend_solr_search(
+    mb_backend_t* be, mb_conn_t* c,
+    const char* album, const char* artist,
+    size_t track_count, int64_t total_ms, char** out_id)
+{
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->solr_search);
+    return be->vt->solr_search(c, album, artist, track_count, total_ms, out_id);
+}
+
+static inline size_t mb_backend_pool_count(const mb_backend_t* be) {
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->pool_count);
+    return be->vt->pool_count(be->pool);
+}
+
+static inline int mb_backend_claim_round_robin(mb_backend_t* be) {
+    g_assert(be); g_assert(be->vt); g_assert(be->vt->pool_claim_round_robin);
+    return be->vt->pool_claim_round_robin(be->pool);
+}
+
+// =============================================================================
+// HTTP Backend Internals (mb_http_*.c)
+// =============================================================================
+//
+// Shared between mb_http_backend.c and mb_http_ops.c. Concrete types live
+// here so both files can manipulate slots without the indirection of the
+// vtable (which is only paid once, by the resolver, to enter the backend).
+
+typedef struct http_slot       http_slot_t;
+typedef struct http_pool_state http_pool_state_t;
+
+http_pool_state_t* mb_http_slot_pool(http_slot_t* s);
+/* Returns SoupSession* — opaque here to avoid pulling libsoup into internal.h */
+void*        mb_http_slot_session(http_slot_t* s);
+const char*  mb_http_pool_mb_base(const http_pool_state_t* p);
+const char*  mb_http_pool_acoustid_base(const http_pool_state_t* p);
+const char*  mb_http_pool_acoustid_key(const http_pool_state_t* p);
+
+/* Rate limiters — process-wide. Block until next slot is available, then
+ * consume a token. Strict adherence to published limits (1/sec MB, 3/sec
+ * AcoustID). The HTTP pool's slot count does not affect concurrency because
+ * the limiter serializes regardless. */
+void mb_http_rate_limit_mb(void);
+void mb_http_rate_limit_acoustid(void);
 
 #endif // MUSICBRAINZ_INTERNAL_H

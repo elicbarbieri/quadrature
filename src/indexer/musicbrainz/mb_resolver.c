@@ -48,10 +48,20 @@ typedef enum {
 
 struct mb_resolver {
     quadrature_db_t* db;
-    mb_pg_client_t* pg_client;          /* MusicBrainz PostgreSQL client (batch consumer) */
-    mb_pg_client_t* pg_client_prefetch; /* Second PG client for prefetch overlap (may be NULL) */
-    char* acoustid_index_url;           /* acoustid-index HTTP URL (may be NULL) */
-    char* solr_url;                     /* MusicBrainz Solr URL (may be NULL) */
+
+    /* Backend instances. The resolver creates 3 separate backends, all from
+     * the same URI: one for the main batch fetch loop, one for the prefetch
+     * thread, and one with N slots for the fingerprint workers. Each backend
+     * owns its own connection pool so they can run concurrently without
+     * cross-locking. */
+    mb_backend_t* backend;             /* Main batch consumer (1 slot) */
+    mb_conn_t*    backend_conn;        /* Cached slot 0 of backend */
+    mb_backend_t* backend_prefetch;    /* Prefetch overlap (1 slot, may be NULL) */
+    mb_conn_t*    backend_prefetch_conn; /* Cached slot 0 of backend_prefetch */
+    mb_backend_t* backend_fp_pool;     /* Fingerprint workers (N slots, may be NULL) */
+
+    char* solr_url;                    /* Solr URL (set if backend has SOLR cap) */
+    char* acoustid_index_url;          /* acoustid-index HTTP URL (may be NULL) */
     mb_resolver_options_t options;
     mb_resolver_progress_cb callback;
     void* user_data;
@@ -62,9 +72,6 @@ struct mb_resolver {
 
     mb_resolver_progress_t progress;
     GMutex progress_mutex;
-
-    /* Fingerprint worker PG pool (one connection per worker thread) */
-    mb_pg_pool_t* pg_pool;
 
     /* Per-tier resolution stats (updated from worker threads via __atomic builtins) */
     volatile size_t tier_count[RESOLVE_TIER_COUNT];
@@ -399,10 +406,12 @@ static void tally_votes(const mb_acoustid_response_t* response,
 }
 
 static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
-                                          mb_pg_client_t* mb_pg,
-                                          mb_pg_client_t* acoustid_pg,
-                                          mb_http_conn_t* http_conn,
+                                          mb_backend_t* be,
+                                          mb_conn_t* conn,
+                                          bool fingerprint_capable,
                                           bool* service_error) {
+    g_assert(be != NULL);
+    g_assert(conn != NULL);
     db_track_t* tracks = NULL;
     size_t track_count = 0;
     if (db_get_tracks_by_album(ctx->db, album_id, &tracks, &track_count) != QUADRATURE_OK
@@ -497,8 +506,9 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
 
         if (isrc_count >= 2) {
             mb_acoustid_response_t isrc_response;
-            quadrature_result_t isrc_res = mb_isrc_lookup(mb_pg, isrcs, isrc_count,
-                                                           &isrc_response);
+            quadrature_result_t isrc_res = mb_backend_isrc_lookup(be, conn,
+                                                                   isrcs, isrc_count,
+                                                                   &isrc_response);
             if (isrc_res == QUADRATURE_OK && isrc_response.count > 0) {
                 tally_votes(&isrc_response, rg_counts, rg_best_release,
                             release_counts, &best_rg, &best_rg_count);
@@ -548,10 +558,11 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
 
     stage_t0 = profile_now_ns();
 
-    if (!best_release && !ctx->cancelled && ctx->solr_url
+    if (!best_release && !ctx->cancelled
+        && (be->caps & MB_CAP_SOLR_SEARCH)
         && tag_album && tag_artist) {
-        best_release = mb_solr_search_release(mb_pg, ctx->solr_url,
-            tag_album, tag_artist, track_count, total_duration_ms);
+        mb_backend_solr_search(be, conn, tag_album, tag_artist,
+                                track_count, total_duration_ms, &best_release);
         if (best_release) {
             tier = RESOLVE_TIER_SOLR;
             g_debug("Solr search resolved album %" G_GINT64_FORMAT
@@ -568,7 +579,8 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
 
     stage_t0 = profile_now_ns();
 
-    if (!best_release && !isrc_resolved && !ctx->cancelled && acoustid_pg && http_conn) {
+    if (!best_release && !isrc_resolved && !ctx->cancelled
+        && fingerprint_capable && (be->caps & MB_CAP_FINGERPRINT)) {
         size_t tracks_to_check = track_count < (size_t)MB_FINGERPRINT_TRACKS
             ? track_count : (size_t)MB_FINGERPRINT_TRACKS;
 
@@ -586,8 +598,8 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
             fingerprinted++;
 
             mb_acoustid_response_t response;
-            quadrature_result_t lookup_res = mb_acoustid_lookup(mb_pg, acoustid_pg,
-                                                                 http_conn, &fp, &response);
+            quadrature_result_t lookup_res = mb_backend_fingerprint_lookup(be, conn,
+                                                                            &fp, &response);
             if (lookup_res == QUADRATURE_ERROR_SERVICE_UNAVAILABLE) {
                 if (service_error) *service_error = true;
                 mb_fingerprint_free(&fp);
@@ -613,9 +625,11 @@ static char* find_release_by_fingerprint(mb_resolver_t* ctx, int64_t album_id,
 
             if (fingerprinted == 1) {
                 // Single-track: require Solr cross-validation
-                if (ctx->solr_url && tag_album && tag_artist) {
-                    char* solr_rel = mb_solr_search_release(mb_pg, ctx->solr_url,
-                        tag_album, tag_artist, track_count, total_duration_ms);
+                if ((be->caps & MB_CAP_SOLR_SEARCH) && tag_album && tag_artist) {
+                    char* solr_rel = NULL;
+                    mb_backend_solr_search(be, conn, tag_album, tag_artist,
+                                            track_count, total_duration_ms,
+                                            &solr_rel);
                     if (solr_rel) {
                         g_free(solr_rel);
                         const char* rel = g_hash_table_lookup(rg_best_release, best_rg);
@@ -1029,10 +1043,10 @@ typedef struct {
  */
 static GPrivate fp_slot_key = G_PRIVATE_INIT(NULL);
 
-static int fp_claim_slot(mb_pg_pool_t* pool) {
+static int fp_claim_slot(mb_backend_t* be) {
     gpointer stored = g_private_get(&fp_slot_key);
     if (stored) return GPOINTER_TO_INT(stored) - 1;
-    int slot = g_atomic_int_add(&pool->next_slot, 1) % (int)pool->count;
+    int slot = mb_backend_claim_round_robin(be);
     g_private_set(&fp_slot_key, GINT_TO_POINTER(slot + 1));
     return slot;
 }
@@ -1045,14 +1059,13 @@ static void fp_worker(gpointer data, gpointer user_data) {
         return;
     }
 
-    int slot = fp_claim_slot(ctx->pg_pool);
-    mb_pg_client_t* mb_pg = ctx->pg_pool->mb_conns[slot];
-    mb_pg_client_t* acoustid_pg = ctx->pg_pool->acoustid_conns[slot];
-    mb_http_conn_t* http_conn = ctx->pg_pool->http_conns[slot];
+    int slot = fp_claim_slot(ctx->backend_fp_pool);
+    mb_conn_t* conn = mb_backend_claim_slot(ctx->backend_fp_pool, slot);
 
     bool svc_error = false;
     char* release_id = find_release_by_fingerprint(ctx, work->album_id,
-                                                    mb_pg, acoustid_pg, http_conn,
+                                                    ctx->backend_fp_pool, conn,
+                                                    /*fingerprint_capable=*/true,
                                                     &svc_error);
 
     resolve_queue_item_t* item = g_new0(resolve_queue_item_t, 1);
@@ -1076,7 +1089,8 @@ static void fp_worker(gpointer data, gpointer user_data) {
 // =============================================================================
 
 typedef struct {
-    mb_pg_client_t* pg;
+    mb_backend_t* be;
+    mb_conn_t*    conn;
     const char* const* release_ids;  /* borrowed from triage — valid until triage_free */
     size_t release_count;
     GHashTable* releases;        /* out: fetched releases (caller destroys) */
@@ -1088,8 +1102,10 @@ static gpointer prefetch_thread_func(gpointer data) {
     prefetch_ctx_t* pf = data;
     pf->releases = NULL;
     pf->links = NULL;
-    pf->result = mb_fetch_all_batch(pf->pg, (const char**)pf->release_ids,
-                                     pf->release_count, &pf->releases, &pf->links);
+    pf->result = mb_backend_batch_fetch(pf->be, pf->conn,
+                                         (const char**)pf->release_ids,
+                                         pf->release_count,
+                                         &pf->releases, &pf->links);
     return NULL;
 }
 
@@ -1272,11 +1288,11 @@ static void process_resolve_batch(mb_resolver_t* ctx,
         return;
     }
 
-    // Consolidated batch fetch: releases + links in one PG round-trip
+    // Consolidated batch fetch: releases + links via backend
     GHashTable* releases = NULL;
     GHashTable* all_links = NULL;
     t0 = profile_now_ns();
-    mb_fetch_all_batch(ctx->pg_client,
+    mb_backend_batch_fetch(ctx->backend, ctx->backend_conn,
         (const char**)release_ids, release_count, &releases, &all_links);
     t1 = profile_now_ns();
     stats->pg_fetch_ns += (t1 - t0);
@@ -1306,11 +1322,8 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
 
     if (!out || !db || !options) return QUADRATURE_ERROR_INVALID_PARAM;
 
-    // PostgreSQL connection is required
-    if (!options->pg_conninfo || !options->pg_conninfo[0]) {
-        g_warning("MusicBrainz PostgreSQL connection info is required");
-        return QUADRATURE_ERROR_INVALID_PARAM;
-    }
+    /* Backend selection: pg_conninfo present → PG backend; otherwise HTTP. */
+    const bool use_pg = (options->pg_conninfo && options->pg_conninfo[0]);
 
     mb_resolver_t* ctx = g_new0(mb_resolver_t, 1);
     ctx->db = db;
@@ -1327,9 +1340,30 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
         ? g_strdup(options->mb_solr_url) : NULL;
     g_mutex_init(&ctx->progress_mutex);
 
-    // MusicBrainz PostgreSQL client (for batch consumer)
-    quadrature_result_t res = mb_pg_client_create(options->pg_conninfo, &ctx->pg_client);
+    /* Build backend URI + config based on PG-vs-HTTP selection. */
+    char* uri = use_pg
+        ? g_strdup_printf("pg://%s", options->pg_conninfo)
+        : g_strdup("mb+https://");
+    mb_backend_config_t cfg = {
+        /* PG-side fields */
+        .mb_conninfo        = options->pg_conninfo,
+        .acoustid_conninfo  = options->acoustid_pg_conninfo,
+        .acoustid_index_url = options->acoustid_index_url,
+        .mb_solr_url        = options->mb_solr_url,
+        /* HTTP-side fields. acoustid_api_key is NULL → backend uses the
+         * bundled QUADRATURE_BUNDLED_ACOUSTID_KEY. The field exists only so
+         * downstream builds (distros / forks) can pass a different key via
+         * a future CMake override path; user settings does not expose it. */
+        .mb_user_agent      = MUSICBRAINZ_USER_AGENT,
+        .acoustid_api_key   = NULL,
+        .mb_base_url        = NULL,
+        .acoustid_base_url  = NULL,
+    };
+
+    /* Main backend (1 slot — was pg_client) */
+    quadrature_result_t res = mb_backend_create(uri, &cfg, 1, &ctx->backend);
     if (res != QUADRATURE_OK) {
+        g_free(uri);
         g_mutex_clear(&ctx->progress_mutex);
         g_free(ctx->library_root);
         g_free(ctx->data_root);
@@ -1338,27 +1372,23 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
         g_free(ctx);
         return res;
     }
-    // MB PG tables live in the 'musicbrainz' schema — set search_path
-    mb_pg_set_schema(ctx->pg_client, "musicbrainz");
-    // Install session-local batch function for consolidated fetching
-    mb_pg_install_batch_function(ctx->pg_client);
-    // Prepare ISRC + SOLR validation statements (needed for no-AcoustID path)
-    mb_acoustid_prepare_stmts(ctx->pg_client, NULL);
+    ctx->backend_conn = mb_backend_claim_slot(ctx->backend, 0);
 
-    // Second PG client for prefetch overlap (non-fatal if it fails)
-    ctx->pg_client_prefetch = NULL;
-    res = mb_pg_client_create(options->pg_conninfo, &ctx->pg_client_prefetch);
+    /* Prefetch backend (1 slot — was pg_client_prefetch). Non-fatal if it fails. */
+    ctx->backend_prefetch = NULL;
+    ctx->backend_prefetch_conn = NULL;
+    res = mb_backend_create(uri, &cfg, 1, &ctx->backend_prefetch);
     if (res == QUADRATURE_OK) {
-        mb_pg_set_schema(ctx->pg_client_prefetch, "musicbrainz");
-        mb_pg_install_batch_function(ctx->pg_client_prefetch);
+        ctx->backend_prefetch_conn = mb_backend_claim_slot(ctx->backend_prefetch, 0);
     } else {
-        g_info("mb_resolver_create: prefetch PG connection failed — running without overlap");
-        ctx->pg_client_prefetch = NULL;
+        g_info("mb_resolver_create: prefetch backend failed — running without overlap");
+        ctx->backend_prefetch = NULL;
     }
 
-    // Metadata DB for recording relations — ATTACHed to the main DB so that
-    // meta writes commit atomically inside db_commit_batch. Non-fatal if it
-    // fails.
+    g_free(uri);
+
+    /* Metadata DB for recording relations — ATTACHed to the main DB so that
+     * meta writes commit atomically inside db_commit_batch. Non-fatal. */
     ctx->meta_db = NULL;
     if (ctx->data_root) {
         if (db_meta_open_attached(ctx->db, ctx->data_root, &ctx->meta_db) != QUADRATURE_OK) {
@@ -1367,8 +1397,8 @@ quadrature_result_t mb_resolver_create(mb_resolver_t** out,
         }
     }
 
-    // PG connection pool for fingerprint workers (created lazily when needed)
-    ctx->pg_pool = NULL;
+    /* Fingerprint pool created lazily in mb_resolver_run when needed. */
+    ctx->backend_fp_pool = NULL;
 
     *out = ctx;
     return QUADRATURE_OK;
@@ -1453,8 +1483,13 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
     // =========================================================================
 
     GThreadPool* fp_pool = NULL;
-    bool has_fingerprint_support = ctx->options.acoustid_pg_conninfo
-                                   && ctx->options.acoustid_pg_conninfo[0];
+    /* PG path: needs acoustid_pg_conninfo. HTTP path: always — the HTTP backend
+     * ships a bundled AcoustID app key; user setting only overrides the quota
+     * source. See QUADRATURE_BUNDLED_ACOUSTID_KEY in mb_http_backend.c. */
+    const bool resolver_use_pg = (ctx->options.pg_conninfo && ctx->options.pg_conninfo[0]);
+    bool has_fingerprint_support = resolver_use_pg
+        ? (ctx->options.acoustid_pg_conninfo && ctx->options.acoustid_pg_conninfo[0])
+        : true;
 
     if (untagged_ids->len > 0 && has_fingerprint_support && !ctx->cancelled) {
         resolver_set_phase(ctx, MB_RESOLVE_FINGERPRINTING);
@@ -1466,11 +1501,21 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
         if (parallelism > 8) parallelism = 8;
         if (parallelism > (int)untagged_ids->len) parallelism = (int)untagged_ids->len;
 
-        // Create PG pool for fingerprint workers
-        res = mb_pg_pool_create(ctx->options.pg_conninfo,
-            ctx->options.acoustid_pg_conninfo,
-            ctx->acoustid_index_url,
-            (size_t)parallelism, &ctx->pg_pool);
+        // Create backend pool for fingerprint workers (mirrors mb_resolver_create choice)
+        const bool fp_use_pg = (ctx->options.pg_conninfo && ctx->options.pg_conninfo[0]);
+        char* fp_uri = fp_use_pg
+            ? g_strdup_printf("pg://%s", ctx->options.pg_conninfo)
+            : g_strdup("mb+https://");
+        mb_backend_config_t fp_cfg = {
+            .mb_conninfo        = ctx->options.pg_conninfo,
+            .acoustid_conninfo  = ctx->options.acoustid_pg_conninfo,
+            .acoustid_index_url = ctx->acoustid_index_url,
+            .mb_solr_url        = ctx->solr_url,
+            .mb_user_agent      = MUSICBRAINZ_USER_AGENT,
+            .acoustid_api_key   = NULL,  /* HTTP backend uses bundled key */
+        };
+        res = mb_backend_create(fp_uri, &fp_cfg, (size_t)parallelism, &ctx->backend_fp_pool);
+        g_free(fp_uri);
 
         if (res == QUADRATURE_OK) {
             fp_pool = g_thread_pool_new(fp_worker, ctx, parallelism, TRUE, NULL);
@@ -1483,7 +1528,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
                 }
             }
         } else {
-            g_warning("MB resolver: failed to create PG pool, fingerprinting disabled");
+            g_warning("MB resolver: failed to create fingerprint backend pool, fingerprinting disabled");
             // Push all untagged as service_error so they get MB_STATUS_FAILED, not NO_MATCH
             for (guint i = 0; i < untagged_ids->len; i++) {
                 resolve_queue_item_t* item = g_new0(resolve_queue_item_t, 1);
@@ -1506,10 +1551,11 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
         for (guint i = 0; i < untagged_ids->len && !ctx->cancelled; i++) {
             int64_t album_id = *(int64_t*)g_ptr_array_index(untagged_ids, i);
 
-            // acoustid_pg=NULL, http_conn=NULL → Stage 3 (fingerprinting) skipped,
-            // but Stages 1 (ISRC) and 2 (Solr) run normally.
+            /* fingerprint_capable=false → Stage 3 (fingerprinting) skipped,
+             * but Stages 1 (ISRC) and 2 (Solr) run normally on the main backend. */
             char* release_id = find_release_by_fingerprint(ctx, album_id,
-                ctx->pg_client, NULL, NULL, NULL);
+                ctx->backend, ctx->backend_conn,
+                /*fingerprint_capable=*/false, NULL);
 
             resolve_queue_item_t* item = g_new0(resolve_queue_item_t, 1);
             item->album_id = album_id;
@@ -1542,7 +1588,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
     size_t total_processed = 0;
     resolve_queue_item_t** batch = g_new0(resolve_queue_item_t*, MB_BATCH_SIZE);
-    bool can_prefetch = (ctx->pg_client_prefetch != NULL);
+    bool can_prefetch = (ctx->backend_prefetch != NULL);
     int consecutive_pg_failures = 0;
 
     /* Pending prefetch state — valid only when pf_thread != NULL */
@@ -1609,14 +1655,16 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
             /* If prefetch failed, attempt reconnect + retry once */
             if (pf.result != QUADRATURE_OK) {
-                g_warning("Phase 6: PG prefetch batch failed, attempting reconnect");
-                mb_pg_client_reset(ctx->pg_client_prefetch);
+                g_warning("Phase 6: prefetch batch failed, attempting reconnect");
+                mb_backend_reset(ctx->backend_prefetch, ctx->backend_prefetch_conn);
                 pf.releases = NULL;
                 pf.links = NULL;
-                pf.result = mb_fetch_all_batch(pf.pg, (const char**)pf.release_ids,
-                                                pf.release_count, &pf.releases, &pf.links);
+                pf.result = mb_backend_batch_fetch(pf.be, pf.conn,
+                                                    (const char**)pf.release_ids,
+                                                    pf.release_count,
+                                                    &pf.releases, &pf.links);
                 if (pf.result != QUADRATURE_OK) {
-                    g_warning("Phase 6: PG retry failed for prefetched batch");
+                    g_warning("Phase 6: backend retry failed for prefetched batch");
                     consecutive_pg_failures++;
                 } else {
                     consecutive_pg_failures = 0;
@@ -1656,13 +1704,14 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             pending_album_ids = album_ids;
             pending_count = release_count;
             pf = (prefetch_ctx_t){
-                .pg = ctx->pg_client_prefetch,
+                .be   = ctx->backend_prefetch,
+                .conn = ctx->backend_prefetch_conn,
                 .release_ids = (const char* const*)release_ids,
                 .release_count = release_count,
             };
             pf_thread = g_thread_new("mb-prefetch", prefetch_thread_func, &pf);
 
-            /* Write PREVIOUS batch to SQLite (overlaps with PG prefetch) */
+            /* Write PREVIOUS batch to SQLite (overlaps with backend prefetch) */
             t0 = profile_now_ns();
             write_resolve_batch(ctx, (const char* const*)prev_ids, prev_album_ids,
                                  prev_count, prev_releases, prev_links, &prof);
@@ -1681,7 +1730,8 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             pending_album_ids = album_ids;
             pending_count = release_count;
             pf = (prefetch_ctx_t){
-                .pg = ctx->pg_client_prefetch,
+                .be   = ctx->backend_prefetch,
+                .conn = ctx->backend_prefetch_conn,
                 .release_ids = (const char* const*)release_ids,
                 .release_count = release_count,
             };
@@ -1691,19 +1741,19 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             GHashTable* rel = NULL;
             GHashTable* lnk = NULL;
             t0 = profile_now_ns();
-            quadrature_result_t fetch_res = mb_fetch_all_batch(ctx->pg_client,
+            quadrature_result_t fetch_res = mb_backend_batch_fetch(ctx->backend, ctx->backend_conn,
                 (const char**)release_ids, release_count, &rel, &lnk);
             t1 = profile_now_ns();
             prof.pg_fetch_ns += (t1 - t0);
 
-            /* Retry once on PG failure after reconnect */
+            /* Retry once on failure after reconnect */
             if (fetch_res != QUADRATURE_OK) {
-                g_warning("Phase 6: PG batch fetch failed, attempting reconnect");
-                mb_pg_client_reset(ctx->pg_client);
+                g_warning("Phase 6: backend batch fetch failed, attempting reconnect");
+                mb_backend_reset(ctx->backend, ctx->backend_conn);
                 rel = NULL;
                 lnk = NULL;
                 t0 = profile_now_ns();
-                fetch_res = mb_fetch_all_batch(ctx->pg_client,
+                fetch_res = mb_backend_batch_fetch(ctx->backend, ctx->backend_conn,
                     (const char**)release_ids, release_count, &rel, &lnk);
                 t1 = profile_now_ns();
                 prof.pg_fetch_ns += (t1 - t0);
@@ -1754,14 +1804,16 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
         /* Retry once on PG failure after reconnect */
         if (pf.result != QUADRATURE_OK) {
-            g_warning("Phase 6: final PG prefetch batch failed, attempting reconnect");
-            mb_pg_client_reset(ctx->pg_client_prefetch);
+            g_warning("Phase 6: final prefetch batch failed, attempting reconnect");
+            mb_backend_reset(ctx->backend_prefetch, ctx->backend_prefetch_conn);
             pf.releases = NULL;
             pf.links = NULL;
-            pf.result = mb_fetch_all_batch(pf.pg, (const char**)pf.release_ids,
-                                            pf.release_count, &pf.releases, &pf.links);
+            pf.result = mb_backend_batch_fetch(pf.be, pf.conn,
+                                                (const char**)pf.release_ids,
+                                                pf.release_count,
+                                                &pf.releases, &pf.links);
             if (pf.result != QUADRATURE_OK)
-                g_warning("Phase 6: final PG retry failed, marking batch as FAILED");
+                g_warning("Phase 6: final retry failed, marking batch as FAILED");
         }
 
         t0 = profile_now_ns();
@@ -1876,9 +1928,9 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
     // Cleanup
     g_async_queue_unref(resolve_queue);
-    if (ctx->pg_pool) {
-        mb_pg_pool_destroy(ctx->pg_pool);
-        ctx->pg_pool = NULL;
+    if (ctx->backend_fp_pool) {
+        mb_backend_destroy(ctx->backend_fp_pool);
+        ctx->backend_fp_pool = NULL;
     }
 
     resolver_set_phase(ctx, MB_RESOLVE_COMPLETE);
@@ -1888,9 +1940,9 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
 void mb_resolver_destroy(mb_resolver_t* ctx) {
     if (!ctx) return;
-    mb_pg_client_destroy(ctx->pg_client);
-    if (ctx->pg_client_prefetch) mb_pg_client_destroy(ctx->pg_client_prefetch);
-    if (ctx->pg_pool) mb_pg_pool_destroy(ctx->pg_pool);
+    if (ctx->backend) mb_backend_destroy(ctx->backend);
+    if (ctx->backend_prefetch) mb_backend_destroy(ctx->backend_prefetch);
+    if (ctx->backend_fp_pool) mb_backend_destroy(ctx->backend_fp_pool);
     if (ctx->meta_db) {
         db_meta_checkpoint(ctx->meta_db);
         db_meta_close(ctx->meta_db);

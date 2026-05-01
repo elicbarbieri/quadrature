@@ -47,10 +47,9 @@ src/
 
 bin/                      # Entry points (quadrature_indexer.c)
 tests/unit/               # Criterion tests
-third_party/              # cavacore (spectrum FFT)
 ```
 
-**Internal header rule:** Each `src/` subdirectory has at most one `internal.h` for private declarations. No other `.h` files in `src/`.
+**Internal header rule:** Each `src/` subdirectory has at most one `internal.h` for private declarations. No other `.h` files in `src/`. The one deliberate exception is `src/audio/cavacore.h` — vendored third-party (MIT) kept separate to ease any future re-syncing with upstream.
 
 ## Code Conventions
 
