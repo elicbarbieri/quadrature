@@ -1,0 +1,90 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "_base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_UI":  "ON",
+        "BUILD_CLI": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev — Debug + tests + libpq",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":     "Debug",
+        "BUILD_TESTS":          "ON",
+        "QUADRATURE_USE_LIBPQ": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release — production native install",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":      "Release",
+        "BUILD_PRODUCTION":      "ON",
+        "QUADRATURE_USE_LIBPQ":  "ON",
+        "QUADRATURE_BUILD_MODE": "BROADCAST"
+      }
+    },
+    {
+      "name": "flatpak",
+      "displayName": "Flatpak — release shape, no libpq",
+      "inherits": "release",
+      "cacheVariables": {
+        "QUADRATURE_USE_LIBPQ": "OFF"
+      }
+    },
+    {
+      "name": "test-http",
+      "displayName": "Tests against public MusicBrainz HTTP (serial)",
+      "inherits": "flatpak",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":       "Debug",
+        "BUILD_TESTS":            "ON",
+        "QUADRATURE_TEST_SERIAL": "ON",
+        "BUILD_PRODUCTION":       "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Dev + AddressSanitizer + UndefinedBehaviorSanitizer",
+      "inherits": "dev",
+      "cacheVariables": {
+        "QUADRATURE_SANITIZE": "ON"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "dev",       "configurePreset": "dev"       },
+    { "name": "release",   "configurePreset": "release"   },
+    { "name": "flatpak",   "configurePreset": "flatpak"   },
+    { "name": "test-http", "configurePreset": "test-http" },
+    { "name": "asan",      "configurePreset": "asan"      }
+  ],
+
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output":    { "outputOnFailure": true },
+      "execution": { "stopOnFailure": true }
+    },
+    {
+      "name": "test-http",
+      "configurePreset": "test-http",
+      "output":      { "outputOnFailure": true },
+      "execution":   { "stopOnFailure": true, "jobs": 1 },
+      "environment": { "QUADRATURE_TEST_HTTP": "1" }
+    }
+  ]
+}

@@ -1,6 +1,7 @@
-# Release manifest — sources pinned to a git revision for reproducibility.
-# Used by CI (.github/workflows/flatpak.yml) and for Flathub submission.
-# For local iteration against your working tree, use flatpak/dev.yaml.
+# Dev manifest — sources the working tree directly. Faster iteration than the
+# release manifest (no git push round-trip) at the cost of reproducibility.
+# Modules section is intentionally identical to org.quadrature.Player.yaml;
+# flatpak-builder has no include mechanism.
 
 id: org.quadrature.Player
 runtime: org.gnome.Platform
@@ -37,8 +38,6 @@ cleanup:
   - '*.a'
 
 modules:
-  # FFmpeg bundled (not via the ffmpeg-full extension — not built for fd 25.08).
-  # GPL allowed for downstream apps; nonfree off to stay redistributable.
   - name: ffmpeg
     config-opts:
       - --prefix=/app
@@ -61,7 +60,6 @@ modules:
         url: https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz
         sha256: b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a
 
-  # No SIMD enables: x86-only flags break aarch64 configure. Nix tunes per-host.
   - name: fftw3-double
     buildsystem: autotools
     config-opts:
@@ -132,7 +130,13 @@ modules:
       - cmake --build --preset=flatpak
       - cmake --install build/flatpak
     sources:
-      - type: git
-        url: https://github.com/elicbarbieri/quadrature.git
-        branch: master
-        # Flathub submission requires `commit: <sha>` instead of `branch:`.
+      - type: dir
+        path: ..
+        skip:
+          - build
+          - result
+          - result-1
+          - .direnv
+          - .jj
+          - .git
+          - flatpak/.flatpak-builder

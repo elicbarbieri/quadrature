@@ -409,7 +409,7 @@ static void bootstrap_empty_db(const char *data_dir) {
  * counter; every increment above the last-seen value triggers a fresh
  * refresh + await on that library's slot. Blocks until both indexers
  * have emitted COMPLETED and all generated refreshes have drained. */
-static void pump_until_indexers_done(library_cache_t *cache,
+static void pump_until_indexers_done(library_cache_t *lib_cache,
                                       ProdParityTracker *trackers,
                                       int tracker_count) {
     int *seen = g_new0(int, tracker_count);
@@ -419,8 +419,8 @@ static void pump_until_indexers_done(library_cache_t *cache,
         for (int i = 0; i < tracker_count; i++) {
             int cur_evs = atomic_load(&trackers[i].lib_updated);
             while (seen[i] < cur_evs) {
-                library_cache_refresh_slot(cache, trackers[i].bitmap_index, NULL);
-                library_cache_await_slot(cache, trackers[i].bitmap_index);
+                library_cache_refresh_slot(lib_cache, trackers[i].bitmap_index, NULL);
+                library_cache_await_slot(lib_cache, trackers[i].bitmap_index);
                 seen[i]++;
             }
             if (!atomic_load(&trackers[i].completed)) all_done = 0;
@@ -434,8 +434,8 @@ static void pump_until_indexers_done(library_cache_t *cache,
             for (int i = 0; i < tracker_count; i++) {
                 int cur_evs = atomic_load(&trackers[i].lib_updated);
                 while (seen[i] < cur_evs) {
-                    library_cache_refresh_slot(cache, trackers[i].bitmap_index, NULL);
-                    library_cache_await_slot(cache, trackers[i].bitmap_index);
+                    library_cache_refresh_slot(lib_cache, trackers[i].bitmap_index, NULL);
+                    library_cache_await_slot(lib_cache, trackers[i].bitmap_index);
                     seen[i]++;
                     pending++;
                 }

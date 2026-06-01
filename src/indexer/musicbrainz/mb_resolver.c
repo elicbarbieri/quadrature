@@ -1634,14 +1634,14 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
         /* Triage: separate release_ids from no-match items */
         t0 = profile_now_ns();
         char** release_ids = NULL;
-        int64_t* album_ids = NULL;
+        int64_t* batch_album_ids = NULL;
         size_t release_count = triage_batch(ctx, batch, batch_count,
-                                             &release_ids, &album_ids);
+                                             &release_ids, &batch_album_ids);
         t1 = profile_now_ns();
         prof.triage_ns += (t1 - t0);
 
         if (release_count == 0) {
-            triage_free(release_ids, album_ids, 0);
+            triage_free(release_ids, batch_album_ids, 0);
             resolver_update_progress(ctx);
         } else if (pf_thread) {
             /* A prefetch is running for the PREVIOUS batch.
@@ -1685,7 +1685,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
                 pending_ids = NULL;
                 pending_album_ids = NULL;
                 pending_count = 0;
-                triage_free(release_ids, album_ids, release_count);
+                triage_free(release_ids, batch_album_ids, release_count);
                 for (size_t i = 0; i < batch_count; i++)
                     resolve_queue_item_free(batch[i]);
                 total_processed += batch_count;
@@ -1701,7 +1701,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
             /* Start prefetch for THIS batch */
             pending_ids = release_ids;
-            pending_album_ids = album_ids;
+            pending_album_ids = batch_album_ids;
             pending_count = release_count;
             pf = (prefetch_ctx_t){
                 .be   = ctx->backend_prefetch,
@@ -1727,7 +1727,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
              * The prefetch thread fetches from PG; next iteration we'll
              * drain another batch from the queue while it runs. */
             pending_ids = release_ids;
-            pending_album_ids = album_ids;
+            pending_album_ids = batch_album_ids;
             pending_count = release_count;
             pf = (prefetch_ctx_t){
                 .be   = ctx->backend_prefetch,
@@ -1768,7 +1768,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             }
 
             t0 = profile_now_ns();
-            write_resolve_batch(ctx, (const char* const*)release_ids, album_ids,
+            write_resolve_batch(ctx, (const char* const*)release_ids, batch_album_ids,
                                  release_count, rel, lnk, &prof);
             t1 = profile_now_ns();
             prof.sqlite_write_ns += (t1 - t0);
@@ -1776,7 +1776,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
 
             if (rel) g_hash_table_destroy(rel);
             if (lnk) g_hash_table_destroy(lnk);
-            triage_free(release_ids, album_ids, release_count);
+            triage_free(release_ids, batch_album_ids, release_count);
 
             if (consecutive_pg_failures >= 3) {
                 g_warning("Phase 6: circuit breaker tripped — skipping remaining albums after 3 consecutive PG failures");

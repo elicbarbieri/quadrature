@@ -1,118 +1,107 @@
-# Build a sideload-only .flatpak bundle on tag push and attach it to the
-# GitHub Release. No Flathub repo, no OSTree hosting — users grab the .flatpak
-# file and `flatpak install --user quadrature-<ver>-<arch>.flatpak`.
-#
-# Triggered only by version tags (v*). Builds x86_64 + aarch64 in parallel
-# inside the official Flathub builder container (which ships flatpak-builder,
-# pre-installed runtimes, and the SDK).
 name: Flatpak Bundle
 
 on:
   push:
     tags:
       - 'v*'
-  # Manual trigger is useful for testing the workflow without cutting a tag.
   workflow_dispatch:
 
 permissions:
-  contents: write  # required to attach assets to the GitHub Release
+  contents: write
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+    steps:
+      - uses: actions/checkout@v4
+      - run: flatpak-builder-lint manifest flatpak/org.quadrature.Player.yaml
+
   build:
     name: Build (${{ matrix.arch }})
+    needs: lint
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            runner: ubuntu-24.04
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+          - { arch: x86_64,  runner: ubuntu-24.04     }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     container:
-      # Official Flathub builder image — multi-arch, has flatpak-builder +
-      # the GNOME 50 runtime/SDK pre-installed so each CI run doesn't pay
-      # the ~800MB SDK download cost.
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
       options: --privileged
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract version from tag
-        id: ver
-        shell: bash
-        # All inputs routed through env: to follow the documented safe-input
-        # pattern (https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/).
-        # Git ref names already disallow newlines/spaces/many metacharacters
-        # via `git check-ref-format`, but this is the belt-and-suspenders form.
+      - id: ver
+        # github.ref / github.ref_name / github.sha through env: per
+        # https://github.blog/security/.../github-actions-workflow-injections
         env:
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
+        shell: bash
         run: |
-          # Strip the leading 'v' from refs/tags/v1.2.3 -> 1.2.3.
-          # For workflow_dispatch (no tag), use the short SHA so dev builds
-          # are still uniquely named.
           if [[ "$REF" == refs/tags/v* ]]; then
             echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
           else
             echo "version=dev-${SHA::7}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build flatpak bundle
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6.5
         with:
           bundle: quadrature-${{ steps.ver.outputs.version }}-${{ matrix.arch }}.flatpak
           manifest-path: flatpak/org.quadrature.Player.yaml
-          # Cache key includes the manifest hash so the SDK + module deps are
-          # reused across runs and invalidated when the manifest changes.
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('flatpak/org.quadrature.Player.yaml') }}
           arch: ${{ matrix.arch }}
-          # Don't run flatpak-builder-lint as part of the build — it gates
-          # Flathub submission, not sideload distribution. Run it locally
-          # before tagging if you care.
           run-tests: false
+
+      # x86_64 only — ARM flatpak runs aren't supported inside this container.
+      - name: Smoke test bundle
+        if: matrix.arch == 'x86_64'
+        env:
+          BUNDLE: quadrature-${{ steps.ver.outputs.version }}-${{ matrix.arch }}.flatpak
+        shell: bash
+        run: |
+          set -euo pipefail
+          flatpak install --user --noninteractive --assumeyes "./$BUNDLE"
+          flatpak run --user org.quadrature.Player --help
+          flatpak uninstall --user --noninteractive --assumeyes org.quadrature.Player
 
   release:
     name: Attach bundles to release
     needs: build
-    # Only run on actual tag pushes, not workflow_dispatch — there's no
-    # release to attach to from a manual run.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - name: Download all bundle artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Create versionless aliases
-        # `releases/latest/download/<file>` resolves by exact filename, so a
-        # versioned asset (quadrature-1.2.3-x86_64.flatpak) is not reachable
-        # via the /latest/ URL. Duplicate each bundle to a versionless name
-        # (quadrature-<arch>.flatpak) so README install instructions stay
-        # stable across releases. Both names are uploaded — versioned for
-        # immutable references, versionless for the always-latest URL.
+      # Versionless aliases so README's /latest/download/ links work.
+      - name: Create latest aliases
         shell: bash
         run: |
+          set -euo pipefail
           cd artifacts
-          for f in quadrature-*-x86_64.flatpak; do
-            [ -f "$f" ] && cp "$f" "quadrature-x86_64.flatpak"
-          done
-          for f in quadrature-*-aarch64.flatpak; do
-            [ -f "$f" ] && cp "$f" "quadrature-aarch64.flatpak"
-          done
-          ls -lh
+          for f in quadrature-*-x86_64.flatpak;  do [ -f "$f" ] && cp "$f" quadrature-x86_64.flatpak;  done
+          for f in quadrature-*-aarch64.flatpak; do [ -f "$f" ] && cp "$f" quadrature-aarch64.flatpak; done
 
-      - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2.1.0
         with:
           files: artifacts/*.flatpak
           fail_on_unmatched_files: true
           generate_release_notes: true
-          # Treat anything tagged `v*-beta*` / `v*-rc*` as a pre-release so
-          # `releases/latest/download/` doesn't auto-promote unfinished builds.
           prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
