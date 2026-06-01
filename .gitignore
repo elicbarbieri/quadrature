@@ -2,7 +2,6 @@
 build/
 build-http/
 cmake-build-*/
-bin/
 
 # Compiled test binaries (root-level only, not tests/unit/test_*.c)
 /test_*

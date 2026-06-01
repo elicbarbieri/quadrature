@@ -16,9 +16,21 @@ A four-channel audio player for broadcast studios, written in C with GTK4.
 
 ### Flatpak (recommended for most users)
 
+Download the bundle for your architecture from the
+[latest release](https://github.com/elicbarbieri/quadrature/releases/latest)
+and install it directly:
+
 ```bash
-flatpak install flathub org.quadrature.Player
+# x86_64 (most desktops/laptops)
+wget https://github.com/elicbarbieri/quadrature/releases/latest/download/quadrature-x86_64.flatpak
+flatpak install --user quadrature-x86_64.flatpak
+
+# aarch64 (ARM — Apple Silicon Linux VMs, Raspberry Pi, etc.)
+wget https://github.com/elicbarbieri/quadrature/releases/latest/download/quadrature-aarch64.flatpak
+flatpak install --user quadrature-aarch64.flatpak
 ```
+
+Updates: re-download the latest bundle and run `flatpak install --user`
 
 The Flatpak distribution talks to the public MusicBrainz REST API
 (rate-limited ≤0.91 req/sec) and AcoustID public service
@@ -46,16 +58,16 @@ Install via Nix flakes:
 mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 
 # Install
-nix profile install github:elibarbieri/quadrature
+nix profile install github:elicbarbieri/quadrature
 
 # Or run directly
-nix run github:elibarbieri/quadrature
+nix run github:elicbarbieri/quadrature
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/elibarbieri/quadrature.git
+git clone https://github.com/elicbarbieri/quadrature.git
 cd quadrature
 nix develop
 make production

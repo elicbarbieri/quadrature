@@ -109,16 +109,16 @@ modules:
         sha256: b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a
 
   # FFTW3 — used by the cavacore spectrum analyzer and Quadrature internals.
+  # No SIMD enables here: FFTW's configure rejects x86-only flags (--enable-sse2,
+  # --enable-avx, etc.) on aarch64, and we want a single portable manifest. The
+  # Nix install path tunes SIMD per-host (see flake.nix); the flatpak build
+  # trades raw FFT throughput for cross-architecture portability.
   - name: fftw3-double
     buildsystem: autotools
     config-opts:
       - --enable-shared
       - --disable-static
       - --enable-threads
-      - --enable-sse2
-      - --enable-avx
-      - --enable-avx2
-      - --enable-fma
     sources:
       - type: archive
         url: https://www.fftw.org/fftw-3.3.10.tar.gz

@@ -106,7 +106,7 @@ if(NOT DEFINED FANART_TV_APPLICATION_KEY)
 endif()
 
 if(NOT DEFINED MUSICBRAINZ_USER_AGENT)
-    set(MUSICBRAINZ_USER_AGENT "quadrature/${PROJECT_VERSION} ( https://github.com/elibarbieri/quadrature )"
+    set(MUSICBRAINZ_USER_AGENT "quadrature/${PROJECT_VERSION} ( https://github.com/elicbarbieri/quadrature )"
         CACHE STRING "User-Agent string sent to musicbrainz.org (TOS-required identifier)")
 endif()
 
@@ -262,7 +262,7 @@ if(BUILD_CLI)
         src/indexer/indexer_config.c
         src/indexer/indexer_watcher.c
     )
-    add_executable(quadrature-cli bin/quadrature_cli.c ${CLI_SOURCES})
+    add_executable(quadrature-cli src/cli/main.c ${CLI_SOURCES})
     target_include_directories(quadrature-cli PRIVATE
         ${CMAKE_SOURCE_DIR}/src/cli
         ${CMAKE_SOURCE_DIR}/src/indexer

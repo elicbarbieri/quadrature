@@ -38,6 +38,7 @@ src/
   audio/                  # Pipeline, ring buffer, spectrum analyzer
   core/                   # Engine, config, logging
   database/               # SQLite music library (v4 schema with album hashing)
+  cli/                    # quadrature-cli unified entry point (main.c) + subcommands
   indexer/                # Four-phase queue-based indexer
     musicbrainz/          # MusicBrainz/AcoustID resolution (phases 4-5)
   ui/                     # GTK4 widgets (.c/.h source files)
@@ -45,7 +46,6 @@ src/
     perf/                 # Performance dashboard widgets
     templates/            # .ui templates, .css stylesheets, gresource.xml
 
-bin/                      # Entry points (quadrature_indexer.c)
 tests/unit/               # Criterion tests
 ```
 
