@@ -39,15 +39,13 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void mkdirs(const char *path) {
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", path);
-    (void)system(cmd);
+    cr_assert_eq(g_mkdir_with_parents(path, 0755), 0,
+                 "g_mkdir_with_parents failed for %s", path);
 }
 
 static void rm_rf(const char *path) {
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    (void)system(cmd);
+    g_autofree char *cmd = g_strdup_printf("rm -rf '%s'", path);
+    cr_assert_eq(system(cmd), 0, "rm -rf failed for %s", path);
 }
 
 /**
@@ -188,7 +186,7 @@ static void run_indexer(const char *library_root, const char *data_root,
  *   DaftPunk/RAM/        — 2 tracks (Get Lucky, Lose Yourself to Dance)
  */
 static void build_daft_punk_library(const char *root) {
-    char path[1024], fpath[1024];
+    char path[1024];
 
     snprintf(path, sizeof(path), "%s/Daft Punk/Discovery", root);
     mkdirs(path);
@@ -200,7 +198,7 @@ static void build_daft_punk_library(const char *root) {
     };
     for (int i = 0; i < 3; i++) {
         char tracknum[16], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac", path,
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path,
                  disc_tracks[i].num, disc_tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", disc_tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", disc_tracks[i].title);
@@ -220,7 +218,7 @@ static void build_daft_punk_library(const char *root) {
     };
     for (int i = 0; i < 2; i++) {
         char tracknum[16], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac", path,
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path,
                  ram_tracks[i].num, ram_tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", ram_tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", ram_tracks[i].title);
@@ -237,7 +235,7 @@ static void build_daft_punk_library(const char *root) {
  *   GoldenFeatures/SECT/ — 2 tracks
  */
 static void build_golden_features_library(const char *root) {
-    char path[1024], fpath[1024];
+    char path[1024];
 
     snprintf(path, sizeof(path), "%s/Golden Features/SECT", root);
     mkdirs(path);
@@ -248,7 +246,7 @@ static void build_golden_features_library(const char *root) {
     };
     for (int i = 0; i < 2; i++) {
         char tracknum[16], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac", path,
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path,
                  tracks[i].num, tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", tracks[i].title);
@@ -807,7 +805,7 @@ static void index_no_mb(const char *library_root, const char *data_root) {
 #define MASK_B (1u << 1)
 
 static void build_picard_tagged_library(const char *root) {
-    char path[1024], fpath[1024];
+    char path[1024];
     snprintf(path, sizeof(path),
         "%s/Daft Punk/Random Access Memories", root);
     mkdirs(path);
@@ -819,7 +817,7 @@ static void build_picard_tagged_library(const char *root) {
     };
     for (int i = 0; i < 3; i++) {
         char tracknum[16], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac",
                  path, tracks[i].num, tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", tracks[i].title);
@@ -924,7 +922,7 @@ Test(indexer, picard_tags_preserve_artist_mbid,
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void build_basic_tagged_ram(const char *root) {
-    char path[1024], fpath[1024];
+    char path[1024];
     snprintf(path, sizeof(path),
         "%s/Daft Punk/Random Access Memories (10th Anniversary Edition)", root);
     mkdirs(path);
@@ -936,7 +934,7 @@ static void build_basic_tagged_ram(const char *root) {
     };
     for (int i = 0; i < 3; i++) {
         char tracknum[16], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac",
                  path, tracks[i].num, tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", tracks[i].title);
@@ -950,7 +948,7 @@ static void build_basic_tagged_ram(const char *root) {
 }
 
 static void build_odesza_with_bronson_credits(const char *root) {
-    char path[1024], fpath[1024];
+    char path[1024];
     snprintf(path, sizeof(path),
         "%s/ODESZA/The Last Goodbye Tour Live", root);
     mkdirs(path);
@@ -964,7 +962,7 @@ static void build_odesza_with_bronson_credits(const char *root) {
     };
     for (int i = 0; i < 5; i++) {
         char tracknum[16], title_tag[256], artist_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac",
                  path, tracks[i].num, tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", tracks[i].title);
@@ -979,7 +977,7 @@ static void build_odesza_with_bronson_credits(const char *root) {
 }
 
 static void build_bronson_picard_tagged(const char *root) {
-    char path[1024], fpath[1024];
+    char path[1024];
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON", root);
     mkdirs(path);
 
@@ -990,7 +988,7 @@ static void build_bronson_picard_tagged(const char *root) {
     };
     for (int i = 0; i < 3; i++) {
         char tracknum[16], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac",
                  path, tracks[i].num, tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", tracks[i].title);
@@ -1174,7 +1172,7 @@ Test(indexer, untagged_track_credit_not_merged_without_mb_resolution,
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void build_fictitious_compilation(const char *root) {
-    char path[1024], fpath[1024];
+    char path[1024];
     snprintf(path, sizeof(path),
         "%s/Quadrature Test Artists/Integration Test Compilation 2025", root);
     mkdirs(path);
@@ -1186,7 +1184,7 @@ static void build_fictitious_compilation(const char *root) {
     };
     for (int i = 0; i < 3; i++) {
         char tracknum[16], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac",
                  path, tracks[i].num, tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", tracks[i].title);

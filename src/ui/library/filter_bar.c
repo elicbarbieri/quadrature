@@ -323,8 +323,7 @@ static void setup_sort_menu(FilterBarState *fb) {
 
     GMenu *menu = g_menu_new();
     for (int i = 0; i < fb->sort_option_count; i++) {
-        char idx_str[8];
-        snprintf(idx_str, sizeof(idx_str), "%d", i);
+        g_autofree char *idx_str = g_strdup_printf("%d", i);
         GMenuItem *item = g_menu_item_new(fb->sort_options[i].label, NULL);
         g_menu_item_set_action_and_target_value(item, "sort.order",
             g_variant_new_string(idx_str));

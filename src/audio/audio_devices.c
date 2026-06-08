@@ -22,7 +22,7 @@ typedef struct {
 static void device_list_add(audio_device_list_t *list, const audio_device_t *device) {
     if (list->count >= list->capacity) {
         int new_cap = list->capacity == 0 ? 8 : list->capacity * 2;
-        audio_device_t *new_devices = realloc(list->devices, new_cap * sizeof(audio_device_t));
+        audio_device_t *new_devices = g_realloc(list->devices, new_cap * sizeof(audio_device_t));
         if (!new_devices) return;
         list->devices = new_devices;
         list->capacity = new_cap;
@@ -41,12 +41,12 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
         return;
 
     // Only care about nodes
-    if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0)
+    if (g_strcmp0(type, PW_TYPE_INTERFACE_Node) != 0)
         return;
 
     // Check if this is an audio sink
     const char *media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
-    if (!media_class || strcmp(media_class, "Audio/Sink") != 0)
+    if (!media_class || g_strcmp0(media_class, "Audio/Sink") != 0)
         return;
 
     // Get device info
@@ -60,17 +60,17 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
     audio_device_t device = {0};
     device.id = id;
 
-    strncpy(device.node_name, node_name, sizeof(device.node_name) - 1);
+    g_strlcpy(device.node_name, node_name, sizeof(device.node_name));
 
     if (description) {
-        strncpy(device.description, description, sizeof(device.description) - 1);
+        g_strlcpy(device.description, description, sizeof(device.description));
     } else {
         // Fall back to node name if no description
-        strncpy(device.description, node_name, sizeof(device.description) - 1);
+        g_strlcpy(device.description, node_name, sizeof(device.description));
     }
 
     if (serial) {
-        strncpy(device.serial, serial, sizeof(device.serial) - 1);
+        g_strlcpy(device.serial, serial, sizeof(device.serial));
     }
 
     device_list_add(ctx->list, &device);
@@ -172,7 +172,7 @@ void audio_devices_free(audio_device_list_t *list) {
     if (!list)
         return;
 
-    free(list->devices);
+    g_free(list->devices);
     list->devices = NULL;
     list->count = 0;
     list->capacity = 0;
@@ -196,11 +196,11 @@ static void monitor_registry_global(void *data, uint32_t id, uint32_t permission
 
     if (!props || !type)
         return;
-    if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0)
+    if (g_strcmp0(type, PW_TYPE_INTERFACE_Node) != 0)
         return;
 
     const char *media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
-    if (!media_class || strcmp(media_class, "Audio/Sink") != 0)
+    if (!media_class || g_strcmp0(media_class, "Audio/Sink") != 0)
         return;
 
     /* Track this sink ID so global_remove can distinguish sinks from stream churn */

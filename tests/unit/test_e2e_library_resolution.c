@@ -131,9 +131,8 @@ static const char *mb_solr_url(void) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void mkdirs(const char *path) {
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", path);
-    (void)system(cmd);
+    cr_assert_eq(g_mkdir_with_parents(path, 0755), 0,
+                 "g_mkdir_with_parents failed for %s", path);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -155,9 +154,7 @@ static void build_lib_a(const char *root) {
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON (2020)", root);
     mkdirs(path);
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
-        char fpath[1024];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s (FLAC 828 kbps).flac",
-                 path, i + 1, BRONSON_TRACKS[i]);
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s (FLAC 828 kbps).flac", path, i + 1, BRONSON_TRACKS[i]);
         const char *tags[] = { "date=2020", "genre=Electronic", NULL };
         cr_assert_eq(create_flac(fpath, tags, BRONSON_DURATIONS[i]), 0,
                      "Failed to create: %s", fpath);
@@ -176,9 +173,7 @@ static void build_lib_a(const char *root) {
     };
 
     for (size_t i = 0; i < sizeof(odesza_tracks)/sizeof(odesza_tracks[0]); i++) {
-        char fpath[1024];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
-                 path, odesza_tracks[i].num, odesza_tracks[i].title);
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, odesza_tracks[i].num, odesza_tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", odesza_tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", odesza_tracks[i].title);
 
@@ -211,9 +206,7 @@ static void build_lib_a(const char *root) {
             { 6, "Late Night",            "Odesza",                258 },
         };
         for (size_t i = 0; i < sizeof(ama)/sizeof(ama[0]); i++) {
-            char fpath[1024];
-            snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
-                     path, ama[i].num, ama[i].title);
+            g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, ama[i].num, ama[i].title);
             snprintf(tracknum, sizeof(tracknum), "track=%d", ama[i].num);
             snprintf(title_tag, sizeof(title_tag), "title=%s", ama[i].title);
             char artist_tag[256], aa_tag[256];
@@ -233,8 +226,7 @@ static void build_lib_a(const char *root) {
              "%s/Daft Punk/Random Access Memories (2013)/CD 01", root);
     mkdirs(path);
     for (int i = 0; i < RAM_TRACK_COUNT; i++) {
-        char fpath[1024];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac", path, i + 1, RAM_TRACKS[i]);
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, i + 1, RAM_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", RAM_TRACKS[i]);
         const char *tags[] = {
@@ -265,11 +257,10 @@ static void build_lib_b(const char *root) {
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON", root);
     mkdirs(path);
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
-        char fpath[1024];
         const bool is_dawn = (i == BRONSON_TRACK_COUNT - 1);
 
-        snprintf(fpath, sizeof(fpath), "%s/%02d BRONSON - %s.flac",
-                 path, i + 1, BRONSON_TRACKS[i]);
+        g_autofree char *fpath = g_strdup_printf("%s/%02d BRONSON - %s.flac",
+                                                  path, i + 1, BRONSON_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", BRONSON_TRACKS[i]);
 
@@ -296,8 +287,7 @@ static void build_lib_b(const char *root) {
     snprintf(path, sizeof(path), "%s/Daft Punk/Random Access Memories", root);
     mkdirs(path);
     for (int i = 0; i < RAM_TRACK_COUNT; i++) {
-        char fpath[1024];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac", path, i + 1, RAM_TRACKS[i]);
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, i + 1, RAM_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", RAM_TRACKS[i]);
         const char *tags[] = {
@@ -613,9 +603,8 @@ static int64_t find_artist_id_in_library(library_cache_t *c,
 }
 
 static void rm_rf(const char *path) {
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    (void)system(cmd);
+    g_autofree char *cmd = g_strdup_printf("rm -rf '%s'", path);
+    cr_assert_eq(system(cmd), 0, "rm -rf failed for %s", path);
 }
 
 /* (Shared fixture state + MASK_A/MASK_B moved up alongside the prod-parity
@@ -979,9 +968,8 @@ static void story_picard_setup(void) {
     char path[1024];
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON (2020)", lib_a_root);
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
-        char fpath[1024], tracknum[32], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s (FLAC 828 kbps).flac",
-                 path, i + 1, BRONSON_TRACKS[i]);
+        char tracknum[32], title_tag[256];
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s (FLAC 828 kbps).flac", path, i + 1, BRONSON_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", BRONSON_TRACKS[i]);
         const char *tags[] = {
@@ -1330,9 +1318,8 @@ static void story_mb_credits_setup(void) {
     };
 
     for (size_t i = 0; i < sizeof(odesza_tracks)/sizeof(odesza_tracks[0]); i++) {
-        char fpath[1024], tracknum[32], title_tag[256];
-        snprintf(fpath, sizeof(fpath), "%s/%02d - %s.flac",
-                 path, odesza_tracks[i].num, odesza_tracks[i].title);
+        char tracknum[32], title_tag[256];
+        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, odesza_tracks[i].num, odesza_tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", odesza_tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", odesza_tracks[i].title);
 

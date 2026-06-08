@@ -20,7 +20,6 @@ option(BUILD_PRODUCTION        "Install desktop file, metainfo, and icons"      
 option(QUADRATURE_USE_LIBPQ    "Build the PostgreSQL MusicBrainz backend"        ON)
 option(QUADRATURE_NATIVE_BUILD "Tune for the local CPU; Release builds only"     OFF)
 option(QUADRATURE_TEST_SERIAL  "Run Criterion in --jobs 1 (rate-limited HTTP)"   OFF)
-option(QUADRATURE_SANITIZE     "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 
 set(QUADRATURE_BUILD_MODE "DEBUG" CACHE STRING "Feature gating: DEBUG or BROADCAST")
 set_property(CACHE QUADRATURE_BUILD_MODE PROPERTY STRINGS "DEBUG" "BROADCAST")
@@ -39,14 +38,9 @@ message(STATUS "Quadrature ${PROJECT_VERSION} — ${CMAKE_BUILD_TYPE} (${QUADRAT
 
 add_compile_options(
     -Wall -Wextra
-    -Wshadow -Wpointer-arith -Wstrict-prototypes -Wformat=2
+    -Wshadow -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes -Wformat=2
 )
 add_compile_definitions(_GNU_SOURCE)
-
-if(QUADRATURE_SANITIZE)
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
-    add_link_options(-fsanitize=address,undefined)
-endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" AND CMAKE_BUILD_TYPE STREQUAL "Release")
     add_compile_options(-ftree-vectorize)
@@ -97,7 +91,12 @@ if(QUADRATURE_USE_LIBPQ)
     pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 endif()
 
-# Application identifiers — overridable per-build for forks.
+# GTK4 is needed by the UI binary and by tests that compile UI sources.
+if(BUILD_UI OR BUILD_TESTS)
+    pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
+endif()
+
+# Application identifiers
 set(ACOUSTID_APPLICATION_KEY  "N3PlLWjzbn"                       CACHE STRING "")
 set(FANART_TV_APPLICATION_KEY "400cfe22b47e1fb93bfeb3ca452059c8" CACHE STRING "")
 set(MUSICBRAINZ_USER_AGENT
@@ -219,7 +218,6 @@ endif()
 # === quadrature (GTK4 UI) ===================================================
 
 if(BUILD_UI)
-    pkg_check_modules(GTK4       REQUIRED IMPORTED_TARGET gtk4)
     pkg_check_modules(LIBADWAITA REQUIRED IMPORTED_TARGET libadwaita-1)
     find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
 
@@ -304,10 +302,6 @@ if(BUILD_TESTS)
     enable_testing()
     pkg_check_modules(CRITERION REQUIRED IMPORTED_TARGET criterion)
 
-    # QUADRATURE_TEST_SERIAL forces Criterion to --jobs 1 per binary.
-    # Required for the HTTP test path: MB's 1 req/sec ceiling is enforced by
-    # an in-process rate limiter that Criterion's default fork-per-test pool
-    # bypasses.
     function(unit_test NAME)
         cmake_parse_arguments(T "" "" "SOURCES;INCLUDES;LIBS" ${ARGN})
         add_executable(${NAME} tests/unit/${NAME}.c ${T_SOURCES})
@@ -315,7 +309,7 @@ if(BUILD_TESTS)
         target_link_libraries(${NAME} PRIVATE PkgConfig::CRITERION ${T_LIBS})
         target_compile_definitions(${NAME} PRIVATE SOURCE_DIR="${CMAKE_SOURCE_DIR}")
         if(QUADRATURE_TEST_SERIAL)
-            add_test(NAME ${NAME} COMMAND ${NAME} --jobs 1)
+            add_test(NAME ${NAME} COMMAND ${NAME} --jobs 1)  # Dont spam musicbrainz/acoustid
         else()
             add_test(NAME ${NAME} COMMAND ${NAME})
         endif()
@@ -324,7 +318,7 @@ if(BUILD_TESTS)
     set(S ${CMAKE_SOURCE_DIR}/src)
 
     unit_test(test_overflow_layout SOURCES ${S}/ui/overflow_plan.c
-        LIBS quadrature_headers PkgConfig::GLIB)
+        LIBS quadrature_headers PkgConfig::GTK4)
     unit_test(test_library_mask    SOURCES ${S}/library/library_mask.c
         LIBS quadrature_headers PkgConfig::GLIB)
 

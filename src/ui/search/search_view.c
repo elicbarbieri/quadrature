@@ -7,7 +7,7 @@
 
 #define G_LOG_DOMAIN "quadrature"
 
-#include "../internal.h"
+#include "internal.h"
 #include "quadrature/library_search.h"
 #include <string.h>
 

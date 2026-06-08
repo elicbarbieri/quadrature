@@ -138,7 +138,7 @@ static gboolean on_indexer_event_idle(gpointer user_data) {
             /* Remove the finished scan from the active list */
             for (guint i = 0; i < self->active->len; i++) {
                 ActiveScan* scan = g_ptr_array_index(self->active, i);
-                if (strcmp(scan->library_path, lib) == 0) {
+                if (g_strcmp0(scan->library_path, lib) == 0) {
                     /* Destroy the indexer and free the slot */
                     indexer_destroy(scan->indexer);
                     g_free(scan->library_path);
@@ -206,7 +206,7 @@ static indexer_t* create_indexer_for_scan(IndexerController* self, ScanCallbackD
     GPtrArray* others = g_ptr_array_new();
     for (guint i = 0; i < self->all_roots->len; i++) {
         const char* root = g_ptr_array_index(self->all_roots, i);
-        if (strcmp(root, cb_data->library_path) != 0)
+        if (g_strcmp0(root, cb_data->library_path) != 0)
             g_ptr_array_add(others, (gpointer)root);
     }
 
@@ -504,7 +504,7 @@ gboolean indexer_controller_start(IndexerController* self,
     g_hash_table_remove_all(self->data_root_map);
     if (data_roots) {
         for (gsize i = 0; i < path_count; i++) {
-            if (data_roots[i] && strcmp(data_roots[i], library_roots[i]) != 0)
+            if (data_roots[i] && g_strcmp0(data_roots[i], library_roots[i]) != 0)
                 g_hash_table_insert(self->data_root_map,
                                     g_strdup(library_roots[i]),
                                     g_strdup(data_roots[i]));
@@ -553,7 +553,7 @@ void indexer_controller_cancel_library(IndexerController* self, const char* libr
     /* Remove from pending queue if not yet started */
     for (guint i = 0; i < self->pending->len; i++) {
         const char* path = g_ptr_array_index(self->pending, i);
-        if (strcmp(path, library_path) == 0) {
+        if (g_strcmp0(path, library_path) == 0) {
             g_ptr_array_remove_index(self->pending, i);
             break;
         }
@@ -562,7 +562,7 @@ void indexer_controller_cancel_library(IndexerController* self, const char* libr
     /* Cancel active scan if running */
     for (guint i = 0; i < self->active->len; i++) {
         ActiveScan* scan = g_ptr_array_index(self->active, i);
-        if (strcmp(scan->library_path, library_path) == 0) {
+        if (g_strcmp0(scan->library_path, library_path) == 0) {
             indexer_cancel(scan->indexer);
             break;
         }

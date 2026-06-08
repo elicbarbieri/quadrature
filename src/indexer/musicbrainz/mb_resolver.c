@@ -219,7 +219,7 @@ static double title_similarity(const char* a, const char* b) {
         if (!wa[i][0]) continue;
         for (size_t j = 0; j < nb; j++) {
             if (!wb[j][0]) continue;
-            if (strcmp(wa[i], wb[j]) == 0) {
+            if (g_strcmp0(wa[i], wb[j]) == 0) {
                 matches++;
                 break;
             }
@@ -871,7 +871,7 @@ static void resolve_album_prepare(mb_resolver_t* ctx, int64_t album_id,
     /* --- Resolve album artist --- */
     t0 = profile_now_ns();
     bool is_va = (release->artist_count > 0 && release->artists[0].id &&
-                  strcmp(release->artists[0].id, VA_MUSICBRAINZ_ID) == 0);
+                  g_strcmp0(release->artists[0].id, VA_MUSICBRAINZ_ID) == 0);
 
     int64_t album_artist_id = 0;
     if (release->artist_count > 0 && !is_va) {
@@ -1293,7 +1293,7 @@ static void process_resolve_batch(mb_resolver_t* ctx,
     GHashTable* all_links = NULL;
     t0 = profile_now_ns();
     mb_backend_batch_fetch(ctx->backend, ctx->backend_conn,
-        (const char**)release_ids, release_count, &releases, &all_links);
+        (const char**)(void*)release_ids, release_count, &releases, &all_links);
     t1 = profile_now_ns();
     stats->pg_fetch_ns += (t1 - t0);
 
@@ -1742,7 +1742,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
             GHashTable* lnk = NULL;
             t0 = profile_now_ns();
             quadrature_result_t fetch_res = mb_backend_batch_fetch(ctx->backend, ctx->backend_conn,
-                (const char**)release_ids, release_count, &rel, &lnk);
+                (const char**)(void*)release_ids, release_count, &rel, &lnk);
             t1 = profile_now_ns();
             prof.pg_fetch_ns += (t1 - t0);
 
@@ -1754,7 +1754,7 @@ quadrature_result_t mb_resolver_run(mb_resolver_t* ctx) {
                 lnk = NULL;
                 t0 = profile_now_ns();
                 fetch_res = mb_backend_batch_fetch(ctx->backend, ctx->backend_conn,
-                    (const char**)release_ids, release_count, &rel, &lnk);
+                    (const char**)(void*)release_ids, release_count, &rel, &lnk);
                 t1 = profile_now_ns();
                 prof.pg_fetch_ns += (t1 - t0);
                 if (fetch_res != QUADRATURE_OK) {

@@ -604,7 +604,7 @@ void refresh_library_views(UiWindow *w) {
         library_unified_detail_set_library_mask(w->detail_view, w->library_mask);
         library_unified_detail_reload(w->detail_view);
     }
-    if (strcmp(w->current_view, "search") == 0)
+    if (g_strcmp0(w->current_view, "search") == 0)
         do_search(w);
 
     /* Sync library bar toggle labels with current names from cache */
@@ -628,7 +628,7 @@ void on_cache_ready(void *data) {
 int find_lib_idx(UiWindow *w, const char *library_path) {
     if (!w->settings || !library_path) return -1;
     for (int i = 0; i < w->settings->library_count; i++) {
-        if (strcmp(w->settings->libraries[i].path, library_path) == 0)
+        if (g_strcmp0(w->settings->libraries[i].path, library_path) == 0)
             return i;
     }
     return -1;

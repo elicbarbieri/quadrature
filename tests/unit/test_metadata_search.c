@@ -168,7 +168,7 @@ static void run_shell(const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
-    (void)system(cmd);
+    cr_assert_eq(system(cmd), 0, "shell command failed: %s", cmd);
 }
 
 static void mkdirs(const char *path)  { run_shell("mkdir -p '%s'", path); }

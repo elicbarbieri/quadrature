@@ -349,8 +349,8 @@ static void cancel_and_join_slot_warming(LibrarySlot *slot) {
 
 /* Sort tracks by (disc_num, track_num) for album display order */
 static gint cmp_track_disc_num(gconstpointer a, gconstpointer b) {
-    const library_track_info_t *ta = *(const library_track_info_t **)a;
-    const library_track_info_t *tb = *(const library_track_info_t **)b;
+    const library_track_info_t *ta = *(const library_track_info_t * const *)a;
+    const library_track_info_t *tb = *(const library_track_info_t * const *)b;
     if (ta->disc_num != tb->disc_num) return ta->disc_num - tb->disc_num;
     return ta->track_num - tb->track_num;
 }
@@ -1125,7 +1125,7 @@ char *library_build_corrected_query(library_cache_t *cache, const char *query) {
 }
 
 static int vocab_term_cmp(const void *a, const void *b) {
-    return g_ascii_strcasecmp(*(const char **)a, *(const char **)b);
+    return g_ascii_strcasecmp(*(const char * const *)a, *(const char * const *)b);
 }
 
 /* Build/merge search vocabulary from one slot's db_warm connection.
@@ -1261,9 +1261,9 @@ static void destroy_slot_internals(LibrarySlot *slot) {
     if (slot->db_warm) { db_close(slot->db_warm); slot->db_warm = NULL; }
     if (slot->db)      { db_close(slot->db);      slot->db      = NULL; }
 
-    g_free(slot->db_path);    slot->db_path    = NULL;
-    g_free(slot->music_base); slot->music_base  = NULL;
-    g_free(slot->display_name); slot->display_name = NULL;
+    g_clear_pointer(&slot->db_path,      g_free);
+    g_clear_pointer(&slot->music_base,   g_free);
+    g_clear_pointer(&slot->display_name, g_free);
 }
 
 /* Open both DB connections for a slot whose DB was absent at init time.

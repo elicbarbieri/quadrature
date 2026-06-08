@@ -15,8 +15,6 @@
 // necessary, introduce a proper versioned migration runner here.
 // =============================================================================
 
-extern quadrature_result_t db_migration_001_initial(sqlite3* db);
-
 #define DB_SCHEMA_VERSION 1
 
 static quadrature_result_t db_init_schema(sqlite3* db) {
@@ -240,8 +238,7 @@ void db_finalize_stmts(quadrature_db_t* db) {
 // =============================================================================
 
 static quadrature_result_t db_open_rw(const char* path, quadrature_db_t** out) {
-    quadrature_db_t* db = calloc(1, sizeof(quadrature_db_t));
-    if (!db) return QUADRATURE_ERROR_OUT_OF_MEMORY;
+    quadrature_db_t* db = g_new0(quadrature_db_t, 1);
 
     pthread_mutexattr_t mattr;
     pthread_mutexattr_init(&mattr);
@@ -254,12 +251,12 @@ static quadrature_result_t db_open_rw(const char* path, quadrature_db_t** out) {
     if (rc != SQLITE_OK) {
         g_critical("Failed to open database: %s", sqlite3_errmsg(db->db));
         pthread_mutex_destroy(&db->lock);
-        free(db);
+        g_free(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
 
     if (path) {
-        db->db_path = strdup(path);
+        db->db_path = g_strdup(path);
     }
 
     sqlite3_exec(db->db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
@@ -276,8 +273,8 @@ static quadrature_result_t db_open_rw(const char* path, quadrature_db_t** out) {
     if (res != QUADRATURE_OK) {
         sqlite3_close(db->db);
         pthread_mutex_destroy(&db->lock);
-        free(db->db_path);
-        free(db);
+        g_free(db->db_path);
+        g_free(db);
         return res;
     }
 
@@ -286,8 +283,7 @@ static quadrature_result_t db_open_rw(const char* path, quadrature_db_t** out) {
 }
 
 static quadrature_result_t db_open_ro(const char* path, quadrature_db_t** out) {
-    quadrature_db_t* db = calloc(1, sizeof(quadrature_db_t));
-    if (!db) return QUADRATURE_ERROR_OUT_OF_MEMORY;
+    quadrature_db_t* db = g_new0(quadrature_db_t, 1);
 
     pthread_mutex_init(&db->lock, NULL);
     atomic_init(&db->cancel_flag, 0);
@@ -302,11 +298,11 @@ static quadrature_result_t db_open_ro(const char* path, quadrature_db_t** out) {
     if (rc != SQLITE_OK) {
         g_critical("Failed to open database read-only: %s", sqlite3_errmsg(db->db));
         pthread_mutex_destroy(&db->lock);
-        free(db);
+        g_free(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
 
-    db->db_path = strdup(path);
+    db->db_path = g_strdup(path);
     db->readonly = true;  /* Single-threaded read-only: skip app-level mutex, WAL handles isolation */
 
     /* Prevent writes while allowing full WAL read visibility.
@@ -340,8 +336,8 @@ void db_close(quadrature_db_t* db) {
     db_finalize_stmts(db);
     sqlite3_close(db->db);
     pthread_mutex_destroy(&db->lock);
-    free(db->db_path);
-    free(db);
+    g_free(db->db_path);
+    g_free(db);
 }
 
 const char* db_path(const quadrature_db_t* db) {

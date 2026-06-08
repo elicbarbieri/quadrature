@@ -5,9 +5,8 @@
  * Applied to fresh databases as version 1.
  */
 
-#include <sqlite3.h>
+#include "../internal.h"
 #include <glib.h>
-#include "quadrature/quadrature.h"
 
 quadrature_result_t db_migration_001_initial(sqlite3* db) {
     char* err = NULL;

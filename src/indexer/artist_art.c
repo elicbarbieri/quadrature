@@ -767,7 +767,7 @@ quadrature_result_t artist_art_fetch_all(const artist_art_config_t* config,
             }
         }
 
-        if (msg) g_object_unref(msg);
+        g_clear_object(&msg);
 
         if (abort_phase) {
             if (body) g_bytes_unref(body);

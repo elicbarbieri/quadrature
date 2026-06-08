@@ -14,7 +14,7 @@
 LibEntry *find_lib_entry(UiWindow *w, const char *path) {
     if (!path) return NULL;
     for (size_t i = 0; i < w->lib_count; i++) {
-        if (w->libs[i].path && strcmp(w->libs[i].path, path) == 0)
+        if (w->libs[i].path && g_strcmp0(w->libs[i].path, path) == 0)
             return &w->libs[i];
     }
     return NULL;
@@ -55,7 +55,7 @@ void libs_load(UiWindow *w) {
         w->libs[i].path = g_strdup(w->settings->libraries[i].path);
         w->libs[i].name = app_settings_get_library_name(w->settings, (int)i);
         const char *dp = app_settings_get_library_data_path(w->settings, (int)i);
-        w->libs[i].data_path = (dp && strcmp(dp, w->libs[i].path) != 0)
+        w->libs[i].data_path = (dp && g_strcmp0(dp, w->libs[i].path) != 0)
                                 ? g_strdup(dp) : NULL;
         libs_load_entry_stats(&w->libs[i], w);
     }

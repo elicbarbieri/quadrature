@@ -239,11 +239,11 @@ int cli_indexer(int argc, char** argv) {
 
     const char* subcmd = argv[1];
 
-    if (strcmp(subcmd, "start") == 0)   return cmd_start(argc - 1, argv + 1);
-    if (strcmp(subcmd, "stop") == 0)    return cmd_stop();
-    if (strcmp(subcmd, "status") == 0)  return cmd_status();
+    if (g_strcmp0(subcmd, "start") == 0)   return cmd_start(argc - 1, argv + 1);
+    if (g_strcmp0(subcmd, "stop") == 0)    return cmd_stop();
+    if (g_strcmp0(subcmd, "status") == 0)  return cmd_status();
 
-    if (strcmp(subcmd, "help") == 0 || strcmp(subcmd, "--help") == 0 || strcmp(subcmd, "-h") == 0) {
+    if (g_strcmp0(subcmd, "help") == 0 || g_strcmp0(subcmd, "--help") == 0 || g_strcmp0(subcmd, "-h") == 0) {
         print_help();
         return 0;
     }

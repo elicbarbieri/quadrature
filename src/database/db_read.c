@@ -23,24 +23,18 @@ quadrature_result_t db_get_track(quadrature_db_t* db, int64_t id, db_track_t** o
     quadrature_result_t res = QUADRATURE_ERROR_FILE_NOT_FOUND;
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
-        db_track_t* track = calloc(1, sizeof(db_track_t));
-        if (!track) {
-            sqlite3_reset(stmt);
-            db_unlock(db);
-            return QUADRATURE_ERROR_OUT_OF_MEMORY;
-        }
-
+        db_track_t* track = g_new0(db_track_t, 1);
         track->id = sqlite3_column_int64(stmt, 0);
         const char* title = (const char*)sqlite3_column_text(stmt, 1);
         const char* artist = (const char*)sqlite3_column_text(stmt, 2);
         const char* album = (const char*)sqlite3_column_text(stmt, 3);
         const char* path = (const char*)sqlite3_column_text(stmt, 4);
-        track->title = title ? strdup(title) : strdup("Unknown");
-        track->artist = artist ? strdup(artist) : strdup("Unknown Artist");
+        track->title = title ? g_strdup(title) : g_strdup("Unknown");
+        track->artist = artist ? g_strdup(artist) : g_strdup("Unknown Artist");
         const char* artist_display = (const char*)sqlite3_column_text(stmt, 13);
-        track->artist_display = artist_display ? strdup(artist_display) : NULL;
-        track->album = album ? strdup(album) : strdup("Unknown Album");
-        track->path = path ? strdup(path) : strdup("");
+        track->artist_display = artist_display ? g_strdup(artist_display) : NULL;
+        track->album = album ? g_strdup(album) : g_strdup("Unknown Album");
+        track->path = path ? g_strdup(path) : g_strdup("");
         track->duration_ms = sqlite3_column_int(stmt, 5);
         track->track_num = sqlite3_column_int(stmt, 6);
         track->disc_num = sqlite3_column_int(stmt, 7);
@@ -49,9 +43,9 @@ quadrature_result_t db_get_track(quadrature_db_t* db, int64_t id, db_track_t** o
         track->album_id = sqlite3_column_int64(stmt, 9);
         track->artist_id = sqlite3_column_int64(stmt, 10);
         const char* genre = (const char*)sqlite3_column_text(stmt, 11);
-        track->genre = genre ? strdup(genre) : NULL;
+        track->genre = genre ? g_strdup(genre) : NULL;
         const char* album_path = (const char*)sqlite3_column_text(stmt, 12);
-        track->album_path = album_path ? strdup(album_path) : NULL;
+        track->album_path = album_path ? g_strdup(album_path) : NULL;
 
         *out = track;
         res = QUADRATURE_OK;
@@ -77,21 +71,21 @@ quadrature_result_t db_get_album_by_id(quadrature_db_t* db, int64_t album_id, db
     sqlite3_bind_int64(stmt, 1, album_id);
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
-        db_album_t* a = calloc(1, sizeof(db_album_t));
+        db_album_t* a = g_new0(db_album_t, 1);
         a->id = sqlite3_column_int64(stmt, 0);
         const char* title = (const char*)sqlite3_column_text(stmt, 1);
         const char* artist = (const char*)sqlite3_column_text(stmt, 2);
-        a->title = title ? strdup(title) : strdup("Unknown Album");
-        a->artist_name = artist ? strdup(artist) : strdup("Unknown Artist");
+        a->title = title ? g_strdup(title) : g_strdup("Unknown Album");
+        a->artist_name = artist ? g_strdup(artist) : g_strdup("Unknown Artist");
         a->artist_id = sqlite3_column_int64(stmt, 3);
         a->year = sqlite3_column_int(stmt, 4);
         a->track_count = sqlite3_column_int64(stmt, 5);
         const char* genres = (const char*)sqlite3_column_text(stmt, 6);
-        a->genres = (genres && *genres) ? strdup(genres) : NULL;
+        a->genres = (genres && *genres) ? g_strdup(genres) : NULL;
         const char* path = (const char*)sqlite3_column_text(stmt, 7);
-        a->path = path ? strdup(path) : strdup("");
+        a->path = path ? g_strdup(path) : g_strdup("");
         const char* mbid = (const char*)sqlite3_column_text(stmt, 8);
-        a->musicbrainz_release_id = mbid ? strdup(mbid) : NULL;
+        a->musicbrainz_release_id = mbid ? g_strdup(mbid) : NULL;
         *out = a;
     }
 
@@ -102,7 +96,7 @@ quadrature_result_t db_get_album_by_id(quadrature_db_t* db, int64_t album_id, db
 
 /* Fill a db_track_t from the current row of a statement using TRACK_SELECT_COLS order.
  * If `borrow` is true, string pointers alias SQLite memory (valid until next step/finalize).
- * If `borrow` is false, strings are strdup'd (caller must free). */
+ * If `borrow` is false, strings are g_strdup'd (caller must free). */
 static void fill_track_from_row(sqlite3_stmt* stmt, db_track_t* t, bool borrow) {
     t->id          = sqlite3_column_int64(stmt, 0);
     t->duration_ms = sqlite3_column_int(stmt, 5);
@@ -134,14 +128,14 @@ static void fill_track_from_row(sqlite3_stmt* stmt, db_track_t* t, bool borrow) 
         t->album_musicbrainz_release_id = (char*)album_mbid;
         t->artist_display = (char*)artist_display;
     } else {
-        t->title          = strdup(title ? title : "Unknown");
-        t->artist         = strdup(artist ? artist : "Unknown Artist");
-        t->album          = strdup(album ? album : "Unknown Album");
-        t->path           = strdup(path ? path : "");
-        t->genre          = genre ? strdup(genre) : NULL;
-        t->album_path     = album_path ? strdup(album_path) : NULL;
-        t->album_musicbrainz_release_id = album_mbid ? strdup(album_mbid) : NULL;
-        t->artist_display = artist_display ? strdup(artist_display) : NULL;
+        t->title          = g_strdup(title ? title : "Unknown");
+        t->artist         = g_strdup(artist ? artist : "Unknown Artist");
+        t->album          = g_strdup(album ? album : "Unknown Album");
+        t->path           = g_strdup(path ? path : "");
+        t->genre          = genre ? g_strdup(genre) : NULL;
+        t->album_path     = album_path ? g_strdup(album_path) : NULL;
+        t->album_musicbrainz_release_id = album_mbid ? g_strdup(album_mbid) : NULL;
+        t->artist_display = artist_display ? g_strdup(artist_display) : NULL;
     }
 }
 
@@ -159,24 +153,12 @@ quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id
     /* Grow dynamically — no COUNT query needed. Most albums have <30 tracks. */
     size_t cap = 32;
     size_t i = 0;
-    db_track_t* results = calloc(cap, sizeof(db_track_t));
-    if (!results) {
-        sqlite3_finalize(stmt);
-        db_unlock(db);
-        return QUADRATURE_ERROR_OUT_OF_MEMORY;
-    }
+    db_track_t* results = g_new0(db_track_t, cap);
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (i == cap) {
             cap *= 2;
-            db_track_t* grown = realloc(results, cap * sizeof(db_track_t));
-            if (!grown) {
-                db_tracks_free(results, i);
-                sqlite3_finalize(stmt);
-                db_unlock(db);
-                return QUADRATURE_ERROR_OUT_OF_MEMORY;
-            }
-            results = grown;
+            results = g_realloc(results, cap * sizeof(db_track_t));
             memset(results + i, 0, (cap - i) * sizeof(db_track_t));
         }
         fill_track_from_row(stmt, &results[i], false);
@@ -190,7 +172,7 @@ quadrature_result_t db_get_tracks_by_album(quadrature_db_t* db, int64_t album_id
     g_debug("db_get_tracks_by_album(%" G_GINT64_FORMAT "): %zu results in %.2f ms", album_id, i, elapsed / 1000.0);
 
     if (i == 0) {
-        free(results);
+        g_free(results);
         results = NULL;
     }
 
@@ -337,28 +319,28 @@ quadrature_result_t db_get_max_ids(quadrature_db_t *db,
 void db_albums_free(db_album_t* albums, size_t count) {
     if (!albums) return;
     for (size_t i = 0; i < count; i++) {
-        free(albums[i].title);
-        free(albums[i].artist_name);
-        free(albums[i].genres);
-        free(albums[i].path);
-        free(albums[i].musicbrainz_release_id);
+        g_free(albums[i].title);
+        g_free(albums[i].artist_name);
+        g_free(albums[i].genres);
+        g_free(albums[i].path);
+        g_free(albums[i].musicbrainz_release_id);
     }
-    free(albums);
+    g_free(albums);
 }
 
 void db_tracks_free(db_track_t* tracks, size_t count) {
     if (!tracks) return;
     for (size_t i = 0; i < count; i++) {
-        free(tracks[i].title);
-        free(tracks[i].artist);
-        free(tracks[i].artist_display);
-        free(tracks[i].album);
-        free(tracks[i].path);
-        free(tracks[i].album_path);
-        free(tracks[i].album_musicbrainz_release_id);
-        free(tracks[i].genre);
+        g_free(tracks[i].title);
+        g_free(tracks[i].artist);
+        g_free(tracks[i].artist_display);
+        g_free(tracks[i].album);
+        g_free(tracks[i].path);
+        g_free(tracks[i].album_path);
+        g_free(tracks[i].album_musicbrainz_release_id);
+        g_free(tracks[i].genre);
     }
-    free(tracks);
+    g_free(tracks);
 }
 
 // =============================================================================
@@ -578,7 +560,7 @@ quadrature_result_t db_get_album_mtimes_page(quadrature_db_t* db,
     while (sqlite3_step(stmt) == SQLITE_ROW && i < limit) {
         results[i].album_id          = sqlite3_column_int64(stmt, 0);
         const char* path = (const char*)sqlite3_column_text(stmt, 1);
-        results[i].path              = path ? strdup(path) : NULL;
+        results[i].path              = path ? g_strdup(path) : NULL;
         results[i].last_updated_at   = sqlite3_column_type(stmt, 2) != SQLITE_NULL
                                        ? sqlite3_column_int64(stmt, 2) : 0;
         results[i].last_updated_size = sqlite3_column_type(stmt, 3) != SQLITE_NULL
@@ -597,9 +579,9 @@ quadrature_result_t db_get_album_mtimes_page(quadrature_db_t* db,
 void db_free_album_mtimes(db_album_mtime_t* albums, size_t count) {
     if (!albums) return;
     for (size_t i = 0; i < count; i++) {
-        free(albums[i].path);
+        g_free(albums[i].path);
     }
-    free(albums);
+    g_free(albums);
 }
 
 // =============================================================================
@@ -703,7 +685,7 @@ quadrature_result_t db_get_errors_page(quadrature_db_t* db, const char* path_pre
     }
 
     if (rc != SQLITE_OK) {
-        free(results);
+        g_free(results);
         db_unlock(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
@@ -712,9 +694,9 @@ quadrature_result_t db_get_errors_page(quadrature_db_t* db, const char* path_pre
     while (sqlite3_step(stmt) == SQLITE_ROW && i < limit) {
         results[i].id = sqlite3_column_int64(stmt, 0);
         const char* path = (const char*)sqlite3_column_text(stmt, 1);
-        results[i].path = path ? strdup(path) : strdup("");
+        results[i].path = path ? g_strdup(path) : g_strdup("");
         const char* message = (const char*)sqlite3_column_text(stmt, 2);
-        results[i].message = message ? strdup(message) : strdup("");
+        results[i].message = message ? g_strdup(message) : g_strdup("");
         results[i].created_at = sqlite3_column_int64(stmt, 3);
         i++;
     }

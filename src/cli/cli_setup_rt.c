@@ -217,7 +217,7 @@ static rt_check_result_t check_audio_group(void) {
     bool found = false;
     char* token = strtok(groups, " ");
     while (token) {
-        if (strcmp(token, "audio") == 0) { found = true; break; }
+        if (g_strcmp0(token, "audio") == 0) { found = true; break; }
         token = strtok(NULL, " ");
     }
 
@@ -260,7 +260,7 @@ static rt_check_result_t check_rtprio_limits(void) {
     }
 
     long rt_val = strtol(rtprio, NULL, 10);
-    bool memlock_ok = memlock && (strcmp(memlock, "unlimited") == 0 || strtol(memlock, NULL, 10) > 1048576);
+    bool memlock_ok = memlock && (g_strcmp0(memlock, "unlimited") == 0 || strtol(memlock, NULL, 10) > 1048576);
 
     if (rt_val >= 80 && memlock_ok) {
         r.status = RT_PASS;
@@ -290,7 +290,7 @@ static rt_check_result_t check_cpu_governor(void) {
         return r;
     }
 
-    if (strcmp(gov, "performance") == 0) {
+    if (g_strcmp0(gov, "performance") == 0) {
         r.status = RT_PASS;
         r.detail = g_strdup("performance");
     } else {

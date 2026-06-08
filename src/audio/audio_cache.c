@@ -319,7 +319,7 @@ static void decode_worker(gpointer data, gpointer user_data) {
         /* Extract file extension */
         const char* dot = strrchr(buffer->path, '.');
         if (dot && dot[1]) {
-            strncpy(event->filetype, dot + 1, sizeof(event->filetype) - 1);
+            g_strlcpy(event->filetype, dot + 1, sizeof(event->filetype));
             event->filetype[sizeof(event->filetype) - 1] = '\0';
             /* Lowercase the extension */
             for (char* p = event->filetype; *p; p++) {

@@ -219,11 +219,11 @@ GtkWidget* perf_grouped_hist_new(const char* title, const char* unit,
     PerfGroupedHist* self = g_object_new(PERF_TYPE_GROUPED_HIST, NULL);
 
     if (title) {
-        strncpy(self->title, title, sizeof(self->title) - 1);
+        g_strlcpy(self->title, title, sizeof(self->title));
         self->title[sizeof(self->title) - 1] = '\0';
     }
     if (unit) {
-        strncpy(self->unit, unit, sizeof(self->unit) - 1);
+        g_strlcpy(self->unit, unit, sizeof(self->unit));
         self->unit[sizeof(self->unit) - 1] = '\0';
     }
     self->num_groups  = (num_groups  > GROUPED_HIST_MAX_GROUPS)  ? GROUPED_HIST_MAX_GROUPS  : num_groups;
@@ -238,7 +238,7 @@ void perf_grouped_hist_set_group(PerfGroupedHist* hist, int group,
     if (group < 0 || group >= GROUPED_HIST_MAX_GROUPS) return;
 
     if (label) {
-        strncpy(hist->group_labels[group], label, sizeof(hist->group_labels[group]) - 1);
+        g_strlcpy(hist->group_labels[group], label, sizeof(hist->group_labels[group]));
         hist->group_labels[group][sizeof(hist->group_labels[group]) - 1] = '\0';
     }
     if (color) hist->group_colors[group] = *color;
@@ -268,7 +268,7 @@ void perf_grouped_hist_set_bucket_label(PerfGroupedHist* hist, int bucket, const
     g_return_if_fail(PERF_IS_GROUPED_HIST(hist));
     if (bucket < 0 || bucket >= GROUPED_HIST_MAX_BUCKETS) return;
     if (label) {
-        strncpy(hist->bucket_labels[bucket], label, sizeof(hist->bucket_labels[bucket]) - 1);
+        g_strlcpy(hist->bucket_labels[bucket], label, sizeof(hist->bucket_labels[bucket]));
         hist->bucket_labels[bucket][sizeof(hist->bucket_labels[bucket]) - 1] = '\0';
     } else {
         hist->bucket_labels[bucket][0] = '\0';

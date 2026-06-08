@@ -279,7 +279,7 @@ static bool str_equal_nullsafe(const char* a, const char* b) {
     if (a == b) return true;
     if (!a) return !b || !b[0];
     if (!b) return !a || !a[0];
-    return strcmp(a, b) == 0;
+    return g_strcmp0(a, b) == 0;
 }
 
 static bool artist_credits_equal(const GPtrArray* cur,

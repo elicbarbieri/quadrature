@@ -41,3 +41,4 @@ result-*
 # Local config
 .claude/
 .env
+flatpak-local/

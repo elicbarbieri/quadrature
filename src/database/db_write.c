@@ -446,10 +446,10 @@ quadrature_result_t db_prune_orphan_errors(quadrature_db_t* db, const char* libr
 void db_indexer_errors_free(db_indexer_error_t* errors, size_t count) {
     if (!errors) return;
     for (size_t i = 0; i < count; i++) {
-        free(errors[i].path);
-        free(errors[i].message);
+        g_free(errors[i].path);
+        g_free(errors[i].message);
     }
-    free(errors);
+    g_free(errors);
 }
 
 // =============================================================================

@@ -69,7 +69,7 @@ static const char *OUTPUT_FORMAT_NAMES[] = {
     "24-bit 96.0 kHz"
 };
 
-char *app_settings_get_path(void) {
+static char *app_settings_get_path(void) {
     const char *config_home = g_get_user_config_dir();
     return g_build_filename(config_home, CONFIG_DIR, CONFIG_FILE, NULL);
 }
@@ -557,7 +557,7 @@ void app_settings_swap_libraries(app_settings_t *settings, int pos_a, int pos_b)
 int app_settings_find_library(const app_settings_t *settings, const char *path) {
     if (!settings || !path) return -1;
     for (int i = 0; i < settings->library_count; i++) {
-        if (settings->libraries[i].path && strcmp(settings->libraries[i].path, path) == 0)
+        if (settings->libraries[i].path && g_strcmp0(settings->libraries[i].path, path) == 0)
             return i;
     }
     return -1;

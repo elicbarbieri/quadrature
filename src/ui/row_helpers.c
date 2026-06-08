@@ -412,6 +412,7 @@ static void sep_snapshot(GtkWidget *widget, GtkSnapshot *snap) {
 
 typedef struct { GtkWidget parent; } QuadSepLine;
 typedef struct { GtkWidgetClass parent_class; } QuadSepLineClass;
+GType quad_sep_line_get_type(void) G_GNUC_CONST;
 G_DEFINE_FINAL_TYPE(QuadSepLine, quad_sep_line, GTK_TYPE_WIDGET)
 static void quad_sep_line_init(QuadSepLine *self) { (void)self; }
 static void quad_sep_line_class_init(QuadSepLineClass *klass) {

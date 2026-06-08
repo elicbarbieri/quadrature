@@ -108,4 +108,7 @@ void db_unlock(quadrature_db_t* db);
 void db_prepare_stmts(quadrature_db_t* db);
 void db_finalize_stmts(quadrature_db_t* db);
 
+// Schema migrations
+quadrature_result_t db_migration_001_initial(sqlite3* db);
+
 #endif // QUADRATURE_DB_INTERNAL_H

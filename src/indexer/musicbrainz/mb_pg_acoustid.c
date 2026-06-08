@@ -790,7 +790,7 @@ static double astrcmp_score(const char* a, const char* b) {
 // Returns: sum_of_best_scores / (shorter_len + remaining_longer_len * 0.4)
 static double similarity2(const char* a, const char* b) {
     if (!a || !b || !*a || !*b) return 0.0;
-    if (strcmp(a, b) == 0) return 1.0;
+    if (g_strcmp0(a, b) == 0) return 1.0;
 
     static GRegex* split_re = NULL;
     if (G_UNLIKELY(!split_re))

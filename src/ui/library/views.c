@@ -716,7 +716,7 @@ static void rebuild_scrubber_buckets(ViewData *vd) {
             }
         }
 
-        if (strcmp(key, cur_key) != 0) {
+        if (g_strcmp0(key, cur_key) != 0) {
             ScrubberBucket *b = g_new0(ScrubberBucket, 1);
             b->label    = g_strdup(key);
             b->position = i;

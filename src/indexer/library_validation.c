@@ -249,13 +249,8 @@ static void check_duplicate_track_positions(indexer_t* idx, const metadata_resul
     if (!idx || !mr || !mr->tracks || !mr->dir_path) return;
     if (mr->track_count < 2) return;
 
-    /* Build a set of (disc_num, track_num) pairs to detect duplicates */
-    typedef struct {
-        uint16_t disc_num;
-        uint16_t track_num;
-    } track_pos_t;
-
-    /* Simple O(n^2) duplicate check - fine for typical album sizes */
+    /* Simple O(n^2) duplicate check on (disc_num, track_num) pairs —
+     * fine for typical album sizes. */
     for (size_t i = 0; i < mr->track_count; i++) {
         for (size_t j = i + 1; j < mr->track_count; j++) {
             if (mr->tracks[i].disc_num == mr->tracks[j].disc_num &&

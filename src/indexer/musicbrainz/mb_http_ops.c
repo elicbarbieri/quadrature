@@ -324,12 +324,6 @@ static void link_row_free(gpointer data) {
     g_free(l);
 }
 
-static void link_arr_free(gpointer data) {
-    GPtrArray* arr = data;
-    if (!arr) return;
-    for (guint i = 0; i < arr->len; i++) link_row_free(g_ptr_array_index(arr, i));
-    g_ptr_array_free(arr, TRUE);
-}
 
 quadrature_result_t mb_http_batch_fetch(mb_conn_t* conn,
                                          const char** ids, size_t n,
@@ -347,7 +341,7 @@ quadrature_result_t mb_http_batch_fetch(mb_conn_t* conn,
     *out_releases = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free, batch_release_free);
     *out_links = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                        g_free, link_arr_free);
+                                        g_free, (GDestroyNotify)g_ptr_array_unref);
 
     for (size_t i = 0; i < n; i++) {
         if (!ids[i]) continue;
@@ -384,21 +378,18 @@ quadrature_result_t mb_http_batch_fetch(mb_conn_t* conn,
             continue;
         }
 
-        GPtrArray* links_arr = g_ptr_array_new();
+        GPtrArray* links_arr = g_ptr_array_new_with_free_func(link_row_free);
         mb_release_t* rel = parse_release_with_links(root, links_arr);
         json_object_unref(root);
         if (rel && rel->id) {
             g_hash_table_insert(*out_releases, g_strdup(ids[i]), rel);
-            if (links_arr->len > 0) {
+            if (links_arr->len > 0)
                 g_hash_table_insert(*out_links, g_strdup(ids[i]), links_arr);
-            } else {
-                g_ptr_array_free(links_arr, TRUE);
-            }
+            else
+                g_ptr_array_unref(links_arr);
         } else {
             if (rel) { mb_release_free(rel); g_free(rel); }
-            for (guint k = 0; k < links_arr->len; k++)
-                link_row_free(g_ptr_array_index(links_arr, k));
-            g_ptr_array_free(links_arr, TRUE);
+            g_ptr_array_unref(links_arr);
         }
     }
 

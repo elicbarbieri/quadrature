@@ -61,7 +61,7 @@ static void rebuild_device_models(UiWindow *w) {
             dev = app_settings_get_channel_device(w->settings, ch);
         if (dev && dev[0]) {
             for (int j = 0; j < w->device_count; j++) {
-                if (strcmp(w->device_names[j], dev) == 0) {
+                if (g_strcmp0(w->device_names[j], dev) == 0) {
                     assigned_by[ch] = j;
                     break;
                 }
@@ -257,7 +257,7 @@ static void device_enum_done(GObject *src, GAsyncResult *res, gpointer data) {
         gboolean found = FALSE;
         if (saved && saved[0]) {
             for (int j = 0; j < w->device_count; j++) {
-                if (strcmp(w->device_names[j], saved) == 0) {
+                if (g_strcmp0(w->device_names[j], saved) == 0) {
                     found = TRUE;
                     break;
                 }

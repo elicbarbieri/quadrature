@@ -54,25 +54,25 @@ void dir_scan_result_init(dir_scan_result_t* result) {
 void dir_scan_result_free(dir_scan_result_t* result) {
     if (!result) return;
     for (size_t i = 0; i < result->file_count; i++) {
-        free(result->files[i]);
+        g_free(result->files[i]);
     }
-    free(result->files);
-    free(result->stats);
+    g_free(result->files);
+    g_free(result->stats);
     for (size_t i = 0; i < result->subdir_count; i++) {
-        free(result->subdirs[i]);
+        g_free(result->subdirs[i]);
     }
-    free(result->subdirs);
+    g_free(result->subdirs);
     memset(result, 0, sizeof(*result));
 }
 
 static void dir_scan_add_file(dir_scan_result_t* result, const char* path, const struct stat* st) {
     if (result->file_count >= result->file_capacity) {
         size_t new_cap = result->file_capacity ? result->file_capacity * 2 : DIR_SCAN_INITIAL_CAPACITY;
-        result->files = realloc(result->files, new_cap * sizeof(char*));
-        result->stats = realloc(result->stats, new_cap * sizeof(struct stat));
+        result->files = g_realloc(result->files, new_cap * sizeof(char*));
+        result->stats = g_realloc(result->stats, new_cap * sizeof(struct stat));
         result->file_capacity = new_cap;
     }
-    result->files[result->file_count] = strdup(path);
+    result->files[result->file_count] = g_strdup(path);
     result->stats[result->file_count] = *st;
     result->file_count++;
 }
@@ -80,10 +80,10 @@ static void dir_scan_add_file(dir_scan_result_t* result, const char* path, const
 static void dir_scan_add_subdir(dir_scan_result_t* result, const char* path) {
     if (result->subdir_count >= result->subdir_capacity) {
         size_t new_cap = result->subdir_capacity ? result->subdir_capacity * 2 : DIR_SCAN_INITIAL_CAPACITY;
-        result->subdirs = realloc(result->subdirs, new_cap * sizeof(char*));
+        result->subdirs = g_realloc(result->subdirs, new_cap * sizeof(char*));
         result->subdir_capacity = new_cap;
     }
-    result->subdirs[result->subdir_count++] = strdup(path);
+    result->subdirs[result->subdir_count++] = g_strdup(path);
 }
 
 void dir_scan_single_pass(const char* dir_path, dir_scan_result_t* result) {
@@ -422,7 +422,7 @@ static void set_phase(indexer_t* idx, indexer_phase_t phase) {
 static void set_current_path(indexer_t* idx, const char* path) {
     pthread_mutex_lock(&idx->lock);
     if (path) {
-        strncpy(idx->current_path, path, INDEXER_PATH_MAX - 1);
+        g_strlcpy(idx->current_path, path, INDEXER_PATH_MAX);
         idx->current_path[INDEXER_PATH_MAX - 1] = '\0';
     } else {
         idx->current_path[0] = '\0';
@@ -1888,7 +1888,7 @@ static void artwork_worker(gpointer data, gpointer user_data) {
 
 /* g_ptr_array_sort passes char** — dereference before comparing. */
 static gint cmp_str_ptr(gconstpointer a, gconstpointer b) {
-    return strcmp(*(const char **)a, *(const char **)b);
+    return strcmp(*(const char * const *)a, *(const char * const *)b);
 }
 
 /* Keep only the N most recent atlas files matching "{size}px-artwork-*.atlas". */
@@ -2096,7 +2096,7 @@ static void phase_artwork(indexer_t* idx, processed_album_t* albums, size_t albu
 
             /* Store path for progress callback (read under lock in indexer_get_progress) */
             pthread_mutex_lock(&idx->lock);
-            strncpy(idx->atlas_path, atlas_path, INDEXER_PATH_MAX - 1);
+            g_strlcpy(idx->atlas_path, atlas_path, INDEXER_PATH_MAX);
             idx->atlas_path[INDEXER_PATH_MAX - 1] = '\0';
             pthread_mutex_unlock(&idx->lock);
         }
@@ -2579,8 +2579,7 @@ cancelled:
 quadrature_result_t indexer_create(indexer_t** out, const indexer_config_t* config) {
     if (!out) return QUADRATURE_ERROR_INVALID_PARAM;
 
-    indexer_t* idx = calloc(1, sizeof(indexer_t));
-    if (!idx) return QUADRATURE_ERROR_OUT_OF_MEMORY;
+    indexer_t* idx = g_new0(indexer_t, 1);
 
     int threads = (config && config->thread_count > 0) ? config->thread_count : (int)g_get_num_processors();
     idx->thread_count = CLAMP(threads, 4, 64);
@@ -2591,13 +2590,13 @@ quadrature_result_t indexer_create(indexer_t** out, const indexer_config_t* conf
         idx->callback = config->callback;
         idx->user_data = config->user_data;
         idx->mb_resolve = config->mb_resolve;
-        idx->pg_conninfo = config->pg_conninfo ? strdup(config->pg_conninfo) : NULL;
-        idx->mb_solr_url = config->mb_solr_url ? strdup(config->mb_solr_url) : NULL;
-        idx->acoustid_pg_conninfo = config->acoustid_pg_conninfo ? strdup(config->acoustid_pg_conninfo) : NULL;
-        idx->acoustid_index_url = config->acoustid_index_url ? strdup(config->acoustid_index_url) : NULL;
+        idx->pg_conninfo = config->pg_conninfo ? g_strdup(config->pg_conninfo) : NULL;
+        idx->mb_solr_url = config->mb_solr_url ? g_strdup(config->mb_solr_url) : NULL;
+        idx->acoustid_pg_conninfo = config->acoustid_pg_conninfo ? g_strdup(config->acoustid_pg_conninfo) : NULL;
+        idx->acoustid_index_url = config->acoustid_index_url ? g_strdup(config->acoustid_index_url) : NULL;
         idx->fetch_artist_art = config->fetch_artist_art;
         idx->fetch_artist_bios = config->fetch_artist_bios;
-        idx->fanart_api_key = config->fanart_api_key ? strdup(config->fanart_api_key) : NULL;
+        idx->fanart_api_key = config->fanart_api_key ? g_strdup(config->fanart_api_key) : NULL;
         if (config->other_library_roots && config->other_library_roots_count > 0) {
             idx->other_artwork_dirs_count = config->other_library_roots_count;
             idx->other_artwork_dirs = calloc(idx->other_artwork_dirs_count, sizeof(char*));
@@ -2617,18 +2616,18 @@ void indexer_destroy(indexer_t* idx) {
     if (!idx) return;
     indexer_cancel(idx);
     indexer_wait(idx);
-    free(idx->library_root);
-    free(idx->data_root);
-    free(idx->pg_conninfo);
-    free(idx->mb_solr_url);
-    free(idx->acoustid_pg_conninfo);
-    free(idx->acoustid_index_url);
-    free(idx->fanart_api_key);
+    g_free(idx->library_root);
+    g_free(idx->data_root);
+    g_free(idx->pg_conninfo);
+    g_free(idx->mb_solr_url);
+    g_free(idx->acoustid_pg_conninfo);
+    g_free(idx->acoustid_index_url);
+    g_free(idx->fanart_api_key);
     for (size_t i = 0; i < idx->other_artwork_dirs_count; i++)
-        free(idx->other_artwork_dirs[i]);
-    free(idx->other_artwork_dirs);
+        g_free(idx->other_artwork_dirs[i]);
+    g_free(idx->other_artwork_dirs);
     pthread_mutex_destroy(&idx->lock);
-    free(idx);
+    g_free(idx);
 }
 
 quadrature_result_t indexer_scan(indexer_t* idx, const char* library_root,
@@ -2636,11 +2635,11 @@ quadrature_result_t indexer_scan(indexer_t* idx, const char* library_root,
     if (!idx || !library_root || !library_root[0]) return QUADRATURE_ERROR_INVALID_PARAM;
     if (atomic_load(&idx->running)) return QUADRATURE_ERROR_DEVICE_BUSY;
 
-    free(idx->library_root);
-    idx->library_root = strdup(library_root);
-    free(idx->data_root);
+    g_free(idx->library_root);
+    idx->library_root = g_strdup(library_root);
+    g_free(idx->data_root);
     idx->data_root = (data_root && data_root[0])
-                     ? strdup(data_root) : strdup(library_root);
+                     ? g_strdup(data_root) : g_strdup(library_root);
 
     // Reset all counters
     atomic_store(&idx->cancel_flag, 0);
@@ -2735,7 +2734,7 @@ void indexer_get_progress(indexer_t* idx, indexer_progress_t* p) {
     pthread_mutex_lock(&idx->lock);
     memcpy(p->phase_start_times, idx->phase_start_times, sizeof(p->phase_start_times));
     p->current_path = idx->current_path;
-    strncpy(p->atlas_path, idx->atlas_path, sizeof(p->atlas_path) - 1);
+    g_strlcpy(p->atlas_path, idx->atlas_path, sizeof(p->atlas_path));
     p->atlas_path[sizeof(p->atlas_path) - 1] = '\0';
     pthread_mutex_unlock(&idx->lock);
 

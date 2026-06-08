@@ -9,7 +9,7 @@
  * as many items as possible within the remaining budget.
  */
 
-#include <glib.h>
+#include "internal.h"
 
 guint ui_overflow_box_plan_layout(int budget,
                                   const int *item_widths,

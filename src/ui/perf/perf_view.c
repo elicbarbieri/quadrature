@@ -274,7 +274,7 @@ static gboolean update_dashboard(gpointer data) {
         if (state == CHANNEL_PLAYING)      state_str = "Playing";
         else if (state == CHANNEL_PAUSED)  state_str = "Paused";
         else if (state == CHANNEL_ERROR)   state_str = "Error";
-        if (strcmp(priv->prev_state_text[i], state_str) != 0) {
+        if (g_strcmp0(priv->prev_state_text[i], state_str) != 0) {
             gtk_label_set_text(GTK_LABEL(priv->channel_state_labels[i]), state_str);
             g_strlcpy(priv->prev_state_text[i], state_str, sizeof(priv->prev_state_text[i]));
         }
@@ -305,7 +305,7 @@ static gboolean update_dashboard(gpointer data) {
             priv->prev_dimmed[i] = dimmed;
         }
         /* p99 label — computed from ring buffer in 1/sec block below */
-        if (!active && strcmp(priv->prev_p99_text[i], "p99: --") != 0) {
+        if (!active && g_strcmp0(priv->prev_p99_text[i], "p99: --") != 0) {
             gtk_label_set_text(GTK_LABEL(priv->channel_p99_labels[i]), "p99: --");
             g_strlcpy(priv->prev_p99_text[i], "p99: --", sizeof(priv->prev_p99_text[i]));
         }
@@ -315,11 +315,11 @@ static gboolean update_dashboard(gpointer data) {
             char buf[24];
             double bpct = perf_budget_max_pct(priv->pipeline, i);
             snprintf(buf, sizeof(buf), "Bgt: %.2f%%", bpct);
-            if (strcmp(priv->prev_budget_text[i], buf) != 0) {
+            if (g_strcmp0(priv->prev_budget_text[i], buf) != 0) {
                 gtk_label_set_text(GTK_LABEL(priv->channel_budget_labels[i]), buf);
                 g_strlcpy(priv->prev_budget_text[i], buf, sizeof(priv->prev_budget_text[i]));
             }
-        } else if (strcmp(priv->prev_budget_text[i], "Bgt: --") != 0) {
+        } else if (g_strcmp0(priv->prev_budget_text[i], "Bgt: --") != 0) {
             gtk_label_set_text(GTK_LABEL(priv->channel_budget_labels[i]), "Bgt: --");
             g_strlcpy(priv->prev_budget_text[i], "Bgt: --", sizeof(priv->prev_budget_text[i]));
         }
@@ -438,7 +438,7 @@ static gboolean update_dashboard(gpointer data) {
                 /* Update p99 label */
                 char buf[32];
                 snprintf(buf, sizeof(buf), "p99: %.0f µs", p99);
-                if (strcmp(priv->prev_p99_text[i], buf) != 0) {
+                if (g_strcmp0(priv->prev_p99_text[i], buf) != 0) {
                     gtk_label_set_text(GTK_LABEL(priv->channel_p99_labels[i]), buf);
                     g_strlcpy(priv->prev_p99_text[i], buf, sizeof(priv->prev_p99_text[i]));
                 }

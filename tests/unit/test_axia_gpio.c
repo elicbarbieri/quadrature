@@ -148,6 +148,7 @@ static void gpio_event_callback(int channel_id, axia_pin_t pin, axia_state_t sta
 }
 
 static void status_callback(int channel_id, bool connected, void *user_data) {
+    (void)channel_id;
     callback_state_t *cb_state = user_data;
     cb_state->status_change_count++;
     cb_state->last_connected = connected;

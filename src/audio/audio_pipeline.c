@@ -1191,7 +1191,7 @@ static quadrature_result_t player_recreate_stream(audio_player_t* p, uint32_t sa
 
     /* Update target device */
     if (target_device && target_device[0]) {
-        strncpy(p->target_device, target_device, sizeof(p->target_device) - 1);
+        g_strlcpy(p->target_device, target_device, sizeof(p->target_device));
         p->target_device[sizeof(p->target_device) - 1] = '\0';
         g_message("Player %d retargeting to device: %s", p->player_id, p->target_device);
     } else {
@@ -1879,7 +1879,7 @@ quadrature_result_t audio_pipeline_set_player_device(audio_pipeline_t* pipeline,
     bool streams_up = atomic_load(&p->streams_active);
     if (streams_up &&
         ((current == NULL && new_dev == NULL) ||
-         (current && new_dev && strcmp(current, new_dev) == 0)))
+         (current && new_dev && g_strcmp0(current, new_dev) == 0)))
         return QUADRATURE_OK;
 
     pw_thread_loop_lock(pipeline->loop);

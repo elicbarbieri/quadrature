@@ -114,16 +114,16 @@ uint16_t get_disc_number_from_folder(const char* dir_name) {
 
 void index_item_free(index_item_t* item) {
     if (!item) return;
-    free(item->path);
-    free(item->title);
-    free(item->artist);
-    free(item->album_artist);
-    free(item->album);
-    free(item->genre);
-    free(item->mb_release_id);
-    free(item->mb_release_group_id);
-    free(item->mb_artist_id);
-    free(item->mb_album_artist_id);
+    g_free(item->path);
+    g_free(item->title);
+    g_free(item->artist);
+    g_free(item->album_artist);
+    g_free(item->album);
+    g_free(item->genre);
+    g_free(item->mb_release_id);
+    g_free(item->mb_release_group_id);
+    g_free(item->mb_artist_id);
+    g_free(item->mb_album_artist_id);
     item->path = NULL;
     item->title = NULL;
     item->artist = NULL;
@@ -144,7 +144,7 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     g_assert(path != NULL);
     g_assert(out != NULL);
 
-    out->path = strdup(path);
+    out->path = g_strdup(path);
     out->title = NULL;
     out->artist = NULL;
     out->album_artist = NULL;
@@ -186,11 +186,11 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     AVDictionaryEntry* tag = NULL;
     while ((tag = av_dict_get(fmt->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
         if (strcasecmp(tag->key, "title") == 0) {
-            out->title = strdup(tag->value);
+            out->title = g_strdup(tag->value);
         } else if (strcasecmp(tag->key, "artist") == 0) {
-            out->artist = strdup(tag->value);
+            out->artist = g_strdup(tag->value);
         } else if (strcasecmp(tag->key, "album") == 0) {
-            out->album = strdup(tag->value);
+            out->album = g_strdup(tag->value);
         } else if (strcasecmp(tag->key, "track") == 0) {
             out->track_num = (uint16_t)atoi(tag->value);
         } else if (strcasecmp(tag->key, "disc") == 0 ||
@@ -200,24 +200,24 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
             out->year = (uint16_t)atoi(tag->value);
         } else if (strcasecmp(tag->key, "album_artist") == 0 ||
                    strcasecmp(tag->key, "albumartist") == 0) {
-            free(out->album_artist);
-            out->album_artist = strdup(tag->value);
+            g_free(out->album_artist);
+            out->album_artist = g_strdup(tag->value);
         } else if (strcasecmp(tag->key, "genre") == 0) {
-            free(out->genre);
-            out->genre = strdup(tag->value);
+            g_free(out->genre);
+            out->genre = g_strdup(tag->value);
             for (char* p = out->genre; *p; p++) *p = tolower((unsigned char)*p);
         } else if (strcasecmp(tag->key, "musicbrainz_albumid") == 0) {
-            free(out->mb_release_id);
-            out->mb_release_id = strdup(tag->value);
+            g_free(out->mb_release_id);
+            out->mb_release_id = g_strdup(tag->value);
         } else if (strcasecmp(tag->key, "musicbrainz_releasegroupid") == 0) {
-            free(out->mb_release_group_id);
-            out->mb_release_group_id = strdup(tag->value);
+            g_free(out->mb_release_group_id);
+            out->mb_release_group_id = g_strdup(tag->value);
         } else if (strcasecmp(tag->key, "musicbrainz_artistid") == 0) {
-            free(out->mb_artist_id);
-            out->mb_artist_id = strdup(tag->value);
+            g_free(out->mb_artist_id);
+            out->mb_artist_id = g_strdup(tag->value);
         } else if (strcasecmp(tag->key, "musicbrainz_albumartistid") == 0) {
-            free(out->mb_album_artist_id);
-            out->mb_album_artist_id = strdup(tag->value);
+            g_free(out->mb_album_artist_id);
+            out->mb_album_artist_id = g_strdup(tag->value);
         }
     }
 
@@ -227,7 +227,7 @@ quadrature_result_t extract_audio_metadata(const char* path, index_item_t* out) 
     if (!out->title) {
         const char* fname = strrchr(path, '/');
         fname = fname ? fname + 1 : path;
-        char* copy = strdup(fname);
+        char* copy = g_strdup(fname);
         char* dot = strrchr(copy, '.');
         if (dot) *dot = '\0';
         out->title = copy;
@@ -363,10 +363,10 @@ char detect_artist_delimiter(const char* const* artist_tags, size_t count) {
 void artist_credits_free(artist_credit_t* credits, size_t count) {
     if (!credits) return;
     for (size_t i = 0; i < count; i++) {
-        free(credits[i].name);
-        free(credits[i].join_phrase);
+        g_free(credits[i].name);
+        g_free(credits[i].join_phrase);
     }
-    free(credits);
+    g_free(credits);
 }
 
 size_t parse_artist_tag(const char* tag, artist_credit_t** out) {
@@ -403,19 +403,19 @@ size_t parse_artist_tag(const char* tag, artist_credit_t** out) {
 
         if (!best_pos) {
             /* No delimiter found — emit the rest as the final credit. */
-            if (count == cap) credits = realloc(credits, (cap *= 2) * sizeof(artist_credit_t));
+            if (count == cap) credits = g_realloc(credits, (cap *= 2) * sizeof(artist_credit_t));
             credits[count++] = (artist_credit_t){
-                .name        = strdup(cursor),
-                .join_phrase = strdup(""),
+                .name        = g_strdup(cursor),
+                .join_phrase = g_strdup(""),
             };
             break;
         }
 
         /* Emit the segment before the delimiter. */
-        if (count == cap) credits = realloc(credits, (cap *= 2) * sizeof(artist_credit_t));
+        if (count == cap) credits = g_realloc(credits, (cap *= 2) * sizeof(artist_credit_t));
         credits[count++] = (artist_credit_t){
-            .name        = strndup(cursor, (size_t)(best_pos - cursor)),
-            .join_phrase = strdup(best_delim->canonical),
+            .name        = g_strndup(cursor, (size_t)(best_pos - cursor)),
+            .join_phrase = g_strdup(best_delim->canonical),
         };
         cursor = best_pos + best_delim->len;
     }

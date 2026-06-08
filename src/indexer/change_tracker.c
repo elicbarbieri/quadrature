@@ -39,14 +39,6 @@ struct change_tracker {
     gboolean     track_artists_dirty;
 };
 
-/* GHashTable key helpers for int64 sets. Keys are malloc'd int64_t. */
-static guint int64_ptr_hash(gconstpointer p) {
-    return g_int64_hash(p);
-}
-static gboolean int64_ptr_equal(gconstpointer a, gconstpointer b) {
-    return g_int64_equal(a, b);
-}
-
 /* Insert rowid into set iff not already present. */
 static void set_add(GHashTable *set, sqlite3_int64 rowid) {
     int64_t v = (int64_t)rowid;
@@ -68,13 +60,13 @@ static void update_hook(void *user_data,
     if (!ct || !table_name) return;
 
     g_mutex_lock(&ct->lock);
-    if (strcmp(table_name, "artists") == 0) {
+    if (g_strcmp0(table_name, "artists") == 0) {
         set_add(ct->artists, rowid);
-    } else if (strcmp(table_name, "albums") == 0) {
+    } else if (g_strcmp0(table_name, "albums") == 0) {
         set_add(ct->albums, rowid);
-    } else if (strcmp(table_name, "tracks") == 0) {
+    } else if (g_strcmp0(table_name, "tracks") == 0) {
         set_add(ct->tracks, rowid);
-    } else if (strcmp(table_name, "track_artists") == 0) {
+    } else if (g_strcmp0(table_name, "track_artists") == 0) {
         ct->track_artists_dirty = TRUE;
     }
     /* Other tables (FTS shadow tables, errors, album_mtimes,
@@ -90,9 +82,9 @@ change_tracker_t *change_tracker_new(quadrature_db_t *db) {
     change_tracker_t *ct = g_new0(change_tracker_t, 1);
     ct->db = db;
     g_mutex_init(&ct->lock);
-    ct->artists = g_hash_table_new_full(int64_ptr_hash, int64_ptr_equal, g_free, NULL);
-    ct->albums  = g_hash_table_new_full(int64_ptr_hash, int64_ptr_equal, g_free, NULL);
-    ct->tracks  = g_hash_table_new_full(int64_ptr_hash, int64_ptr_equal, g_free, NULL);
+    ct->artists = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+    ct->albums  = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+    ct->tracks  = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
     ct->track_artists_dirty = FALSE;
 
     /* Register the hook. Returns the previous user_data (we don't chain). */

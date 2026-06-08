@@ -1463,7 +1463,7 @@ GtkWidget *ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, libr
 static inline void update_cached_label(GtkWidget *label, char *cache, size_t cache_size,
                                         const char *text) {
     if (!label) return;
-    if (strcmp(text, cache) != 0) {
+    if (g_strcmp0(text, cache) != 0) {
         memcpy(cache, text, MIN(strlen(text) + 1, cache_size));
         gtk_label_set_text(GTK_LABEL(label), text);
     }

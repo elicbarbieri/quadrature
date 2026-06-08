@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <glib.h>
 
 #include "internal.h"
 
@@ -42,15 +43,15 @@ int main(int argc, char* argv[]) {
     int sub_argc = argc - 1;
     char** sub_argv = argv + 1;
 
-    if (strcmp(cmd, "indexer") == 0)     return cli_indexer(sub_argc, sub_argv);
-    if (strcmp(cmd, "setup-rt") == 0)    return cli_setup_rt(sub_argc, sub_argv);
+    if (g_strcmp0(cmd, "indexer") == 0)     return cli_indexer(sub_argc, sub_argv);
+    if (g_strcmp0(cmd, "setup-rt") == 0)    return cli_setup_rt(sub_argc, sub_argv);
 
-    if (strcmp(cmd, "help") == 0 || strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
+    if (g_strcmp0(cmd, "help") == 0 || g_strcmp0(cmd, "--help") == 0 || g_strcmp0(cmd, "-h") == 0) {
         print_usage();
         return 0;
     }
 
-    if (strcmp(cmd, "version") == 0 || strcmp(cmd, "--version") == 0) {
+    if (g_strcmp0(cmd, "version") == 0 || g_strcmp0(cmd, "--version") == 0) {
         printf("quadrature-cli %s\n", QUADRATURE_CLI_VERSION);
         return 0;
     }

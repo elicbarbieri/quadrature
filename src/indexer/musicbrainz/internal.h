@@ -464,6 +464,32 @@ quadrature_result_t mb_backend_create(const char* uri,
 
 void mb_backend_destroy(mb_backend_t* backend);
 
+quadrature_result_t mb_backend_http_factory(const char* uri,
+                                            const mb_backend_config_t* cfg,
+                                            size_t slot_count,
+                                            mb_backend_t** out);
+quadrature_result_t mb_backend_pg_factory(const char* uri,
+                                          const mb_backend_config_t* cfg,
+                                          size_t slot_count,
+                                          mb_backend_t** out);
+
+quadrature_result_t mb_http_batch_fetch(mb_conn_t* conn,
+                                        const char** ids, size_t n,
+                                        GHashTable** out_releases,
+                                        GHashTable** out_links);
+quadrature_result_t mb_http_isrc_lookup(mb_conn_t* conn,
+                                        const char** isrcs, size_t n,
+                                        mb_acoustid_response_t* out);
+quadrature_result_t mb_http_fingerprint_lookup(mb_conn_t* conn,
+                                               const mb_fingerprint_t* fp,
+                                               mb_acoustid_response_t* out);
+quadrature_result_t mb_http_solr_search(mb_conn_t* conn,
+                                        const char* album_title,
+                                        const char* artist_name,
+                                        size_t local_track_count,
+                                        int64_t local_total_duration_ms,
+                                        char** out_release_id);
+
 /* Inline call helpers — keep call sites short and assert-checked. */
 
 static inline mb_conn_t* mb_backend_claim_slot(mb_backend_t* be, int slot) {

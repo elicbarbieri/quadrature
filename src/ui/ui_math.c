@@ -6,10 +6,8 @@
  */
 
 #include <math.h>
-#include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
-#include "quadrature/quadrature.h"  /* shuttle_mode_t */
+#include "internal.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Shuttle Speed Mapping

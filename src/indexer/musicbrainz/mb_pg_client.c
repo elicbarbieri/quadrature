@@ -319,23 +319,20 @@ static mb_artist_t* flatten_artists(GPtrArray* ptrs) {
     return flat;
 }
 
-static void links_array_free(gpointer data) {
-    GPtrArray* arr = data;
-    for (guint i = 0; i < arr->len; i++) {
-        mb_recording_link_row_t* row = g_ptr_array_index(arr, i);
-        g_free(row->recording_mbid);
-        g_free(row->link_type_gid);
-        g_free(row->link_type_name);
-        g_free(row->link_type_desc);
-        g_free(row->artist_mbid);
-        g_free(row->artist_name);
-        g_free(row->artist_sort_name);
-        g_free(row->artist_type);
-        g_free(row->entity0_credit);
-        g_free(row->attributes);
-        g_free(row);
-    }
-    g_ptr_array_free(arr, TRUE);
+static void link_row_free(gpointer data) {
+    mb_recording_link_row_t* row = data;
+    if (!row) return;
+    g_free(row->recording_mbid);
+    g_free(row->link_type_gid);
+    g_free(row->link_type_name);
+    g_free(row->link_type_desc);
+    g_free(row->artist_mbid);
+    g_free(row->artist_name);
+    g_free(row->artist_sort_name);
+    g_free(row->artist_type);
+    g_free(row->entity0_credit);
+    g_free(row->attributes);
+    g_free(row);
 }
 
 // =============================================================================
@@ -441,7 +438,7 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
     GHashTable* releases = g_hash_table_new_full(
         g_str_hash, g_str_equal, NULL, batch_release_free);
     GHashTable* links = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, links_array_free);
+        g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
     GHashTable* rec_arrays = g_hash_table_new(g_str_hash, g_str_equal);
 
     /* Per-release artist accumulator (A section) */
@@ -501,7 +498,7 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
             if (!r) break;
 
             /* Track which release we're accumulating artists for */
-            if (!cur_album_gid || strcmp(rel_gid, cur_album_gid) != 0) {
+            if (!cur_album_gid || g_strcmp0(rel_gid, cur_album_gid) != 0) {
                 /* Flush previous */
                 if (cur_album_gid && cur_album_artists) {
                     mb_release_t* prev = g_hash_table_lookup(releases, cur_album_gid);
@@ -530,9 +527,9 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
 
             /* Detect new (release, recording) pair */
             bool new_recording = !t_rec_gid
-                || strcmp(rec_gid, t_rec_gid) != 0
+                || g_strcmp0(rec_gid, t_rec_gid) != 0
                 || !t_release_gid
-                || strcmp(rel_gid, t_release_gid) != 0;
+                || g_strcmp0(rel_gid, t_release_gid) != 0;
 
             if (new_recording) {
                 /* Flush previous recording */
@@ -540,7 +537,7 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
                 cur_rec_artists = NULL;
 
                 /* Ensure we have a recs array for this release */
-                if (!t_release_gid || strcmp(rel_gid, t_release_gid) != 0) {
+                if (!t_release_gid || g_strcmp0(rel_gid, t_release_gid) != 0) {
                     cur_recs_arr = g_hash_table_lookup(rec_arrays, rel_gid);
                     if (!cur_recs_arr) {
                         cur_recs_arr = g_ptr_array_new();
@@ -583,7 +580,7 @@ quadrature_result_t mb_fetch_all_batch(mb_pg_client_t* client,
 
             GPtrArray* arr = g_hash_table_lookup(links, release_gid_owned);
             if (!arr) {
-                arr = g_ptr_array_new();
+                arr = g_ptr_array_new_with_free_func(link_row_free);
                 g_hash_table_insert(links, release_gid_owned, arr);
             } else {
                 g_free(release_gid_owned);

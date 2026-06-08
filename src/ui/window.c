@@ -32,7 +32,7 @@ static const struct { const char *view; const char *label; } VIEW_LABELS[] = {
 
 static const char *view_display_name(const char *view) {
     for (size_t i = 0; i < G_N_ELEMENTS(VIEW_LABELS); i++) {
-        if (strcmp(view, VIEW_LABELS[i].view) == 0) return VIEW_LABELS[i].label;
+        if (g_strcmp0(view, VIEW_LABELS[i].view) == 0) return VIEW_LABELS[i].label;
     }
     return VIEW_LABELS[G_N_ELEMENTS(VIEW_LABELS) - 1].label;  /* default: Albums */
 }
@@ -181,7 +181,7 @@ static void on_channel_album_clicked(UiChannelStrip *strip, int channel_id, int6
     UiWindow *w = UI_WINDOW(data);
 
     if (album_id > 0) {
-        gboolean from_detail = (strcmp(w->current_view, "detail") == 0);
+        gboolean from_detail = (g_strcmp0(w->current_view, "detail") == 0);
         /* Channel strip clicks preserve existing nav stack (no clear_nav).
          * Pass source view name so back button shows where to return to. */
         const char *source = from_detail ? NULL : view_display_name(w->current_view);
@@ -198,7 +198,7 @@ static void on_channel_artist_clicked(UiChannelStrip *strip, int channel_id, int
     UiWindow *w = UI_WINDOW(data);
 
     if (artist_id > 0) {
-        gboolean from_detail = (strcmp(w->current_view, "detail") == 0);
+        gboolean from_detail = (g_strcmp0(w->current_view, "detail") == 0);
         /* Channel strip clicks preserve existing nav stack (no clear_nav).
          * Pass source view name so back button shows where to return to. */
         const char *source = from_detail ? NULL : view_display_name(w->current_view);
@@ -241,11 +241,11 @@ static int64_t get_selected_track_id(GtkWidget *list_box) {
 
 /* Helper: Get selected track from the current view */
 static int64_t get_current_view_selected_track(UiWindow *w) {
-    if (strcmp(w->current_view, "search") == 0) {
+    if (g_strcmp0(w->current_view, "search") == 0) {
         return get_selected_track_id(w->search_results_list);
-    } else if (strcmp(w->current_view, "detail") == 0) {
+    } else if (g_strcmp0(w->current_view, "detail") == 0) {
         return get_selected_track_id(library_unified_detail_get_track_list(w->detail_view));
-    } else if (strcmp(w->current_view, "albums") == 0 && w->albums_view) {
+    } else if (g_strcmp0(w->current_view, "albums") == 0 && w->albums_view) {
         return library_view_get_selected_track_id(w->albums_view);
     }
     return 0;
@@ -393,7 +393,7 @@ static void on_action_toggle_metadata(GSimpleAction *action, GVariant *param, gp
     (void)action; (void)param;
     UiWindow *w = UI_WINDOW(data);
     /* In search view: toggle the metadata button */
-    if (w->filter_metadata_btn && strcmp(w->current_view, "search") == 0) {
+    if (w->filter_metadata_btn && g_strcmp0(w->current_view, "search") == 0) {
         gboolean active = gtk_toggle_button_get_active(
             GTK_TOGGLE_BUTTON(w->filter_metadata_btn));
         gtk_toggle_button_set_active(
@@ -405,11 +405,11 @@ static void on_action_toggle_metadata(GSimpleAction *action, GVariant *param, gp
 static void on_action_clear_filters(GSimpleAction *action, GVariant *param, gpointer data) {
     (void)action; (void)param;
     UiWindow *w = UI_WINDOW(data);
-    if (strcmp(w->current_view, "search") == 0)
+    if (g_strcmp0(w->current_view, "search") == 0)
         clear_search_view_filters(w);
-    else if (w->artists_view && strcmp(w->current_view, "artists") == 0)
+    else if (w->artists_view && g_strcmp0(w->current_view, "artists") == 0)
         library_view_clear_filters(w->artists_view);
-    else if (w->albums_view && strcmp(w->current_view, "albums") == 0)
+    else if (w->albums_view && g_strcmp0(w->current_view, "albums") == 0)
         library_view_clear_filters(w->albums_view);
 }
 
@@ -419,7 +419,7 @@ static void on_action_close_errors(GSimpleAction *action, GVariant *param, gpoin
     UiWindow *w = UI_WINDOW(data);
 
     /* Priority 1: In detail view, navigate back */
-    if (strcmp(w->current_view, "detail") == 0) {
+    if (g_strcmp0(w->current_view, "detail") == 0) {
         if (!library_unified_detail_go_back(w->detail_view)) {
             if (w->previous_view)
                 ui_window_navigate_to(w, w->previous_view);
@@ -428,7 +428,7 @@ static void on_action_close_errors(GSimpleAction *action, GVariant *param, gpoin
     }
 
     /* Priority 3: In search view, return focus to search entry */
-    if (strcmp(w->current_view, "search") == 0) {
+    if (g_strcmp0(w->current_view, "search") == 0) {
         focus_search_entry(w);
     }
 }
@@ -516,7 +516,7 @@ static void on_track_activate(int64_t track_id, gpointer data) {
 
     /* Navigate to album detail with this track selected */
     const char *source = NULL;
-    if (strcmp(w->current_view, "detail") != 0) {
+    if (g_strcmp0(w->current_view, "detail") != 0) {
         source = view_display_name(w->current_view);
         w->previous_view = w->current_view;
         library_unified_detail_clear_nav(w->detail_view);
@@ -646,7 +646,7 @@ static gboolean on_window_key_pressed(GtkEventControllerKey *ctl, guint keyval,
 
 static void on_library_navigate(LibraryItemKind kind, int64_t id, gpointer data) {
     UiWindow *w = UI_WINDOW(data);
-    gboolean from_detail = (strcmp(w->current_view, "detail") == 0);
+    gboolean from_detail = (g_strcmp0(w->current_view, "detail") == 0);
     const char *source = from_detail ? NULL : view_display_name(w->current_view);
 
     /* Toplevel navigation clears stale detail history */
@@ -1264,7 +1264,7 @@ static void on_library_availability_changed(LibraryMonitor *mon,
                                               w->settings->libraries[si].path);
 
         /* If detail view is showing entity from this library, navigate back */
-        if (w->current_view && strcmp(w->current_view, "detail") == 0 && w->detail_view) {
+        if (w->current_view && g_strcmp0(w->current_view, "detail") == 0 && w->detail_view) {
             int64_t eid = library_unified_detail_get_current_entity_id(w->detail_view);
             if (eid > 0 && LIBRARY_GLOBAL_ID_LIB(eid) == bitmap_idx) {
                 const char *back_to = w->previous_view ? w->previous_view : "artists";
