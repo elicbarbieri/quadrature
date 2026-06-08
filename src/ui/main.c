@@ -129,8 +129,67 @@ static gboolean on_unix_signal(gpointer user_data) {
  * GtkApplication Callbacks
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * on_startup — initialise settings, library cache, and audio pipeline.
+ *
+ * Fires after GApplication processes local options (--help / --version)
+ * so those flags exit cleanly without touching pipewire, dbus, or sqlite.
+ * On fatal init failure, calls g_application_quit() — on_shutdown still
+ * runs to clean up whatever was constructed.
+ */
+static void on_startup(GtkApplication *gtkapp, gpointer data) {
+    AppData *d = data;
+
+    adw_init();
+
+    d->settings = app_settings_load();
+    startup_health_check(d->settings);
+
+    int lib_count = d->settings ? d->settings->library_count : 0;
+    library_cache_source_t *sources = NULL;
+    char **dbpaths = NULL;
+    char **names   = NULL;
+
+    if (lib_count > 0) {
+        sources = g_new0(library_cache_source_t, lib_count);
+        dbpaths = g_new0(char *, lib_count);
+        names   = g_new0(char *, lib_count);
+        for (int i = 0; i < lib_count; i++) {
+            const char *data_root = app_settings_get_library_data_path(d->settings, i);
+            dbpaths[i] = g_build_filename(data_root, "quadrature.sqlite", NULL);
+            names[i]   = app_settings_get_library_name(d->settings, i);
+            sources[i].db_path      = dbpaths[i];
+            sources[i].music_base   = d->settings->libraries[i].path;
+            sources[i].display_name = names[i];
+            sources[i].bitmap_index = d->settings->libraries[i].library_index;
+        }
+    }
+
+    if (library_cache_create_multi(sources, lib_count, &d->library_cache) != QUADRATURE_OK) {
+        g_warning("Failed to create library cache - audio will not resolve track IDs");
+        d->library_cache = NULL;
+    }
+
+    for (int i = 0; i < lib_count; i++) {
+        g_free(dbpaths[i]);
+        g_free(names[i]);
+    }
+    g_free(dbpaths);
+    g_free(names);
+    g_free(sources);
+
+    if (audio_pipeline_create(d->library_cache, SAMPLE_RATE, &d->pipeline) != QUADRATURE_OK) {
+        g_critical("Failed to create audio pipeline");
+        g_application_quit(G_APPLICATION(gtkapp));
+        return;
+    }
+}
+
 static void on_activate(GtkApplication *gtkapp, gpointer data) {
     AppData *d = data;
+
+    /* Startup may have aborted before constructing the pipeline. */
+    if (!d->pipeline) return;
 
     /* Ensure widget types are registered */
     g_type_ensure(UI_TYPE_SPECTRUM);
@@ -175,65 +234,28 @@ static void on_shutdown(GtkApplication *gtkapp, gpointer data) {
     g_message("Shutdown complete");
 }
 
+static gint on_local_options(GApplication *gapp, GVariantDict *opts, gpointer user_data) {
+    (void)gapp; (void)user_data;
+    if (g_variant_dict_contains(opts, "version")) {
+        g_print("quadrature %s\n", QUADRATURE_VERSION);
+        return 0;  /* exit success — startup never fires */
+    }
+    return -1;  /* continue to startup */
+}
+
 int main(int argc, char *argv[]) {
     AppData data = {0};
 
-    /* Load settings first to get library paths */
-    data.settings = app_settings_load();
-
-    /* Early health checks — log warnings for inaccessible paths,
-     * corrupt databases, or unreachable services */
-    startup_health_check(data.settings);
-
-    /* Create library cache for ALL configured libraries.
-     * Each library gets its own slot (indexed 0..N-1) in the cache.
-     * If no libraries are configured, the cache starts empty but non-NULL
-     * so slots can be added dynamically when the user adds libraries. */
-    {
-        int lib_count = data.settings ? data.settings->library_count : 0;
-        library_cache_source_t *sources = NULL;
-        char **dbpaths = NULL;
-        char **names   = NULL;
-
-        if (lib_count > 0) {
-            sources = g_new0(library_cache_source_t, lib_count);
-            dbpaths = g_new0(char *, lib_count);
-            names   = g_new0(char *, lib_count);
-            for (int i = 0; i < lib_count; i++) {
-                const char *data_root = app_settings_get_library_data_path(data.settings, i);
-                dbpaths[i] = g_build_filename(data_root, "quadrature.sqlite", NULL);
-                names[i]   = app_settings_get_library_name(data.settings, i);
-                sources[i].db_path      = dbpaths[i];
-                sources[i].music_base   = data.settings->libraries[i].path;
-                sources[i].display_name = names[i];
-                sources[i].bitmap_index = data.settings->libraries[i].library_index;
-            }
-        }
-
-        if (library_cache_create_multi(sources, lib_count, &data.library_cache) != QUADRATURE_OK) {
-            g_warning("Failed to create library cache - audio will not resolve track IDs");
-            data.library_cache = NULL;
-        }
-
-        for (int i = 0; i < lib_count; i++) {
-            g_free(dbpaths[i]);
-            g_free(names[i]);
-        }
-        g_free(dbpaths);
-        g_free(names);
-        g_free(sources);
-    }
-
-    /* Create audio pipeline with library cache */
-    if (audio_pipeline_create(data.library_cache, SAMPLE_RATE, &data.pipeline) != QUADRATURE_OK) {
-        g_critical("Failed to create audio pipeline");
-        if (data.library_cache) library_cache_destroy(data.library_cache);
-        app_settings_destroy(data.settings);
-        return 1;
-    }
-
-    adw_init();
     data.app = gtk_application_new("org.quadrature.player", G_APPLICATION_NON_UNIQUE);
+
+    const GOptionEntry option_entries[] = {
+        { "version", 0, 0, G_OPTION_ARG_NONE, NULL, "Print version and exit", NULL },
+        { 0 },
+    };
+    g_application_add_main_option_entries(G_APPLICATION(data.app), option_entries);
+
+    g_signal_connect(data.app, "handle-local-options", G_CALLBACK(on_local_options), &data);
+    g_signal_connect(data.app, "startup",  G_CALLBACK(on_startup),  &data);
     g_signal_connect(data.app, "activate", G_CALLBACK(on_activate), &data);
     g_signal_connect(data.app, "shutdown", G_CALLBACK(on_shutdown), &data);
 
