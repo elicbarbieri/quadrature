@@ -42,3 +42,4 @@ result-*
 .claude/
 .env
 flatpak-local/
+.flatpak-builder/

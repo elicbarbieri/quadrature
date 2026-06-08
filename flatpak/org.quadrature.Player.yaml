@@ -134,5 +134,4 @@ modules:
     sources:
       - type: git
         url: https://github.com/elicbarbieri/quadrature.git
-        branch: master
-        # Flathub submission requires `commit: <sha>` instead of `branch:`.
+        tag: v0.1.0
