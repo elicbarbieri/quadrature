@@ -2,6 +2,8 @@
 
 A four-channel audio player for broadcast studios, written in C with GTK4.
 
+![Demo](docs/assets/demo.gif)
+
 |                                       4-track audio player                                        |                          Fast full-text search engine                          |
 | :-----------------------------------------------------------------------------------------------: | :----------------------------------------------------------------------------: |
 |                       ![4-track audio player](docs/assets/screenshot_1.png)                       |         ![Fast full-text search engine](docs/assets/screenshot_2.png)          |
