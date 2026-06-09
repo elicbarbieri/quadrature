@@ -26,9 +26,9 @@
 
 /* Test constants */
 #define TEST_CHANNEL_ID 0
-#define TEST_IP "127.0.0.1"
-#define TEST_PORT 9300  // Use non-standard port to avoid conflicts
-#define TEST_PASSWORD "testpass"
+#define TEST_IP         "127.0.0.1"
+#define TEST_PORT       9300 // Use non-standard port to avoid conflicts
+#define TEST_PASSWORD   "testpass"
 
 /* Mock server state */
 typedef struct {
@@ -53,7 +53,7 @@ typedef struct {
 } callback_state_t;
 
 /* Forward declarations */
-static mock_server_t* mock_server_create(uint16_t port);
+static mock_server_t *mock_server_create(uint16_t port);
 static void mock_server_destroy(mock_server_t *server);
 static void mock_server_send(mock_server_t *server, const char *msg);
 
@@ -68,25 +68,23 @@ static void mock_server_send(mock_server_t *server, const char *msg);
  * 5. Invalid channel ID handling
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(axia_gpio, lifecycle_null_safety) {
+Test(axia_gpio, lifecycle_null_safety)
+{
     axia_gpio_t *gpio = NULL;
 
     /* Create with NULL out pointer returns error */
-    quadrature_result_t res = axia_gpio_create(TEST_IP, TEST_CHANNEL_ID,
-                                               TEST_PASSWORD,
-                                               NULL);
+    quadrature_result_t res = axia_gpio_create(TEST_IP, TEST_CHANNEL_ID, TEST_PASSWORD, NULL);
     cr_assert_eq(res, QUADRATURE_ERROR_INVALID_PARAM);
 
     /* Create with NULL IP returns error */
-    res = axia_gpio_create(NULL, TEST_CHANNEL_ID,
-                          TEST_PASSWORD,
-                          &gpio);
+    res = axia_gpio_create(NULL, TEST_CHANNEL_ID, TEST_PASSWORD, &gpio);
     cr_assert_eq(res, QUADRATURE_ERROR_INVALID_PARAM);
 
     /* Create with valid parameters succeeds (will fail to connect, that's OK) */
-    res = axia_gpio_create("192.0.2.1", TEST_CHANNEL_ID,  // Use TEST-NET-1 (won't connect)
-                          NULL,        // No auth
-                          &gpio);
+    res = axia_gpio_create("192.0.2.1",
+                           TEST_CHANNEL_ID, // Use TEST-NET-1 (won't connect)
+                           NULL,            // No auth
+                           &gpio);
     cr_assert_eq(res, QUADRATURE_OK);
     cr_assert_not_null(gpio);
 
@@ -106,13 +104,12 @@ Test(axia_gpio, lifecycle_null_safety) {
  * 3. No crash when sending to unconnected handler
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(axia_gpio, send_without_connection) {
+Test(axia_gpio, send_without_connection)
+{
     axia_gpio_t *gpio = NULL;
 
     /* Create handler but won't connect (invalid IP) */
-    quadrature_result_t res = axia_gpio_create("192.0.2.1", TEST_CHANNEL_ID,
-                                               NULL,
-                                               &gpio);
+    quadrature_result_t res = axia_gpio_create("192.0.2.1", TEST_CHANNEL_ID, NULL, &gpio);
     cr_assert_eq(res, QUADRATURE_OK);
 
     /* Send commands should not crash (may return error or succeed) */
@@ -139,7 +136,9 @@ Test(axia_gpio, send_without_connection) {
  * 5. Callback invoked with correct parameters
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void gpio_event_callback(int channel_id, axia_pin_t pin, axia_state_t state, void *user_data) {
+static void
+gpio_event_callback(int channel_id, axia_pin_t pin, axia_state_t state, void *user_data)
+{
     callback_state_t *cb_state = user_data;
     cb_state->event_count++;
     cb_state->last_channel_id = channel_id;
@@ -147,25 +146,29 @@ static void gpio_event_callback(int channel_id, axia_pin_t pin, axia_state_t sta
     cb_state->last_state = state;
 }
 
-static void status_callback(int channel_id, bool connected, void *user_data) {
+static void
+status_callback(int channel_id, bool connected, void *user_data)
+{
     (void)channel_id;
     callback_state_t *cb_state = user_data;
     cb_state->status_change_count++;
     cb_state->last_connected = connected;
 }
 
-Test(axia_gpio, lwrp_message_parsing, .timeout = 5.0) {
+Test(axia_gpio, lwrp_message_parsing, .timeout = 5.0)
+{
     mock_server_t *server = mock_server_create(TEST_PORT);
     cr_assert_not_null(server);
 
-    callback_state_t cb_state = {0};
+    callback_state_t cb_state = { 0 };
     axia_gpio_t *gpio = NULL;
 
     /* Create GPIO handler pointing to mock server */
     char address[32];
     snprintf(address, sizeof(address), "127.0.0.1:%d", TEST_PORT);
-    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID,
-                                               NULL,        // No auth for this test
+    quadrature_result_t res = axia_gpio_create(address,
+                                               TEST_CHANNEL_ID,
+                                               NULL, // No auth for this test
                                                &gpio);
     cr_assert_eq(res, QUADRATURE_OK);
 
@@ -178,17 +181,18 @@ Test(axia_gpio, lwrp_message_parsing, .timeout = 5.0) {
     cr_assert_eq(res, QUADRATURE_OK);
 
     /* Wait for connection */
-    g_usleep(500000);  // 500ms
+    g_usleep(500000); // 500ms
 
     /* Verify status callback fired (connected) */
     cr_assert_gt(cb_state.status_change_count, 0, "Status callback not called");
 
     /* Send GPI messages from mock server */
-    mock_server_send(server, "GPI 1 H\n");    // Channel 1 (LWRP), pin 1 HIGH (ON-AIR)
-    g_usleep(100000);  // 100ms for callback
+    mock_server_send(server, "GPI 1 H\n"); // Channel 1 (LWRP), pin 1 HIGH (ON-AIR)
+    g_usleep(100000);                      // 100ms for callback
 
     cr_assert_eq(cb_state.event_count, 1, "Expected 1 event");
-    cr_assert_eq(cb_state.last_channel_id, 0, "Channel ID should be 0 (internal, from LWRP channel 1)");
+    cr_assert_eq(
+        cb_state.last_channel_id, 0, "Channel ID should be 0 (internal, from LWRP channel 1)");
     cr_assert_eq(cb_state.last_pin, AXIA_PIN_ON_AIR);
     cr_assert_eq(cb_state.last_state, AXIA_STATE_HIGH);
 
@@ -200,7 +204,7 @@ Test(axia_gpio, lwrp_message_parsing, .timeout = 5.0) {
     cr_assert_eq(cb_state.last_state, AXIA_STATE_LOW);
 
     /* Send multi-pin message (preview = pin 2) */
-    mock_server_send(server, "GPI 1 xH\n");  // Pin 2 HIGH
+    mock_server_send(server, "GPI 1 xH\n"); // Pin 2 HIGH
     g_usleep(100000);
 
     cr_assert_eq(cb_state.event_count, 3);
@@ -229,16 +233,15 @@ Test(axia_gpio, lwrp_message_parsing, .timeout = 5.0) {
  * 5. Commands received by server in correct format
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(axia_gpio, gpo_command_formatting, .timeout = 5.0) {
+Test(axia_gpio, gpo_command_formatting, .timeout = 5.0)
+{
     mock_server_t *server = mock_server_create(TEST_PORT + 1);
     cr_assert_not_null(server);
 
     axia_gpio_t *gpio = NULL;
     char address[32];
     snprintf(address, sizeof(address), "127.0.0.1:%d", TEST_PORT + 1);
-    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID,
-                                               NULL,
-                                               &gpio);
+    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID, NULL, &gpio);
     cr_assert_eq(res, QUADRATURE_OK);
 
     /* Start listener thread */
@@ -254,8 +257,8 @@ Test(axia_gpio, gpo_command_formatting, .timeout = 5.0) {
 
     /* Check server received correct command */
     g_mutex_lock(&server->mutex);
-    gboolean has_gpo_high = strstr(server->received_commands->str, "GPO") != NULL &&
-                            strstr(server->received_commands->str, "H") != NULL;
+    gboolean has_gpo_high = strstr(server->received_commands->str, "GPO") != NULL
+                            && strstr(server->received_commands->str, "H") != NULL;
     g_mutex_unlock(&server->mutex);
     cr_assert(has_gpo_high, "Expected GPO HIGH command");
 
@@ -281,16 +284,15 @@ Test(axia_gpio, gpo_command_formatting, .timeout = 5.0) {
  * 2. ADD commands sent after authentication
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(axia_gpio, authentication_flow, .timeout = 5.0) {
+Test(axia_gpio, authentication_flow, .timeout = 5.0)
+{
     mock_server_t *server = mock_server_create(TEST_PORT + 2);
     cr_assert_not_null(server);
 
     axia_gpio_t *gpio = NULL;
     char address[32];
     snprintf(address, sizeof(address), "127.0.0.1:%d", TEST_PORT + 2);
-    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID,
-                                               TEST_PASSWORD,
-                                               &gpio);
+    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID, TEST_PASSWORD, &gpio);
     cr_assert_eq(res, QUADRATURE_OK);
 
     /* Start listener thread */
@@ -329,18 +331,17 @@ Test(axia_gpio, authentication_flow, .timeout = 5.0) {
  * 4. Callbacks not invoked after destroy
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(axia_gpio, thread_cleanup, .timeout = 5.0) {
+Test(axia_gpio, thread_cleanup, .timeout = 5.0)
+{
     mock_server_t *server = mock_server_create(TEST_PORT + 3);
     cr_assert_not_null(server);
 
-    callback_state_t cb_state = {0};
+    callback_state_t cb_state = { 0 };
     axia_gpio_t *gpio = NULL;
 
     char address[32];
     snprintf(address, sizeof(address), "127.0.0.1:%d", TEST_PORT + 3);
-    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID,
-                                               NULL,
-                                               &gpio);
+    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID, NULL, &gpio);
     cr_assert_eq(res, QUADRATURE_OK);
 
     axia_gpio_set_callback(gpio, gpio_event_callback, &cb_state);
@@ -361,8 +362,7 @@ Test(axia_gpio, thread_cleanup, .timeout = 5.0) {
     mock_server_send(server, "GPI 1 H\n");
     g_usleep(100000);
 
-    cr_assert_eq(cb_state.event_count, events_before, 
-                 "No callbacks should fire after destroy");
+    cr_assert_eq(cb_state.event_count, events_before, "No callbacks should fire after destroy");
 
     mock_server_destroy(server);
 }
@@ -376,16 +376,15 @@ Test(axia_gpio, thread_cleanup, .timeout = 5.0) {
  * 3. is_connected() returns false after stop
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(axia_gpio, connection_status_tracking, .timeout = 5.0) {
+Test(axia_gpio, connection_status_tracking, .timeout = 5.0)
+{
     mock_server_t *server = mock_server_create(TEST_PORT + 4);
     cr_assert_not_null(server);
 
     axia_gpio_t *gpio = NULL;
     char address[32];
     snprintf(address, sizeof(address), "127.0.0.1:%d", TEST_PORT + 4);
-    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID,
-                                               NULL,
-                                               &gpio);
+    quadrature_result_t res = axia_gpio_create(address, TEST_CHANNEL_ID, NULL, &gpio);
     cr_assert_eq(res, QUADRATURE_OK);
 
     /* Before start, should not be connected */
@@ -402,7 +401,7 @@ Test(axia_gpio, connection_status_tracking, .timeout = 5.0) {
     /* Stop and verify disconnected */
     axia_gpio_stop(gpio);
     g_usleep(100000);
-    
+
     cr_assert_eq(axia_gpio_is_connected(gpio), false);
 
     axia_gpio_destroy(gpio);
@@ -413,13 +412,15 @@ Test(axia_gpio, connection_status_tracking, .timeout = 5.0) {
  * Mock Server Implementation
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void* mock_server_thread(void *arg) {
+static void *
+mock_server_thread(void *arg)
+{
     mock_server_t *server = arg;
     struct sockaddr_in addr;
     socklen_t addrlen = sizeof(addr);
 
     /* Accept connection */
-    server->client_fd = accept(server->server_fd, (struct sockaddr*)&addr, &addrlen);
+    server->client_fd = accept(server->server_fd, (struct sockaddr *)&addr, &addrlen);
     if (server->client_fd < 0) {
         return NULL;
     }
@@ -430,7 +431,7 @@ static void* mock_server_thread(void *arg) {
         ssize_t n = recv(server->client_fd, buf, sizeof(buf) - 1, MSG_DONTWAIT);
         if (n > 0) {
             buf[n] = '\0';
-            
+
             /* Store received commands */
             g_mutex_lock(&server->mutex);
             g_string_append(server->received_commands, buf);
@@ -440,10 +441,10 @@ static void* mock_server_thread(void *arg) {
             const char *response = "OK\n";
             send(server->client_fd, response, strlen(response), 0);
         } else if (n == 0) {
-            break;  // Connection closed
+            break; // Connection closed
         }
-        
-        usleep(10000);  // 10ms
+
+        usleep(10000); // 10ms
     }
 
     if (server->client_fd >= 0) {
@@ -454,7 +455,9 @@ static void* mock_server_thread(void *arg) {
     return NULL;
 }
 
-static mock_server_t* mock_server_create(uint16_t port) {
+static mock_server_t *
+mock_server_create(uint16_t port)
+{
     mock_server_t *server = g_new0(mock_server_t, 1);
     server->port = port;
     server->running = TRUE;
@@ -474,12 +477,12 @@ static mock_server_t* mock_server_create(uint16_t port) {
     setsockopt(server->server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     /* Bind to localhost */
-    struct sockaddr_in addr = {0};
+    struct sockaddr_in addr = { 0 };
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
 
-    if (bind(server->server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(server->server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(server->server_fd);
         g_free(server);
         return NULL;
@@ -497,11 +500,14 @@ static mock_server_t* mock_server_create(uint16_t port) {
     return server;
 }
 
-static void mock_server_destroy(mock_server_t *server) {
-    if (!server) return;
+static void
+mock_server_destroy(mock_server_t *server)
+{
+    if (!server)
+        return;
 
     server->running = FALSE;
-    
+
     /* Wake up server thread */
     if (server->client_fd >= 0) {
         shutdown(server->client_fd, SHUT_RDWR);
@@ -518,7 +524,10 @@ static void mock_server_destroy(mock_server_t *server) {
     g_free(server);
 }
 
-static void mock_server_send(mock_server_t *server, const char *msg) {
-    if (!server || server->client_fd < 0) return;
+static void
+mock_server_send(mock_server_t *server, const char *msg)
+{
+    if (!server || server->client_fd < 0)
+        return;
     send(server->client_fd, msg, strlen(msg), 0);
 }

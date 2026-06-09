@@ -11,7 +11,6 @@
 #include "../../audio/internal.h"
 #include <string.h>
 
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * Quantum (Buffer Size) Constants
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -19,12 +18,16 @@
 static const uint32_t quantum_values[] = { 32, 64, 128, 256, 512, 1024, 2048 };
 static const int quantum_value_count = 7;
 
-static int quantum_to_index(uint32_t quantum) {
+static int
+quantum_to_index(uint32_t quantum)
+{
     for (int i = 0; i < quantum_value_count; i++)
-        if (quantum_values[i] == quantum) return i;
+        if (quantum_values[i] == quantum)
+            return i;
     /* Fallback: find index of APP_SETTINGS_DEFAULT_QUANTUM */
     for (int i = 0; i < quantum_value_count; i++)
-        if (quantum_values[i] == APP_SETTINGS_DEFAULT_QUANTUM) return i;
+        if (quantum_values[i] == APP_SETTINGS_DEFAULT_QUANTUM)
+            return i;
     return 3;
 }
 
@@ -42,18 +45,23 @@ static int quantum_to_index(uint32_t quantum) {
  */
 static void rebuild_device_models(UiWindow *w);
 
-static gboolean rebuild_device_models_idle(gpointer user_data) {
+static gboolean
+rebuild_device_models_idle(gpointer user_data)
+{
     UiWindow *w = UI_WINDOW(user_data);
     w->device_rebuild_idle_id = 0;
     rebuild_device_models(w);
     return G_SOURCE_REMOVE;
 }
 
-static void rebuild_device_models(UiWindow *w) {
-    if (!w->device_names || w->device_count == 0) return;
+static void
+rebuild_device_models(UiWindow *w)
+{
+    if (!w->device_names || w->device_count == 0)
+        return;
 
     /* First, collect current assignments by device_names index */
-    int assigned_by[MAX_CHANNELS];  /* device_names index for each channel, -1 = none */
+    int assigned_by[MAX_CHANNELS]; /* device_names index for each channel, -1 = none */
     for (int ch = 0; ch < MAX_CHANNELS; ch++) {
         assigned_by[ch] = -1;
         const char *dev = NULL;
@@ -78,7 +86,8 @@ static void rebuild_device_models(UiWindow *w) {
     }
 
     for (int ch = 0; ch < MAX_CHANNELS; ch++) {
-        if (!w->device_drops[ch]) continue;
+        if (!w->device_drops[ch])
+            continue;
 
         /* Create fresh model */
         GtkStringList *model = gtk_string_list_new(NULL);
@@ -86,7 +95,7 @@ static void rebuild_device_models(UiWindow *w) {
         w->device_model_map[ch][0] = -1;
 
         int model_idx = 1;
-        int selected = 0;  /* Default to "None" */
+        int selected = 0; /* Default to "None" */
 
         for (int j = 0; j < w->device_count && model_idx < 63; j++) {
             /* Include if: unassigned OR assigned to THIS channel */
@@ -97,7 +106,8 @@ static void rebuild_device_models(UiWindow *w) {
                     break;
                 }
             }
-            if (taken) continue;
+            if (taken)
+                continue;
 
             /* Need to get description — search was done at enum time.
              * We store node_name in device_names; description is in the
@@ -105,7 +115,8 @@ static void rebuild_device_models(UiWindow *w) {
             /* Build description: for now use the node_name. The actual
              * description was stored in the old shared model entries. */
             /* We need the description. Let's store it. */
-            gtk_string_list_append(model, w->device_descs ? w->device_descs[j] : w->device_names[j]);
+            gtk_string_list_append(model,
+                                   w->device_descs ? w->device_descs[j] : w->device_names[j]);
             w->device_model_map[ch][model_idx] = j;
 
             if (assigned_by[ch] == j) {
@@ -142,28 +153,33 @@ static void rebuild_device_models(UiWindow *w) {
 
 typedef struct {
     audio_pipeline_t *pipeline;
-    int               channel;
-    char              device_name[256];  /* empty string means NULL (no device) */
-    gboolean          is_quantum_op;
-    uint32_t          quantum;
+    int channel;
+    char device_name[256]; /* empty string means NULL (no device) */
+    gboolean is_quantum_op;
+    uint32_t quantum;
 } PipelineOpTask;
 
-static void pipeline_op_thread(GTask *task, gpointer src, gpointer data, GCancellable *c) {
-    (void)src; (void)c;
+static void
+pipeline_op_thread(GTask *task, gpointer src, gpointer data, GCancellable *c)
+{
+    (void)src;
+    (void)c;
     PipelineOpTask *t = data;
     if (t->is_quantum_op) {
         audio_pipeline_set_player_quantum(t->pipeline, t->channel, t->quantum);
     } else {
-        audio_pipeline_set_player_device(t->pipeline, t->channel,
-                                         t->device_name[0] ? t->device_name : NULL);
+        audio_pipeline_set_player_device(
+            t->pipeline, t->channel, t->device_name[0] ? t->device_name : NULL);
     }
     g_task_return_boolean(task, TRUE);
 }
 
-static void dispatch_player_device(audio_pipeline_t *pipeline, int channel, const char *name) {
+static void
+dispatch_player_device(audio_pipeline_t *pipeline, int channel, const char *name)
+{
     PipelineOpTask *t = g_new0(PipelineOpTask, 1);
     t->pipeline = pipeline;
-    t->channel  = channel;
+    t->channel = channel;
     if (name)
         g_strlcpy(t->device_name, name, sizeof(t->device_name));
     GTask *task = g_task_new(NULL, NULL, NULL, NULL);
@@ -172,12 +188,14 @@ static void dispatch_player_device(audio_pipeline_t *pipeline, int channel, cons
     g_object_unref(task);
 }
 
-static void dispatch_player_quantum(audio_pipeline_t *pipeline, int channel, uint32_t quantum) {
+static void
+dispatch_player_quantum(audio_pipeline_t *pipeline, int channel, uint32_t quantum)
+{
     PipelineOpTask *t = g_new0(PipelineOpTask, 1);
-    t->pipeline      = pipeline;
-    t->channel       = channel;
+    t->pipeline = pipeline;
+    t->channel = channel;
     t->is_quantum_op = TRUE;
-    t->quantum       = quantum;
+    t->quantum = quantum;
     GTask *task = g_task_new(NULL, NULL, NULL, NULL);
     g_task_set_task_data(task, t, g_free);
     g_task_run_in_thread(task, pipeline_op_thread);
@@ -194,20 +212,28 @@ typedef struct {
     quadrature_result_t result;
 } DeviceEnumData;
 
-static void device_enum_thread(GTask *task, gpointer src, gpointer data, GCancellable *c) {
-    (void)src; (void)c;
+static void
+device_enum_thread(GTask *task, gpointer src, gpointer data, GCancellable *c)
+{
+    (void)src;
+    (void)c;
     DeviceEnumData *d = data;
     d->result = audio_devices_enumerate(d->pipeline, &d->devices);
     g_task_return_pointer(task, d, NULL);
 }
 
-static void device_enum_done(GObject *src, GAsyncResult *res, gpointer data) {
+static void
+device_enum_done(GObject *src, GAsyncResult *res, gpointer data)
+{
     (void)src;
     UiWindow *w = UI_WINDOW(data);
     GError *err = NULL;
     DeviceEnumData *d = g_task_propagate_pointer(G_TASK(res), &err);
 
-    if (err) { g_error_free(err); return; }
+    if (err) {
+        g_error_free(err);
+        return;
+    }
 
     /* Block callbacks while restoring settings */
     w->settings_initializing = TRUE;
@@ -232,8 +258,8 @@ static void device_enum_done(GObject *src, GAsyncResult *res, gpointer data) {
 
     /* Store device names and descriptions */
     if (d->result == QUADRATURE_OK && d->devices.count > 0) {
-        w->device_names = g_new0(char*, d->devices.count);
-        w->device_descs = g_new0(char*, d->devices.count);
+        w->device_names = g_new0(char *, d->devices.count);
+        w->device_descs = g_new0(char *, d->devices.count);
         w->device_count = d->devices.count;
         for (int i = 0; i < d->devices.count; i++) {
             w->device_names[i] = g_strdup(d->devices.devices[i].node_name);
@@ -316,7 +342,8 @@ static void device_enum_done(GObject *src, GAsyncResult *res, gpointer data) {
         /* Restore quantum selection and apply to pipeline */
         if (w->quantum_drops[i] && w->settings) {
             uint32_t quantum = app_settings_get_channel_quantum(w->settings, i);
-            gtk_drop_down_set_selected(GTK_DROP_DOWN(w->quantum_drops[i]), (guint)quantum_to_index(quantum));
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(w->quantum_drops[i]),
+                                       (guint)quantum_to_index(quantum));
             if (w->pipeline) {
                 /* Dispatch off GTK thread — same as device above. */
                 dispatch_player_quantum(w->pipeline, i, quantum);
@@ -330,8 +357,11 @@ static void device_enum_done(GObject *src, GAsyncResult *res, gpointer data) {
     g_free(d);
 }
 
-void populate_devices_async(UiWindow *w) {
-    if (!w->pipeline) return;
+void
+populate_devices_async(UiWindow *w)
+{
+    if (!w->pipeline)
+        return;
     DeviceEnumData *d = g_new0(DeviceEnumData, 1);
     d->pipeline = w->pipeline;
     GTask *task = g_task_new(NULL, NULL, device_enum_done, w);
@@ -340,15 +370,22 @@ void populate_devices_async(UiWindow *w) {
     g_object_unref(task);
 }
 
-static void on_exclusive_toggled(GtkCheckButton *btn, gpointer data) {
+static void
+on_exclusive_toggled(GtkCheckButton *btn, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (w->settings_initializing) return;
+    if (w->settings_initializing)
+        return;
 
     int ch = -1;
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (GTK_WIDGET(btn) == w->exclusive_checks[i]) { ch = i; break; }
+        if (GTK_WIDGET(btn) == w->exclusive_checks[i]) {
+            ch = i;
+            break;
+        }
     }
-    if (ch < 0) return;
+    if (ch < 0)
+        return;
 
     gboolean excl = gtk_check_button_get_active(btn);
     if (w->settings) {
@@ -364,18 +401,25 @@ static void on_exclusive_toggled(GtkCheckButton *btn, gpointer data) {
     }
 }
 
-static void on_device_changed(GtkDropDown *drop, GParamSpec *p, gpointer data) {
+static void
+on_device_changed(GtkDropDown *drop, GParamSpec *p, gpointer data)
+{
     (void)p;
     UiWindow *w = UI_WINDOW(data);
 
     /* Skip save during initialization - settings are being restored, not changed */
-    if (w->settings_initializing) return;
+    if (w->settings_initializing)
+        return;
 
     int ch = -1;
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (GTK_WIDGET(drop) == w->device_drops[i]) { ch = i; break; }
+        if (GTK_WIDGET(drop) == w->device_drops[i]) {
+            ch = i;
+            break;
+        }
     }
-    if (ch < 0 || !w->pipeline) return;
+    if (ch < 0 || !w->pipeline)
+        return;
 
     /* Map from per-channel model index to actual device name */
     guint sel = gtk_drop_down_get_selected(drop);
@@ -391,7 +435,7 @@ static void on_device_changed(GtkDropDown *drop, GParamSpec *p, gpointer data) {
     if (w->channels[ch]) {
         ui_channel_strip_set_device_name(w->channels[ch], NULL);
         ui_channel_strip_set_device_state(w->channels[ch],
-            name ? DEVICE_STATE_VALID : DEVICE_STATE_UNCONFIGURED);
+                                          name ? DEVICE_STATE_VALID : DEVICE_STATE_UNCONFIGURED);
     }
 
     if (w->settings) {
@@ -404,17 +448,24 @@ static void on_device_changed(GtkDropDown *drop, GParamSpec *p, gpointer data) {
         w->device_rebuild_idle_id = g_idle_add(rebuild_device_models_idle, w);
 }
 
-static void on_format_changed(GtkDropDown *drop, GParamSpec *p, gpointer data) {
+static void
+on_format_changed(GtkDropDown *drop, GParamSpec *p, gpointer data)
+{
     (void)p;
     UiWindow *w = UI_WINDOW(data);
 
-    if (w->settings_initializing) return;
+    if (w->settings_initializing)
+        return;
 
     int ch = -1;
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (GTK_WIDGET(drop) == w->format_drops[i]) { ch = i; break; }
+        if (GTK_WIDGET(drop) == w->format_drops[i]) {
+            ch = i;
+            break;
+        }
     }
-    if (ch < 0) return;
+    if (ch < 0)
+        return;
 
     guint sel = gtk_drop_down_get_selected(drop);
     if (w->settings && sel < OUTPUT_FORMAT_COUNT) {
@@ -423,20 +474,28 @@ static void on_format_changed(GtkDropDown *drop, GParamSpec *p, gpointer data) {
     }
 }
 
-static void on_quantum_changed(GtkDropDown *drop, GParamSpec *p, gpointer data) {
+static void
+on_quantum_changed(GtkDropDown *drop, GParamSpec *p, gpointer data)
+{
     (void)p;
     UiWindow *w = UI_WINDOW(data);
 
-    if (w->settings_initializing) return;
+    if (w->settings_initializing)
+        return;
 
     int ch = -1;
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (GTK_WIDGET(drop) == w->quantum_drops[i]) { ch = i; break; }
+        if (GTK_WIDGET(drop) == w->quantum_drops[i]) {
+            ch = i;
+            break;
+        }
     }
-    if (ch < 0) return;
+    if (ch < 0)
+        return;
 
     guint sel = gtk_drop_down_get_selected(drop);
-    if (sel >= (guint)quantum_value_count) return;
+    if (sel >= (guint)quantum_value_count)
+        return;
 
     uint32_t quantum = quantum_values[sel];
     if (w->settings) {
@@ -449,9 +508,11 @@ static void on_quantum_changed(GtkDropDown *drop, GParamSpec *p, gpointer data) 
 
 /* Forward declaration for GPIO handler restart */
 
-GtkWidget *make_channel_settings_frame(UiWindow *w, int channel) {
-    GtkBuilder *builder = gtk_builder_new_from_resource(
-        "/org/quadrature/ui/channel_settings_frame.ui");
+GtkWidget *
+make_channel_settings_frame(UiWindow *w, int channel)
+{
+    GtkBuilder *builder
+        = gtk_builder_new_from_resource("/org/quadrature/ui/channel_settings_frame.ui");
 
     GtkWidget *frame = GTK_WIDGET(gtk_builder_get_object(builder, "channel_frame"));
     g_object_ref(frame);
@@ -483,10 +544,8 @@ GtkWidget *make_channel_settings_frame(UiWindow *w, int channel) {
         }
     }
 
-    gtk_drop_down_set_model(GTK_DROP_DOWN(w->format_drops[channel]),
-                            G_LIST_MODEL(w->format_model));
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(w->format_drops[channel]),
-                               OUTPUT_FORMAT_16BIT_48000);
+    gtk_drop_down_set_model(GTK_DROP_DOWN(w->format_drops[channel]), G_LIST_MODEL(w->format_model));
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(w->format_drops[channel]), OUTPUT_FORMAT_16BIT_48000);
 
     gtk_drop_down_set_model(GTK_DROP_DOWN(w->quantum_drops[channel]),
                             G_LIST_MODEL(w->quantum_model));
@@ -494,17 +553,14 @@ GtkWidget *make_channel_settings_frame(UiWindow *w, int channel) {
                                (guint)quantum_to_index(APP_SETTINGS_DEFAULT_QUANTUM));
 
     /* Signal connections */
-    w->device_drop_handler_ids[channel] =
-        g_signal_connect(w->device_drops[channel], "notify::selected",
-                         G_CALLBACK(on_device_changed), w);
-    g_signal_connect(w->gpio_entries[channel], "changed",
-                     G_CALLBACK(on_gpio_changed), w);
-    g_signal_connect(w->exclusive_checks[channel], "toggled",
-                     G_CALLBACK(on_exclusive_toggled), w);
-    g_signal_connect(w->format_drops[channel], "notify::selected",
-                     G_CALLBACK(on_format_changed), w);
-    g_signal_connect(w->quantum_drops[channel], "notify::selected",
-                     G_CALLBACK(on_quantum_changed), w);
+    w->device_drop_handler_ids[channel] = g_signal_connect(
+        w->device_drops[channel], "notify::selected", G_CALLBACK(on_device_changed), w);
+    g_signal_connect(w->gpio_entries[channel], "changed", G_CALLBACK(on_gpio_changed), w);
+    g_signal_connect(w->exclusive_checks[channel], "toggled", G_CALLBACK(on_exclusive_toggled), w);
+    g_signal_connect(
+        w->format_drops[channel], "notify::selected", G_CALLBACK(on_format_changed), w);
+    g_signal_connect(
+        w->quantum_drops[channel], "notify::selected", G_CALLBACK(on_quantum_changed), w);
 
     g_object_unref(builder);
     return frame;
@@ -522,14 +578,18 @@ GtkWidget *make_channel_settings_frame(UiWindow *w, int channel) {
 
 #define DEVICE_HOTPLUG_DEBOUNCE_MS 300
 
-static gboolean device_hotplug_timeout(gpointer user_data) {
+static gboolean
+device_hotplug_timeout(gpointer user_data)
+{
     UiWindow *w = UI_WINDOW(user_data);
     w->device_hotplug_timer_id = 0;
     populate_devices_async(w);
     return G_SOURCE_REMOVE;
 }
 
-static gboolean device_hotplug_idle(gpointer user_data) {
+static gboolean
+device_hotplug_idle(gpointer user_data)
+{
     UiWindow *w = UI_WINDOW(user_data);
 
     /* If the window has already been disposed, bail out */
@@ -541,22 +601,30 @@ static gboolean device_hotplug_idle(gpointer user_data) {
         g_source_remove(w->device_hotplug_timer_id);
         w->device_hotplug_timer_id = 0;
     }
-    w->device_hotplug_timer_id =
-        g_timeout_add(DEVICE_HOTPLUG_DEBOUNCE_MS, device_hotplug_timeout, w);
+    w->device_hotplug_timer_id
+        = g_timeout_add(DEVICE_HOTPLUG_DEBOUNCE_MS, device_hotplug_timeout, w);
     return G_SOURCE_REMOVE;
 }
 
 /* Called from the PipeWire thread — marshal to GTK main thread */
-static void on_pw_device_changed(void *user_data) {
+static void
+on_pw_device_changed(void *user_data)
+{
     g_main_context_invoke(NULL, device_hotplug_idle, user_data);
 }
 
-void setup_device_monitor(UiWindow *w) {
-    if (!w->pipeline) return;
+void
+setup_device_monitor(UiWindow *w)
+{
+    if (!w->pipeline)
+        return;
     audio_devices_monitor_start(w->pipeline, on_pw_device_changed, w);
 }
 
-void teardown_device_monitor(UiWindow *w) {
-    if (!w->pipeline) return;
+void
+teardown_device_monitor(UiWindow *w)
+{
+    if (!w->pipeline)
+        return;
     audio_devices_monitor_stop(w->pipeline);
 }

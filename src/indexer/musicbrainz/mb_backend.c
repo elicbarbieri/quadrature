@@ -16,22 +16,23 @@
 
 #ifdef QUADRATURE_USE_LIBPQ
 /* Forward decl — implemented in mb_pg_backend.c (phase 3). */
-quadrature_result_t mb_backend_pg_factory(const char* uri,
-                                          const mb_backend_config_t* cfg,
+quadrature_result_t mb_backend_pg_factory(const char *uri,
+                                          const mb_backend_config_t *cfg,
                                           size_t slot_count,
-                                          mb_backend_t** out);
+                                          mb_backend_t **out);
 #endif
 
 /* Forward decl — implemented in mb_http_backend.c (phase 7). */
-quadrature_result_t mb_backend_http_factory(const char* uri,
-                                            const mb_backend_config_t* cfg,
+quadrature_result_t mb_backend_http_factory(const char *uri,
+                                            const mb_backend_config_t *cfg,
                                             size_t slot_count,
-                                            mb_backend_t** out);
+                                            mb_backend_t **out);
 
-quadrature_result_t mb_backend_create(const char* uri,
-                                      const mb_backend_config_t* cfg,
-                                      size_t slot_count,
-                                      mb_backend_t** out)
+quadrature_result_t
+mb_backend_create(const char *uri,
+                  const mb_backend_config_t *cfg,
+                  size_t slot_count,
+                  mb_backend_t **out)
 {
     g_assert(uri != NULL);
     g_assert(cfg != NULL);
@@ -65,8 +66,11 @@ quadrature_result_t mb_backend_create(const char* uri,
  * Defined here so HTTP-only builds (QUADRATURE_USE_LIBPQ=OFF) link cleanly.
  * ---------------------------------------------------------------------------- */
 
-void mb_artist_free(mb_artist_t* artist) {
-    if (!artist) return;
+void
+mb_artist_free(mb_artist_t *artist)
+{
+    if (!artist)
+        return;
     g_free(artist->id);
     g_free(artist->name);
     g_free(artist->credited_name);
@@ -74,8 +78,11 @@ void mb_artist_free(mb_artist_t* artist) {
     g_free(artist->joinphrase);
 }
 
-void mb_recording_free(mb_recording_t* recording) {
-    if (!recording) return;
+void
+mb_recording_free(mb_recording_t *recording)
+{
+    if (!recording)
+        return;
     g_free(recording->id);
     g_free(recording->title);
     if (recording->artists) {
@@ -86,8 +93,11 @@ void mb_recording_free(mb_recording_t* recording) {
     }
 }
 
-void mb_release_free(mb_release_t* release) {
-    if (!release) return;
+void
+mb_release_free(mb_release_t *release)
+{
+    if (!release)
+        return;
     g_free(release->id);
     g_free(release->release_group_id);
     g_free(release->title);
@@ -112,8 +122,11 @@ void mb_release_free(mb_release_t* release) {
     memset(release, 0, sizeof(mb_release_t));
 }
 
-void mb_acoustid_response_free(mb_acoustid_response_t* response) {
-    if (!response) return;
+void
+mb_acoustid_response_free(mb_acoustid_response_t *response)
+{
+    if (!response)
+        return;
     if (response->results) {
         for (size_t i = 0; i < response->count; i++) {
             g_free(response->results[i].recording_id);
@@ -125,8 +138,11 @@ void mb_acoustid_response_free(mb_acoustid_response_t* response) {
     memset(response, 0, sizeof(mb_acoustid_response_t));
 }
 
-void mb_backend_destroy(mb_backend_t* backend) {
-    if (!backend) return;
+void
+mb_backend_destroy(mb_backend_t *backend)
+{
+    if (!backend)
+        return;
     g_assert(backend->vt != NULL);
     g_assert(backend->vt->pool_destroy != NULL);
 

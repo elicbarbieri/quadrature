@@ -19,7 +19,9 @@
 
 #define QUADRATURE_CLI_VERSION "0.1.0"
 
-static void print_usage(void) {
+static void
+print_usage(void)
+{
     printf("Usage: quadrature-cli <command> [args...]\n"
            "\n"
            "Commands:\n"
@@ -31,20 +33,24 @@ static void print_usage(void) {
            "Run 'quadrature-cli <command> --help' for command-specific help.\n");
 }
 
-int main(int argc, char* argv[]) {
+int
+main(int argc, char *argv[])
+{
     if (argc < 2) {
         print_usage();
         return 1;
     }
 
-    const char* cmd = argv[1];
+    const char *cmd = argv[1];
 
     /* Shift argv so subcommand sees itself as argv[0] */
     int sub_argc = argc - 1;
-    char** sub_argv = argv + 1;
+    char **sub_argv = argv + 1;
 
-    if (g_strcmp0(cmd, "indexer") == 0)     return cli_indexer(sub_argc, sub_argv);
-    if (g_strcmp0(cmd, "setup-rt") == 0)    return cli_setup_rt(sub_argc, sub_argv);
+    if (g_strcmp0(cmd, "indexer") == 0)
+        return cli_indexer(sub_argc, sub_argv);
+    if (g_strcmp0(cmd, "setup-rt") == 0)
+        return cli_setup_rt(sub_argc, sub_argv);
 
     if (g_strcmp0(cmd, "help") == 0 || g_strcmp0(cmd, "--help") == 0 || g_strcmp0(cmd, "-h") == 0) {
         print_usage();

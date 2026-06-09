@@ -35,7 +35,7 @@ extern "C" {
  * ============================================================================= */
 
 /* Histogram (Log-Scale Buckets) */
-#define PERF_HIST_BUCKETS 20  /* 0-1ms, 1-2ms, 2-4ms, ... 512ms+ */
+#define PERF_HIST_BUCKETS 20 /* 0-1ms, 1-2ms, 2-4ms, ... 512ms+ */
 
 typedef struct {
     atomic_uint_fast64_t buckets[PERF_HIST_BUCKETS];
@@ -53,7 +53,7 @@ typedef struct {
     uint64_t min;
     uint64_t mean;
     uint64_t count;
-    uint64_t bucket_counts[PERF_HIST_BUCKETS];  /* For chart rendering */
+    uint64_t bucket_counts[PERF_HIST_BUCKETS]; /* For chart rendering */
 } perf_hist_stats_t;
 
 /* Microsecond-scale histogram — identical layout to perf_histogram_t but
@@ -64,7 +64,9 @@ typedef struct {
 typedef perf_histogram_t perf_histogram_us_t;
 
 /** Record a µs value into a µs-scale histogram.  O(1), lock-free. */
-static inline void perf_histogram_record_us(perf_histogram_us_t *h, uint64_t us) {
+static inline void
+perf_histogram_record_us(perf_histogram_us_t *h, uint64_t us)
+{
     /* Map to log-spaced bucket: bucket k = floor(log2(us)) + 1, clamped. */
     int bucket;
     if (us == 0) {
@@ -72,7 +74,8 @@ static inline void perf_histogram_record_us(perf_histogram_us_t *h, uint64_t us)
     } else {
         /* __builtin_clzll: count leading zeros → floor(log2) */
         bucket = (int)(63 - __builtin_clzll(us)) + 1;
-        if (bucket >= PERF_HIST_BUCKETS) bucket = PERF_HIST_BUCKETS - 1;
+        if (bucket >= PERF_HIST_BUCKETS)
+            bucket = PERF_HIST_BUCKETS - 1;
     }
     atomic_fetch_add_explicit(&h->buckets[bucket], 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&h->count, 1, memory_order_relaxed);
@@ -80,22 +83,26 @@ static inline void perf_histogram_record_us(perf_histogram_us_t *h, uint64_t us)
 
     /* Update min/max with CAS loops (relaxed ordering — dashboard-only data) */
     uint64_t cur_min = atomic_load_explicit(&h->min, memory_order_relaxed);
-    while (us < cur_min && !atomic_compare_exchange_weak_explicit(
-               &h->min, &cur_min, us, memory_order_relaxed, memory_order_relaxed));
+    while (us < cur_min
+           && !atomic_compare_exchange_weak_explicit(
+               &h->min, &cur_min, us, memory_order_relaxed, memory_order_relaxed))
+        ;
 
     uint64_t cur_max = atomic_load_explicit(&h->max, memory_order_relaxed);
-    while (us > cur_max && !atomic_compare_exchange_weak_explicit(
-               &h->max, &cur_max, us, memory_order_relaxed, memory_order_relaxed));
+    while (us > cur_max
+           && !atomic_compare_exchange_weak_explicit(
+               &h->max, &cur_max, us, memory_order_relaxed, memory_order_relaxed))
+        ;
 }
 
 /* Time Series (Ring Buffer for Line Charts) */
-#define PERF_TIMESERIES_SIZE 300  /* 5 minutes at 1/sec */
+#define PERF_TIMESERIES_SIZE 300 /* 5 minutes at 1/sec */
 
 typedef struct {
     double values[PERF_TIMESERIES_SIZE];
     uint64_t timestamps[PERF_TIMESERIES_SIZE];
     atomic_uint write_index;
-    GMutex lock;  /* For bulk reads */
+    GMutex lock; /* For bulk reads */
 } perf_timeseries_t;
 
 /* Multi-Series Memory Time Series (for stacked area chart) */
@@ -125,14 +132,14 @@ typedef struct {
     atomic_uint_fast64_t callback_count_for_budget;
 
     /* Fault event counters (should be 0 in normal operation) */
-    atomic_uint_fast64_t budget_overruns;      /* Callbacks exceeding 50% budget */
-    atomic_uint_fast64_t dequeue_failures;     /* PipeWire couldn't provide output buffer */
-    atomic_uint_fast64_t scrubber_underflows;  /* Rubberband couldn't fill requested frames */
-    atomic_uint_fast64_t deferred_advances;    /* Track advance with audible gap (preload miss) */
-    
+    atomic_uint_fast64_t budget_overruns;     /* Callbacks exceeding 50% budget */
+    atomic_uint_fast64_t dequeue_failures;    /* PipeWire couldn't provide output buffer */
+    atomic_uint_fast64_t scrubber_underflows; /* Rubberband couldn't fill requested frames */
+    atomic_uint_fast64_t deferred_advances;   /* Track advance with audible gap (preload miss) */
+
     /* Advance quality tracking */
-    atomic_uint_fast64_t instant_advances;     /* Preloaded track advances (no gap) */
-    atomic_uint_fast64_t total_advances;       /* Total track changes */
+    atomic_uint_fast64_t instant_advances; /* Preloaded track advances (no gap) */
+    atomic_uint_fast64_t total_advances;   /* Total track changes */
 } perf_audio_health_t;
 
 /* Dashboard State */
@@ -153,10 +160,10 @@ struct perf_dashboard {
     perf_timeseries_t pw_queue_depth[PERF_MAX_PLAYERS];
 
     /* Component references for polling (weak pointers, not owned) */
-    void* audio_pipeline;  /* audio_pipeline_t* - use void* to avoid circular dependency */
-    void* audio_cache;     /* audio_cache_t* - use void* to avoid circular dependency */
-    void* library_cache;   /* library_cache_t* */
-    void* artwork_mgr;     /* ArtworkManager* */
+    void *audio_pipeline; /* audio_pipeline_t* - use void* to avoid circular dependency */
+    void *audio_cache;    /* audio_cache_t* - use void* to avoid circular dependency */
+    void *library_cache;  /* library_cache_t* */
+    void *artwork_mgr;    /* ArtworkManager* */
 
     /* Control */
     atomic_bool enabled;
@@ -164,33 +171,32 @@ struct perf_dashboard {
 };
 
 /* Lifecycle */
-quadrature_result_t perf_dashboard_create(uint32_t sample_rate, perf_dashboard_t** out);
-void perf_dashboard_destroy(perf_dashboard_t* d);
+quadrature_result_t perf_dashboard_create(uint32_t sample_rate, perf_dashboard_t **out);
+void perf_dashboard_destroy(perf_dashboard_t *d);
 
 /* Component Registration (for event polling) */
-void perf_dashboard_set_audio_pipeline(perf_dashboard_t* d, void* pipeline);
-void perf_dashboard_set_audio_cache(perf_dashboard_t* d, void* cache);
+void perf_dashboard_set_audio_pipeline(perf_dashboard_t *d, void *pipeline);
+void perf_dashboard_set_audio_cache(perf_dashboard_t *d, void *cache);
 
 /* Querying (UI Thread) */
-void perf_get_histogram_stats(const perf_histogram_t* h, perf_hist_stats_t* out);
-void perf_get_timeseries(perf_timeseries_t* ts, double* out, size_t* count);
-void perf_timeseries_add(perf_timeseries_t* ts, double value);
-void perf_sample_pw_queue_depth(perf_dashboard_t* d);
+void perf_get_histogram_stats(const perf_histogram_t *h, perf_hist_stats_t *out);
+void perf_get_timeseries(perf_timeseries_t *ts, double *out, size_t *count);
+void perf_timeseries_add(perf_timeseries_t *ts, double value);
+void perf_sample_pw_queue_depth(perf_dashboard_t *d);
 
 /* Multi-series memory time series helpers */
-void perf_memory_multi_init(perf_memory_multi_t* mm);
-void perf_memory_multi_add(perf_memory_multi_t* mm,
+void perf_memory_multi_init(perf_memory_multi_t *mm);
+void perf_memory_multi_add(perf_memory_multi_t *mm,
                            double audio_cache_mb,
-                           const double* lib_cache_mb,
+                           const double *lib_cache_mb,
                            double artwork_texture_mb,
-                           const double* artwork_atlas_mb,
+                           const double *artwork_atlas_mb,
                            int lib_count);
-void perf_memory_multi_get(perf_memory_multi_t* mm, int series_idx,
-                           double* out, size_t* count);
+void perf_memory_multi_get(perf_memory_multi_t *mm, int series_idx, double *out, size_t *count);
 
 /* Component registration */
-void perf_dashboard_set_library_cache(perf_dashboard_t* d, void* library_cache);
-void perf_dashboard_set_artwork_mgr(perf_dashboard_t* d, void* artwork_mgr);
+void perf_dashboard_set_library_cache(perf_dashboard_t *d, void *library_cache);
+void perf_dashboard_set_artwork_mgr(perf_dashboard_t *d, void *artwork_mgr);
 
 #ifdef __cplusplus
 }

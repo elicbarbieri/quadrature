@@ -17,23 +17,47 @@
  * GObject Item Types — thin wrappers around cache-owned data
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-struct _QuadArtistItemClass { GObjectClass parent; };
+struct _QuadArtistItemClass {
+    GObjectClass parent;
+};
 G_DEFINE_FINAL_TYPE(QuadArtistItem, quad_artist_item, G_TYPE_OBJECT)
-static void quad_artist_item_class_init(QuadArtistItemClass *klass) { (void)klass; }
-static void quad_artist_item_init(QuadArtistItem *self) { (void)self; }
+static void
+quad_artist_item_class_init(QuadArtistItemClass *klass)
+{
+    (void)klass;
+}
+static void
+quad_artist_item_init(QuadArtistItem *self)
+{
+    (void)self;
+}
 
-QuadArtistItem *quad_artist_item_new(const library_artist_info_t *info) {
+QuadArtistItem *
+quad_artist_item_new(const library_artist_info_t *info)
+{
     QuadArtistItem *item = g_object_new(QUAD_TYPE_ARTIST_ITEM, NULL);
     item->info = info;
     return item;
 }
 
-struct _QuadAlbumItemClass { GObjectClass parent; };
+struct _QuadAlbumItemClass {
+    GObjectClass parent;
+};
 G_DEFINE_FINAL_TYPE(QuadAlbumItem, quad_album_item, G_TYPE_OBJECT)
-static void quad_album_item_class_init(QuadAlbumItemClass *klass) { (void)klass; }
-static void quad_album_item_init(QuadAlbumItem *self) { (void)self; }
+static void
+quad_album_item_class_init(QuadAlbumItemClass *klass)
+{
+    (void)klass;
+}
+static void
+quad_album_item_init(QuadAlbumItem *self)
+{
+    (void)self;
+}
 
-QuadAlbumItem *quad_album_item_new(const library_album_info_t *info) {
+QuadAlbumItem *
+quad_album_item_new(const library_album_info_t *info)
+{
     QuadAlbumItem *item = g_object_new(QUAD_TYPE_ALBUM_ITEM, NULL);
     item->info = info;
     return item;
@@ -44,10 +68,10 @@ QuadAlbumItem *quad_album_item_new(const library_album_info_t *info) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 struct _LazyList {
-    GListStore *store;                  /* Base data (all items, unfiltered) */
-    GtkSortListModel *sorted;          /* Sorts store contents */
-    GtkFilterListModel *filtered;      /* Filters sorted contents */
-    GtkSingleSelection *selection;     /* Selection over filtered view */
+    GListStore *store;             /* Base data (all items, unfiltered) */
+    GtkSortListModel *sorted;      /* Sorts store contents */
+    GtkFilterListModel *filtered;  /* Filters sorted contents */
+    GtkSingleSelection *selection; /* Selection over filtered view */
     GtkWidget *list_view;
 
     /* Scroll monitoring */
@@ -60,7 +84,9 @@ struct _LazyList {
 /* Forward declaration for activate handler */
 static void on_list_activate(GtkListView *lv, guint position, gpointer data);
 
-LazyList *lazy_list_new(GType item_type, const LazyListCallbacks *cbs) {
+LazyList *
+lazy_list_new(GType item_type, const LazyListCallbacks *cbs)
+{
     g_assert(cbs != NULL);
 
     LazyList *ll = g_new0(LazyList, 1);
@@ -95,43 +121,60 @@ LazyList *lazy_list_new(GType item_type, const LazyListCallbacks *cbs) {
     return ll;
 }
 
-void lazy_list_free(LazyList *ll) {
-    if (!ll) return;
+void
+lazy_list_free(LazyList *ll)
+{
+    if (!ll)
+        return;
     /* store, sorted, filtered, selection are owned by the list view */
     g_free(ll);
 }
 
-GtkWidget *lazy_list_get_widget(LazyList *ll) {
+GtkWidget *
+lazy_list_get_widget(LazyList *ll)
+{
     g_assert(ll != NULL);
     return ll->list_view;
 }
 
-GListStore *lazy_list_get_store(LazyList *ll) {
+GListStore *
+lazy_list_get_store(LazyList *ll)
+{
     g_assert(ll != NULL);
     return ll->store;
 }
 
-GListModel *lazy_list_get_filtered_model(LazyList *ll) {
+GListModel *
+lazy_list_get_filtered_model(LazyList *ll)
+{
     g_assert(ll != NULL);
     return G_LIST_MODEL(ll->filtered);
 }
 
-GObject *lazy_list_get_selected_item(LazyList *ll) {
+GObject *
+lazy_list_get_selected_item(LazyList *ll)
+{
     g_assert(ll != NULL);
     return gtk_single_selection_get_selected_item(ll->selection);
 }
 
-void lazy_list_set_filter(LazyList *ll, GtkFilter *filter) {
+void
+lazy_list_set_filter(LazyList *ll, GtkFilter *filter)
+{
     g_assert(ll != NULL);
     gtk_filter_list_model_set_filter(ll->filtered, filter);
 }
 
-void lazy_list_set_sorter(LazyList *ll, GtkSorter *sorter) {
+void
+lazy_list_set_sorter(LazyList *ll, GtkSorter *sorter)
+{
     g_assert(ll != NULL);
     gtk_sort_list_model_set_sorter(ll->sorted, sorter);
 }
 
-void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll) {
+void
+lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll)
+{
     g_assert(ll != NULL);
     g_assert(scroll != NULL);
 
@@ -142,7 +185,9 @@ void lazy_list_connect_scroll(LazyList *ll, GtkScrolledWindow *scroll) {
  * Activate Handler
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void on_list_activate(GtkListView *lv, guint position, gpointer data) {
+static void
+on_list_activate(GtkListView *lv, guint position, gpointer data)
+{
     (void)lv;
     LazyList *ll = data;
     if (ll->cbs.activate)

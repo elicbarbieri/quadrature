@@ -31,46 +31,46 @@ extern "C" {
  * sort_name) for the full MB-aware dedup path: MBID lookup → name lookup →
  * normalized name lookup → insert, with in-place rename to canonical values.
  */
-int64_t db_get_or_create_artist(quadrature_db_t* db,
-                                 const char* name,
-                                 const char* sort_name,
-                                 const char* musicbrainz_id);
+int64_t db_get_or_create_artist(quadrature_db_t *db,
+                                const char *name,
+                                const char *sort_name,
+                                const char *musicbrainz_id);
 
 /**
  * Delete artists with no entries in track_artists. Handles the
  * 1-Phase2-artist-to-many-MB-credits split case. Called from finalize.
  */
-quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db);
+quadrature_result_t db_prune_orphan_artists(quadrature_db_t *db);
 
 /* =============================================================================
  * Indexer Error Logging
  * ============================================================================= */
 
-quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const char* message,
-                                int64_t scan_generation);
+quadrature_result_t
+db_log_error(quadrature_db_t *db, const char *path, const char *message, int64_t scan_generation);
 
-quadrature_result_t db_clear_errors_for_path(quadrature_db_t* db, const char* path_prefix);
+quadrature_result_t db_clear_errors_for_path(quadrature_db_t *db, const char *path_prefix);
 
 /**
  * Prune orphan errors whose paths don't correspond to any known album.
  */
-quadrature_result_t db_prune_orphan_errors(quadrature_db_t* db, const char* library_root);
+quadrature_result_t db_prune_orphan_errors(quadrature_db_t *db, const char *library_root);
 
 /* =============================================================================
  * Album Mtime Batch Writes (indexer delta detection)
  * ============================================================================= */
 
-quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
-                                               const int64_t* album_ids,
-                                               const int64_t* mtimes,
-                                               const int64_t* sizes,
-                                               size_t count);
+quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t *db,
+                                              const int64_t *album_ids,
+                                              const int64_t *mtimes,
+                                              const int64_t *sizes,
+                                              size_t count);
 
 /* =============================================================================
  * WAL Checkpoint
  * ============================================================================= */
 
-quadrature_result_t db_checkpoint(quadrature_db_t* db);
+quadrature_result_t db_checkpoint(quadrature_db_t *db);
 
 #ifdef __cplusplus
 }

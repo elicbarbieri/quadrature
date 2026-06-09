@@ -13,34 +13,34 @@
 #include <stdatomic.h>
 
 /* LWRP protocol constants */
-#define LWRP_PORT 93
-#define LWRP_MAX_LINE 512
+#define LWRP_PORT                  93
+#define LWRP_MAX_LINE              512
 #define RECONNECT_INITIAL_DELAY_MS 100
-#define RECONNECT_MAX_DELAY_MS 5000
-#define RECONNECT_BACKOFF_FACTOR 2
+#define RECONNECT_MAX_DELAY_MS     5000
+#define RECONNECT_BACKOFF_FACTOR   2
 
 /* Main GPIO handle structure */
 struct axia_gpio_t {
-    char *console_ip;                    // Heap-allocated console IP
-    uint16_t port;                       // TCP port (default: 93)
-    int channel_id;                      // 0-3 (internal), sent as 1-4 to console
-    char *password;                      // LWRP password for LOGIN command (NULL if not required)
-    int sockfd;                          // TCP socket file descriptor (-1 if not connected)
-    
+    char *console_ip; // Heap-allocated console IP
+    uint16_t port;    // TCP port (default: 93)
+    int channel_id;   // 0-3 (internal), sent as 1-4 to console
+    char *password;   // LWRP password for LOGIN command (NULL if not required)
+    int sockfd;       // TCP socket file descriptor (-1 if not connected)
+
     /* Thread management */
     pthread_t listener_thread;
-    _Atomic bool running;                // Thread should keep running
-    _Atomic bool connected;              // Currently connected to console
-    
+    _Atomic bool running;   // Thread should keep running
+    _Atomic bool connected; // Currently connected to console
+
     /* Callbacks */
-    GMutex callback_mutex;               // Protects callback pointers
-    axia_gpio_callback_t callback;       // User callback for GPIO events
-    void *callback_user_data;            // User data for GPIO callback
-    axia_gpio_status_callback_t status_callback;  // User callback for status changes
-    void *status_callback_user_data;     // User data for status callback
-    
+    GMutex callback_mutex;                       // Protects callback pointers
+    axia_gpio_callback_t callback;               // User callback for GPIO events
+    void *callback_user_data;                    // User data for GPIO callback
+    axia_gpio_status_callback_t status_callback; // User callback for status changes
+    void *status_callback_user_data;             // User data for status callback
+
     /* Reconnection state */
-    int reconnect_delay_ms;              // Current reconnect delay (exponential backoff)
+    int reconnect_delay_ms; // Current reconnect delay (exponential backoff)
 };
 
 /* Protocol helpers (axia_protocol.c) */

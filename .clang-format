@@ -1,0 +1,69 @@
+---
+Language: Cpp
+BasedOnStyle: GNU
+
+# Indentation
+IndentWidth: 4
+ContinuationIndentWidth: 4
+UseTab: Never
+TabWidth: 4
+
+# Line width
+ColumnLimit: 100
+
+# Pointer/reference style: GNU/Linux — `T *p`, not `T* p`
+PointerAlignment: Right
+DerivePointerAlignment: false
+
+# Function definitions: return type on its own line, brace on its own line.
+#     quadrature_result_t
+#     ffmpeg_decoder_open(ffmpeg_decoder_t *dec, const char *path)
+#     {
+#         ...
+#     }
+AlwaysBreakAfterReturnType: AllDefinitions
+BreakBeforeBraces: Linux
+
+# Braces everywhere else stay attached (if/else/for/while/struct):
+#     if (x) {
+#         ...
+#     } else {
+#         ...
+#     }
+# (BreakBeforeBraces: Linux gives exactly this — function/struct/enum break,
+#  control flow attaches.)
+
+# Don't collapse short bodies onto one line
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+
+# Argument / parameter alignment
+AlignAfterOpenBracket: Align
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+
+# Spacing
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpacesInCStyleCastParentheses: false
+SpaceBeforeAssignmentOperators: true
+
+# Include order: don't auto-sort — C include order is load-bearing
+SortIncludes: Never
+IncludeBlocks: Preserve
+
+# Misc
+Cpp11BracedListStyle: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+ReflowComments: false
+AlignConsecutiveMacros: AcrossEmptyLines
+AlignEscapedNewlines: Left
+AlignTrailingComments: true

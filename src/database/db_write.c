@@ -11,8 +11,11 @@
 // =============================================================================
 
 /* Fast path: name-only lookup/insert. Used when sort_name and mbid are NULL. */
-static int64_t artist_get_or_create_plain(quadrature_db_t* db, const char* name) {
-    if (!name || !*name) name = "Unknown Artist";
+static int64_t
+artist_get_or_create_plain(quadrature_db_t *db, const char *name)
+{
+    if (!name || !*name)
+        name = "Unknown Artist";
 
     int64_t id = -1;
 
@@ -59,23 +62,31 @@ static int64_t artist_get_or_create_plain(quadrature_db_t* db, const char* name)
 // Album Mtime Write Operations (batch only)
 // =============================================================================
 
-quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
-                                               const int64_t* album_ids,
-                                               const int64_t* mtimes,
-                                               const int64_t* sizes,
-                                               size_t count) {
-    if (!db || !album_ids || !mtimes || count == 0) return QUADRATURE_ERROR_INVALID_PARAM;
+quadrature_result_t
+db_set_album_mtimes_batch(quadrature_db_t *db,
+                          const int64_t *album_ids,
+                          const int64_t *mtimes,
+                          const int64_t *sizes,
+                          size_t count)
+{
+    if (!db || !album_ids || !mtimes || count == 0)
+        return QUADRATURE_ERROR_INVALID_PARAM;
 
     db_lock(db);
 
-    char* err = NULL;
+    char *err = NULL;
     sqlite3_exec(db->db, "BEGIN", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
+    if (err) {
+        sqlite3_free(err);
+        err = NULL;
+    }
 
-    sqlite3_stmt* stmt;
+    sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db->db,
-        "UPDATE albums SET last_updated_at = ?, last_updated_size = ? WHERE id = ?",
-        -1, &stmt, NULL);
+                       "UPDATE albums SET last_updated_at = ?, last_updated_size = ? WHERE id = ?",
+                       -1,
+                       &stmt,
+                       NULL);
 
     for (size_t i = 0; i < count; i++) {
         sqlite3_bind_int64(stmt, 1, mtimes[i]);
@@ -87,7 +98,8 @@ quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
 
     sqlite3_finalize(stmt);
     sqlite3_exec(db->db, "COMMIT", NULL, NULL, &err);
-    if (err) sqlite3_free(err);
+    if (err)
+        sqlite3_free(err);
 
     db_unlock(db);
     return QUADRATURE_OK;
@@ -100,8 +112,11 @@ quadrature_result_t db_set_album_mtimes_batch(quadrature_db_t* db,
 /* Strip spaces and hyphens then casefold: "2 Mex" → "2mex", "AC-DC" → "acdc".
  * Uses g_utf8_casefold for correct Unicode handling (ö→ö not left uppercase).
  * Returns g_malloc'd string; caller must g_free(). Returns NULL on empty input. */
-static char *artist_normalize(const char *name) {
-    if (!name || !*name) return NULL;
+static char *
+artist_normalize(const char *name)
+{
+    if (!name || !*name)
+        return NULL;
 
     char *folded = g_utf8_casefold(name, -1);
     GString *out = g_string_new(NULL);
@@ -124,9 +139,10 @@ static char *artist_normalize(const char *name) {
 /* Apply canonical MB name/MBID/sort_name to an existing artist row.
  * Also updates artists_fts so search stays consistent.
  * Returns SQLITE_OK on success, SQLITE_CONSTRAINT on name UNIQUE conflict. */
-static int rename_artist_inplace(quadrature_db_t* db, int64_t id,
-                                  const char* name, const char* mbid,
-                                  const char* sort_name) {
+static int
+rename_artist_inplace(
+    quadrature_db_t *db, int64_t id, const char *name, const char *mbid, const char *sort_name)
+{
     sqlite3_bind_text(db->rename_artist_mb, 1, name, -1, SQLITE_STATIC);
     if (mbid && *mbid)
         sqlite3_bind_text(db->rename_artist_mb, 2, mbid, -1, SQLITE_STATIC);
@@ -157,8 +173,12 @@ static int rename_artist_inplace(quadrature_db_t* db, int64_t id,
  * `new_name`/`new_mbid` identify the row that already has the canonical form.
  * Re-homes all track_artists from old_id → new_id, then deletes old_id.
  * Returns new_id on success, old_id if the canonical row cannot be found. */
-static int64_t merge_duplicate_artist(quadrature_db_t* db, int64_t old_id,
-                                       const char* new_name, const char* new_mbid) {
+static int64_t
+merge_duplicate_artist(quadrature_db_t *db,
+                       int64_t old_id,
+                       const char *new_name,
+                       const char *new_mbid)
+{
     /* Find the canonical row (has same name NOCASE + same MBID) */
     int64_t new_id = -1;
     sqlite3_bind_text(db->select_artist_by_name_and_mbid, 1, new_name, -1, SQLITE_STATIC);
@@ -167,7 +187,8 @@ static int64_t merge_duplicate_artist(quadrature_db_t* db, int64_t old_id,
         new_id = sqlite3_column_int64(db->select_artist_by_name_and_mbid, 0);
     sqlite3_reset(db->select_artist_by_name_and_mbid);
 
-    if (new_id < 0) return old_id;  /* Can't locate canonical row — leave as-is */
+    if (new_id < 0)
+        return old_id; /* Can't locate canonical row — leave as-is */
 
     /* Move track_artists: UPDATE OR IGNORE avoids PK conflicts */
     sqlite3_bind_int64(db->move_track_artists, 1, new_id);
@@ -191,19 +212,26 @@ static int64_t merge_duplicate_artist(quadrature_db_t* db, int64_t old_id,
     sqlite3_reset(db->delete_artist);
 
     g_message("merge_duplicate_artist: merged id=%" G_GINT64_FORMAT " into %" G_GINT64_FORMAT
-              " (\"%s\")", old_id, new_id, new_name);
+              " (\"%s\")",
+              old_id,
+              new_id,
+              new_name);
     return new_id;
 }
 
-int64_t db_get_or_create_artist(quadrature_db_t* db,
-                                 const char* name,
-                                 const char* sort_name,
-                                 const char* musicbrainz_id) {
+int64_t
+db_get_or_create_artist(quadrature_db_t *db,
+                        const char *name,
+                        const char *sort_name,
+                        const char *musicbrainz_id)
+{
     /* Fast path when caller has no MB data — simpler stmts, fewer lookups. */
     bool has_mb = (sort_name && *sort_name) || (musicbrainz_id && *musicbrainz_id);
-    if (!has_mb) return artist_get_or_create_plain(db, name);
+    if (!has_mb)
+        return artist_get_or_create_plain(db, name);
 
-    if (!name || !*name) name = "Unknown Artist";
+    if (!name || !*name)
+        name = "Unknown Artist";
 
     bool need_unlock = false;
     if (!db->in_transaction) {
@@ -229,7 +257,8 @@ int64_t db_get_or_create_artist(quadrature_db_t* db,
                 sqlite3_step(db->update_artist_sort_name);
                 sqlite3_reset(db->update_artist_sort_name);
             }
-            if (need_unlock) db_unlock(db);
+            if (need_unlock)
+                db_unlock(db);
             return id;
         }
     }
@@ -249,7 +278,8 @@ int64_t db_get_or_create_artist(quadrature_db_t* db,
     if (id >= 0) {
         /* Rename in-place: apply canonical MB name/MBID/sort_name */
         rename_artist_inplace(db, id, name, musicbrainz_id, sort_name);
-        if (need_unlock) db_unlock(db);
+        if (need_unlock)
+            db_unlock(db);
         return id;
     }
 
@@ -258,7 +288,8 @@ int64_t db_get_or_create_artist(quadrature_db_t* db,
     // (rows already claimed by Phase 4 are excluded via the MBID check in Step 1).
     char *normalized = artist_normalize(name);
     if (normalized) {
-        sqlite3_bind_text(db->select_artist_normalized_no_mbid, 1, normalized, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(
+            db->select_artist_normalized_no_mbid, 1, normalized, -1, SQLITE_TRANSIENT);
         if (sqlite3_step(db->select_artist_normalized_no_mbid) == SQLITE_ROW)
             id = sqlite3_column_int64(db->select_artist_normalized_no_mbid, 0);
         sqlite3_reset(db->select_artist_normalized_no_mbid);
@@ -272,7 +303,8 @@ int64_t db_get_or_create_artist(quadrature_db_t* db,
             if (rc == SQLITE_CONSTRAINT || rc == SQLITE_CONSTRAINT_UNIQUE) {
                 id = merge_duplicate_artist(db, id, name, musicbrainz_id);
             }
-            if (need_unlock) db_unlock(db);
+            if (need_unlock)
+                db_unlock(db);
             return id;
         }
     }
@@ -299,31 +331,38 @@ int64_t db_get_or_create_artist(quadrature_db_t* db,
         sqlite3_reset(db->insert_artist_fts_replace);
     }
 
-    if (need_unlock) db_unlock(db);
+    if (need_unlock)
+        db_unlock(db);
     return id;
 }
 
-quadrature_result_t db_get_unresolved_albums(quadrature_db_t* db,
-    int64_t retry_no_match_before,
-    int64_t** album_ids, size_t* count) {
-    if (!db || !album_ids || !count) return QUADRATURE_ERROR_INVALID_PARAM;
+quadrature_result_t
+db_get_unresolved_albums(quadrature_db_t *db,
+                         int64_t retry_no_match_before,
+                         int64_t **album_ids,
+                         size_t *count)
+{
+    if (!db || !album_ids || !count)
+        return QUADRATURE_ERROR_INVALID_PARAM;
 
     *album_ids = NULL;
     *count = 0;
 
     db_lock(db);
 
-    sqlite3_stmt* stmt;
+    sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db->db,
-        "SELECT id FROM albums "
-        "WHERE (mb_status IN (0, 1, 4) "
-        "   OR (mb_status = 3 AND mb_resolved_at < ?)) "
-        "AND path != '' ORDER BY id",
-        -1, &stmt, NULL);
+                       "SELECT id FROM albums "
+                       "WHERE (mb_status IN (0, 1, 4) "
+                       "   OR (mb_status = 3 AND mb_resolved_at < ?)) "
+                       "AND path != '' ORDER BY id",
+                       -1,
+                       &stmt,
+                       NULL);
     sqlite3_bind_int64(stmt, 1, retry_no_match_before);
 
     size_t cap = 256;
-    int64_t* ids = g_new(int64_t, cap);
+    int64_t *ids = g_new(int64_t, cap);
     size_t n = 0;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -341,14 +380,15 @@ quadrature_result_t db_get_unresolved_albums(quadrature_db_t* db,
     return QUADRATURE_OK;
 }
 
-
 // =============================================================================
 // Indexer Error Operations (simplified path-based)
 // =============================================================================
 
-quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const char* message,
-                                int64_t scan_generation) {
-    if (!db || !path || !message) return QUADRATURE_ERROR_INVALID_PARAM;
+quadrature_result_t
+db_log_error(quadrature_db_t *db, const char *path, const char *message, int64_t scan_generation)
+{
+    if (!db || !path || !message)
+        return QUADRATURE_ERROR_INVALID_PARAM;
 
     bool need_unlock = false;
     if (!db->in_transaction) {
@@ -356,12 +396,16 @@ quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const ch
         need_unlock = true;
     }
 
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db->db,
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(
+        db->db,
         "INSERT INTO indexer_errors(path, message, scan_generation) VALUES(?, ?, ?)",
-        -1, &stmt, NULL);
+        -1,
+        &stmt,
+        NULL);
     if (rc != SQLITE_OK) {
-        if (need_unlock) db_unlock(db);
+        if (need_unlock)
+            db_unlock(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
 
@@ -371,28 +415,29 @@ quadrature_result_t db_log_error(quadrature_db_t* db, const char* path, const ch
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    if (need_unlock) db_unlock(db);
+    if (need_unlock)
+        db_unlock(db);
     return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
 }
 
-quadrature_result_t db_clear_errors_for_path(quadrature_db_t* db, const char* path_prefix) {
-    if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+quadrature_result_t
+db_clear_errors_for_path(quadrature_db_t *db, const char *path_prefix)
+{
+    if (!db)
+        return QUADRATURE_ERROR_INVALID_PARAM;
 
     db_lock(db);
 
-    sqlite3_stmt* stmt;
+    sqlite3_stmt *stmt;
     int rc;
     if (path_prefix && *path_prefix) {
-        rc = sqlite3_prepare_v2(db->db,
-            "DELETE FROM indexer_errors WHERE path LIKE ? || '%'",
-            -1, &stmt, NULL);
+        rc = sqlite3_prepare_v2(
+            db->db, "DELETE FROM indexer_errors WHERE path LIKE ? || '%'", -1, &stmt, NULL);
         if (rc == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, path_prefix, -1, SQLITE_STATIC);
         }
     } else {
-        rc = sqlite3_prepare_v2(db->db,
-            "DELETE FROM indexer_errors",
-            -1, &stmt, NULL);
+        rc = sqlite3_prepare_v2(db->db, "DELETE FROM indexer_errors", -1, &stmt, NULL);
     }
 
     if (rc != SQLITE_OK) {
@@ -407,21 +452,26 @@ quadrature_result_t db_clear_errors_for_path(quadrature_db_t* db, const char* pa
     return (rc == SQLITE_DONE) ? QUADRATURE_OK : QUADRATURE_ERROR_INTERNAL;
 }
 
-quadrature_result_t db_prune_orphan_errors(quadrature_db_t* db, const char* library_root) {
-    if (!db || !library_root) return QUADRATURE_ERROR_INVALID_PARAM;
+quadrature_result_t
+db_prune_orphan_errors(quadrature_db_t *db, const char *library_root)
+{
+    if (!db || !library_root)
+        return QUADRATURE_ERROR_INVALID_PARAM;
 
     db_lock(db);
 
-    sqlite3_stmt* stmt;
+    sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db->db,
-        "DELETE FROM indexer_errors WHERE id IN ("
-        "  SELECT e.id FROM indexer_errors e"
-        "  WHERE NOT EXISTS ("
-        "    SELECT 1 FROM albums a WHERE a.path != ''"
-        "    AND e.path LIKE ?1 || '/' || a.path || '%'"
-        "  )"
-        ")",
-        -1, &stmt, NULL);
+                                "DELETE FROM indexer_errors WHERE id IN ("
+                                "  SELECT e.id FROM indexer_errors e"
+                                "  WHERE NOT EXISTS ("
+                                "    SELECT 1 FROM albums a WHERE a.path != ''"
+                                "    AND e.path LIKE ?1 || '/' || a.path || '%'"
+                                "  )"
+                                ")",
+                                -1,
+                                &stmt,
+                                NULL);
     if (rc != SQLITE_OK) {
         db_unlock(db);
         return QUADRATURE_ERROR_INTERNAL;
@@ -443,8 +493,11 @@ quadrature_result_t db_prune_orphan_errors(quadrature_db_t* db, const char* libr
 // Free Functions for New Types
 // =============================================================================
 
-void db_indexer_errors_free(db_indexer_error_t* errors, size_t count) {
-    if (!errors) return;
+void
+db_indexer_errors_free(db_indexer_error_t *errors, size_t count)
+{
+    if (!errors)
+        return;
     for (size_t i = 0; i < count; i++) {
         g_free(errors[i].path);
         g_free(errors[i].message);
@@ -456,40 +509,51 @@ void db_indexer_errors_free(db_indexer_error_t* errors, size_t count) {
 // Orphan Cleanup
 // =============================================================================
 
-quadrature_result_t db_prune_orphan_artists(quadrature_db_t* db) {
-    if (!db) return QUADRATURE_ERROR_INVALID_PARAM;
+quadrature_result_t
+db_prune_orphan_artists(quadrature_db_t *db)
+{
+    if (!db)
+        return QUADRATURE_ERROR_INVALID_PARAM;
 
     db_lock(db);
 
-    char* err = NULL;
+    char *err = NULL;
     sqlite3_exec(db->db, "BEGIN", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
+    if (err) {
+        sqlite3_free(err);
+        err = NULL;
+    }
 
     /* An artist is "alive" if it appears in track_artists OR is an album artist.
      * Both must be checked: MusicBrainz resolve can replace track credits with
      * corrected artists, orphaning Phase 2 entries that may still be album artists. */
-    sqlite3_stmt* del;
+    sqlite3_stmt *del;
     sqlite3_prepare_v2(db->db,
-        "DELETE FROM artists "
-        "WHERE NOT EXISTS "
-        "  (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.id) "
-        "AND NOT EXISTS "
-        "  (SELECT 1 FROM albums al WHERE al.artist_id = artists.id)",
-        -1, &del, NULL);
+                       "DELETE FROM artists "
+                       "WHERE NOT EXISTS "
+                       "  (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.id) "
+                       "AND NOT EXISTS "
+                       "  (SELECT 1 FROM albums al WHERE al.artist_id = artists.id)",
+                       -1,
+                       &del,
+                       NULL);
     sqlite3_step(del);
     int changes = sqlite3_changes(db->db);
     sqlite3_finalize(del);
 
     /* Clean FTS shadow table for any deleted rows */
-    sqlite3_stmt* del_fts;
+    sqlite3_stmt *del_fts;
     sqlite3_prepare_v2(db->db,
-        "DELETE FROM artists_fts WHERE rowid NOT IN (SELECT id FROM artists)",
-        -1, &del_fts, NULL);
+                       "DELETE FROM artists_fts WHERE rowid NOT IN (SELECT id FROM artists)",
+                       -1,
+                       &del_fts,
+                       NULL);
     sqlite3_step(del_fts);
     sqlite3_finalize(del_fts);
 
     sqlite3_exec(db->db, "COMMIT", NULL, NULL, &err);
-    if (err) sqlite3_free(err);
+    if (err)
+        sqlite3_free(err);
 
     if (changes > 0)
         g_message("db_prune_orphan_artists: removed %d orphan artist(s)", changes);

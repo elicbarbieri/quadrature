@@ -35,12 +35,12 @@ typedef enum {
 } rt_status_t;
 
 typedef struct {
-    rt_status_t  status;
-    const char*  name;
-    char*        detail;       /* heap-allocated, freed by caller */
-    const char*  fix_cmd;      /* static string or NULL */
-    bool         needs_root;
-    bool         can_auto_apply;
+    rt_status_t status;
+    const char *name;
+    char *detail;        /* heap-allocated, freed by caller */
+    const char *fix_cmd; /* static string or NULL */
+    bool needs_root;
+    bool can_auto_apply;
 } rt_check_result_t;
 
 typedef struct {
@@ -52,20 +52,28 @@ typedef struct {
 // Helpers
 // =============================================================================
 
-static const char* status_label(rt_status_t s) {
+static const char *
+status_label(rt_status_t s)
+{
     switch (s) {
-        case RT_PASS: return "\033[32mPASS\033[0m";
-        case RT_WARN: return "\033[33mWARN\033[0m";
-        case RT_FAIL: return "\033[31mFAIL\033[0m";
-        case RT_SKIP: return "\033[90mSKIP\033[0m";
+    case RT_PASS:
+        return "\033[32mPASS\033[0m";
+    case RT_WARN:
+        return "\033[33mWARN\033[0m";
+    case RT_FAIL:
+        return "\033[31mFAIL\033[0m";
+    case RT_SKIP:
+        return "\033[90mSKIP\033[0m";
     }
     return "????";
 }
 
 /** Run a command and capture stdout. Returns heap-allocated string or NULL. */
-static char* run_cmd(const char* cmd) {
-    char* out = NULL;
-    char* err = NULL;
+static char *
+run_cmd(const char *cmd)
+{
+    char *out = NULL;
+    char *err = NULL;
     int exit_status = 0;
 
     gboolean ok = g_spawn_command_line_sync(cmd, &out, &err, &exit_status, NULL);
@@ -86,14 +94,18 @@ static char* run_cmd(const char* cmd) {
 }
 
 /** Check if a command exits successfully. */
-static bool cmd_ok(const char* cmd) {
-    char* out = run_cmd(cmd);
+static bool
+cmd_ok(const char *cmd)
+{
+    char *out = run_cmd(cmd);
     bool ok = (out != NULL);
     g_free(out);
     return ok;
 }
 
-static void print_check(const rt_check_result_t* r) {
+static void
+print_check(const rt_check_result_t *r)
+{
     printf("  [%s] %s", status_label(r->status), r->name);
     if (r->detail)
         printf(" — %s", r->detail);
@@ -102,7 +114,9 @@ static void print_check(const rt_check_result_t* r) {
         printf("         → %s\n", r->fix_cmd);
 }
 
-static void free_check(rt_check_result_t* r) {
+static void
+free_check(rt_check_result_t *r)
+{
     g_free(r->detail);
     r->detail = NULL;
 }
@@ -111,10 +125,12 @@ static void free_check(rt_check_result_t* r) {
 // Checks
 // =============================================================================
 
-static rt_check_result_t check_pipewire_running(void) {
+static rt_check_result_t
+check_pipewire_running(void)
+{
     rt_check_result_t r = { .name = "PipeWire running" };
 
-    char* version = run_cmd("pw-cli --version");
+    char *version = run_cmd("pw-cli --version");
     if (!version) {
         r.status = RT_FAIL;
         r.detail = g_strdup("pw-cli not found or PipeWire not running");
@@ -123,8 +139,9 @@ static rt_check_result_t check_pipewire_running(void) {
     }
 
     /* pw-cli --version outputs multiple lines; first line has the version */
-    char* nl = strchr(version, '\n');
-    if (nl) *nl = '\0';
+    char *nl = strchr(version, '\n');
+    if (nl)
+        *nl = '\0';
 
     r.status = RT_PASS;
     r.detail = g_strdup(version);
@@ -132,10 +149,12 @@ static rt_check_result_t check_pipewire_running(void) {
     return r;
 }
 
-static rt_check_result_t check_force_quantum(void) {
+static rt_check_result_t
+check_force_quantum(void)
+{
     rt_check_result_t r = { .name = "No global force-quantum override" };
 
-    char* out = run_cmd("pw-metadata -n settings 0");
+    char *out = run_cmd("pw-metadata -n settings 0");
     if (!out) {
         r.status = RT_SKIP;
         r.detail = g_strdup("Could not query PipeWire metadata");
@@ -144,7 +163,8 @@ static rt_check_result_t check_force_quantum(void) {
 
     if (strstr(out, "clock.force-quantum")) {
         r.status = RT_WARN;
-        r.detail = g_strdup("force-quantum is set globally — may override per-stream quantum requests");
+        r.detail
+            = g_strdup("force-quantum is set globally — may override per-stream quantum requests");
         r.fix_cmd = "Remove clock.force-quantum from PipeWire config if unintended";
     } else {
         r.status = RT_PASS;
@@ -155,13 +175,15 @@ static rt_check_result_t check_force_quantum(void) {
     return r;
 }
 
-static rt_check_result_t check_suspend_on_idle(void) {
+static rt_check_result_t
+check_suspend_on_idle(void)
+{
     rt_check_result_t r = {
         .name = "suspend-on-idle disabled",
         .can_auto_apply = true,
     };
 
-    char* out = run_cmd("pw-cli ls Module");
+    char *out = run_cmd("pw-cli ls Module");
     if (!out) {
         r.status = RT_SKIP;
         r.detail = g_strdup("Could not list PipeWire modules");
@@ -182,7 +204,9 @@ static rt_check_result_t check_suspend_on_idle(void) {
     return r;
 }
 
-static rt_check_result_t check_rtkit(void) {
+static rt_check_result_t
+check_rtkit(void)
+{
     rt_check_result_t r = {
         .name = "rtkit-daemon",
         .needs_root = true,
@@ -200,13 +224,15 @@ static rt_check_result_t check_rtkit(void) {
     return r;
 }
 
-static rt_check_result_t check_audio_group(void) {
+static rt_check_result_t
+check_audio_group(void)
+{
     rt_check_result_t r = {
         .name = "User in audio group",
         .needs_root = true,
     };
 
-    char* groups = run_cmd("id -nG");
+    char *groups = run_cmd("id -nG");
     if (!groups) {
         r.status = RT_SKIP;
         r.detail = g_strdup("Could not determine group membership");
@@ -215,9 +241,12 @@ static rt_check_result_t check_audio_group(void) {
 
     /* Check for "audio" as a whole word */
     bool found = false;
-    char* token = strtok(groups, " ");
+    char *token = strtok(groups, " ");
     while (token) {
-        if (g_strcmp0(token, "audio") == 0) { found = true; break; }
+        if (g_strcmp0(token, "audio") == 0) {
+            found = true;
+            break;
+        }
         token = strtok(NULL, " ");
     }
 
@@ -225,7 +254,7 @@ static rt_check_result_t check_audio_group(void) {
         r.status = RT_PASS;
         r.detail = g_strdup("Member of audio group");
     } else {
-        const char* user = g_get_user_name();
+        const char *user = g_get_user_name();
         r.status = RT_FAIL;
         r.detail = g_strdup("Not in audio group — RT priority limits may not apply");
         r.fix_cmd = "sudo usermod -aG audio <user> (then log out and back in)";
@@ -236,7 +265,9 @@ static rt_check_result_t check_audio_group(void) {
     return r;
 }
 
-static rt_check_result_t check_rtprio_limits(void) {
+static rt_check_result_t
+check_rtprio_limits(void)
+{
     rt_check_result_t r = {
         .name = "RT priority limits (rtprio/memlock)",
         .needs_root = true,
@@ -249,8 +280,8 @@ static rt_check_result_t check_rtprio_limits(void) {
     };
 
     /* Use ulimit from a subshell to check effective limits */
-    char* rtprio = run_cmd("sh -c 'ulimit -r'");
-    char* memlock = run_cmd("sh -c 'ulimit -l'");
+    char *rtprio = run_cmd("sh -c 'ulimit -r'");
+    char *memlock = run_cmd("sh -c 'ulimit -l'");
 
     if (!rtprio) {
         r.status = RT_SKIP;
@@ -260,16 +291,20 @@ static rt_check_result_t check_rtprio_limits(void) {
     }
 
     long rt_val = strtol(rtprio, NULL, 10);
-    bool memlock_ok = memlock && (g_strcmp0(memlock, "unlimited") == 0 || strtol(memlock, NULL, 10) > 1048576);
+    bool memlock_ok
+        = memlock && (g_strcmp0(memlock, "unlimited") == 0 || strtol(memlock, NULL, 10) > 1048576);
 
     if (rt_val >= 80 && memlock_ok) {
         r.status = RT_PASS;
         r.detail = g_strdup_printf("rtprio=%s memlock=%s", rtprio, memlock);
     } else {
         r.status = RT_FAIL;
-        r.detail = g_strdup_printf("rtprio=%s memlock=%s (need rtprio>=80, memlock>=1GB or unlimited)",
-                                   rtprio, memlock ? memlock : "?");
-        r.fix_cmd = "Create /etc/security/limits.d/99-quadrature-audio.conf with: @audio - rtprio 95 / @audio - memlock unlimited";
+        r.detail
+            = g_strdup_printf("rtprio=%s memlock=%s (need rtprio>=80, memlock>=1GB or unlimited)",
+                              rtprio,
+                              memlock ? memlock : "?");
+        r.fix_cmd = "Create /etc/security/limits.d/99-quadrature-audio.conf with: @audio - rtprio "
+                    "95 / @audio - memlock unlimited";
     }
 
     g_free(rtprio);
@@ -277,13 +312,15 @@ static rt_check_result_t check_rtprio_limits(void) {
     return r;
 }
 
-static rt_check_result_t check_cpu_governor(void) {
+static rt_check_result_t
+check_cpu_governor(void)
+{
     rt_check_result_t r = {
         .name = "CPU frequency governor",
         .needs_root = true,
     };
 
-    char* gov = run_cmd("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
+    char *gov = run_cmd("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
     if (!gov) {
         r.status = RT_SKIP;
         r.detail = g_strdup("Could not read CPU governor (cpufreq not available?)");
@@ -303,10 +340,12 @@ static rt_check_result_t check_cpu_governor(void) {
     return r;
 }
 
-static rt_check_result_t check_threadirqs(void) {
+static rt_check_result_t
+check_threadirqs(void)
+{
     rt_check_result_t r = { .name = "Kernel threadirqs" };
 
-    char* cmdline = run_cmd("cat /proc/cmdline");
+    char *cmdline = run_cmd("cat /proc/cmdline");
     if (!cmdline) {
         r.status = RT_SKIP;
         r.detail = g_strdup("Could not read /proc/cmdline");
@@ -326,10 +365,12 @@ static rt_check_result_t check_threadirqs(void) {
     return r;
 }
 
-static rt_check_result_t check_cstate(void) {
+static rt_check_result_t
+check_cstate(void)
+{
     rt_check_result_t r = { .name = "CPU C-state depth" };
 
-    char* cmdline = run_cmd("cat /proc/cmdline");
+    char *cmdline = run_cmd("cat /proc/cmdline");
     if (!cmdline) {
         r.status = RT_SKIP;
         r.detail = g_strdup("Could not read /proc/cmdline");
@@ -337,7 +378,7 @@ static rt_check_result_t check_cstate(void) {
     }
 
     bool has_max_cstate = strstr(cmdline, "processor.max_cstate=") != NULL
-                       || strstr(cmdline, "intel_idle.max_cstate=") != NULL;
+                          || strstr(cmdline, "intel_idle.max_cstate=") != NULL;
 
     if (has_max_cstate) {
         r.status = RT_PASS;
@@ -345,7 +386,8 @@ static rt_check_result_t check_cstate(void) {
     } else {
         r.status = RT_WARN;
         r.detail = g_strdup("No C-state limit — deep sleep states can cause >100µs wakeup latency");
-        r.fix_cmd = "Add 'processor.max_cstate=1 intel_idle.max_cstate=0' to kernel boot parameters";
+        r.fix_cmd
+            = "Add 'processor.max_cstate=1 intel_idle.max_cstate=0' to kernel boot parameters";
     }
 
     g_free(cmdline);
@@ -357,10 +399,12 @@ static rt_check_result_t check_cstate(void) {
 // =============================================================================
 
 /** Write PipeWire drop-in config for RT priority and suspend-on-idle. */
-static bool apply_pipewire_dropin(const rt_options_t* opts) {
-    const char* config_dir = NULL;
-    char* dropin_dir = NULL;
-    char* dropin_path = NULL;
+static bool
+apply_pipewire_dropin(const rt_options_t *opts)
+{
+    const char *config_dir = NULL;
+    char *dropin_dir = NULL;
+    char *dropin_path = NULL;
     bool ok = false;
 
     config_dir = g_get_user_config_dir(); /* ~/.config */
@@ -373,32 +417,32 @@ static bool apply_pipewire_dropin(const rt_options_t* opts) {
         goto out;
     }
 
-    const char* content =
-        "# Generated by quadrature-cli setup-rt --apply\n"
-        "# Optimizes PipeWire for low-latency audio playback.\n"
-        "#\n"
-        "# RT priority: ensure PipeWire graph runs at high RT priority.\n"
-        "# suspend-on-idle: disable to prevent latency spikes on stream resume.\n"
-        "#\n"
-        "# Safe to delete — re-run 'quadrature-cli setup-rt --apply' to regenerate.\n"
-        "\n"
-        "context.properties = {\n"
-        "    default.clock.rt-prio = 88\n"
-        "    default.clock.rt-time-hard = 200000\n"
-        "    default.clock.rt-time-soft = 200000\n"
-        "}\n"
-        "\n"
-        "# Disable suspend-on-idle to avoid stream resume latency\n"
-        "context.modules = [\n"
-        "    { name = libpipewire-module-rt\n"
-        "      args = {\n"
-        "          nice.level   = -11\n"
-        "          rt.prio      = 88\n"
-        "          rt.time.hard = 200000\n"
-        "          rt.time.soft = 200000\n"
-        "      }\n"
-        "    }\n"
-        "]\n";
+    const char *content
+        = "# Generated by quadrature-cli setup-rt --apply\n"
+          "# Optimizes PipeWire for low-latency audio playback.\n"
+          "#\n"
+          "# RT priority: ensure PipeWire graph runs at high RT priority.\n"
+          "# suspend-on-idle: disable to prevent latency spikes on stream resume.\n"
+          "#\n"
+          "# Safe to delete — re-run 'quadrature-cli setup-rt --apply' to regenerate.\n"
+          "\n"
+          "context.properties = {\n"
+          "    default.clock.rt-prio = 88\n"
+          "    default.clock.rt-time-hard = 200000\n"
+          "    default.clock.rt-time-soft = 200000\n"
+          "}\n"
+          "\n"
+          "# Disable suspend-on-idle to avoid stream resume latency\n"
+          "context.modules = [\n"
+          "    { name = libpipewire-module-rt\n"
+          "      args = {\n"
+          "          nice.level   = -11\n"
+          "          rt.prio      = 88\n"
+          "          rt.time.hard = 200000\n"
+          "          rt.time.soft = 200000\n"
+          "      }\n"
+          "    }\n"
+          "]\n";
 
     if (!g_file_set_contents(dropin_path, content, -1, NULL)) {
         fprintf(stderr, "Failed to write %s\n", dropin_path);
@@ -416,23 +460,26 @@ out:
     return ok;
 }
 
-static void apply_system_fixes(const rt_check_result_t* checks, int count) {
+static void
+apply_system_fixes(const rt_check_result_t *checks, int count)
+{
     bool has_system_fixes = false;
 
     for (int i = 0; i < count; i++) {
-        if (checks[i].needs_root && checks[i].fix_cmd &&
-            (checks[i].status == RT_FAIL || checks[i].status == RT_WARN)) {
+        if (checks[i].needs_root && checks[i].fix_cmd
+            && (checks[i].status == RT_FAIL || checks[i].status == RT_WARN)) {
             has_system_fixes = true;
             break;
         }
     }
 
-    if (!has_system_fixes) return;
+    if (!has_system_fixes)
+        return;
 
     printf("\n  The following fixes require root privileges:\n\n");
     for (int i = 0; i < count; i++) {
-        if (checks[i].needs_root && checks[i].fix_cmd &&
-            (checks[i].status == RT_FAIL || checks[i].status == RT_WARN)) {
+        if (checks[i].needs_root && checks[i].fix_cmd
+            && (checks[i].status == RT_FAIL || checks[i].status == RT_WARN)) {
             printf("    %s\n", checks[i].fix_cmd);
         }
     }
@@ -443,7 +490,9 @@ static void apply_system_fixes(const rt_check_result_t* checks, int count) {
 // Entry Point
 // =============================================================================
 
-static void print_help(void) {
+static void
+print_help(void)
+{
     printf("Usage: quadrature-cli setup-rt [options]\n\n"
            "Check and configure the system for realtime audio.\n\n"
            "Options:\n"
@@ -453,24 +502,32 @@ static void print_help(void) {
            "  -h, --help      Show help\n");
 }
 
-int cli_setup_rt(int argc, char** argv) {
+int
+cli_setup_rt(int argc, char **argv)
+{
     rt_options_t opts = { .apply = false, .verbose = false };
 
-    static struct option long_options[] = {
-        {"apply",   no_argument, 0, 'a'},
-        {"verbose", no_argument, 0, 'v'},
-        {"help",    no_argument, 0, 'h'},
-        {0, 0, 0, 0}
-    };
+    static struct option long_options[] = { { "apply", no_argument, 0, 'a' },
+                                            { "verbose", no_argument, 0, 'v' },
+                                            { "help", no_argument, 0, 'h' },
+                                            { 0, 0, 0, 0 } };
 
     optind = 1;
     int opt;
     while ((opt = getopt_long(argc, argv, "avh", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'a': opts.apply = true;    break;
-            case 'v': opts.verbose = true;  break;
-            case 'h': print_help();         return 0;
-            default:  print_help();         return 1;
+        case 'a':
+            opts.apply = true;
+            break;
+        case 'v':
+            opts.verbose = true;
+            break;
+        case 'h':
+            print_help();
+            return 0;
+        default:
+            print_help();
+            return 1;
         }
     }
 
@@ -479,33 +536,34 @@ int cli_setup_rt(int argc, char** argv) {
 
     /* Run all checks */
     rt_check_result_t checks[] = {
-        check_pipewire_running(),
-        check_force_quantum(),
-        check_suspend_on_idle(),
-        check_rtkit(),
-        check_audio_group(),
-        check_rtprio_limits(),
-        check_cpu_governor(),
-        check_threadirqs(),
+        check_pipewire_running(), check_force_quantum(),
+        check_suspend_on_idle(),  check_rtkit(),
+        check_audio_group(),      check_rtprio_limits(),
+        check_cpu_governor(),     check_threadirqs(),
         check_cstate(),
     };
     int check_count = (int)(sizeof(checks) / sizeof(checks[0]));
 
     /* Print results */
     printf("PipeWire:\n");
-    for (int i = 0; i < 3; i++) print_check(&checks[i]);
+    for (int i = 0; i < 3; i++)
+        print_check(&checks[i]);
 
     printf("\nSystem:\n");
-    for (int i = 3; i < 7; i++) print_check(&checks[i]);
+    for (int i = 3; i < 7; i++)
+        print_check(&checks[i]);
 
     printf("\nKernel:\n");
-    for (int i = 7; i < check_count; i++) print_check(&checks[i]);
+    for (int i = 7; i < check_count; i++)
+        print_check(&checks[i]);
 
     /* Count issues */
     int fails = 0, warns = 0;
     for (int i = 0; i < check_count; i++) {
-        if (checks[i].status == RT_FAIL) fails++;
-        if (checks[i].status == RT_WARN) warns++;
+        if (checks[i].status == RT_FAIL)
+            fails++;
+        if (checks[i].status == RT_WARN)
+            warns++;
     }
 
     printf("\n");
@@ -522,8 +580,8 @@ int cli_setup_rt(int argc, char** argv) {
         /* User-level: PipeWire drop-in config */
         bool need_pw_config = false;
         for (int i = 1; i < 4; i++) {
-            if (checks[i].can_auto_apply &&
-                (checks[i].status == RT_FAIL || checks[i].status == RT_WARN)) {
+            if (checks[i].can_auto_apply
+                && (checks[i].status == RT_FAIL || checks[i].status == RT_WARN)) {
                 need_pw_config = true;
                 break;
             }
@@ -542,7 +600,8 @@ int cli_setup_rt(int argc, char** argv) {
     }
 
     /* Cleanup */
-    for (int i = 0; i < check_count; i++) free_check(&checks[i]);
+    for (int i = 0; i < check_count; i++)
+        free_check(&checks[i]);
 
     return (fails > 0) ? 1 : 0;
 }

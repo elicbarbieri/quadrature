@@ -40,14 +40,14 @@ typedef struct quadrature_meta_db quadrature_meta_db_t;
  * All string fields are owned by the array; free with db_meta_links_free().
  */
 typedef struct {
-    char* link_type_gid;    /* link_type.gid (UUID string) */
-    char* link_type_name;   /* e.g. "producer", "remixer", "vocal" */
-    char* artist_mbid;      /* artist.gid (UUID string) */
-    char* artist_name;      /* canonical artist name */
-    char* artist_sort_name; /* sort name; may be NULL */
-    char* artist_type;      /* "Person", "Group", etc.; may be NULL */
-    char* entity0_credit;   /* credited name override; NULL = use artist_name */
-    char* attributes;       /* comma-separated attribute names; NULL if none */
+    char *link_type_gid;    /* link_type.gid (UUID string) */
+    char *link_type_name;   /* e.g. "producer", "remixer", "vocal" */
+    char *artist_mbid;      /* artist.gid (UUID string) */
+    char *artist_name;      /* canonical artist name */
+    char *artist_sort_name; /* sort name; may be NULL */
+    char *artist_type;      /* "Person", "Group", etc.; may be NULL */
+    char *entity0_credit;   /* credited name override; NULL = use artist_name */
+    char *attributes;       /* comma-separated attribute names; NULL if none */
 } db_meta_link_t;
 
 /**
@@ -55,12 +55,12 @@ typedef struct {
  * All string fields are owned; free with db_meta_release_free().
  */
 typedef struct {
-    char* release_date;     /* "YYYY-MM-DD", "YYYY-MM", or "YYYY"; may be NULL */
-    char* release_type;     /* "Album", "EP", "Single", etc.; may be NULL */
-    char* label;            /* Record label name; may be NULL */
-    char* catalog_number;   /* Label catalog number; may be NULL */
-    char* barcode;          /* UPC/barcode; may be NULL */
-    char* genres;           /* Semicolon-separated curated MB genres; may be NULL */
+    char *release_date;   /* "YYYY-MM-DD", "YYYY-MM", or "YYYY"; may be NULL */
+    char *release_type;   /* "Album", "EP", "Single", etc.; may be NULL */
+    char *label;          /* Record label name; may be NULL */
+    char *catalog_number; /* Label catalog number; may be NULL */
+    char *barcode;        /* UPC/barcode; may be NULL */
+    char *genres;         /* Semicolon-separated curated MB genres; may be NULL */
 } db_meta_release_t;
 
 /* =============================================================================
@@ -71,8 +71,7 @@ typedef struct {
  * Open (or create) the metadata DB at {library_root}/quadrature-metadata.sqlite.
  * Applies schema and pragmas. Used by Phase 4 writer.
  */
-quadrature_result_t db_meta_open(const char* library_root,
-                                  quadrature_meta_db_t** out);
+quadrature_result_t db_meta_open(const char *library_root, quadrature_meta_db_t **out);
 
 /**
  * Open the metadata DB in ATTACH mode — attaches quadrature-metadata.sqlite
@@ -84,28 +83,27 @@ quadrature_result_t db_meta_open(const char* library_root,
  * transaction). db_meta_close() will DETACH but leave the main connection
  * open.
  */
-quadrature_result_t db_meta_open_attached(quadrature_db_t* main_db,
-                                           const char* library_root,
-                                           quadrature_meta_db_t** out);
+quadrature_result_t db_meta_open_attached(quadrature_db_t *main_db,
+                                          const char *library_root,
+                                          quadrature_meta_db_t **out);
 
 /**
  * Open the metadata DB read-only. Returns QUADRATURE_ERROR_FILE_NOT_FOUND if
  * the file does not exist (Phase 4 never ran). Used by the UI.
  */
-quadrature_result_t db_meta_open_readonly(const char* library_root,
-                                           quadrature_meta_db_t** out);
+quadrature_result_t db_meta_open_readonly(const char *library_root, quadrature_meta_db_t **out);
 
 /**
  * Close and free the metadata DB handle.
  */
-void db_meta_close(quadrature_meta_db_t* db);
+void db_meta_close(quadrature_meta_db_t *db);
 
 /* =============================================================================
  * Transactions (write path)
  * ============================================================================= */
 
-quadrature_result_t db_meta_begin(quadrature_meta_db_t* db);
-quadrature_result_t db_meta_commit(quadrature_meta_db_t* db);
+quadrature_result_t db_meta_begin(quadrature_meta_db_t *db);
+quadrature_result_t db_meta_commit(quadrature_meta_db_t *db);
 
 /* =============================================================================
  * Write Operations (Phase 4 only)
@@ -114,59 +112,59 @@ quadrature_result_t db_meta_commit(quadrature_meta_db_t* db);
 /**
  * Upsert the (release_mbid, disc_num, track_num) -> recording_mbid bridge row.
  */
-quadrature_result_t db_meta_upsert_recording(quadrature_meta_db_t* db,
-    const char* recording_mbid,
-    const char* release_mbid,
-    int disc_num,
-    int track_num);
+quadrature_result_t db_meta_upsert_recording(quadrature_meta_db_t *db,
+                                             const char *recording_mbid,
+                                             const char *release_mbid,
+                                             int disc_num,
+                                             int track_num);
 
 /**
  * Upsert a link_type row by its GID.
  */
-quadrature_result_t db_meta_upsert_link_type(quadrature_meta_db_t* db,
-    const char* link_type_gid,
-    const char* name,
-    const char* description);
+quadrature_result_t db_meta_upsert_link_type(quadrature_meta_db_t *db,
+                                             const char *link_type_gid,
+                                             const char *name,
+                                             const char *description);
 
 /**
  * Upsert an artist row by its MBID.
  */
-quadrature_result_t db_meta_upsert_artist(quadrature_meta_db_t* db,
-    const char* artist_mbid,
-    const char* name,
-    const char* sort_name,
-    const char* artist_type);
+quadrature_result_t db_meta_upsert_artist(quadrature_meta_db_t *db,
+                                          const char *artist_mbid,
+                                          const char *name,
+                                          const char *sort_name,
+                                          const char *artist_type);
 
 /**
  * Insert one recording_links row. Call db_meta_delete_recording_links() first
  * if re-resolving to avoid duplicate rows.
  */
-quadrature_result_t db_meta_insert_recording_link(quadrature_meta_db_t* db,
-    const char* recording_mbid,
-    const char* artist_mbid,
-    const char* link_type_gid,
-    const char* entity0_credit,
-    const char* attributes);
+quadrature_result_t db_meta_insert_recording_link(quadrature_meta_db_t *db,
+                                                  const char *recording_mbid,
+                                                  const char *artist_mbid,
+                                                  const char *link_type_gid,
+                                                  const char *entity0_credit,
+                                                  const char *attributes);
 
 /**
  * Delete all recording_links rows for a recording_mbid. Call before
  * re-inserting on re-resolve to keep data fresh.
  */
-quadrature_result_t db_meta_delete_recording_links(quadrature_meta_db_t* db,
-    const char* recording_mbid);
+quadrature_result_t db_meta_delete_recording_links(quadrature_meta_db_t *db,
+                                                   const char *recording_mbid);
 
 /**
  * Upsert release-level metadata (date, type, label, catalog, barcode, genres).
  * Called by Phase 4 after successful resolution.
  */
-quadrature_result_t db_meta_upsert_release(quadrature_meta_db_t* db,
-    const char* release_mbid,
-    const char* release_date,
-    const char* release_type,
-    const char* label,
-    const char* catalog_number,
-    const char* barcode,
-    const char* genres);
+quadrature_result_t db_meta_upsert_release(quadrature_meta_db_t *db,
+                                           const char *release_mbid,
+                                           const char *release_date,
+                                           const char *release_type,
+                                           const char *label,
+                                           const char *catalog_number,
+                                           const char *barcode,
+                                           const char *genres);
 
 /* =============================================================================
  * Read Operations (UI)
@@ -177,40 +175,36 @@ quadrature_result_t db_meta_upsert_release(quadrature_meta_db_t* db,
  * On success, *out is a g_malloc'd string the caller must g_free().
  * Returns QUADRATURE_ERROR_FILE_NOT_FOUND if no row exists.
  */
-quadrature_result_t db_meta_get_recording_mbid(quadrature_meta_db_t* db,
-    const char* release_mbid,
-    int disc_num,
-    int track_num,
-    char** out);
+quadrature_result_t db_meta_get_recording_mbid(
+    quadrature_meta_db_t *db, const char *release_mbid, int disc_num, int track_num, char **out);
 
 /**
  * Fetch all recording_links rows for a recording_mbid.
  * *out is a heap-allocated array of *count elements; free with db_meta_links_free().
  * Returns QUADRATURE_OK with count=0 if no links exist.
  */
-quadrature_result_t db_meta_get_links(quadrature_meta_db_t* db,
-    const char* recording_mbid,
-    db_meta_link_t** out,
-    size_t* count);
+quadrature_result_t db_meta_get_links(quadrature_meta_db_t *db,
+                                      const char *recording_mbid,
+                                      db_meta_link_t **out,
+                                      size_t *count);
 
 /**
  * Free a db_meta_link_t array returned by db_meta_get_links().
  */
-void db_meta_links_free(db_meta_link_t* links, size_t count);
+void db_meta_links_free(db_meta_link_t *links, size_t count);
 
 /**
  * Fetch release-level metadata by MBID.
  * On success, *out is a heap-allocated struct; free with db_meta_release_free().
  * Returns QUADRATURE_ERROR_FILE_NOT_FOUND if no row exists.
  */
-quadrature_result_t db_meta_get_release(quadrature_meta_db_t* db,
-    const char* release_mbid,
-    db_meta_release_t** out);
+quadrature_result_t
+db_meta_get_release(quadrature_meta_db_t *db, const char *release_mbid, db_meta_release_t **out);
 
 /**
  * Free a db_meta_release_t returned by db_meta_get_release().
  */
-void db_meta_release_free(db_meta_release_t* release);
+void db_meta_release_free(db_meta_release_t *release);
 
 /* =============================================================================
  * Credit Bridge Queries (artist-centric, for navigation & search)
@@ -225,8 +219,8 @@ typedef struct {
     char *release_mbid;
     int disc_num;
     int track_num;
-    char *link_type_name;   /* "producer", "vocal", "instrument" */
-    char *attributes;       /* "guitar", "bass", etc. (NULL if none) */
+    char *link_type_name; /* "producer", "vocal", "instrument" */
+    char *attributes;     /* "guitar", "bass", etc. (NULL if none) */
 } db_meta_artist_credit_t;
 
 /**
@@ -234,10 +228,11 @@ typedef struct {
  * link_type_gid (pass NULL for all roles).
  * Returns positional tuples that can be resolved to main DB track_ids.
  */
-quadrature_result_t db_meta_get_credits_by_artist(
-    quadrature_meta_db_t *db, const char *artist_mbid,
-    const char *link_type_gid_filter,
-    db_meta_artist_credit_t **out, size_t *count);
+quadrature_result_t db_meta_get_credits_by_artist(quadrature_meta_db_t *db,
+                                                  const char *artist_mbid,
+                                                  const char *link_type_gid_filter,
+                                                  db_meta_artist_credit_t **out,
+                                                  size_t *count);
 
 void db_meta_artist_credits_free(db_meta_artist_credit_t *credits, size_t count);
 
@@ -249,16 +244,18 @@ typedef struct {
     char *artist_mbid;
     char *name;
     char *sort_name;
-    char *artist_type;  /* "Person", "Group", etc. */
+    char *artist_type; /* "Person", "Group", etc. */
 } db_meta_artist_search_result_t;
 
 /**
  * Search metadata artists by name using LIKE '%query%' COLLATE NOCASE.
  * The artists table has <5K rows — no FTS needed.
  */
-quadrature_result_t db_meta_search_artists(
-    quadrature_meta_db_t *db, const char *query,
-    size_t limit, db_meta_artist_search_result_t **out, size_t *count);
+quadrature_result_t db_meta_search_artists(quadrature_meta_db_t *db,
+                                           const char *query,
+                                           size_t limit,
+                                           db_meta_artist_search_result_t **out,
+                                           size_t *count);
 
 void db_meta_artist_search_results_free(db_meta_artist_search_result_t *results, size_t count);
 
@@ -269,7 +266,7 @@ void db_meta_artist_search_results_free(db_meta_artist_search_result_t *results,
 /**
  * Issue a WAL checkpoint (PASSIVE mode). Call before closing after a write session.
  */
-quadrature_result_t db_meta_checkpoint(quadrature_meta_db_t* db);
+quadrature_result_t db_meta_checkpoint(quadrature_meta_db_t *db);
 
 /* =============================================================================
  * Bios DB — Artist biographies (separate from metadata DB)
@@ -281,18 +278,22 @@ quadrature_result_t db_meta_checkpoint(quadrature_meta_db_t* db);
 
 typedef struct quadrature_bios_db quadrature_bios_db_t;
 
-quadrature_result_t db_bios_open(const char* library_root, quadrature_bios_db_t** out);
-quadrature_result_t db_bios_open_readonly(const char* library_root, quadrature_bios_db_t** out);
-void db_bios_close(quadrature_bios_db_t* db);
-quadrature_result_t db_bios_begin(quadrature_bios_db_t* db);
-quadrature_result_t db_bios_commit(quadrature_bios_db_t* db);
-quadrature_result_t db_bios_checkpoint(quadrature_bios_db_t* db);
-quadrature_result_t db_bios_upsert(quadrature_bios_db_t* db, const char* artist_mbid,
-                                    const char* bio_text, const char* wiki_url);
-quadrature_result_t db_bios_get(quadrature_bios_db_t* db, const char* artist_mbid,
-                                 char** bio_text_out, char** wiki_url_out);
-quadrature_result_t db_bios_exists(quadrature_bios_db_t* db, const char* artist_mbid,
-                                    bool* exists_out);
+quadrature_result_t db_bios_open(const char *library_root, quadrature_bios_db_t **out);
+quadrature_result_t db_bios_open_readonly(const char *library_root, quadrature_bios_db_t **out);
+void db_bios_close(quadrature_bios_db_t *db);
+quadrature_result_t db_bios_begin(quadrature_bios_db_t *db);
+quadrature_result_t db_bios_commit(quadrature_bios_db_t *db);
+quadrature_result_t db_bios_checkpoint(quadrature_bios_db_t *db);
+quadrature_result_t db_bios_upsert(quadrature_bios_db_t *db,
+                                   const char *artist_mbid,
+                                   const char *bio_text,
+                                   const char *wiki_url);
+quadrature_result_t db_bios_get(quadrature_bios_db_t *db,
+                                const char *artist_mbid,
+                                char **bio_text_out,
+                                char **wiki_url_out);
+quadrature_result_t
+db_bios_exists(quadrature_bios_db_t *db, const char *artist_mbid, bool *exists_out);
 
 #ifdef __cplusplus
 }

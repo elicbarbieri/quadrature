@@ -18,8 +18,8 @@
 // =============================================================================
 
 typedef enum {
-    ERROR_ITEM_FOLDER,   // A directory that contains errors (or subdirs with errors)
-    ERROR_ITEM_ERROR,    // An actual error entry
+    ERROR_ITEM_FOLDER, // A directory that contains errors (or subdirs with errors)
+    ERROR_ITEM_ERROR,  // An actual error entry
 } ErrorItemKind;
 
 #define ERROR_TYPE_ITEM (error_item_get_type())
@@ -29,26 +29,32 @@ struct _ErrorItem {
     GObject parent;
     ErrorItemKind kind;
 
-    char *path;           // Full path (folder path or error path)
-    char *display_name;   // What to show (folder name or error message)
-    size_t error_count;   // For folders: count of errors underneath
-    int64_t created_at;   // For errors: timestamp
+    char *path;         // Full path (folder path or error path)
+    char *display_name; // What to show (folder name or error message)
+    size_t error_count; // For folders: count of errors underneath
+    int64_t created_at; // For errors: timestamp
 };
 
 G_DEFINE_FINAL_TYPE(ErrorItem, error_item, G_TYPE_OBJECT)
 
-static void error_item_finalize(GObject *obj) {
+static void
+error_item_finalize(GObject *obj)
+{
     ErrorItem *item = (ErrorItem *)obj;
     g_free(item->path);
     g_free(item->display_name);
     G_OBJECT_CLASS(error_item_parent_class)->finalize(obj);
 }
 
-static void error_item_class_init(ErrorItemClass *klass) {
+static void
+error_item_class_init(ErrorItemClass *klass)
+{
     G_OBJECT_CLASS(klass)->finalize = error_item_finalize;
 }
 
-static void error_item_init(ErrorItem *self) {
+static void
+error_item_init(ErrorItem *self)
+{
     self->kind = ERROR_ITEM_FOLDER;
     self->path = NULL;
     self->display_name = NULL;
@@ -68,7 +74,7 @@ typedef struct {
     GtkTreeListModel *tree_model;
     GListStore *root_store;
 
-    char *path_filter;  /* Optional path prefix filter (library root) */
+    char *path_filter; /* Optional path prefix filter (library root) */
 
     void (*on_navigate_to_path)(const char *path, gpointer data);
     gpointer user_data;
@@ -76,7 +82,9 @@ typedef struct {
 
 static const char *ERRORS_VIEW_DATA_KEY = "errors-view-data";
 
-static void errors_view_data_free(gpointer data) {
+static void
+errors_view_data_free(gpointer data)
+{
     ErrorsViewData *vd = data;
     if (vd) {
         g_free(vd->path_filter);
@@ -88,17 +96,25 @@ static void errors_view_data_free(gpointer data) {
 // Path Utilities
 // =============================================================================
 
-static char *get_basename(const char *path) {
-    if (!path) return g_strdup("");
+static char *
+get_basename(const char *path)
+{
+    if (!path)
+        return g_strdup("");
     const char *last_slash = strrchr(path, '/');
-    if (!last_slash) return g_strdup(path);
+    if (!last_slash)
+        return g_strdup(path);
     return g_strdup(last_slash + 1);
 }
 
-static bool path_is_under(const char *path, const char *prefix) {
-    if (!prefix || !*prefix) return true;
+static bool
+path_is_under(const char *path, const char *prefix)
+{
+    if (!prefix || !*prefix)
+        return true;
     size_t prefix_len = strlen(prefix);
-    if (strncmp(path, prefix, prefix_len) != 0) return false;
+    if (strncmp(path, prefix, prefix_len) != 0)
+        return false;
     return path[prefix_len] == '\0' || path[prefix_len] == '/';
 }
 
@@ -106,7 +122,9 @@ static bool path_is_under(const char *path, const char *prefix) {
 // Tree Model Creation Callbacks
 // =============================================================================
 
-static GListModel *create_children_model(gpointer item, gpointer user_data) {
+static GListModel *
+create_children_model(gpointer item, gpointer user_data)
+{
     ErrorsViewData *vd = user_data;
     ErrorItem *parent = (ErrorItem *)item;
 
@@ -140,10 +158,12 @@ static GListModel *create_children_model(gpointer item, gpointer user_data) {
     for (size_t i = 0; i < error_count; i++) {
         const char *error_path = errors[i].path;
 
-        if (!path_is_under(error_path, folder_path)) continue;
+        if (!path_is_under(error_path, folder_path))
+            continue;
 
         const char *rest = error_path + folder_len;
-        if (*rest == '/') rest++;
+        if (*rest == '/')
+            rest++;
 
         if (*rest == '\0') {
             /* Error is AT this exact folder path */
@@ -165,7 +185,8 @@ static GListModel *create_children_model(gpointer item, gpointer user_data) {
 
             char *child_path = g_strdup_printf("%s/%s", folder_path, first_component);
             g_hash_table_replace(children, g_strdup(first_component), child_path);
-            g_hash_table_replace(child_counts, g_strdup(first_component), GSIZE_TO_POINTER(count + 1));
+            g_hash_table_replace(
+                child_counts, g_strdup(first_component), GSIZE_TO_POINTER(count + 1));
         }
         g_free(first_component);
     }
@@ -223,7 +244,9 @@ static GListModel *create_children_model(gpointer item, gpointer user_data) {
 
 #define INDENT_PX 20
 
-static void errors_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
+static void
+errors_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
     (void)f;
     (void)data;
 
@@ -247,7 +270,9 @@ static void errors_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer da
     gtk_list_item_set_child(li, box);
 }
 
-static void errors_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
+static void
+errors_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
     (void)f;
     (void)data;
 
@@ -277,7 +302,7 @@ static void errors_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer dat
         /* Folder icon: open/closed based on expanded state */
         gboolean expanded = gtk_tree_list_row_get_expanded(row);
         gtk_image_set_from_icon_name(GTK_IMAGE(icon),
-            expanded ? "folder-open-symbolic" : "folder-symbolic");
+                                     expanded ? "folder-open-symbolic" : "folder-symbolic");
         gtk_widget_set_visible(icon, TRUE);
 
         gtk_label_set_text(GTK_LABEL(label), item->display_name);
@@ -316,13 +341,15 @@ static void errors_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer dat
 // Activation Handler — expand/collapse folders, navigate for errors
 // =============================================================================
 
-static void on_errors_activated(GtkListView *lv, guint pos, gpointer data) {
+static void
+on_errors_activated(GtkListView *lv, guint pos, gpointer data)
+{
     (void)lv;
     ErrorsViewData *vd = data;
 
-    GtkTreeListRow *row = g_list_model_get_item(
-        G_LIST_MODEL(vd->tree_model), pos);
-    if (!row) return;
+    GtkTreeListRow *row = g_list_model_get_item(G_LIST_MODEL(vd->tree_model), pos);
+    if (!row)
+        return;
 
     ErrorItem *item = gtk_tree_list_row_get_item(row);
     if (!item) {
@@ -351,7 +378,9 @@ static void on_errors_activated(GtkListView *lv, guint pos, gpointer data) {
 // Build Root Model
 // =============================================================================
 
-static void build_root_model(ErrorsViewData *vd) {
+static void
+build_root_model(ErrorsViewData *vd)
+{
     g_list_store_remove_all(vd->root_store);
 
     db_indexer_error_t *errors = NULL;
@@ -376,9 +405,11 @@ static void build_root_model(ErrorsViewData *vd) {
 
         const char *rest = error_path;
         if (base_path && *base_path) {
-            if (!path_is_under(error_path, base_path)) continue;
+            if (!path_is_under(error_path, base_path))
+                continue;
             rest = error_path + strlen(base_path);
-            if (*rest == '/') rest++;
+            if (*rest == '/')
+                rest++;
         }
 
         const char *slash = strchr(rest, '/');
@@ -401,7 +432,8 @@ static void build_root_model(ErrorsViewData *vd) {
             }
 
             g_hash_table_replace(children, g_strdup(first_component), child_path);
-            g_hash_table_replace(child_counts, g_strdup(first_component), GSIZE_TO_POINTER(count + 1));
+            g_hash_table_replace(
+                child_counts, g_strdup(first_component), GSIZE_TO_POINTER(count + 1));
         }
         g_free(first_component);
     }
@@ -434,7 +466,9 @@ static void build_root_model(ErrorsViewData *vd) {
 // Public API
 // =============================================================================
 
-GtkWidget *errors_view_new(quadrature_db_t *db) {
+GtkWidget *
+errors_view_new(quadrature_db_t *db)
+{
     GtkWidget *container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(container, "errors-view-container");
 
@@ -463,13 +497,12 @@ GtkWidget *errors_view_new(quadrature_db_t *db) {
     vd->root_store = g_list_store_new(error_item_get_type());
 
     /* Tree list model with lazy children */
-    vd->tree_model = gtk_tree_list_model_new(
-        G_LIST_MODEL(vd->root_store),
-        FALSE,  // passthrough
-        FALSE,  // autoexpand
-        create_children_model,
-        vd,
-        NULL);
+    vd->tree_model = gtk_tree_list_model_new(G_LIST_MODEL(vd->root_store),
+                                             FALSE, // passthrough
+                                             FALSE, // autoexpand
+                                             create_children_model,
+                                             vd,
+                                             NULL);
 
     /* Selection model */
     GtkSingleSelection *sel = gtk_single_selection_new(G_LIST_MODEL(vd->tree_model));
@@ -487,8 +520,8 @@ GtkWidget *errors_view_new(quadrature_db_t *db) {
 
     /* Scrolled window */
     GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
-                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_policy(
+        GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), vd->list_view);
     ui_smooth_scroll_attach(GTK_SCROLLED_WINDOW(scroll));
@@ -497,13 +530,17 @@ GtkWidget *errors_view_new(quadrature_db_t *db) {
     return container;
 }
 
-void errors_view_set_db(GtkWidget *view, quadrature_db_t *db) {
+void
+errors_view_set_db(GtkWidget *view, quadrature_db_t *db)
+{
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
     g_assert(vd != NULL);
     vd->db = db;
 }
 
-void errors_view_refresh(GtkWidget *view) {
+void
+errors_view_refresh(GtkWidget *view)
+{
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
     g_assert(vd != NULL);
 
@@ -527,9 +564,11 @@ void errors_view_refresh(GtkWidget *view) {
     build_root_model(vd);
 }
 
-void errors_view_set_callbacks(GtkWidget *view,
-                                void (*on_path)(const char *path, gpointer data),
-                                gpointer user_data) {
+void
+errors_view_set_callbacks(GtkWidget *view,
+                          void (*on_path)(const char *path, gpointer data),
+                          gpointer user_data)
+{
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
     g_assert(vd != NULL);
 
@@ -537,17 +576,22 @@ void errors_view_set_callbacks(GtkWidget *view,
     vd->user_data = user_data;
 }
 
-size_t errors_view_get_count(GtkWidget *view) {
+size_t
+errors_view_get_count(GtkWidget *view)
+{
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
     g_assert(vd != NULL);
-    if (!vd->db) return 0;
+    if (!vd->db)
+        return 0;
 
     size_t count = 0;
     db_get_error_count(vd->db, vd->path_filter, &count);
     return count;
 }
 
-void errors_view_set_path_filter(GtkWidget *view, const char *path_filter) {
+void
+errors_view_set_path_filter(GtkWidget *view, const char *path_filter)
+{
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
     g_assert(vd != NULL);
 

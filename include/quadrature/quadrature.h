@@ -50,9 +50,9 @@ typedef enum {
  * ============================================================================= */
 
 typedef enum {
-    SHUTTLE_MODE_OFF = 0,      /* Speed locked at 1.0x, no processing */
-    SHUTTLE_MODE_KEYLOCK,      /* Variable speed, pitch preserved (Rubberband) */
-    SHUTTLE_MODE_PITCHED       /* Variable speed, pitch shifts (Turntable) */
+    SHUTTLE_MODE_OFF = 0, /* Speed locked at 1.0x, no processing */
+    SHUTTLE_MODE_KEYLOCK, /* Variable speed, pitch preserved (Rubberband) */
+    SHUTTLE_MODE_PITCHED  /* Variable speed, pitch shifts (Turntable) */
 } shuttle_mode_t;
 
 /* =============================================================================
@@ -60,16 +60,16 @@ typedef enum {
  * ============================================================================= */
 
 typedef enum {
-    TRACK_END_STOP = 0,    /* Stop after the current track */
-    TRACK_END_REPEAT,      /* Restart the current track */
-    TRACK_END_AUTOPLAY,    /* Advance to next track in album */
+    TRACK_END_STOP = 0, /* Stop after the current track */
+    TRACK_END_REPEAT,   /* Restart the current track */
+    TRACK_END_AUTOPLAY, /* Advance to next track in album */
 } track_end_mode_t;
 
 /* =============================================================================
  * Constants
  * ============================================================================= */
 
-#define QUADRATURE_MAX_CHANNELS 4
+#define QUADRATURE_MAX_CHANNELS        4
 #define QUADRATURE_MAX_FILENAME_LENGTH 512
 
 #ifdef __cplusplus

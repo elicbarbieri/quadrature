@@ -20,31 +20,36 @@
  * Left-click: simple toggle (XOR)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(library_mask, toggle_on) {
+Test(library_mask, toggle_on)
+{
     /* Lib 0 off, toggle → on */
     uint32_t result = library_mask_after_toggle(LIB(1), 0);
     cr_assert_eq(result, LIB(0) | LIB(1), "expected libs 0+1, got 0x%x", result);
 }
 
-Test(library_mask, toggle_off) {
+Test(library_mask, toggle_off)
+{
     /* Libs 0+1 on, toggle 0 → off */
     uint32_t result = library_mask_after_toggle(LIB(0) | LIB(1), 0);
     cr_assert_eq(result, LIB(1), "expected lib 1 only, got 0x%x", result);
 }
 
-Test(library_mask, toggle_last_falls_back_to_all) {
+Test(library_mask, toggle_last_falls_back_to_all)
+{
     /* Only lib 1 on, toggle 1 → falls back to LIBRARY_MASK_ALL (never 0) */
     uint32_t result = library_mask_after_toggle(LIB(1), 1);
     cr_assert_eq(result, ALL, "expected ALL (fallback), got 0x%x", result);
 }
 
-Test(library_mask, toggle_from_all) {
+Test(library_mask, toggle_from_all)
+{
     /* All on, toggle lib 5 → all except 5 */
     uint32_t result = library_mask_after_toggle(ALL, 5);
     cr_assert_eq(result, ALL ^ LIB(5), "expected all except lib 5, got 0x%x", result);
 }
 
-Test(library_mask, toggle_from_zero) {
+Test(library_mask, toggle_from_zero)
+{
     /* None on, toggle lib 3 → only 3 */
     uint32_t result = library_mask_after_toggle(0, 3);
     cr_assert_eq(result, LIB(3), "expected lib 3 only, got 0x%x", result);
@@ -54,7 +59,8 @@ Test(library_mask, toggle_from_zero) {
  * Shift+click: solo
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(library_mask, solo) {
+Test(library_mask, solo)
+{
     cr_assert_eq(library_mask_solo(0), LIB(0));
     cr_assert_eq(library_mask_solo(1), LIB(1));
     cr_assert_eq(library_mask_solo(31), LIB(31));
@@ -64,7 +70,8 @@ Test(library_mask, solo) {
  * Right-click: always LIBRARY_MASK_ALL
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(library_mask, right_click_selects_all) {
+Test(library_mask, right_click_selects_all)
+{
     cr_assert_eq(LIBRARY_MASK_ALL, UINT32_MAX);
 }
 
@@ -80,7 +87,8 @@ Test(library_mask, right_click_selects_all) {
  * 7. Right-click → all on
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(library_mask, full_workflow) {
+Test(library_mask, full_workflow)
+{
     uint32_t mask = ALL;
 
     /* Step 1: toggle lib 1 off */
@@ -112,7 +120,8 @@ Test(library_mask, full_workflow) {
  * Idempotency: toggling the same lib twice returns to original state
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(library_mask, toggle_idempotent) {
+Test(library_mask, toggle_idempotent)
+{
     uint32_t original = LIB(0) | LIB(3) | LIB(7);
     uint32_t toggled = library_mask_after_toggle(original, 3);
     uint32_t restored = library_mask_after_toggle(toggled, 3);

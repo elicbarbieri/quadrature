@@ -11,13 +11,14 @@
 #include "quadrature/database.h"
 #include <string.h>
 
-static GtkWidget *find_parent_card(GtkWidget *widget) {
+static GtkWidget *
+find_parent_card(GtkWidget *widget)
+{
     GtkWidget *w = widget;
     while (w) {
         if (g_object_get_data(G_OBJECT(w), "release-mbid"))
             return w;
-        if (g_object_get_data(G_OBJECT(w), "album-id") &&
-            gtk_widget_has_css_class(w, "album-card"))
+        if (g_object_get_data(G_OBJECT(w), "album-id") && gtk_widget_has_css_class(w, "album-card"))
             return w;
         w = gtk_widget_get_parent(w);
     }
@@ -26,12 +27,14 @@ static GtkWidget *find_parent_card(GtkWidget *widget) {
 
 /** Accumulated unique roles for a single entity (track or album). */
 typedef struct {
-    int64_t id;                /* track_id or album_id */
-    GPtrArray *roles;          /* unique role strings (owned) */
-    GHashTable *role_set;      /* for dedup */
+    int64_t id;           /* track_id or album_id */
+    GPtrArray *roles;     /* unique role strings (owned) */
+    GHashTable *role_set; /* for dedup */
 } CreditRoleSet;
 
-static void credit_role_set_free(gpointer data) {
+static void
+credit_role_set_free(gpointer data)
+{
     CreditRoleSet *rs = data;
     if (rs) {
         g_ptr_array_unref(rs->roles);
@@ -41,7 +44,9 @@ static void credit_role_set_free(gpointer data) {
 }
 
 /** Create a new CreditRoleSet for the given entity ID. */
-static CreditRoleSet *credit_role_set_new(int64_t id) {
+static CreditRoleSet *
+credit_role_set_new(int64_t id)
+{
     CreditRoleSet *rs = g_new0(CreditRoleSet, 1);
     rs->id = id;
     rs->roles = g_ptr_array_new_with_free_func(g_free);
@@ -50,8 +55,11 @@ static CreditRoleSet *credit_role_set_new(int64_t id) {
 }
 
 /** Add a role to the set if not already present. Always takes ownership of role. */
-static void credit_role_set_add(CreditRoleSet *rs, char *role) {
-    if (!role) return;
+static void
+credit_role_set_add(CreditRoleSet *rs, char *role)
+{
+    if (!role)
+        return;
     if (g_hash_table_contains(rs->role_set, role)) {
         g_free(role);
         return;
@@ -66,7 +74,9 @@ static void credit_role_set_add(CreditRoleSet *rs, char *role) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /** Add a subsection header (smaller than section header). */
-static void popover_add_subsection(GtkWidget *container, const char *title) {
+static void
+popover_add_subsection(GtkWidget *container, const char *title)
+{
     GtkWidget *lbl = gtk_label_new(title);
     gtk_widget_add_css_class(lbl, "track-info-subsection-header");
     gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
@@ -75,7 +85,9 @@ static void popover_add_subsection(GtkWidget *container, const char *title) {
 
 /** Dismiss the ancestor popover, then navigate to the artist.
  * on_album_card_artist_navigate is defined in detail_view.c (non-static). */
-static void on_popover_artist_navigate(GtkButton *btn, gpointer data) {
+static void
+on_popover_artist_navigate(GtkButton *btn, gpointer data)
+{
     GtkWidget *w = GTK_WIDGET(btn);
     while (w && !GTK_IS_POPOVER(w))
         w = gtk_widget_get_parent(w);
@@ -86,29 +98,30 @@ static void on_popover_artist_navigate(GtkButton *btn, gpointer data) {
 }
 
 /** Create a clickable artist button for the popover. */
-static GtkWidget *popover_create_artist_button(int64_t artist_id,
-                                                const char *name,
-                                                UnifiedDetailData *ud) {
+static GtkWidget *
+popover_create_artist_button(int64_t artist_id, const char *name, UnifiedDetailData *ud)
+{
     GtkWidget *btn = gtk_button_new_with_label(name);
     gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
     gtk_widget_add_css_class(btn, "artist-btn");
-    g_object_set_data(G_OBJECT(btn), "artist-id",
-                      GSIZE_TO_POINTER((gsize)artist_id));
-    g_signal_connect(btn, "clicked",
-                     G_CALLBACK(on_popover_artist_navigate), ud);
+    g_object_set_data(G_OBJECT(btn), "artist-id", GSIZE_TO_POINTER((gsize)artist_id));
+    g_signal_connect(btn, "clicked", G_CALLBACK(on_popover_artist_navigate), ud);
     return btn;
 }
 
 /** Dismiss the ancestor popover, then navigate to a credit artist (MBID-based).
  * Checks the MBID bridge: if the artist exists in the main DB, navigate to the
  * library artist view; otherwise, navigate to the credits-only meta artist view. */
-static void on_popover_credit_navigate(GtkButton *btn, gpointer data) {
+static void
+on_popover_credit_navigate(GtkButton *btn, gpointer data)
+{
     UnifiedDetailData *ud = data;
     const char *artist_mbid = g_object_get_data(G_OBJECT(btn), "artist-mbid");
     const char *artist_name = g_object_get_data(G_OBJECT(btn), "artist-name");
     const char *artist_type = g_object_get_data(G_OBJECT(btn), "artist-type");
 
-    if (!artist_mbid) return;
+    if (!artist_mbid)
+        return;
 
     /* Dismiss popover */
     GtkWidget *w = GTK_WIDGET(btn);
@@ -123,7 +136,8 @@ static void on_popover_credit_navigate(GtkButton *btn, gpointer data) {
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int i = 0; i < lib_count && found_artist_id == 0; i++) {
         int bi = library_cache_get_bitmap_index(ud->cache, i);
-        if (!library_cache_get_available(ud->cache, bi)) continue;
+        if (!library_cache_get_available(ud->cache, bi))
+            continue;
         quadrature_db_t *lib_db = library_cache_get_dbs(ud->cache, bi).db;
         if (lib_db) {
             db_get_artist_by_mbid(lib_db, artist_mbid, &found_artist_id);
@@ -145,13 +159,21 @@ static void on_popover_credit_navigate(GtkButton *btn, gpointer data) {
  * Categorize a MusicBrainz link_type_name into a credit bucket.
  * Returns: 0=instrumentalist, 1=vocal, 2=producer, -1=uncategorized (omit).
  */
-static int credit_bucket(const char *link_type_name) {
-    if (!link_type_name) return -1;
-    if (g_strcmp0(link_type_name, "instrument") == 0) return 0;
-    if (g_strcmp0(link_type_name, "vocal") == 0) return 1;
-    if (g_strcmp0(link_type_name, "producer") == 0) return 2;
-    if (g_strcmp0(link_type_name, "co-producer") == 0) return 2;
-    if (g_strcmp0(link_type_name, "remixer") == 0) return 2;
+static int
+credit_bucket(const char *link_type_name)
+{
+    if (!link_type_name)
+        return -1;
+    if (g_strcmp0(link_type_name, "instrument") == 0)
+        return 0;
+    if (g_strcmp0(link_type_name, "vocal") == 0)
+        return 1;
+    if (g_strcmp0(link_type_name, "producer") == 0)
+        return 2;
+    if (g_strcmp0(link_type_name, "co-producer") == 0)
+        return 2;
+    if (g_strcmp0(link_type_name, "remixer") == 0)
+        return 2;
     return -1;
 }
 
@@ -159,7 +181,9 @@ static int credit_bucket(const char *link_type_name) {
  * Format a credit role for display.
  * Caller must g_free() the result.
  */
-static char *format_credit_role(const char *link_type_name, const char *attributes) {
+static char *
+format_credit_role(const char *link_type_name, const char *attributes)
+{
     if (g_strcmp0(link_type_name, "co-producer") == 0)
         return g_strdup("Co Producer");
     if (g_strcmp0(link_type_name, "remixer") == 0)
@@ -195,33 +219,43 @@ static char *format_credit_role(const char *link_type_name, const char *attribut
  * (trivial pointers) and values (GPtrArray with g_free element destructor)
  * are freed when the table is destroyed.  Returns NULL if no credits found.
  */
-static void _roles_array_free(gpointer p) { g_ptr_array_unref(p); }
+static void
+_roles_array_free(gpointer p)
+{
+    g_ptr_array_unref(p);
+}
 
-GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
-                                       const char *artist_mbid,
-                                       const char *artist_name,
-                                       int64_t viewed_artist_id,
-                                       GHashTable *skip_track_ids) {
-    if (!artist_mbid || !ud->settings) return NULL;
+GHashTable *
+collect_credit_album_roles(UnifiedDetailData *ud,
+                           const char *artist_mbid,
+                           const char *artist_name,
+                           int64_t viewed_artist_id,
+                           GHashTable *skip_track_ids)
+{
+    if (!artist_mbid || !ud->settings)
+        return NULL;
 
     /* release_mbid → CreditRoleSet* (internal, freed at end). Keying by MBID
      * collapses the same logical album across libraries into one set. */
-    GHashTable *album_roles = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                                     g_free, credit_role_set_free);
+    GHashTable *album_roles
+        = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, credit_role_set_free);
 
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int li = 0; li < lib_count; li++) {
         int bi = library_cache_get_bitmap_index(ud->cache, li);
         /* Skip libraries not in the active library mask */
-        if (!(ud->library_mask & (1u << bi))) continue;
-        if (!library_cache_get_available(ud->cache, bi)) continue;
+        if (!(ud->library_mask & (1u << bi)))
+            continue;
+        if (!library_cache_get_available(ud->cache, bi))
+            continue;
         library_cache_dbs_t dbs = library_cache_get_dbs(ud->cache, bi);
-        if (!dbs.meta || !dbs.db) continue;
+        if (!dbs.meta || !dbs.db)
+            continue;
 
         db_meta_artist_credit_t *credits = NULL;
         size_t credit_count = 0;
-        quadrature_result_t res = db_meta_get_credits_by_artist(
-            dbs.meta, artist_mbid, NULL, &credits, &credit_count);
+        quadrature_result_t res
+            = db_meta_get_credits_by_artist(dbs.meta, artist_mbid, NULL, &credits, &credit_count);
         if (res != QUADRATURE_OK || credit_count == 0) {
             db_meta_artist_credits_free(credits, credit_count);
             continue;
@@ -229,55 +263,63 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
 
         for (size_t i = 0; i < credit_count; i++) {
             db_meta_artist_credit_t *c = &credits[i];
-            if (!c->release_mbid) continue;
+            if (!c->release_mbid)
+                continue;
 
             char *role = format_credit_role(c->link_type_name, c->attributes);
-            if (!role) continue;
+            if (!role)
+                continue;
 
             /* Resolve to local track_id → global */
             int64_t local_tid = 0;
-            if (db_get_track_by_position(dbs.db, c->release_mbid,
-                    c->disc_num, c->track_num, &local_tid) != QUADRATURE_OK) {
+            if (db_get_track_by_position(
+                    dbs.db, c->release_mbid, c->disc_num, c->track_num, &local_tid)
+                != QUADRATURE_OK) {
                 g_free(role);
                 continue;
             }
             int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(bi, local_tid);
 
             /* Skip tracks from own albums */
-            if (skip_track_ids &&
-                g_hash_table_contains(skip_track_ids,
-                                      GSIZE_TO_POINTER((gsize)track_id))) {
+            if (skip_track_ids
+                && g_hash_table_contains(skip_track_ids, GSIZE_TO_POINTER((gsize)track_id))) {
                 g_free(role);
                 continue;
             }
 
             /* Skip if viewed artist is already a track artist */
             {
-                const GPtrArray *track_artists =
-                    library_cache_get_track_artists(ud->cache, track_id);
+                const GPtrArray *track_artists
+                    = library_cache_get_track_artists(ud->cache, track_id);
                 gboolean already_credited = FALSE;
                 if (track_artists && artist_name) {
                     for (guint j = 0; j < track_artists->len; j++) {
-                        const library_track_artist_t *a =
-                            g_ptr_array_index(track_artists, j);
-                        if (a->artist_id == viewed_artist_id ||
-                            (a->name && g_ascii_strcasecmp(a->name, artist_name) == 0)) {
+                        const library_track_artist_t *a = g_ptr_array_index(track_artists, j);
+                        if (a->artist_id == viewed_artist_id
+                            || (a->name && g_ascii_strcasecmp(a->name, artist_name) == 0)) {
                             already_credited = TRUE;
                             break;
                         }
                     }
                 }
-                if (already_credited) { g_free(role); continue; }
+                if (already_credited) {
+                    g_free(role);
+                    continue;
+                }
             }
 
             const library_track_info_t *track = library_cache_get_track(ud->cache, track_id);
-            if (!track || track->album_id <= 0) { g_free(role); continue; }
+            if (!track || track->album_id <= 0) {
+                g_free(role);
+                continue;
+            }
 
             /* Skip own-album by artist name match */
             {
-                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id, ud->library_mask);
-                if (al && al->artist_name && artist_name &&
-                    g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
+                const library_album_info_t *al
+                    = library_cache_get_album(ud->cache, track->album_id, ud->library_mask);
+                if (al && al->artist_name && artist_name
+                    && g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
                     g_free(role);
                     continue;
                 }
@@ -289,7 +331,7 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
                 ars = credit_role_set_new(track->album_id);
                 g_hash_table_insert(album_roles, g_strdup(c->release_mbid), ars);
             }
-            credit_role_set_add(ars, role);  /* ownership transferred */
+            credit_role_set_add(ars, role); /* ownership transferred */
         }
 
         db_meta_artist_credits_free(credits, credit_count);
@@ -301,8 +343,7 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
     }
 
     /* Convert CreditRoleSet → GPtrArray<char*> in output table, keyed by MBID */
-    GHashTable *out = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                             g_free, _roles_array_free);
+    GHashTable *out = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, _roles_array_free);
     GHashTableIter iter;
     gpointer k, v;
     g_hash_table_iter_init(&iter, album_roles);
@@ -327,39 +368,45 @@ GHashTable *collect_credit_album_roles(UnifiedDetailData *ud,
  * When multiple credits exist for the same track, keeps the highest-priority role.
  * Returns the number of credit tracks appended.
  */
-guint append_credit_rows(UnifiedDetailData *ud,
-                                 const char *artist_mbid,
-                                 const char *artist_name,
-                                 int64_t viewed_artist_id,
-                                 GHashTable *skip_track_ids,
-                                 GHashTable *skip_album_mbids,
-                                 UiRowSizeGroups *track_groups,
-                                 UiRowSizeGroups *album_groups) {
-    if (!artist_mbid || !ud->settings) return 0;
+guint
+append_credit_rows(UnifiedDetailData *ud,
+                   const char *artist_mbid,
+                   const char *artist_name,
+                   int64_t viewed_artist_id,
+                   GHashTable *skip_track_ids,
+                   GHashTable *skip_album_mbids,
+                   UiRowSizeGroups *track_groups,
+                   UiRowSizeGroups *album_groups)
+{
+    if (!artist_mbid || !ud->settings)
+        return 0;
 
     /* Pass 1: collect all unique roles per track position + per album.
      * Albums are keyed by release_mbid so entries for the same logical album
      * from multiple libraries collapse into one row. */
     /* track key "release:disc:track" → CreditRoleSet */
-    GHashTable *track_roles = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                                     g_free, credit_role_set_free);
+    GHashTable *track_roles
+        = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, credit_role_set_free);
     /* release_mbid → CreditRoleSet (stores a representative album_id for display) */
-    GHashTable *album_roles = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                                     g_free, credit_role_set_free);
+    GHashTable *album_roles
+        = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, credit_role_set_free);
 
     int lib_count = library_cache_get_library_count(ud->cache);
     for (int li = 0; li < lib_count; li++) {
         int bi = library_cache_get_bitmap_index(ud->cache, li);
         /* Skip libraries not in the active library mask */
-        if (!(ud->library_mask & (1u << bi))) continue;
-        if (!library_cache_get_available(ud->cache, bi)) continue;
+        if (!(ud->library_mask & (1u << bi)))
+            continue;
+        if (!library_cache_get_available(ud->cache, bi))
+            continue;
         library_cache_dbs_t dbs = library_cache_get_dbs(ud->cache, bi);
-        if (!dbs.meta) continue;
+        if (!dbs.meta)
+            continue;
 
         db_meta_artist_credit_t *credits = NULL;
         size_t credit_count = 0;
-        quadrature_result_t res = db_meta_get_credits_by_artist(
-            dbs.meta, artist_mbid, NULL, &credits, &credit_count);
+        quadrature_result_t res
+            = db_meta_get_credits_by_artist(dbs.meta, artist_mbid, NULL, &credits, &credit_count);
 
         if (res != QUADRATURE_OK || credit_count == 0) {
             db_meta_artist_credits_free(credits, credit_count);
@@ -373,24 +420,25 @@ guint append_credit_rows(UnifiedDetailData *ud,
 
         for (size_t i = 0; i < credit_count; i++) {
             db_meta_artist_credit_t *c = &credits[i];
-            if (!c->release_mbid) continue;
+            if (!c->release_mbid)
+                continue;
 
             /* Format role for this credit */
             char *role = format_credit_role(c->link_type_name, c->attributes);
 
             /* Resolve to local track_id, then convert to global */
             int64_t local_tid = 0;
-            if (db_get_track_by_position(dbs.db, c->release_mbid,
-                    c->disc_num, c->track_num, &local_tid) != QUADRATURE_OK) {
+            if (db_get_track_by_position(
+                    dbs.db, c->release_mbid, c->disc_num, c->track_num, &local_tid)
+                != QUADRATURE_OK) {
                 g_free(role);
                 continue;
             }
             int64_t track_id = LIBRARY_MAKE_GLOBAL_ID(bi, local_tid);
 
             /* Skip tracks from own albums or already shown */
-            if (skip_track_ids &&
-                g_hash_table_contains(skip_track_ids,
-                                      GSIZE_TO_POINTER((gsize)track_id))) {
+            if (skip_track_ids
+                && g_hash_table_contains(skip_track_ids, GSIZE_TO_POINTER((gsize)track_id))) {
                 g_free(role);
                 continue;
             }
@@ -400,21 +448,23 @@ guint append_credit_rows(UnifiedDetailData *ud,
              * same artist can have different global IDs across libraries due
              * to cross-library merging. */
             {
-                const GPtrArray *track_artists =
-                    library_cache_get_track_artists(ud->cache, track_id);
+                const GPtrArray *track_artists
+                    = library_cache_get_track_artists(ud->cache, track_id);
                 gboolean already_credited = FALSE;
                 if (track_artists && artist_name) {
                     for (guint j = 0; j < track_artists->len; j++) {
-                        const library_track_artist_t *a =
-                            g_ptr_array_index(track_artists, j);
-                        if (a->artist_id == viewed_artist_id ||
-                            (a->name && g_ascii_strcasecmp(a->name, artist_name) == 0)) {
+                        const library_track_artist_t *a = g_ptr_array_index(track_artists, j);
+                        if (a->artist_id == viewed_artist_id
+                            || (a->name && g_ascii_strcasecmp(a->name, artist_name) == 0)) {
                             already_credited = TRUE;
                             break;
                         }
                     }
                 }
-                if (already_credited) { g_free(role); continue; }
+                if (already_credited) {
+                    g_free(role);
+                    continue;
+                }
             }
 
             const library_track_info_t *track = library_cache_get_track(ud->cache, track_id);
@@ -423,22 +473,25 @@ guint append_credit_rows(UnifiedDetailData *ud,
              * This catches "appears on own album" cases that the ID check
              * can miss across merged libraries. */
             if (track && track->album_id > 0) {
-                const library_album_info_t *al = library_cache_get_album(ud->cache, track->album_id, ud->library_mask);
-                if (al && al->artist_name && artist_name &&
-                    g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
+                const library_album_info_t *al
+                    = library_cache_get_album(ud->cache, track->album_id, ud->library_mask);
+                if (al && al->artist_name && artist_name
+                    && g_ascii_strcasecmp(al->artist_name, artist_name) == 0) {
                     g_free(role);
                     continue;
                 }
             }
-            if (!track) { g_free(role); continue; }
+            if (!track) {
+                g_free(role);
+                continue;
+            }
 
             /* Accumulate per-album roles (keyed by MBID, not album_id, so
              * the same logical album in multiple libraries collapses). Also
              * skip albums already shown as cache appearances — compared by
              * MBID since global album_ids diverge across libraries. */
             if (role && track->album_id > 0 && c->release_mbid) {
-                if (skip_album_mbids &&
-                    g_hash_table_contains(skip_album_mbids, c->release_mbid)) {
+                if (skip_album_mbids && g_hash_table_contains(skip_album_mbids, c->release_mbid)) {
                     /* already shown via appearance_albums pass */
                 } else {
                     CreditRoleSet *ars = g_hash_table_lookup(album_roles, c->release_mbid);
@@ -451,8 +504,7 @@ guint append_credit_rows(UnifiedDetailData *ud,
             }
 
             /* Accumulate per-track roles (all unique roles, no priority) */
-            char *key = g_strdup_printf("%s:%d:%d",
-                c->release_mbid, c->disc_num, c->track_num);
+            char *key = g_strdup_printf("%s:%d:%d", c->release_mbid, c->disc_num, c->track_num);
             CreditRoleSet *trs = g_hash_table_lookup(track_roles, key);
             if (!trs) {
                 trs = credit_role_set_new(track_id);
@@ -460,7 +512,7 @@ guint append_credit_rows(UnifiedDetailData *ud,
             } else {
                 g_free(key);
             }
-            credit_role_set_add(trs, role);  /* ownership transferred */
+            credit_role_set_add(trs, role); /* ownership transferred */
         }
 
         db_meta_artist_credits_free(credits, credit_count);
@@ -474,21 +526,26 @@ guint append_credit_rows(UnifiedDetailData *ud,
     while (g_hash_table_iter_next(&iter, &k, &v)) {
         CreditRoleSet *trs = v;
         const library_track_info_t *track = library_cache_get_track(ud->cache, trs->id);
-        if (!track) continue;
+        if (!track)
+            continue;
 
         /* Build NULL-terminated roles array */
-        g_ptr_array_add(trs->roles, NULL);  /* sentinel */
+        g_ptr_array_add(trs->roles, NULL); /* sentinel */
         UiTrackCreditInfo credit = {
             .roles = (const char *const *)trs->roles->pdata,
-            .role_count = trs->roles->len - 1,  /* exclude sentinel */
+            .role_count = trs->roles->len - 1, /* exclude sentinel */
             .artist_name = artist_name,
             .artist_id = viewed_artist_id,
         };
 
-        GtkWidget *row = ui_create_track_row(track, ud->cache, ud->art_mgr, TRUE,
-                                               (RowCallbacks *)&ud->cbs.artist_cbs,
-                                               (RowCallbacks *)&ud->cbs.album_cbs,
-                                               track_groups, &credit);
+        GtkWidget *row = ui_create_track_row(track,
+                                             ud->cache,
+                                             ud->art_mgr,
+                                             TRUE,
+                                             (RowCallbacks *)&ud->cbs.artist_cbs,
+                                             (RowCallbacks *)&ud->cbs.album_cbs,
+                                             track_groups,
+                                             &credit);
         ui_row_attach_handlers(row, (RowCallbacks *)&ud->cbs.track_cbs);
         gtk_list_box_append(GTK_LIST_BOX(ud->appears_on_tracks), row);
         added++;
@@ -500,21 +557,27 @@ guint append_credit_rows(UnifiedDetailData *ud,
     while (g_hash_table_iter_next(&iter, &k, &v)) {
         CreditRoleSet *ars = v;
 
-        const library_album_info_t *album = library_cache_get_album(ud->cache, ars->id, ud->library_mask);
-        if (!album) continue;
+        const library_album_info_t *album
+            = library_cache_get_album(ud->cache, ars->id, ud->library_mask);
+        if (!album)
+            continue;
 
         /* Build NULL-terminated roles array for UiAlbumCreditInfo */
-        g_ptr_array_add(ars->roles, NULL);  /* sentinel */
+        g_ptr_array_add(ars->roles, NULL); /* sentinel */
         UiAlbumCreditInfo acredit = {
             .artist_name = artist_name,
             .artist_id = viewed_artist_id,
             .roles = (const char *const *)ars->roles->pdata,
-            .role_count = ars->roles->len - 1,  /* exclude sentinel */
+            .role_count = ars->roles->len - 1, /* exclude sentinel */
         };
 
-        GtkWidget *row = ui_create_album_row(album, ud->cache, ud->art_mgr, TRUE,
-                                               (RowCallbacks *)&ud->cbs.artist_cbs,
-                                               album_groups, &acredit);
+        GtkWidget *row = ui_create_album_row(album,
+                                             ud->cache,
+                                             ud->art_mgr,
+                                             TRUE,
+                                             (RowCallbacks *)&ud->cbs.artist_cbs,
+                                             album_groups,
+                                             &acredit);
         ui_row_attach_handlers(row, (RowCallbacks *)&ud->cbs.album_cbs);
         gtk_list_box_append(GTK_LIST_BOX(ud->appears_on_albums), row);
     }
@@ -525,11 +588,17 @@ guint append_credit_rows(UnifiedDetailData *ud,
     return added;
 }
 
-static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
-                                 const char *release_mbid,
-                                 int disc_num, int track_num, int library_index,
-                                 char **rec_mbid_out) {
-    if (rec_mbid_out) *rec_mbid_out = NULL;
+static void
+populate_mb_credits(GtkWidget *credits_box,
+                    UnifiedDetailData *ud,
+                    const char *release_mbid,
+                    int disc_num,
+                    int track_num,
+                    int library_index,
+                    char **rec_mbid_out)
+{
+    if (rec_mbid_out)
+        *rec_mbid_out = NULL;
 
     if (!release_mbid || library_index < 0)
         return;
@@ -538,7 +607,8 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
 
     if (meta_db) {
         char *rec_mbid = NULL;
-        quadrature_result_t res = db_meta_get_recording_mbid(meta_db, release_mbid, disc_num, track_num, &rec_mbid);
+        quadrature_result_t res
+            = db_meta_get_recording_mbid(meta_db, release_mbid, disc_num, track_num, &rec_mbid);
 
         if (res == QUADRATURE_OK && rec_mbid) {
             if (rec_mbid_out)
@@ -562,13 +632,12 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                         g_ptr_array_add(buckets[b], &links[i]);
                 }
 
-                static const char *bucket_titles[] = {
-                    "Instrumentalists", "Vocals", "Producers"
-                };
+                static const char *bucket_titles[] = { "Instrumentalists", "Vocals", "Producers" };
 
                 gboolean has_any = FALSE;
                 for (int b = 0; b < 3; b++) {
-                    if (buckets[b]->len > 0) has_any = TRUE;
+                    if (buckets[b]->len > 0)
+                        has_any = TRUE;
                 }
 
                 if (has_any) {
@@ -578,11 +647,12 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                     GtkSizeGroup *sg = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL);
 
                     /* Load credit row template ONCE — reuse for each row */
-                    GBytes *tmpl_bytes = g_resources_lookup_data(
-                        "/org/quadrature/ui/credit_row.ui", 0, NULL);
+                    GBytes *tmpl_bytes
+                        = g_resources_lookup_data("/org/quadrature/ui/credit_row.ui", 0, NULL);
 
                     for (int b = 0; b < 3; b++) {
-                        if (buckets[b]->len == 0) continue;
+                        if (buckets[b]->len == 0)
+                            continue;
                         popover_add_subsection(credits_box, bucket_titles[b]);
 
                         for (guint j = 0; j < buckets[b]->len; j++) {
@@ -591,10 +661,11 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                             /* Create fresh builder from cached bytes (avoids re-parsing resource) */
                             GtkBuilder *cr_builder = gtk_builder_new();
                             gtk_builder_add_from_string(cr_builder,
-                                g_bytes_get_data(tmpl_bytes, NULL),
-                                g_bytes_get_size(tmpl_bytes), NULL);
-                            GtkWidget *row = GTK_WIDGET(
-                                gtk_builder_get_object(cr_builder, "credit_row"));
+                                                        g_bytes_get_data(tmpl_bytes, NULL),
+                                                        g_bytes_get_size(tmpl_bytes),
+                                                        NULL);
+                            GtkWidget *row
+                                = GTK_WIDGET(gtk_builder_get_object(cr_builder, "credit_row"));
                             GtkWidget *btn = GTK_WIDGET(
                                 gtk_builder_get_object(cr_builder, "credit_artist_btn"));
                             GtkWidget *artist_label = GTK_WIDGET(
@@ -603,13 +674,13 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                                 gtk_builder_get_object(cr_builder, "credit_role_label"));
 
                             /* Set artist name */
-                            const char *display_name = link->entity0_credit
-                                ? link->entity0_credit : link->artist_name;
+                            const char *display_name
+                                = link->entity0_credit ? link->entity0_credit : link->artist_name;
                             gtk_label_set_text(GTK_LABEL(artist_label), display_name);
 
                             /* Set role/instrument text */
-                            char *display_role = format_credit_role(
-                                link->link_type_name, link->attributes);
+                            char *display_role
+                                = format_credit_role(link->link_type_name, link->attributes);
                             if (display_role) {
                                 if (b == 0) {
                                     /* Instruments: show bare name */
@@ -624,21 +695,23 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
                             }
 
                             /* Store MBID/name/type on button for navigation */
-                            g_object_set_data_full(G_OBJECT(btn), "artist-mbid",
-                                                   g_strdup(link->artist_mbid), g_free);
-                            g_object_set_data_full(G_OBJECT(btn), "artist-name",
-                                                   g_strdup(link->artist_name), g_free);
+                            g_object_set_data_full(
+                                G_OBJECT(btn), "artist-mbid", g_strdup(link->artist_mbid), g_free);
+                            g_object_set_data_full(
+                                G_OBJECT(btn), "artist-name", g_strdup(link->artist_name), g_free);
                             if (link->artist_type)
-                                g_object_set_data_full(G_OBJECT(btn), "artist-type",
-                                                       g_strdup(link->artist_type), g_free);
+                                g_object_set_data_full(G_OBJECT(btn),
+                                                       "artist-type",
+                                                       g_strdup(link->artist_type),
+                                                       g_free);
 
                             /* Suppress if this credit is the artist we're viewing */
-                            if (link->artist_mbid && ud->meta_artist_mbid &&
-                                g_strcmp0(link->artist_mbid, ud->meta_artist_mbid) == 0) {
+                            if (link->artist_mbid && ud->meta_artist_mbid
+                                && g_strcmp0(link->artist_mbid, ud->meta_artist_mbid) == 0) {
                                 gtk_widget_set_sensitive(btn, FALSE);
                             } else {
-                                g_signal_connect(btn, "clicked",
-                                                 G_CALLBACK(on_popover_credit_navigate), ud);
+                                g_signal_connect(
+                                    btn, "clicked", G_CALLBACK(on_popover_credit_navigate), ud);
                             }
 
                             /* Add button to size group for column alignment */
@@ -661,45 +734,46 @@ static void populate_mb_credits(GtkWidget *credits_box, UnifiedDetailData *ud,
             db_meta_links_free(links, link_count);
             g_free(rec_mbid);
         }
-
     }
 }
 
 /** Called when the track info popover is closed — unparent and destroy it. */
-static void on_track_info_popover_closed(GtkPopover *popover, gpointer data) {
+static void
+on_track_info_popover_closed(GtkPopover *popover, gpointer data)
+{
     (void)data;
     gtk_widget_unparent(GTK_WIDGET(popover));
 }
 
-static void on_track_info_btn_clicked(GtkButton *btn, gpointer data) {
+static void
+on_track_info_btn_clicked(GtkButton *btn, gpointer data)
+{
     UnifiedDetailData *ud = data;
 
     /* Walk up to find the track item grid (row content with track-id data) */
     GtkWidget *content = gtk_widget_get_parent(GTK_WIDGET(btn));
     while (content && !g_object_get_data(G_OBJECT(content), "track-id"))
         content = gtk_widget_get_parent(content);
-    if (!content) return;
+    if (!content)
+        return;
 
     /* Get track metadata stored on the row widget */
-    int64_t track_id = (int64_t)GPOINTER_TO_SIZE(
-        g_object_get_data(G_OBJECT(content), "track-id"));
-    int disc_num = (int)GPOINTER_TO_SIZE(
-        g_object_get_data(G_OBJECT(content), "disc-num"));
-    int track_num = (int)GPOINTER_TO_SIZE(
-        g_object_get_data(G_OBJECT(content), "track-num"));
-    int library_index = (int)GPOINTER_TO_SIZE(
-        g_object_get_data(G_OBJECT(content), "library-index"));
+    int64_t track_id = (int64_t)GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(content), "track-id"));
+    int disc_num = (int)GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(content), "disc-num"));
+    int track_num = (int)GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(content), "track-num"));
+    int library_index
+        = (int)GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(content), "library-index"));
 
     /* Find release MBID from parent card */
     GtkWidget *card = find_parent_card(content);
-    const char *release_mbid = card
-        ? g_object_get_data(G_OBJECT(card), "release-mbid") : NULL;
+    const char *release_mbid = card ? g_object_get_data(G_OBJECT(card), "release-mbid") : NULL;
 
     /* Look up track info from cache */
     const library_track_info_t *track = library_cache_get_track(ud->cache, track_id);
 
     /* ── Load popover structure from template ── */
-    GtkBuilder *builder = gtk_builder_new_from_resource("/org/quadrature/ui/track_metadata_popover.ui");
+    GtkBuilder *builder
+        = gtk_builder_new_from_resource("/org/quadrature/ui/track_metadata_popover.ui");
     GtkWidget *popover = GTK_WIDGET(gtk_builder_get_object(builder, "track_info_popover"));
     GtkWidget *scroll = GTK_WIDGET(gtk_builder_get_object(builder, "track_info_scroll"));
 
@@ -710,7 +784,8 @@ static void on_track_info_btn_clicked(GtkButton *btn, gpointer data) {
     GtkWidget *artist_row = GTK_WIDGET(gtk_builder_get_object(builder, "artist_row"));
     GtkFlowBox *artist_flow_box = GTK_FLOW_BOX(gtk_builder_get_object(builder, "artist_flow_box"));
     GtkWidget *featuring_row = GTK_WIDGET(gtk_builder_get_object(builder, "featuring_row"));
-    GtkFlowBox *featuring_flow_box = GTK_FLOW_BOX(gtk_builder_get_object(builder, "featuring_flow_box"));
+    GtkFlowBox *featuring_flow_box
+        = GTK_FLOW_BOX(gtk_builder_get_object(builder, "featuring_flow_box"));
     GtkWidget *release_date_row = GTK_WIDGET(gtk_builder_get_object(builder, "release_date_row"));
     GtkLabel *release_date_value = GTK_LABEL(gtk_builder_get_object(builder, "release_date_value"));
     GtkWidget *position_row = GTK_WIDGET(gtk_builder_get_object(builder, "position_row"));
@@ -769,8 +844,8 @@ static void on_track_info_btn_clicked(GtkButton *btn, gpointer data) {
 
     /* ══ Credits (dynamic — subsection headers + rows appended to credits_box) ══ */
     char *rec_mbid = NULL;
-    populate_mb_credits(credits_box, ud, release_mbid, disc_num, track_num,
-                        library_index, &rec_mbid);
+    populate_mb_credits(
+        credits_box, ud, release_mbid, disc_num, track_num, library_index, &rec_mbid);
 
     /* ══ Track Info section ══ */
     {
@@ -794,9 +869,9 @@ static void on_track_info_btn_clicked(GtkButton *btn, gpointer data) {
     }
 
     /* ── Size popover to fit within content_stack ── */
-    static const int MARGIN_TOP  = 100;
+    static const int MARGIN_TOP = 100;
     static const int MARGIN_SIDE = 100;
-    static const int MARGIN_BOT  = 100;
+    static const int MARGIN_BOT = 100;
 
     int stack_w = gtk_widget_get_width(ud->content_stack);
     int stack_h = gtk_widget_get_height(ud->content_stack);
@@ -807,7 +882,7 @@ static void on_track_info_btn_clicked(GtkButton *btn, gpointer data) {
     gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scroll), pop_h);
 
     gtk_widget_set_parent(popover, ud->content_stack);
-    g_object_unref(popover);  /* parent now owns it */
+    g_object_unref(popover); /* parent now owns it */
 
     /* Anchor below top margin, opening downward */
     GdkRectangle anchor = { stack_w / 2, MARGIN_TOP, 1, 1 };
@@ -819,9 +894,12 @@ static void on_track_info_btn_clicked(GtkButton *btn, gpointer data) {
 }
 
 /** Wire info button click handlers for all track rows in a card. */
-void wire_info_buttons(GtkWidget *card, UnifiedDetailData *ud) {
+void
+wire_info_buttons(GtkWidget *card, UnifiedDetailData *ud)
+{
     GtkWidget *track_list = find_widget_by_name(card, "track_list");
-    if (!track_list) return;
+    if (!track_list)
+        return;
 
     GtkWidget *child = gtk_widget_get_first_child(track_list);
     while (child) {
@@ -830,8 +908,8 @@ void wire_info_buttons(GtkWidget *card, UnifiedDetailData *ud) {
             if (row_content) {
                 GtkWidget *info_btn = g_object_get_data(G_OBJECT(row_content), "info-btn");
                 if (info_btn)
-                    g_signal_connect(info_btn, "clicked",
-                                     G_CALLBACK(on_track_info_btn_clicked), ud);
+                    g_signal_connect(
+                        info_btn, "clicked", G_CALLBACK(on_track_info_btn_clicked), ud);
             }
         }
         child = gtk_widget_get_next_sibling(child);
@@ -841,4 +919,3 @@ void wire_info_buttons(GtkWidget *card, UnifiedDetailData *ud) {
 /* ═══════════════════════════════════════════════════════════════════════════
  * List Navigation Helpers (modular, reusable)
  * ═══════════════════════════════════════════════════════════════════════════ */
-

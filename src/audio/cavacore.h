@@ -112,8 +112,12 @@ struct cava_plan {
 // returns a cava_plan to be used by cava_execute. If cava_plan.status is 0 all is OK.
 // If cava_plan.status is -1, cava_init was called with an illegal parameter, see error string in
 // cava_plan.error_message
-extern struct cava_plan *cava_init(int number_of_bars, unsigned int rate, int channels,
-                                   int autosens, double noise_reduction, int low_cut_off,
+extern struct cava_plan *cava_init(int number_of_bars,
+                                   unsigned int rate,
+                                   int channels,
+                                   int autosens,
+                                   double noise_reduction,
+                                   int low_cut_off,
                                    int high_cut_off);
 
 // cava_execute, executes visualization
@@ -135,8 +139,8 @@ extern struct cava_plan *cava_init(int number_of_bars, unsigned int rate, int ch
 //
 // cava_execute assumes cava_in samples to be interleaved if more than one channel
 // only up to two channels are supported.
-extern void cava_execute(double *cava_in, int new_samples, double *cava_out,
-                         struct cava_plan *plan);
+extern void
+cava_execute(double *cava_in, int new_samples, double *cava_out, struct cava_plan *plan);
 
 // cava_destroy, destroys the plan, frees up memory
 extern void cava_destroy(struct cava_plan *plan);

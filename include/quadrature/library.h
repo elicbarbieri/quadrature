@@ -35,11 +35,11 @@ extern "C" {
  * Supports up to 32 libraries.
  * ============================================================================= */
 
-#define LIBRARY_MASK_ALL  UINT32_MAX
+#define LIBRARY_MASK_ALL UINT32_MAX
 
 /* Sentinel passed to library_cache_get_albums / _get_artists `num_results`
  * parameter to request every matching library version. */
-#define LIBRARY_RESULTS_ALL  (-1)
+#define LIBRARY_RESULTS_ALL (-1)
 
 /** Toggle a single library bit. Never returns 0 — falls back to LIBRARY_MASK_ALL. */
 uint32_t library_mask_after_toggle(uint32_t current_mask, int lib_idx);
@@ -60,16 +60,13 @@ uint32_t library_mask_solo(int lib_idx);
 
 /** Encode a (library index, local id) pair into a global entity ID. */
 #define LIBRARY_MAKE_GLOBAL_ID(lib_idx, local_id) \
-    (((int64_t)((lib_idx) & 0xFFFF) << 48) | \
-     ((int64_t)(local_id) & INT64_C(0x0000FFFFFFFFFFFF)))
+    (((int64_t)((lib_idx) & 0xFFFF) << 48) | ((int64_t)(local_id) & INT64_C(0x0000FFFFFFFFFFFF)))
 
 /** Extract the bitmap index (stable library ID) from a global entity ID. */
-#define LIBRARY_GLOBAL_ID_LIB(id) \
-    ((int)(((int64_t)(id) >> 48) & 0xFFFF))
+#define LIBRARY_GLOBAL_ID_LIB(id) ((int)(((int64_t)(id) >> 48) & 0xFFFF))
 
 /** Extract the local entity ID from a global entity ID. */
-#define LIBRARY_GLOBAL_ID_LOCAL(id) \
-    ((int64_t)((id) & INT64_C(0x0000FFFFFFFFFFFF)))
+#define LIBRARY_GLOBAL_ID_LOCAL(id) ((int64_t)((id) & INT64_C(0x0000FFFFFFFFFFFF)))
 
 /* =============================================================================
  * Forward Declarations
@@ -84,55 +81,56 @@ typedef struct quadrature_bios_db quadrature_bios_db_t;
  * ============================================================================= */
 
 typedef struct {
-    int64_t artist_id;       /* Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id) */
-    char* name;
-    char* musicbrainz_id;    /* MBID for cross-library merging; NULL if unknown */
-    uint32_t album_count;    /* Per-slot count (set during warming) */
-    uint32_t track_count;    /* Per-slot count (set during warming) */
-    int library_index;       /* Source library (0-based bitmap index) */
+    int64_t artist_id; /* Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id) */
+    char *name;
+    char *musicbrainz_id; /* MBID for cross-library merging; NULL if unknown */
+    uint32_t album_count; /* Per-slot count (set during warming) */
+    uint32_t track_count; /* Per-slot count (set during warming) */
+    int library_index;    /* Source library (0-based bitmap index) */
 } library_artist_info_t;
 
 typedef struct {
-    int64_t album_id;        /* Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id) */
-    int64_t artist_id;       /* Global ID */
-    int64_t first_track_id;  /* Global ID of first track (disc 1, track 1); 0 if unknown */
-    char* title;
-    char* artist_name;
-    char* path;              /* Relative path to album directory */
-    char* genres;            /* Comma-separated distinct genres, or NULL */
+    int64_t album_id;       /* Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id) */
+    int64_t artist_id;      /* Global ID */
+    int64_t first_track_id; /* Global ID of first track (disc 1, track 1); 0 if unknown */
+    char *title;
+    char *artist_name;
+    char *path;   /* Relative path to album directory */
+    char *genres; /* Comma-separated distinct genres, or NULL */
     uint16_t year;
     uint16_t track_count;
-    char* musicbrainz_release_id;       /* Album MBID; NULL if unknown */
-    char* musicbrainz_release_group_id; /* Release group MBID; NULL if unknown */
-    int library_index;       /* Source library (0-based bitmap index) */
+    char *musicbrainz_release_id;       /* Album MBID; NULL if unknown */
+    char *musicbrainz_release_group_id; /* Release group MBID; NULL if unknown */
+    int library_index;                  /* Source library (0-based bitmap index) */
 } library_album_info_t;
 
 typedef struct {
-    int64_t track_id;        /* Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id) */
-    int64_t album_id;        /* Global ID */
-    int64_t artist_id;       /* Global ID of primary artist (position 0) */
-    char* path;              /* Relative path within album dir (resolve via library_cache_resolve_track_path) */
-    char* title;
-    char* artist_display;    /* Display name: "Artist A feat. Artist B", or just primary name. Always non-NULL. */
-    char* album_title;
-    char* genre;
+    int64_t track_id;  /* Global ID: LIBRARY_MAKE_GLOBAL_ID(lib_index, local_id) */
+    int64_t album_id;  /* Global ID */
+    int64_t artist_id; /* Global ID of primary artist (position 0) */
+    char *path; /* Relative path within album dir (resolve via library_cache_resolve_track_path) */
+    char *title;
+    char *
+        artist_display; /* Display name: "Artist A feat. Artist B", or just primary name. Always non-NULL. */
+    char *album_title;
+    char *genre;
     uint32_t duration_ms;
     uint16_t track_num;
     uint16_t disc_num;
     uint16_t year;
-    int library_index;       /* Source library (0-based) */
+    int library_index; /* Source library (0-based) */
 } library_track_info_t;
 
 /* Track artist credit (for UI artist buttons) */
 typedef enum {
-    LIBRARY_ARTIST_ROLE_PRIMARY = 0,     /* Track artist */
-    LIBRARY_ARTIST_ROLE_FEATURING = 1,   /* Featured/guest artist */
+    LIBRARY_ARTIST_ROLE_PRIMARY = 0,   /* Track artist */
+    LIBRARY_ARTIST_ROLE_FEATURING = 1, /* Featured/guest artist */
 } library_artist_role_t;
 
 typedef struct {
     int64_t artist_id;
-    char* name;          /* Canonical artist name */
-    char* join_phrase;   /* Connector to next artist: " feat. ", " & ", "" for last */
+    char *name;                 /* Canonical artist name */
+    char *join_phrase;          /* Connector to next artist: " feat. ", " & ", "" for last */
     library_artist_role_t role; /* Derived from position: 0=PRIMARY, >0=FEATURING */
     int position;
 } library_track_artist_t;
@@ -181,19 +179,19 @@ typedef struct library_cache library_cache_t;
  * ============================================================================= */
 
 typedef struct library_cache_changeset {
-    int64_t *artists;         /* Mutated local artist rowids; NULL if count==0 */
-    size_t   artists_count;
+    int64_t *artists; /* Mutated local artist rowids; NULL if count==0 */
+    size_t artists_count;
 
-    int64_t *albums;          /* Mutated local album rowids */
-    size_t   albums_count;
+    int64_t *albums; /* Mutated local album rowids */
+    size_t albums_count;
 
-    int64_t *tracks;          /* Mutated local track rowids */
-    size_t   tracks_count;
+    int64_t *tracks; /* Mutated local track rowids */
+    size_t tracks_count;
 
     /* True if any track_artists row was mutated. track_artists is keyed by a
      * synthetic rowid (not track_id), so row-precise invalidation isn't
      * worthwhile — if set, the refresh rebuilds all track_artists arrays. */
-    bool     track_artists_dirty;
+    bool track_artists_dirty;
 } library_cache_changeset_t;
 
 /** Allocate an empty changeset (zeroed). Owns its arrays. */
@@ -203,8 +201,7 @@ library_cache_changeset_t *library_cache_changeset_new(void);
 void library_cache_changeset_free(library_cache_changeset_t *cs);
 
 /** Deep-copy a changeset. Returns NULL if src is NULL. */
-library_cache_changeset_t *library_cache_changeset_copy(
-    const library_cache_changeset_t *src);
+library_cache_changeset_t *library_cache_changeset_copy(const library_cache_changeset_t *src);
 
 /**
  * Merge src into dst. Duplicates in the unioned arrays are removed. If either
@@ -225,10 +222,10 @@ bool library_cache_changeset_is_empty(const library_cache_changeset_t *cs);
  * Source descriptor for one library slot in a multi-library cache.
  */
 typedef struct {
-    const char *db_path;       /* Path to quadrature.sqlite for this library */
-    const char *music_base;    /* Root directory for resolving relative file paths */
-    const char *display_name;  /* Human-readable name; NULL = use basename(music_base) */
-    int bitmap_index;          /* Stable library ID encoded in global entity IDs.
+    const char *db_path;      /* Path to quadrature.sqlite for this library */
+    const char *music_base;   /* Root directory for resolving relative file paths */
+    const char *display_name; /* Human-readable name; NULL = use basename(music_base) */
+    int bitmap_index;         /* Stable library ID encoded in global entity IDs.
                                 * Must be unique across sources and ≥ 0.
                                 * Typically settings->libraries[i].library_index. */
 } library_cache_source_t;
@@ -248,15 +245,15 @@ typedef struct {
  * @return QUADRATURE_OK on success
  */
 quadrature_result_t library_cache_create_multi(const library_cache_source_t *sources,
-                                                int source_count,
-                                                library_cache_t **out);
+                                               int source_count,
+                                               library_cache_t **out);
 
 /**
  * Destroy a library cache.
  *
  * @param cache Cache to destroy (NULL-safe)
  */
-void library_cache_destroy(library_cache_t* cache);
+void library_cache_destroy(library_cache_t *cache);
 
 /**
  * Add a new library slot to an existing cache.
@@ -269,8 +266,7 @@ void library_cache_destroy(library_cache_t* cache);
  * @param source Source descriptor (must include a unique bitmap_index)
  * @return The bitmap_index on success, -1 on failure
  */
-int library_cache_add_slot(library_cache_t *cache,
-                           const library_cache_source_t *source);
+int library_cache_add_slot(library_cache_t *cache, const library_cache_source_t *source);
 
 /**
  * Remove a library slot by bitmap index.
@@ -297,16 +293,14 @@ quadrature_result_t library_cache_remove_slot(library_cache_t *cache, int bitmap
  * @param track_id Track ID
  * @return Track info (owned by cache) or NULL if not found
  */
-const library_track_info_t* library_cache_get_track(library_cache_t* cache,
-                                                     int64_t track_id);
+const library_track_info_t *library_cache_get_track(library_cache_t *cache, int64_t track_id);
 
 /**
  * Get album by ID (cached). Calls get_albums() and returns the first entry
  * (respects library sort order in the bitmask).
  */
-const library_album_info_t* library_cache_get_album(library_cache_t* cache,
-                                                     int64_t album_id,
-                                                     uint32_t library_mask);
+const library_album_info_t *
+library_cache_get_album(library_cache_t *cache, int64_t album_id, uint32_t library_mask);
 
 /**
  * Get all library versions of an album (via release-group MBID index).
@@ -319,7 +313,7 @@ const library_album_info_t* library_cache_get_album(library_cache_t* cache,
  * @param num_results  Max results to return (LIBRARY_RESULTS_ALL for every version)
  * @return GPtrArray of interior pointers (caller must g_ptr_array_unref), or NULL
  */
-GPtrArray* library_cache_get_albums(library_cache_t* cache,
+GPtrArray *library_cache_get_albums(library_cache_t *cache,
                                     int64_t album_id,
                                     uint32_t library_mask,
                                     int num_results);
@@ -328,9 +322,8 @@ GPtrArray* library_cache_get_albums(library_cache_t* cache,
  * Get artist by ID (cached). Calls get_artists() and returns the first entry
  * (respects library sort order in the bitmask).
  */
-const library_artist_info_t* library_cache_get_artist(library_cache_t* cache,
-                                                       int64_t artist_id,
-                                                       uint32_t library_mask);
+const library_artist_info_t *
+library_cache_get_artist(library_cache_t *cache, int64_t artist_id, uint32_t library_mask);
 
 /**
  * Get all library versions of an artist (via MusicBrainz artist ID index).
@@ -343,7 +336,7 @@ const library_artist_info_t* library_cache_get_artist(library_cache_t* cache,
  * @param num_results  Max results to return (LIBRARY_RESULTS_ALL for every version)
  * @return GPtrArray of interior pointers (caller must g_ptr_array_unref), or NULL
  */
-GPtrArray* library_cache_get_artists(library_cache_t* cache,
+GPtrArray *library_cache_get_artists(library_cache_t *cache,
                                      int64_t artist_id,
                                      uint32_t library_mask,
                                      int num_results);
@@ -356,8 +349,7 @@ GPtrArray* library_cache_get_artists(library_cache_t* cache,
  * @param track_id Track ID
  * @return GPtrArray of library_track_artist_t* (owned by cache) or NULL if not found
  */
-const GPtrArray* library_cache_get_track_artists(library_cache_t* cache,
-                                                   int64_t track_id);
+const GPtrArray *library_cache_get_track_artists(library_cache_t *cache, int64_t track_id);
 
 /**
  * Resolve the full absolute path for a track.
@@ -382,8 +374,7 @@ char *library_cache_resolve_track_path(library_cache_t *cache, int64_t track_id)
  * @param current_track_id Current track ID
  * @return Next track ID, or 0 if current track is last in album
  */
-int64_t library_cache_get_next_track_id(library_cache_t* cache,
-                                        int64_t current_track_id);
+int64_t library_cache_get_next_track_id(library_cache_t *cache, int64_t current_track_id);
 
 /**
  * Get previous track ID in album.
@@ -392,8 +383,7 @@ int64_t library_cache_get_next_track_id(library_cache_t* cache,
  * @param current_track_id Current track ID
  * @return Previous track ID, or 0 if current track is first in album
  */
-int64_t library_cache_get_prev_track_id(library_cache_t* cache,
-                                        int64_t current_track_id);
+int64_t library_cache_get_prev_track_id(library_cache_t *cache, int64_t current_track_id);
 
 /* =============================================================================
  * List Queries
@@ -409,9 +399,8 @@ int64_t library_cache_get_prev_track_id(library_cache_t* cache,
  * @param library_mask Bitmask of enabled libraries (LIBRARY_MASK_ALL = all)
  * @return GPtrArray of library_track_info_t* (caller owns array, cache owns items) or NULL
  */
-GPtrArray* library_cache_get_tracks_by_album(library_cache_t* cache,
-                                              int64_t album_id,
-                                              uint32_t library_mask);
+GPtrArray *
+library_cache_get_tracks_by_album(library_cache_t *cache, int64_t album_id, uint32_t library_mask);
 
 /**
  * Get albums by artist.
@@ -423,9 +412,9 @@ GPtrArray* library_cache_get_tracks_by_album(library_cache_t* cache,
  * @param library_mask Bitmask of enabled libraries (LIBRARY_MASK_ALL = all)
  * @return GPtrArray of library_album_info_t* (caller owns array, cache owns items) or NULL
  */
-GPtrArray* library_cache_get_albums_by_artist(library_cache_t* cache,
-                                               int64_t artist_id,
-                                               uint32_t library_mask);
+GPtrArray *library_cache_get_albums_by_artist(library_cache_t *cache,
+                                              int64_t artist_id,
+                                              uint32_t library_mask);
 
 /* =============================================================================
  * "Appears On" Queries (Featured Artist Detection)
@@ -445,9 +434,9 @@ GPtrArray* library_cache_get_albums_by_artist(library_cache_t* cache,
  * @param library_mask Bitmask of enabled libraries (LIBRARY_MASK_ALL = all)
  * @return GPtrArray of library_album_info_t* (caller owns array, cache owns items) or NULL
  */
-GPtrArray* library_cache_get_artist_appearances(library_cache_t* cache,
-                                                 int64_t artist_id,
-                                                 uint32_t library_mask);
+GPtrArray *library_cache_get_artist_appearances(library_cache_t *cache,
+                                                int64_t artist_id,
+                                                uint32_t library_mask);
 
 /**
  * Get tracks where artist appears on albums by other artists.
@@ -461,9 +450,9 @@ GPtrArray* library_cache_get_artist_appearances(library_cache_t* cache,
  * @param library_mask Bitmask of enabled libraries (LIBRARY_MASK_ALL = all)
  * @return GPtrArray of library_track_info_t* (caller owns array, cache owns items) or NULL
  */
-GPtrArray* library_cache_get_artist_appearance_tracks(library_cache_t* cache,
-                                                       int64_t artist_id,
-                                                       uint32_t library_mask);
+GPtrArray *library_cache_get_artist_appearance_tracks(library_cache_t *cache,
+                                                      int64_t artist_id,
+                                                      uint32_t library_mask);
 
 /**
  * Get merged artist counts across libraries, computed on demand.
@@ -472,11 +461,11 @@ GPtrArray* library_cache_get_artist_appearance_tracks(library_cache_t* cache,
  * @param appearance_count  Tracks on OTHER artists' albums (excludes own albums,
  *                          deduped by MBRID+disc+track across libraries)
  */
-void library_cache_get_merged_artist_counts(library_cache_t* cache,
-                                             int64_t artist_id,
-                                             uint32_t library_mask,
-                                             uint32_t* album_count,
-                                             uint32_t* appearance_count);
+void library_cache_get_merged_artist_counts(library_cache_t *cache,
+                                            int64_t artist_id,
+                                            uint32_t library_mask,
+                                            uint32_t *album_count,
+                                            uint32_t *appearance_count);
 
 /**
  * Get artists matching filters (queries DB for IDs, resolves from cache).
@@ -491,11 +480,11 @@ void library_cache_get_merged_artist_counts(library_cache_t* cache,
  * @param filters Genre/year filter options (NULL = no genre/year filter)
  * @return GPtrArray of library_artist_info_t* (caller owns array, cache owns items)
  */
-GPtrArray* library_cache_get_artists_filtered(library_cache_t* cache,
-                                               library_sort_t sort,
-                                               const char* search_text,
-                                               const db_search_opts_t* filters,
-                                               uint32_t library_mask);
+GPtrArray *library_cache_get_artists_filtered(library_cache_t *cache,
+                                              library_sort_t sort,
+                                              const char *search_text,
+                                              const db_search_opts_t *filters,
+                                              uint32_t library_mask);
 
 /**
  * Get albums matching filters (queries DB for IDs, resolves from cache).
@@ -510,11 +499,11 @@ GPtrArray* library_cache_get_artists_filtered(library_cache_t* cache,
  * @param library_mask Bitmask of enabled libraries (LIBRARY_MASK_ALL = all)
  * @return GPtrArray of library_album_info_t* (caller owns array, cache owns items)
  */
-GPtrArray* library_cache_get_albums_filtered(library_cache_t* cache,
-                                              library_sort_t sort,
-                                              const char* search_text,
-                                              const db_search_opts_t* filters,
-                                              uint32_t library_mask);
+GPtrArray *library_cache_get_albums_filtered(library_cache_t *cache,
+                                             library_sort_t sort,
+                                             const char *search_text,
+                                             const db_search_opts_t *filters,
+                                             uint32_t library_mask);
 
 /* Search API (library_cache_search, library_credit_search) is declared in
  * library_search.h. */
@@ -532,9 +521,8 @@ GPtrArray* library_cache_get_albums_filtered(library_cache_t* cache,
  * @param track_ids Array of track IDs
  * @param count Number of track IDs
  */
-void library_cache_prefetch_audio_files(library_cache_t* cache,
-                                        const int64_t* track_ids,
-                                        size_t count);
+void
+library_cache_prefetch_audio_files(library_cache_t *cache, const int64_t *track_ids, size_t count);
 
 /* =============================================================================
  * Cache Warming
@@ -544,26 +532,27 @@ typedef enum {
     LIBRARY_CACHE_IDLE = 0,
     LIBRARY_CACHE_WARMING = 1,
     LIBRARY_CACHE_READY = 2,
-    LIBRARY_CACHE_REFRESHING = 3,  /* READY + COW refresh in progress; old data still live */
+    LIBRARY_CACHE_REFRESHING = 3, /* READY + COW refresh in progress; old data still live */
 } library_cache_state_t;
 
 /**
  * Callback invoked on the main thread (via g_idle_add) when warming completes.
  */
-typedef void (*library_cache_ready_cb)(void* user_data);
+typedef void (*library_cache_ready_cb)(void *user_data);
 
 /**
  * Set the callback for when cache warming completes.
  */
-void library_cache_set_ready_callback(library_cache_t* cache,
-                                       library_cache_ready_cb cb, void* user_data);
+void library_cache_set_ready_callback(library_cache_t *cache,
+                                      library_cache_ready_cb cb,
+                                      void *user_data);
 
 /**
  * Start background warming thread for ALL idle library slots.
  * Safe to call multiple times -- individual slots are no-ops if already
  * warming or ready.
  */
-void library_cache_start_warming(library_cache_t* cache);
+void library_cache_start_warming(library_cache_t *cache);
 
 /**
  * Warm a specific slot and block until it is fully populated.
@@ -603,7 +592,7 @@ void library_cache_await_slot(library_cache_t *cache, int bitmap_index);
  *
  * @param cache Library cache
  */
-void library_cache_clear(library_cache_t* cache);
+void library_cache_clear(library_cache_t *cache);
 
 /**
  * Clear a specific library slot and reset it to IDLE.
@@ -646,7 +635,7 @@ void library_cache_refresh_slot(library_cache_t *cache,
  * Get the number of library slots in this cache.
  * Returns the actual slot_count set at creation time.
  */
-int library_cache_get_library_count(library_cache_t* cache);
+int library_cache_get_library_count(library_cache_t *cache);
 
 /**
  * Get the bitmap_index (stable library ID) for a slot at a given position.
@@ -666,14 +655,14 @@ int library_cache_get_bitmap_index(library_cache_t *cache, int slot_position);
  * @param bitmap_index Stable library ID
  * @return Estimated bytes, or 0 if index invalid or slot is IDLE
  */
-size_t library_cache_get_slot_memory_bytes(library_cache_t* cache, int bitmap_index);
+size_t library_cache_get_slot_memory_bytes(library_cache_t *cache, int bitmap_index);
 
 /**
  * Readonly DB handles for a library slot. All pointers are cache-owned —
  * caller must NOT close them. Any field may be NULL if the DB doesn't exist.
  */
 typedef struct {
-    quadrature_db_t      *db;
+    quadrature_db_t *db;
     quadrature_meta_db_t *meta;
     quadrature_bios_db_t *bios;
 } library_cache_dbs_t;
@@ -693,7 +682,7 @@ library_cache_dbs_t library_cache_get_dbs(library_cache_t *cache, int bitmap_ind
  * @param bitmap_index Stable library ID
  * @return Static string owned by the cache; do not free. NULL if index invalid.
  */
-const char* library_cache_get_library_name(library_cache_t* cache, int bitmap_index);
+const char *library_cache_get_library_name(library_cache_t *cache, int bitmap_index);
 
 /**
  * Get all library bitmap indices where an artist appears (via MBID index).
@@ -705,7 +694,8 @@ const char* library_cache_get_library_name(library_cache_t* cache, int bitmap_in
  */
 int library_cache_get_artist_libraries(library_cache_t *cache,
                                        int64_t artist_global_id,
-                                       int *out_libs, int max_libs);
+                                       int *out_libs,
+                                       int max_libs);
 
 /**
  * Get all library bitmap indices where an album appears (via MBID index,
@@ -718,7 +708,8 @@ int library_cache_get_artist_libraries(library_cache_t *cache,
  */
 int library_cache_get_album_libraries(library_cache_t *cache,
                                       int64_t album_global_id,
-                                      int *out_libs, int max_libs);
+                                      int *out_libs,
+                                      int max_libs);
 
 /**
  * Get all library bitmap indices that contain the "same" track as the given
@@ -734,7 +725,8 @@ int library_cache_get_album_libraries(library_cache_t *cache,
  */
 int library_cache_get_track_libraries(library_cache_t *cache,
                                       int64_t track_global_id,
-                                      int *out_libs, int max_libs);
+                                      int *out_libs,
+                                      int max_libs);
 
 /**
  * Update the display name for a library slot.
@@ -746,7 +738,7 @@ int library_cache_get_track_libraries(library_cache_t *cache,
  * @param bitmap_index  Stable library ID
  * @param name  New display name, or NULL
  */
-void library_cache_set_library_name(library_cache_t* cache, int bitmap_index, const char* name);
+void library_cache_set_library_name(library_cache_t *cache, int bitmap_index, const char *name);
 
 /**
  * Set availability for a library slot.
@@ -758,13 +750,13 @@ void library_cache_set_library_name(library_cache_t* cache, int bitmap_index, co
  *
  * Thread-safe (atomic store).
  */
-void library_cache_set_available(library_cache_t* cache, int bitmap_index, gboolean available);
+void library_cache_set_available(library_cache_t *cache, int bitmap_index, gboolean available);
 
 /**
  * Get availability for a library slot.
  * Thread-safe (atomic load).
  */
-gboolean library_cache_get_available(library_cache_t* cache, int bitmap_index);
+gboolean library_cache_get_available(library_cache_t *cache, int bitmap_index);
 
 #ifdef __cplusplus
 }

@@ -8,9 +8,12 @@
 #include "../internal.h"
 #include <glib.h>
 
-quadrature_result_t db_migration_001_initial(sqlite3* db) {
-    char* err = NULL;
-    int rc = sqlite3_exec(db,
+quadrature_result_t
+db_migration_001_initial(sqlite3 *db)
+{
+    char *err = NULL;
+    int rc = sqlite3_exec(
+        db,
         /* Artists */
         "CREATE TABLE IF NOT EXISTS artists ("
         "  id INTEGER PRIMARY KEY,"
@@ -77,7 +80,8 @@ quadrature_result_t db_migration_001_initial(sqlite3* db) {
         /* Indexes — albums */
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_path ON albums(path) WHERE path != '';"
         "CREATE INDEX IF NOT EXISTS idx_albums_artist_year_title ON albums(artist_id, year, title);"
-        "CREATE INDEX IF NOT EXISTS idx_albums_mb_release ON albums(musicbrainz_release_id) WHERE musicbrainz_release_id IS NOT NULL;"
+        "CREATE INDEX IF NOT EXISTS idx_albums_mb_release ON albums(musicbrainz_release_id) WHERE "
+        "musicbrainz_release_id IS NOT NULL;"
         "CREATE INDEX IF NOT EXISTS idx_albums_mb_status ON albums(mb_status);"
         "CREATE INDEX IF NOT EXISTS idx_albums_year_title ON albums(year, title COLLATE NOCASE);"
 
@@ -89,12 +93,14 @@ quadrature_result_t db_migration_001_initial(sqlite3* db) {
         "CREATE INDEX IF NOT EXISTS idx_tracks_album_genre ON tracks(album_id, genre);"
 
         /* Indexes — artists */
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_artists_mbid ON artists(musicbrainz_id) WHERE musicbrainz_id IS NOT NULL;"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_artists_mbid ON artists(musicbrainz_id) WHERE "
+        "musicbrainz_id IS NOT NULL;"
         "CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name COLLATE NOCASE);"
 
         /* Indexes — track_artists */
         "CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);"
-        "CREATE INDEX IF NOT EXISTS idx_track_artists_track ON track_artists(track_id, position, artist_id);"
+        "CREATE INDEX IF NOT EXISTS idx_track_artists_track ON track_artists(track_id, position, "
+        "artist_id);"
 
         /* Indexes — errors */
         "CREATE INDEX IF NOT EXISTS idx_errors_path ON indexer_errors(path);"
@@ -103,7 +109,9 @@ quadrature_result_t db_migration_001_initial(sqlite3* db) {
         /* FTS5 BM25 rank weights */
         "INSERT OR REPLACE INTO tracks_fts(tracks_fts, rank) VALUES('rank', 'bm25(10, 5, 1)');"
         "INSERT OR REPLACE INTO albums_fts(albums_fts, rank) VALUES('rank', 'bm25(5, 1)');",
-        NULL, NULL, &err);
+        NULL,
+        NULL,
+        &err);
 
     if (rc != SQLITE_OK) {
         g_critical("Migration 001 failed: %s", err);

@@ -22,7 +22,8 @@
 
 /* FFmpeg must be initialized before Criterion forks */
 #include <libavformat/avformat.h>
-ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
+ReportHook(PRE_ALL)(struct criterion_test_set *tests)
+{
     (void)tests;
     avformat_network_init();
 }
@@ -41,7 +42,8 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
  * 5. Double destroy doesn't crash
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, lifecycle_null_safety_initial_state) {
+Test(audio_scrubber, lifecycle_null_safety_initial_state)
+{
     audio_scrubber_t *scrubber = NULL;
 
     /* --- Null safety --- */
@@ -76,7 +78,8 @@ Test(audio_scrubber, lifecycle_null_safety_initial_state) {
  * 5. Fractional speeds work correctly
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, speed_control_clamping_atomicity) {
+Test(audio_scrubber, speed_control_clamping_atomicity)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -101,20 +104,20 @@ Test(audio_scrubber, speed_control_clamping_atomicity) {
     audio_scrubber_set_speed(scrubber, 4.0f);
     cr_assert_float_eq(audio_scrubber_get_speed(scrubber), 4.0f, 0.0001f);
 
-    audio_scrubber_set_speed(scrubber, 5.0f);  /* Should clamp to 4.0 */
+    audio_scrubber_set_speed(scrubber, 5.0f); /* Should clamp to 4.0 */
     cr_assert_float_eq(audio_scrubber_get_speed(scrubber), 4.0f, 0.0001f);
 
-    audio_scrubber_set_speed(scrubber, 100.0f);  /* Extreme positive */
+    audio_scrubber_set_speed(scrubber, 100.0f); /* Extreme positive */
     cr_assert_float_eq(audio_scrubber_get_speed(scrubber), 4.0f, 0.0001f);
 
     /* --- Clamping at negative limit --- */
     audio_scrubber_set_speed(scrubber, -4.0f);
     cr_assert_float_eq(audio_scrubber_get_speed(scrubber), -4.0f, 0.0001f);
 
-    audio_scrubber_set_speed(scrubber, -5.0f);  /* Should clamp to -4.0 */
+    audio_scrubber_set_speed(scrubber, -5.0f); /* Should clamp to -4.0 */
     cr_assert_float_eq(audio_scrubber_get_speed(scrubber), -4.0f, 0.0001f);
 
-    audio_scrubber_set_speed(scrubber, -100.0f);  /* Extreme negative */
+    audio_scrubber_set_speed(scrubber, -100.0f); /* Extreme negative */
     cr_assert_float_eq(audio_scrubber_get_speed(scrubber), -4.0f, 0.0001f);
 
     /* --- Fractional speeds --- */
@@ -145,7 +148,8 @@ Test(audio_scrubber, speed_control_clamping_atomicity) {
  * 4. Position changes are atomic
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, position_control_atomicity) {
+Test(audio_scrubber, position_control_atomicity)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -156,11 +160,11 @@ Test(audio_scrubber, position_control_atomicity) {
     audio_scrubber_set_position(scrubber, 1000);
     cr_assert_eq(audio_scrubber_get_position(scrubber), 1000);
 
-    audio_scrubber_set_position(scrubber, 48000);  /* 1 second at 48kHz */
+    audio_scrubber_set_position(scrubber, 48000); /* 1 second at 48kHz */
     cr_assert_eq(audio_scrubber_get_position(scrubber), 48000);
 
     /* --- Large positions (typical for long audio files) --- */
-    int64_t one_hour = (int64_t)TEST_SAMPLE_RATE * 3600;  /* 1 hour in samples */
+    int64_t one_hour = (int64_t)TEST_SAMPLE_RATE * 3600; /* 1 hour in samples */
     audio_scrubber_set_position(scrubber, one_hour);
     cr_assert_eq(audio_scrubber_get_position(scrubber), one_hour);
 
@@ -188,7 +192,8 @@ Test(audio_scrubber, position_control_atomicity) {
  * 3. Mode affects zone selection (tested via process behavior)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, shuttle_mode_control) {
+Test(audio_scrubber, shuttle_mode_control)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -226,7 +231,8 @@ Test(audio_scrubber, shuttle_mode_control) {
  * 3. Position is preserved after flush (synced from atomic)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, flush_operation) {
+Test(audio_scrubber, flush_operation)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -260,22 +266,23 @@ Test(audio_scrubber, flush_operation) {
  * 4. Process handles edge cases (empty frames, zero samples)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, process_passthrough_zone) {
+Test(audio_scrubber, process_passthrough_zone)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
     /* Create synthetic audio: 1 second of stereo samples */
     const uint32_t num_frames = TEST_SAMPLE_RATE;
     float *input = malloc(num_frames * 2 * sizeof(float));
-    float *output = malloc(1024 * 2 * sizeof(float));  /* Process buffer */
+    float *output = malloc(1024 * 2 * sizeof(float)); /* Process buffer */
 
     cr_assert_not_null(input);
     cr_assert_not_null(output);
 
     /* Fill with recognizable pattern: left=frame_index, right=-frame_index */
     for (uint32_t i = 0; i < num_frames; i++) {
-        input[i * 2] = (float)i / num_frames;       /* Left: 0.0 to ~1.0 */
-        input[i * 2 + 1] = -(float)i / num_frames;  /* Right: 0.0 to ~-1.0 */
+        input[i * 2] = (float)i / num_frames;      /* Left: 0.0 to ~1.0 */
+        input[i * 2 + 1] = -(float)i / num_frames; /* Right: 0.0 to ~-1.0 */
     }
 
     /* Configure for passthrough: speed=1.0, mode=OFF */
@@ -285,25 +292,24 @@ Test(audio_scrubber, process_passthrough_zone) {
 
     /* Process 256 frames */
     uint64_t out_position = 0;
-    uint32_t processed = audio_scrubber_process(scrubber, input, num_frames,
-                                                 output, 256, &out_position);
+    uint32_t processed
+        = audio_scrubber_process(scrubber, input, num_frames, output, 256, &out_position);
 
     cr_assert_eq(processed, 256);
-    cr_assert_eq(out_position, 256);  /* Position should advance */
+    cr_assert_eq(out_position, 256); /* Position should advance */
 
     /* Verify output matches input (passthrough) */
     for (uint32_t i = 0; i < 256; i++) {
-        cr_assert_float_eq(output[i * 2], input[i * 2], 0.0001f,
-                          "Left channel mismatch at frame %u", i);
-        cr_assert_float_eq(output[i * 2 + 1], input[i * 2 + 1], 0.0001f,
-                          "Right channel mismatch at frame %u", i);
+        cr_assert_float_eq(
+            output[i * 2], input[i * 2], 0.0001f, "Left channel mismatch at frame %u", i);
+        cr_assert_float_eq(
+            output[i * 2 + 1], input[i * 2 + 1], 0.0001f, "Right channel mismatch at frame %u", i);
     }
 
     /* Process more and verify position continues */
-    processed = audio_scrubber_process(scrubber, input, num_frames,
-                                        output, 256, &out_position);
+    processed = audio_scrubber_process(scrubber, input, num_frames, output, 256, &out_position);
     cr_assert_eq(processed, 256);
-    cr_assert_eq(out_position, 512);  /* 256 + 256 */
+    cr_assert_eq(out_position, 512); /* 256 + 256 */
 
     free(input);
     free(output);
@@ -319,7 +325,8 @@ Test(audio_scrubber, process_passthrough_zone) {
  * 3. Near-zero speed (< 0.01) is treated as stopped
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, process_stopped_state) {
+Test(audio_scrubber, process_stopped_state)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -339,11 +346,11 @@ Test(audio_scrubber, process_stopped_state) {
     audio_scrubber_set_position(scrubber, 1000);
 
     uint64_t out_position = 9999;
-    uint32_t processed = audio_scrubber_process(scrubber, input, num_frames,
-                                                 output, 256, &out_position);
+    uint32_t processed
+        = audio_scrubber_process(scrubber, input, num_frames, output, 256, &out_position);
 
     cr_assert_eq(processed, 256);
-    cr_assert_eq(out_position, 1000);  /* Position should NOT advance */
+    cr_assert_eq(out_position, 1000); /* Position should NOT advance */
 
     /* Output should be silence */
     for (uint32_t i = 0; i < 256; i++) {
@@ -353,9 +360,8 @@ Test(audio_scrubber, process_stopped_state) {
 
     /* Near-zero speed should also be treated as stopped */
     audio_scrubber_set_speed(scrubber, 0.005f);
-    processed = audio_scrubber_process(scrubber, input, num_frames,
-                                        output, 256, &out_position);
-    cr_assert_eq(out_position, 1000);  /* Still no advancement */
+    processed = audio_scrubber_process(scrubber, input, num_frames, output, 256, &out_position);
+    cr_assert_eq(out_position, 1000); /* Still no advancement */
 
     free(input);
     free(output);
@@ -371,7 +377,8 @@ Test(audio_scrubber, process_stopped_state) {
  * 3. Process with empty sample buffer handles gracefully
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, process_parameter_validation) {
+Test(audio_scrubber, process_parameter_validation)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -410,7 +417,7 @@ Test(audio_scrubber, process_parameter_validation) {
  * 4. No crashes under contention
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#define SCRUB_THREADS 4
+#define SCRUB_THREADS    4
 #define SCRUB_ITERATIONS 10000
 
 typedef struct {
@@ -418,24 +425,27 @@ typedef struct {
     int thread_id;
 } scrub_thread_ctx_t;
 
-static void *speed_writer_thread(void *arg) {
+static void *
+speed_writer_thread(void *arg)
+{
     scrub_thread_ctx_t *ctx = arg;
 
     for (int i = 0; i < SCRUB_ITERATIONS; i++) {
         /* Vary speed based on iteration */
-        float speed = -4.0f + (float)(i % 800) / 100.0f;  /* -4.0 to 4.0 */
+        float speed = -4.0f + (float)(i % 800) / 100.0f; /* -4.0 to 4.0 */
         audio_scrubber_set_speed(ctx->scrubber, speed);
 
         /* Read back and verify in valid range */
         float read_speed = audio_scrubber_get_speed(ctx->scrubber);
-        cr_assert(read_speed >= -4.0f && read_speed <= 4.0f,
-                 "Speed out of range: %f", read_speed);
+        cr_assert(read_speed >= -4.0f && read_speed <= 4.0f, "Speed out of range: %f", read_speed);
     }
 
     return NULL;
 }
 
-static void *position_writer_thread(void *arg) {
+static void *
+position_writer_thread(void *arg)
+{
     scrub_thread_ctx_t *ctx = arg;
 
     for (int i = 0; i < SCRUB_ITERATIONS; i++) {
@@ -444,13 +454,14 @@ static void *position_writer_thread(void *arg) {
 
         /* Read back - may be different due to other threads, but should be valid */
         int64_t read_pos = audio_scrubber_get_position(ctx->scrubber);
-        (void)read_pos;  /* Just verify no crash */
+        (void)read_pos; /* Just verify no crash */
     }
 
     return NULL;
 }
 
-Test(audio_scrubber, concurrent_speed_position_updates) {
+Test(audio_scrubber, concurrent_speed_position_updates)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -465,8 +476,10 @@ Test(audio_scrubber, concurrent_speed_position_updates) {
 
         contexts[SCRUB_THREADS + i].scrubber = scrubber;
         contexts[SCRUB_THREADS + i].thread_id = SCRUB_THREADS + i;
-        pthread_create(&threads[SCRUB_THREADS + i], NULL, position_writer_thread,
-                      &contexts[SCRUB_THREADS + i]);
+        pthread_create(&threads[SCRUB_THREADS + i],
+                       NULL,
+                       position_writer_thread,
+                       &contexts[SCRUB_THREADS + i]);
     }
 
     /* Wait for all threads */
@@ -490,7 +503,8 @@ Test(audio_scrubber, concurrent_speed_position_updates) {
  * 3. Position can be set, flushed, and read back
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, seek_and_flush_operations) {
+Test(audio_scrubber, seek_and_flush_operations)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -528,7 +542,8 @@ Test(audio_scrubber, seek_and_flush_operations) {
  * 4. Large position values work
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, position_bounds_edge_cases) {
+Test(audio_scrubber, position_bounds_edge_cases)
+{
     audio_scrubber_t *scrubber = NULL;
     cr_assert_eq(audio_scrubber_create(TEST_SAMPLE_RATE, &scrubber), QUADRATURE_OK);
 
@@ -560,18 +575,22 @@ Test(audio_scrubber, position_bounds_edge_cases) {
  * would signal a missed crash immediately.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(audio_scrubber, death_set_speed_null_scrubber, .signal = SIGABRT) {
+Test(audio_scrubber, death_set_speed_null_scrubber, .signal = SIGABRT)
+{
     audio_scrubber_set_speed(NULL, 1.0f);
 }
 
-Test(audio_scrubber, death_get_speed_null_scrubber, .signal = SIGABRT) {
+Test(audio_scrubber, death_get_speed_null_scrubber, .signal = SIGABRT)
+{
     (void)audio_scrubber_get_speed(NULL);
 }
 
-Test(audio_scrubber, death_flush_null_scrubber, .signal = SIGABRT) {
+Test(audio_scrubber, death_flush_null_scrubber, .signal = SIGABRT)
+{
     audio_scrubber_flush(NULL);
 }
 
-Test(audio_scrubber, death_set_position_null_scrubber, .signal = SIGABRT) {
+Test(audio_scrubber, death_set_position_null_scrubber, .signal = SIGABRT)
+{
     audio_scrubber_set_position(NULL, 0);
 }

@@ -14,7 +14,9 @@ struct _UiMetadataDialog {
 
 G_DEFINE_FINAL_TYPE(UiMetadataDialog, ui_metadata_dialog, GTK_TYPE_WINDOW)
 
-static GtkWidget *create_row(const char *label, const char *value) {
+static GtkWidget *
+create_row(const char *label, const char *value)
+{
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(row, "metadata-dialog-row");
 
@@ -33,18 +35,24 @@ static GtkWidget *create_row(const char *label, const char *value) {
     return row;
 }
 
-static gboolean on_focus_out(GtkEventControllerFocus *ctrl, gpointer data) {
+static gboolean
+on_focus_out(GtkEventControllerFocus *ctrl, gpointer data)
+{
     (void)ctrl;
     GtkWindow *win = GTK_WINDOW(data);
     gtk_window_destroy(win);
     return FALSE;
 }
 
-static void ui_metadata_dialog_class_init(UiMetadataDialogClass *klass) {
+static void
+ui_metadata_dialog_class_init(UiMetadataDialogClass *klass)
+{
     (void)klass;
 }
 
-static void ui_metadata_dialog_init(UiMetadataDialog *self) {
+static void
+ui_metadata_dialog_init(UiMetadataDialog *self)
+{
     gtk_window_set_title(GTK_WINDOW(self), "Track Info");
     gtk_window_set_default_size(GTK_WINDOW(self), 400, -1);
     gtk_window_set_resizable(GTK_WINDOW(self), FALSE);
@@ -60,15 +68,19 @@ static void ui_metadata_dialog_init(UiMetadataDialog *self) {
     gtk_widget_add_controller(GTK_WIDGET(self), focus);
 }
 
-GtkWidget *ui_metadata_dialog_new(GtkWindow *parent, const library_track_info_t *track,
-                                  const char *resolved_path) {
+GtkWidget *
+ui_metadata_dialog_new(GtkWindow *parent,
+                       const library_track_info_t *track,
+                       const char *resolved_path)
+{
     UiMetadataDialog *dlg = g_object_new(UI_TYPE_METADATA_DIALOG, NULL);
 
     if (parent) {
         gtk_window_set_transient_for(GTK_WINDOW(dlg), parent);
     }
 
-    if (!track) return GTK_WIDGET(dlg);
+    if (!track)
+        return GTK_WIDGET(dlg);
 
     /* Title */
     char *title = g_strdup_printf("Info: %s", track->title ? track->title : "Unknown");

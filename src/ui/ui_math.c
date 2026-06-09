@@ -24,8 +24,11 @@
 #define SHUTTLE_SLIDER_MAX 3.0f
 #define SHUTTLE_SLIDER_MIN -2.0f
 
-float ui_shuttle_value_to_speed(double slider_value, shuttle_mode_t mode) {
-    if (mode == SHUTTLE_MODE_OFF) return 1.0f;
+float
+ui_shuttle_value_to_speed(double slider_value, shuttle_mode_t mode)
+{
+    if (mode == SHUTTLE_MODE_OFF)
+        return 1.0f;
 
     int pitched = (mode == SHUTTLE_MODE_PITCHED);
 
@@ -50,12 +53,19 @@ float ui_shuttle_value_to_speed(double slider_value, shuttle_mode_t mode) {
  *   0%→0, 0.1%→1/4, 1%→1/2, 10%→3/4, 100%→1
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-double ui_log_pct_norm(double pct) {
-    if (pct <= 0.0)   return 0.0;
-    if (pct <= 0.1)   return (pct / 0.1) / 4.0;
-    if (pct <= 1.0)   return (1.0 + (pct - 0.1) / 0.9) / 4.0;
-    if (pct <= 10.0)  return (2.0 + (pct - 1.0) / 9.0) / 4.0;
-    if (pct <= 100.0) return (3.0 + (pct - 10.0) / 90.0) / 4.0;
+double
+ui_log_pct_norm(double pct)
+{
+    if (pct <= 0.0)
+        return 0.0;
+    if (pct <= 0.1)
+        return (pct / 0.1) / 4.0;
+    if (pct <= 1.0)
+        return (1.0 + (pct - 0.1) / 0.9) / 4.0;
+    if (pct <= 10.0)
+        return (2.0 + (pct - 1.0) / 9.0) / 4.0;
+    if (pct <= 100.0)
+        return (3.0 + (pct - 10.0) / 90.0) / 4.0;
     return 1.0;
 }
 
@@ -68,7 +78,9 @@ double ui_log_pct_norm(double pct) {
  * Used by the scrubber to scale tick marks near the scroll position.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void ui_bell_curve_lut(float *lut, int n, double sigma) {
+void
+ui_bell_curve_lut(float *lut, int n, double sigma)
+{
     double inv_2sig2 = 1.0 / (2.0 * sigma * sigma);
     for (int i = 0; i < n; i++) {
         double dist = (double)i / (double)(n - 1);
@@ -84,7 +96,9 @@ void ui_bell_curve_lut(float *lut, int n, double sigma) {
  *   >= 1h: "Nh MMm"
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void ui_format_duration(uint32_t ms, char *buf, size_t len) {
+void
+ui_format_duration(uint32_t ms, char *buf, size_t len)
+{
     uint32_t sec = ms / 1000, min = sec / 60, hr = min / 60;
     if (hr > 0)
         snprintf(buf, len, "%uh %02um", hr, min % 60);
@@ -98,7 +112,9 @@ void ui_format_duration(uint32_t ms, char *buf, size_t len) {
  * 1 → "   Single", N → "NN Tracks" (capped at 99 for column alignment).
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void ui_format_track_count(char *buf, size_t len, uint32_t count) {
+void
+ui_format_track_count(char *buf, size_t len, uint32_t count)
+{
     if (count == 1)
         snprintf(buf, len, "   Single");
     else {

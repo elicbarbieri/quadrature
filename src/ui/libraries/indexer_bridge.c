@@ -12,15 +12,18 @@
 #include "../search/internal.h"
 #include <string.h>
 
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * Progress Display Helpers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void format_rate_eta(double rate_smoothed,
-                            size_t processed, size_t total,
-                            const char *unit,
-                            char *out_buf, size_t buf_size) {
+static void
+format_rate_eta(double rate_smoothed,
+                size_t processed,
+                size_t total,
+                const char *unit,
+                char *out_buf,
+                size_t buf_size)
+{
     if (rate_smoothed <= 0.0 || processed == 0) {
         snprintf(out_buf, buf_size, "Calculating...");
         return;
@@ -30,13 +33,21 @@ static void format_rate_eta(double rate_smoothed,
     if (eta_sec < 60)
         snprintf(out_buf, buf_size, "%.1f %s/sec · ~%.0fs remaining", rate_smoothed, unit, eta_sec);
     else
-        snprintf(out_buf, buf_size, "%.1f %s/sec · ~%.1fm remaining", rate_smoothed, unit, eta_sec / 60.0);
+        snprintf(out_buf,
+                 buf_size,
+                 "%.1f %s/sec · ~%.1fm remaining",
+                 rate_smoothed,
+                 unit,
+                 eta_sec / 60.0);
 }
 
 /* ── PhaseRow state machine transitions ──────────────────────────────────── */
 
-static void set_phase_css(PhaseRow *ph, const char *class) {
-    if (!ph->container) return;
+static void
+set_phase_css(PhaseRow *ph, const char *class)
+{
+    if (!ph->container)
+        return;
     gtk_widget_remove_css_class(ph->container, "progress-phase-dim");
     gtk_widget_remove_css_class(ph->container, "progress-phase-active");
     gtk_widget_remove_css_class(ph->container, "progress-phase-complete");
@@ -46,14 +57,17 @@ static void set_phase_css(PhaseRow *ph, const char *class) {
         gtk_widget_add_css_class(ph->container, class);
 }
 
-static void phase_reset(PhaseRow *ph) {
-    ph->state    = PHASE_WAITING;
+static void
+phase_reset(PhaseRow *ph)
+{
+    ph->state = PHASE_WAITING;
     ph->start_us = 0;
-    ph->end_us   = 0;
+    ph->end_us = 0;
     ph->prev_count = 0;
-    ph->prev_time  = 0;
-    ph->rate_ema   = 0.0;
-    if (!ph->container) return;
+    ph->prev_time = 0;
+    ph->rate_ema = 0.0;
+    if (!ph->container)
+        return;
     set_phase_css(ph, "progress-phase-dim");
     if (ph->bar)
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar), 0.0);
@@ -65,17 +79,23 @@ static void phase_reset(PhaseRow *ph) {
     }
 }
 
-static void phase_activate(PhaseRow *ph) {
-    if (ph->state != PHASE_WAITING && ph->state != PHASE_STARTUP) return;
-    ph->state    = PHASE_ACTIVE;
+static void
+phase_activate(PhaseRow *ph)
+{
+    if (ph->state != PHASE_WAITING && ph->state != PHASE_STARTUP)
+        return;
+    ph->state = PHASE_ACTIVE;
     if (ph->start_us == 0)
         ph->start_us = g_get_monotonic_time();
     set_phase_css(ph, "progress-phase-active");
 }
 
-static void phase_startup(PhaseRow *ph, const char *message) {
-    if (ph->state != PHASE_WAITING) return;
-    ph->state    = PHASE_STARTUP;
+static void
+phase_startup(PhaseRow *ph, const char *message)
+{
+    if (ph->state != PHASE_WAITING)
+        return;
+    ph->state = PHASE_STARTUP;
     ph->start_us = g_get_monotonic_time();
     set_phase_css(ph, "progress-phase-active");
     if (ph->label)
@@ -84,9 +104,10 @@ static void phase_startup(PhaseRow *ph, const char *message) {
         gtk_widget_set_visible(ph->rate_label, FALSE);
 }
 
-static void phase_complete(PhaseRow *ph, size_t total, const char *unit) {
-    if (ph->state == PHASE_COMPLETE || ph->state == PHASE_SKIPPED
-        || ph->state == PHASE_ERROR)
+static void
+phase_complete(PhaseRow *ph, size_t total, const char *unit)
+{
+    if (ph->state == PHASE_COMPLETE || ph->state == PHASE_SKIPPED || ph->state == PHASE_ERROR)
         return;
     ph->state = PHASE_COMPLETE;
     set_phase_css(ph, "progress-phase-complete");
@@ -110,16 +131,20 @@ static void phase_complete(PhaseRow *ph, size_t total, const char *unit) {
             if (ph->end_us == 0)
                 ph->end_us = g_get_monotonic_time();
             int64_t elapsed_us = ph->end_us - ph->start_us;
-            double elapsed_s   = elapsed_us / 1e6;
-            double avg_rate    = elapsed_s > 0.0 ? (double)total / elapsed_s : 0.0;
+            double elapsed_s = elapsed_us / 1e6;
+            double avg_rate = elapsed_s > 0.0 ? (double)total / elapsed_s : 0.0;
 
             char rate_buf[80];
             if (elapsed_s < 60)
-                snprintf(rate_buf, sizeof(rate_buf), "%.0fs · %.1f %s/sec",
-                         elapsed_s, avg_rate, unit);
+                snprintf(
+                    rate_buf, sizeof(rate_buf), "%.0fs · %.1f %s/sec", elapsed_s, avg_rate, unit);
             else
-                snprintf(rate_buf, sizeof(rate_buf), "%.1fm · %.1f %s/sec",
-                         elapsed_s / 60.0, avg_rate, unit);
+                snprintf(rate_buf,
+                         sizeof(rate_buf),
+                         "%.1fm · %.1f %s/sec",
+                         elapsed_s / 60.0,
+                         avg_rate,
+                         unit);
             gtk_label_set_text(GTK_LABEL(ph->rate_label), rate_buf);
             gtk_widget_set_visible(ph->rate_label, TRUE);
         } else {
@@ -128,9 +153,10 @@ static void phase_complete(PhaseRow *ph, size_t total, const char *unit) {
     }
 }
 
-static void phase_skip(PhaseRow *ph) {
-    if (ph->state == PHASE_COMPLETE || ph->state == PHASE_SKIPPED
-        || ph->state == PHASE_ERROR)
+static void
+phase_skip(PhaseRow *ph)
+{
+    if (ph->state == PHASE_COMPLETE || ph->state == PHASE_SKIPPED || ph->state == PHASE_ERROR)
         return;
     ph->state = PHASE_SKIPPED;
     set_phase_css(ph, "progress-phase-skipped");
@@ -144,7 +170,9 @@ static void phase_skip(PhaseRow *ph) {
         gtk_widget_set_visible(ph->rate_label, FALSE);
 }
 
-static void phase_error(PhaseRow *ph, const char *msg) {
+static void
+phase_error(PhaseRow *ph, const char *msg)
+{
     ph->state = PHASE_ERROR;
     set_phase_css(ph, "progress-phase-error");
     if (ph->bar)
@@ -157,13 +185,15 @@ static void phase_error(PhaseRow *ph, const char *msg) {
         gtk_widget_set_visible(ph->rate_label, FALSE);
 }
 
-static void phase_update(PhaseRow *ph, size_t processed, size_t total,
-                          const char *unit) {
-    if (ph->state != PHASE_ACTIVE) return;
+static void
+phase_update(PhaseRow *ph, size_t processed, size_t total, const char *unit)
+{
+    if (ph->state != PHASE_ACTIVE)
+        return;
 
     if (ph->bar)
         gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ph->bar),
-            total > 0 ? (double)processed / total : 0.0);
+                                      total > 0 ? (double)processed / total : 0.0);
 
     if (ph->label) {
         char buf[128];
@@ -180,7 +210,7 @@ static void phase_update(PhaseRow *ph, size_t processed, size_t total,
     if (elapsed_s > 2.0 && processed > 0)
         ph->rate_ema = (double)processed / elapsed_s;
     ph->prev_count = processed;
-    ph->prev_time  = now;
+    ph->prev_time = now;
 
     if (ph->rate_label) {
         char rate_buf[128];
@@ -196,10 +226,10 @@ static void phase_update(PhaseRow *ph, size_t processed, size_t total,
  *   If the phase was never activated in the UI (start_us == 0), this seeds
  *   the start time so phase_complete can compute rate/duration. Pass 0 if
  *   unavailable. */
-static void finalize_phase(PhaseRow *ph, size_t count, const char *unit,
-                           int64_t indexer_start_us) {
-    if (ph->state == PHASE_COMPLETE || ph->state == PHASE_SKIPPED
-        || ph->state == PHASE_ERROR)
+static void
+finalize_phase(PhaseRow *ph, size_t count, const char *unit, int64_t indexer_start_us)
+{
+    if (ph->state == PHASE_COMPLETE || ph->state == PHASE_SKIPPED || ph->state == PHASE_ERROR)
         return;
     /* Backfill start time from indexer when UI never saw a progress tick */
     if (ph->start_us == 0 && indexer_start_us > 0)
@@ -213,8 +243,13 @@ static void finalize_phase(PhaseRow *ph, size_t count, const char *unit,
 /* Build a phase row widget and fill in the ProgressPhaseWidgets struct */
 
 /* Format last-indexed timestamp as "Last scanned Feb 18, 2026" */
-static void format_last_indexed(int64_t unix_time, char *buf, size_t size) {
-    if (unix_time <= 0) { snprintf(buf, size, "Never scanned"); return; }
+static void
+format_last_indexed(int64_t unix_time, char *buf, size_t size)
+{
+    if (unix_time <= 0) {
+        snprintf(buf, size, "Never scanned");
+        return;
+    }
     time_t t = (time_t)unix_time;
     struct tm *tm_info = localtime(&t);
     char date_buf[64];
@@ -229,9 +264,9 @@ static void format_last_indexed(int64_t unix_time, char *buf, size_t size) {
 /* Async library stats loading — runs DB queries off the main thread */
 
 typedef struct {
-    char *db_root;       /* Data root for DB path (owned) */
-    char *lib_path;      /* Library root path for re-lookup (owned) */
-    UiWindow *window;    /* Window ref for re-lookup (never freed during app) */
+    char *db_root;    /* Data root for DB path (owned) */
+    char *lib_path;   /* Library root path for re-lookup (owned) */
+    UiWindow *window; /* Window ref for re-lookup (never freed during app) */
     size_t tracks;
     size_t albums;
     size_t artists;
@@ -239,20 +274,25 @@ typedef struct {
     size_t errors;
 } LibStatsData;
 
-static void lib_stats_data_free(LibStatsData *d) {
+static void
+lib_stats_data_free(LibStatsData *d)
+{
     g_free(d->db_root);
     g_free(d->lib_path);
     g_free(d);
 }
 
-static void lib_stats_thread(GTask *task, gpointer src, gpointer data, GCancellable *c) {
-    (void)src; (void)c;
+static void
+lib_stats_thread(GTask *task, gpointer src, gpointer data, GCancellable *c)
+{
+    (void)src;
+    (void)c;
     LibStatsData *d = data;
     char *dbpath = g_build_filename(d->db_root, "quadrature.sqlite", NULL);
     quadrature_db_t *lib_db = NULL;
 
-    if (g_file_test(dbpath, G_FILE_TEST_EXISTS) &&
-        db_open(dbpath, true, &lib_db) == QUADRATURE_OK) {
+    if (g_file_test(dbpath, G_FILE_TEST_EXISTS)
+        && db_open(dbpath, true, &lib_db) == QUADRATURE_OK) {
         db_get_entity_count(lib_db, DB_ENTITY_TRACK, &d->tracks);
         db_get_entity_count(lib_db, DB_ENTITY_ALBUM, &d->albums);
         db_get_entity_count(lib_db, DB_ENTITY_ARTIST, &d->artists);
@@ -264,11 +304,18 @@ static void lib_stats_thread(GTask *task, gpointer src, gpointer data, GCancella
     g_task_return_pointer(task, d, NULL);
 }
 
-static void lib_stats_done(GObject *src, GAsyncResult *res, gpointer data) {
-    (void)src; (void)data;
+static void
+lib_stats_done(GObject *src, GAsyncResult *res, gpointer data)
+{
+    (void)src;
+    (void)data;
     GError *err = NULL;
     LibStatsData *d = g_task_propagate_pointer(G_TASK(res), &err);
-    if (err) { g_error_free(err); lib_stats_data_free(d); return; }
+    if (err) {
+        g_error_free(err);
+        lib_stats_data_free(d);
+        return;
+    }
 
     /* Re-lookup the LibEntry by path — the original pointer may be stale
      * if libs_load() was called between task start and completion. */
@@ -290,10 +337,12 @@ static void lib_stats_done(GObject *src, GAsyncResult *res, gpointer data) {
     if (e->pending_load_toast) {
         e->pending_load_toast = FALSE;
         char *folder = g_path_get_basename(e->path);
-        char *markup = g_markup_printf_escaped(
-            "<b>Library \"%s\" Loaded</b>\n"
-            "<span size=\"small\" alpha=\"70%%\">%zu Albums · %zu Tracks · Processing artwork…</span>",
-            folder, e->albums, e->tracks);
+        char *markup = g_markup_printf_escaped("<b>Library \"%s\" Loaded</b>\n"
+                                               "<span size=\"small\" alpha=\"70%%\">%zu Albums · "
+                                               "%zu Tracks · Processing artwork…</span>",
+                                               folder,
+                                               e->albums,
+                                               e->tracks);
         g_free(folder);
         ui_window_show_toast_markup(d->window, markup, TOAST_SUCCESS, 5000);
         g_free(markup);
@@ -302,7 +351,9 @@ static void lib_stats_done(GObject *src, GAsyncResult *res, gpointer data) {
     lib_stats_data_free(d);
 }
 
-void libs_load_entry_stats(LibEntry *e, UiWindow *w) {
+void
+libs_load_entry_stats(LibEntry *e, UiWindow *w)
+{
     /* Reset stats immediately so stale values never persist */
     e->tracks = 0;
     e->albums = 0;
@@ -311,9 +362,9 @@ void libs_load_entry_stats(LibEntry *e, UiWindow *w) {
     e->errors = 0;
 
     LibStatsData *d = g_new0(LibStatsData, 1);
-    d->db_root  = g_strdup(e->data_path ? e->data_path : e->path);
+    d->db_root = g_strdup(e->data_path ? e->data_path : e->path);
     d->lib_path = g_strdup(e->path);
-    d->window   = w;
+    d->window = w;
 
     GTask *task = g_task_new(NULL, NULL, lib_stats_done, NULL);
     g_task_set_task_data(task, d, NULL);
@@ -322,7 +373,9 @@ void libs_load_entry_stats(LibEntry *e, UiWindow *w) {
 }
 
 /* Push current LibEntry stat values into the stats panel labels */
-void update_card_stats_labels(LibEntry *e) {
+void
+update_card_stats_labels(LibEntry *e)
+{
     char buf[128];
 
     snprintf(buf, sizeof(buf), "%zu tracks", e->tracks);
@@ -346,9 +399,10 @@ void update_card_stats_labels(LibEntry *e) {
     }
 }
 
-
 /* Per-card pulse timer — pulses scan phase (always) + any STARTUP phases */
-static gboolean on_card_pulse(gpointer data) {
+static gboolean
+on_card_pulse(gpointer data)
+{
     LibEntry *e = (LibEntry *)data;
     if ((e->phases[0].state == PHASE_ACTIVE || e->phases[0].state == PHASE_STARTUP)
         && e->phases[0].bar)
@@ -361,7 +415,9 @@ static gboolean on_card_pulse(gpointer data) {
 }
 
 /* Called 5s after indexing completes — crossfade back to stats page */
-static gboolean on_card_hide_progress(gpointer data) {
+static gboolean
+on_card_hide_progress(gpointer data)
+{
     LibEntry *e = (LibEntry *)data;
     e->hide_timer = 0;
     if (e->progress_revealer)
@@ -370,7 +426,9 @@ static gboolean on_card_hide_progress(gpointer data) {
 }
 
 /* Update the per-card phase panel for an incoming progress report */
-static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
+static void
+update_card_phase_panel(LibEntry *e, const indexer_progress_t *p)
+{
     PhaseRow *ph = e->phases;
     char buf[128];
     char rate_buf[128];
@@ -393,54 +451,60 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
         /* Live elapsed + dirs/sec in the scan phase rate label */
         if (ph[0].rate_label && ph[0].start_us > 0 && p->dirs_scanned > 0) {
             int64_t elapsed_us = g_get_monotonic_time() - ph[0].start_us;
-            double elapsed_s   = elapsed_us / 1e6;
-            double dirs_sec    = elapsed_s > 0.0 ? (double)p->dirs_scanned / elapsed_s : 0.0;
+            double elapsed_s = elapsed_us / 1e6;
+            double dirs_sec = elapsed_s > 0.0 ? (double)p->dirs_scanned / elapsed_s : 0.0;
             if (elapsed_s < 60)
-                snprintf(rate_buf, sizeof(rate_buf), "%.0fs · %.0f dirs/sec",
-                         elapsed_s, dirs_sec);
+                snprintf(rate_buf, sizeof(rate_buf), "%.0fs · %.0f dirs/sec", elapsed_s, dirs_sec);
             else
-                snprintf(rate_buf, sizeof(rate_buf), "%.1fm · %.0f dirs/sec",
-                         elapsed_s / 60.0, dirs_sec);
+                snprintf(rate_buf,
+                         sizeof(rate_buf),
+                         "%.1fm · %.0f dirs/sec",
+                         elapsed_s / 60.0,
+                         dirs_sec);
             gtk_label_set_text(GTK_LABEL(ph[0].rate_label), rate_buf);
             gtk_widget_set_visible(ph[0].rate_label, TRUE);
         }
         break;
 
     case INDEXER_PHASE_METADATA:
-        if (e->pulse_timer) { g_source_remove(e->pulse_timer); e->pulse_timer = 0; }
-        finalize_phase(&ph[0], p->dirs_scanned, "dirs",
-                       p->phase_start_times[INDEXER_PHASE_SCANNING]);
+        if (e->pulse_timer) {
+            g_source_remove(e->pulse_timer);
+            e->pulse_timer = 0;
+        }
+        finalize_phase(
+            &ph[0], p->dirs_scanned, "dirs", p->phase_start_times[INDEXER_PHASE_SCANNING]);
 
         if (p->files_total == 0) {
             phase_skip(&ph[1]);
             break;
         }
-        if (ph[1].state == PHASE_WAITING) phase_activate(&ph[1]);
+        if (ph[1].state == PHASE_WAITING)
+            phase_activate(&ph[1]);
         phase_update(&ph[1], p->files_processed, p->files_total, "tracks");
         break;
 
     case INDEXER_PHASE_ARTWORK:
-        finalize_phase(&ph[1], p->files_total, "tracks",
-                       p->phase_start_times[INDEXER_PHASE_METADATA]);
+        finalize_phase(
+            &ph[1], p->files_total, "tracks", p->phase_start_times[INDEXER_PHASE_METADATA]);
 
         if (p->albums_total == 0) {
             phase_skip(&ph[2]);
             break;
         }
-        if (ph[2].state == PHASE_WAITING) phase_activate(&ph[2]);
+        if (ph[2].state == PHASE_WAITING)
+            phase_activate(&ph[2]);
         phase_update(&ph[2], p->albums_processed, p->albums_total, "albums");
         break;
 
     case INDEXER_PHASE_FINGERPRINT:
-        finalize_phase(&ph[2], p->albums_total, "albums",
-                       p->phase_start_times[INDEXER_PHASE_ARTWORK]);
+        finalize_phase(
+            &ph[2], p->albums_total, "albums", p->phase_start_times[INDEXER_PHASE_ARTWORK]);
 
         /* Phase 3: fingerprinting progress */
         if (p->fingerprint_total > 0) {
             if (ph[3].state == PHASE_WAITING || ph[3].state == PHASE_STARTUP)
                 phase_activate(&ph[3]);
-            phase_update(&ph[3], p->fingerprint_processed,
-                         p->fingerprint_total, "albums");
+            phase_update(&ph[3], p->fingerprint_processed, p->fingerprint_total, "albums");
         } else if (p->albums_total == 0) {
             /* Triage hasn't finished yet — PG connections being established */
             if (ph[3].state == PHASE_WAITING)
@@ -451,19 +515,20 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
             if (e->pulse_timer == 0)
                 e->pulse_timer = g_timeout_add(100, on_card_pulse, e);
         } else {
-            phase_skip(&ph[3]);  /* All albums have tags, no fingerprinting needed */
+            phase_skip(&ph[3]); /* All albums have tags, no fingerprinting needed */
         }
         break;
 
     case INDEXER_PHASE_RESOLVE:
-        finalize_phase(&ph[2], p->albums_total, "albums",
-                       p->phase_start_times[INDEXER_PHASE_ARTWORK]);
+        finalize_phase(
+            &ph[2], p->albums_total, "albums", p->phase_start_times[INDEXER_PHASE_ARTWORK]);
 
         /* Finalize fingerprinting if complete */
-        if (p->fingerprint_total > 0
-            && p->fingerprint_processed >= p->fingerprint_total
+        if (p->fingerprint_total > 0 && p->fingerprint_processed >= p->fingerprint_total
             && ph[3].state == PHASE_ACTIVE) {
-            finalize_phase(&ph[3], p->fingerprint_total, "albums",
+            finalize_phase(&ph[3],
+                           p->fingerprint_total,
+                           "albums",
                            p->phase_start_times[INDEXER_PHASE_FINGERPRINT]);
         } else if (p->fingerprint_total == 0) {
             phase_skip(&ph[3]);
@@ -472,8 +537,7 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
         }
         /* Update fingerprint progress even during resolve (concurrent) */
         if (ph[3].state == PHASE_ACTIVE && p->fingerprint_total > 0) {
-            phase_update(&ph[3], p->fingerprint_processed,
-                         p->fingerprint_total, "albums");
+            phase_update(&ph[3], p->fingerprint_processed, p->fingerprint_total, "albums");
         }
 
         /* Phase 4: MB resolution */
@@ -494,15 +558,17 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
     case INDEXER_PHASE_ARTIST_ART:
         /* Finalize fingerprint + resolve if still active */
         if (p->fingerprint_total > 0 && ph[3].state == PHASE_ACTIVE)
-            finalize_phase(&ph[3], p->fingerprint_total, "albums",
+            finalize_phase(&ph[3],
+                           p->fingerprint_total,
+                           "albums",
                            p->phase_start_times[INDEXER_PHASE_FINGERPRINT]);
         else if (ph[3].state != PHASE_COMPLETE && ph[3].state != PHASE_SKIPPED
                  && ph[3].state != PHASE_ERROR)
             phase_skip(&ph[3]);
 
         if (ph[4].state == PHASE_ACTIVE)
-            finalize_phase(&ph[4], p->albums_processed, "albums",
-                           p->phase_start_times[INDEXER_PHASE_RESOLVE]);
+            finalize_phase(
+                &ph[4], p->albums_processed, "albums", p->phase_start_times[INDEXER_PHASE_RESOLVE]);
         else if (ph[4].state != PHASE_COMPLETE && ph[4].state != PHASE_SKIPPED
                  && ph[4].state != PHASE_ERROR)
             phase_skip(&ph[4]);
@@ -517,18 +583,19 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
         } else {
             if (ph[5].state == PHASE_WAITING || ph[5].state == PHASE_STARTUP)
                 phase_activate(&ph[5]);
-            phase_update(&ph[5], p->artist_art_processed,
-                         p->artist_art_total, "artists");
+            phase_update(&ph[5], p->artist_art_processed, p->artist_art_total, "artists");
         }
         break;
 
     case INDEXER_PHASE_ARTIST_BIO:
         /* Finalize all prior phases that may have been skipped */
-        if (e->pulse_timer) { g_source_remove(e->pulse_timer); e->pulse_timer = 0; }
+        if (e->pulse_timer) {
+            g_source_remove(e->pulse_timer);
+            e->pulse_timer = 0;
+        }
         for (int i = 3; i <= 5; i++) {
             if (ph[i].state == PHASE_ACTIVE)
-                finalize_phase(&ph[i], 0, "",
-                               p->phase_start_times[INDEXER_PHASE_ARTIST_ART]);
+                finalize_phase(&ph[i], 0, "", p->phase_start_times[INDEXER_PHASE_ARTIST_ART]);
             else if (ph[i].state != PHASE_COMPLETE && ph[i].state != PHASE_SKIPPED
                      && ph[i].state != PHASE_ERROR)
                 phase_skip(&ph[i]);
@@ -543,8 +610,7 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
         } else {
             if (ph[6].state == PHASE_WAITING || ph[6].state == PHASE_STARTUP)
                 phase_activate(&ph[6]);
-            phase_update(&ph[6], p->artist_bio_processed,
-                         p->artist_bio_total, "artists");
+            phase_update(&ph[6], p->artist_bio_processed, p->artist_bio_total, "artists");
         }
         break;
 
@@ -558,14 +624,20 @@ static void update_card_phase_panel(LibEntry *e, const indexer_progress_t *p) {
     }
 }
 
-void on_indexer_started(IndexerController *idx, const char *library_path, gpointer data) {
+void
+on_indexer_started(IndexerController *idx, const char *library_path, gpointer data)
+{
     (void)idx;
     UiWindow *w = UI_WINDOW(data);
     LibEntry *e = find_lib_entry(w, library_path);
-    if (!e || !e->progress_revealer) return;
+    if (!e || !e->progress_revealer)
+        return;
 
     /* Cancel any pending hide timer from a previous scan */
-    if (e->hide_timer) { g_source_remove(e->hide_timer); e->hide_timer = 0; }
+    if (e->hide_timer) {
+        g_source_remove(e->hide_timer);
+        e->hide_timer = 0;
+    }
 
     e->shown_initial_load_toast = FALSE;
 
@@ -580,8 +652,12 @@ void on_indexer_started(IndexerController *idx, const char *library_path, gpoint
         e->pulse_timer = g_timeout_add(100, on_card_pulse, e);
 }
 
-void on_indexer_progress(IndexerController *idx, const char *library_path,
-                                 indexer_progress_t *p, gpointer data) {
+void
+on_indexer_progress(IndexerController *idx,
+                    const char *library_path,
+                    indexer_progress_t *p,
+                    gpointer data)
+{
     (void)idx;
     UiWindow *w = UI_WINDOW(data);
     LibEntry *e = find_lib_entry(w, library_path);
@@ -594,7 +670,9 @@ void on_indexer_progress(IndexerController *idx, const char *library_path,
  * Called after cache warming completes OR after artwork atlas reload.
  * Adding a new library-dependent view? Add it here.
  */
-void refresh_library_views(UiWindow *w) {
+void
+refresh_library_views(UiWindow *w)
+{
     /* Rebuild search view genre popover from warm cache */
     filter_bar_rebuild_genre_popover(&w->search_filter_bar);
 
@@ -610,23 +688,26 @@ void refresh_library_views(UiWindow *w) {
     /* Sync library bar toggle labels with current names from cache */
     if (w->library_cache && w->library_toggles) {
         for (int i = 0; i < w->library_toggle_count; i++) {
-            int bi = GPOINTER_TO_INT(g_object_get_data(
-                G_OBJECT(w->library_toggles[i]), "lib-idx"));
+            int bi = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w->library_toggles[i]), "lib-idx"));
             const char *name = library_cache_get_library_name(w->library_cache, bi);
-            gtk_button_set_label(GTK_BUTTON(w->library_toggles[i]),
-                                 name ? name : "Library");
+            gtk_button_set_label(GTK_BUTTON(w->library_toggles[i]), name ? name : "Library");
         }
     }
 }
 
-void on_cache_ready(void *data) {
+void
+on_cache_ready(void *data)
+{
     UiWindow *w = UI_WINDOW(data);
     refresh_library_views(w);
 }
 
 /* Resolve lib_idx for a library_path (returns -1 if not found). */
-int find_lib_idx(UiWindow *w, const char *library_path) {
-    if (!w->settings || !library_path) return -1;
+int
+find_lib_idx(UiWindow *w, const char *library_path)
+{
+    if (!w->settings || !library_path)
+        return -1;
     for (int i = 0; i < w->settings->library_count; i++) {
         if (g_strcmp0(w->settings->libraries[i].path, library_path) == 0)
             return i;
@@ -639,16 +720,18 @@ int find_lib_idx(UiWindow *w, const char *library_path) {
  * We debounce per bitmap_index (500ms) so only one COW rebuild runs. */
 
 typedef struct {
-    UiWindow                  *w;
-    int                        bitmap_index;
-    guint                      source_id;
-    library_cache_changeset_t *changeset;  /* owned; merged across debounced signals */
+    UiWindow *w;
+    int bitmap_index;
+    guint source_id;
+    library_cache_changeset_t *changeset; /* owned; merged across debounced signals */
 } PendingRefresh;
 
 /* bitmap_index (GINT_TO_POINTER) → PendingRefresh*.  Lazily created. */
 static GHashTable *pending_refreshes = NULL;
 
-static gboolean debounced_refresh_cb(gpointer user_data) {
+static gboolean
+debounced_refresh_cb(gpointer user_data)
+{
     PendingRefresh *pr = user_data;
     UiWindow *w = pr->w;
     int bitmap = pr->bitmap_index;
@@ -667,8 +750,11 @@ static gboolean debounced_refresh_cb(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
-static void schedule_debounced_refresh(UiWindow *w, int bitmap_index,
-                                       const library_cache_changeset_t *changeset) {
+static void
+schedule_debounced_refresh(UiWindow *w,
+                           int bitmap_index,
+                           const library_cache_changeset_t *changeset)
+{
     if (!pending_refreshes)
         pending_refreshes = g_hash_table_new(g_direct_hash, g_direct_equal);
 
@@ -705,8 +791,11 @@ static void schedule_debounced_refresh(UiWindow *w, int bitmap_index,
     g_message("library-updated: scheduled debounced refresh for bitmap_index=%d", bitmap_index);
 }
 
-void indexer_bridge_cancel_pending_refreshes(void) {
-    if (!pending_refreshes) return;
+void
+indexer_bridge_cancel_pending_refreshes(void)
+{
+    if (!pending_refreshes)
+        return;
     GHashTableIter iter;
     gpointer key, value;
     g_hash_table_iter_init(&iter, pending_refreshes);
@@ -722,17 +811,22 @@ void indexer_bridge_cancel_pending_refreshes(void) {
 
 /* Called whenever SQLite metadata changes and the library cache must be reloaded.
  * Fired after: phases 1-3 (initial scan), phase 6 (MB enrichment). */
-void on_indexer_library_updated(IndexerController *idx, const char *library_path,
-                                indexer_progress_t *p,
-                                library_cache_changeset_t *changeset,
-                                gpointer data) {
+void
+on_indexer_library_updated(IndexerController *idx,
+                           const char *library_path,
+                           indexer_progress_t *p,
+                           library_cache_changeset_t *changeset,
+                           gpointer data)
+{
     (void)idx;
     (void)p;
     UiWindow *w = UI_WINDOW(data);
 
     int lib_idx = find_lib_idx(w, library_path);
     g_message("library-updated: library=%s lib_idx=%d cache=%p",
-              library_path, lib_idx, (void*)w->library_cache);
+              library_path,
+              lib_idx,
+              (void *)w->library_cache);
 
     /* COW refresh: debounced per bitmap_index (500ms) to coalesce rapid
      * LIBRARY_UPDATED signals from consecutive indexer phases. */
@@ -742,13 +836,21 @@ void on_indexer_library_updated(IndexerController *idx, const char *library_path
     }
 
     LibEntry *e = find_lib_entry(w, library_path);
-    if (!e || !e->progress_revealer) return;
+    if (!e || !e->progress_revealer)
+        return;
 
     /* Finalize scan + metadata phase rows (safe to call repeatedly — no-ops if already done) */
-    if (e->pulse_timer) { g_source_remove(e->pulse_timer); e->pulse_timer = 0; }
-    finalize_phase(&e->phases[0], p ? p->dirs_scanned : 0, "dirs",
+    if (e->pulse_timer) {
+        g_source_remove(e->pulse_timer);
+        e->pulse_timer = 0;
+    }
+    finalize_phase(&e->phases[0],
+                   p ? p->dirs_scanned : 0,
+                   "dirs",
                    p ? p->phase_start_times[INDEXER_PHASE_SCANNING] : 0);
-    finalize_phase(&e->phases[1], p ? p->files_total : 0, "tracks",
+    finalize_phase(&e->phases[1],
+                   p ? p->files_total : 0,
+                   "tracks",
                    p ? p->phase_start_times[INDEXER_PHASE_METADATA] : 0);
 
     libs_load_entry_stats(e, w);
@@ -763,8 +865,12 @@ void on_indexer_library_updated(IndexerController *idx, const char *library_path
 
 /* Called whenever an artwork atlas is written.
  * Fired after: phase 4 (album atlas), phase 7 (global artist atlas). */
-void on_indexer_artwork_updated(IndexerController *idx, const char *library_path,
-                                indexer_progress_t *p, gpointer data) {
+void
+on_indexer_artwork_updated(IndexerController *idx,
+                           const char *library_path,
+                           indexer_progress_t *p,
+                           gpointer data)
+{
     (void)idx;
     UiWindow *w = UI_WINDOW(data);
 
@@ -785,7 +891,9 @@ void on_indexer_artwork_updated(IndexerController *idx, const char *library_path
     /* Per-card: finalize artwork phase row (no-op if already done) */
     LibEntry *e = find_lib_entry(w, library_path);
     if (e && e->progress_revealer) {
-        finalize_phase(&e->phases[2], p ? p->albums_total : 0, "albums",
+        finalize_phase(&e->phases[2],
+                       p ? p->albums_total : 0,
+                       "albums",
                        p ? p->phase_start_times[INDEXER_PHASE_ARTWORK] : 0);
     }
 }
@@ -793,15 +901,23 @@ void on_indexer_artwork_updated(IndexerController *idx, const char *library_path
 /* Called when a single library scan fully completes (terminal — all phases done).
  * Cache refreshes are driven by LIBRARY_UPDATED signals; this handler is
  * purely responsible for finalizing the progress panel UI. */
-void on_indexer_done(IndexerController *idx, const char *library_path,
-                             gboolean ok, indexer_progress_t *p, gpointer data) {
+void
+on_indexer_done(IndexerController *idx,
+                const char *library_path,
+                gboolean ok,
+                indexer_progress_t *p,
+                gpointer data)
+{
     (void)idx;
     UiWindow *w = UI_WINDOW(data);
 
     /* Per-card: mark resolve phase done, update final stats */
     LibEntry *e = find_lib_entry(w, library_path);
     if (e && e->progress_revealer) {
-        if (e->pulse_timer) { g_source_remove(e->pulse_timer); e->pulse_timer = 0; }
+        if (e->pulse_timer) {
+            g_source_remove(e->pulse_timer);
+            e->pulse_timer = 0;
+        }
 
         if (ok) {
             /* Finalize fingerprint phase (or show error if AcoustID unreachable) */
@@ -810,7 +926,9 @@ void on_indexer_done(IndexerController *idx, const char *library_path,
             else {
                 size_t fp_total = p ? p->fingerprint_total : 0;
                 if (fp_total > 0)
-                    finalize_phase(&e->phases[3], fp_total, "albums",
+                    finalize_phase(&e->phases[3],
+                                   fp_total,
+                                   "albums",
                                    p ? p->phase_start_times[INDEXER_PHASE_FINGERPRINT] : 0);
                 else
                     phase_skip(&e->phases[3]);
@@ -820,7 +938,9 @@ void on_indexer_done(IndexerController *idx, const char *library_path,
                 phase_error(&e->phases[4], "Database unreachable");
             else {
                 size_t resolved = p ? p->albums_processed : 0;
-                finalize_phase(&e->phases[4], resolved, "albums",
+                finalize_phase(&e->phases[4],
+                               resolved,
+                               "albums",
                                p ? p->phase_start_times[INDEXER_PHASE_RESOLVE] : 0);
             }
             /* Finalize artist art phase */
@@ -829,7 +949,9 @@ void on_indexer_done(IndexerController *idx, const char *library_path,
             else {
                 size_t art_total = p ? p->artist_art_total : 0;
                 if (art_total > 0)
-                    finalize_phase(&e->phases[5], p->artist_art_downloaded, "artists",
+                    finalize_phase(&e->phases[5],
+                                   p->artist_art_downloaded,
+                                   "artists",
                                    p ? p->phase_start_times[INDEXER_PHASE_ARTIST_ART] : 0);
                 else
                     phase_skip(&e->phases[5]);
@@ -838,7 +960,9 @@ void on_indexer_done(IndexerController *idx, const char *library_path,
             {
                 size_t bio_total = p ? p->artist_bio_total : 0;
                 if (bio_total > 0)
-                    finalize_phase(&e->phases[6], p->artist_bio_fetched, "artists",
+                    finalize_phase(&e->phases[6],
+                                   p->artist_bio_fetched,
+                                   "artists",
                                    p ? p->phase_start_times[INDEXER_PHASE_ARTIST_BIO] : 0);
                 else
                     phase_skip(&e->phases[6]);
@@ -853,8 +977,8 @@ void on_indexer_done(IndexerController *idx, const char *library_path,
         /* Reload stats — MB enrichment may have updated titles/artists */
         libs_load_entry_stats(e, w);
 
-        if (e->hide_timer) g_source_remove(e->hide_timer);
+        if (e->hide_timer)
+            g_source_remove(e->hide_timer);
         e->hide_timer = g_timeout_add(5000, on_card_hide_progress, e);
     }
 }
-

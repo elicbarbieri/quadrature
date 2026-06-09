@@ -24,10 +24,13 @@
 #include <libavformat/avformat.h>
 
 // Local helper: count tracks via direct SQL (db_get_track_count was removed)
-static quadrature_result_t test_get_track_count(quadrature_db_t* db, size_t* out) {
-    if (!db || !out) return QUADRATURE_ERROR_INVALID_PARAM;
+static quadrature_result_t
+test_get_track_count(quadrature_db_t *db, size_t *out)
+{
+    if (!db || !out)
+        return QUADRATURE_ERROR_INVALID_PARAM;
     db_lock(db);
-    sqlite3_stmt* stmt = NULL;
+    sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db->db, "SELECT COUNT(*) FROM tracks", -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         db_unlock(db);
@@ -45,7 +48,8 @@ static quadrature_result_t test_get_track_count(quadrature_db_t* db, size_t* out
 }
 
 // Initialize FFmpeg before any tests run (before Criterion forks)
-ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
+ReportHook(PRE_ALL)(struct criterion_test_set *tests)
+{
     (void)tests;
     avformat_network_init();
 }
@@ -54,14 +58,14 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
 // Forward declarations from indexer internals
 // ============================================================================
 
-bool is_disc_folder(const char* dir_name);
-uint16_t get_disc_number_from_folder(const char* dir_name);
-bool title_extract_featuring(const char* title, char** clean_out, char** feat_out);
-char detect_artist_delimiter(const char* const* artist_tags, size_t count);
+bool is_disc_folder(const char *dir_name);
+uint16_t get_disc_number_from_folder(const char *dir_name);
+bool title_extract_featuring(const char *title, char **clean_out, char **feat_out);
+char detect_artist_delimiter(const char *const *artist_tags, size_t count);
 
 // Mock indexer struct for validation tests (minimal fields needed)
 struct indexer {
-    quadrature_db_t* db;
+    quadrature_db_t *db;
     int64_t scan_generation;
     atomic_size_t error_count;
 };
@@ -71,7 +75,8 @@ struct indexer {
 // ============================================================================
 
 // Test: is_disc_folder() recognizes "CD" prefix patterns
-Test(multi_disc, disc_folder_cd_patterns) {
+Test(multi_disc, disc_folder_cd_patterns)
+{
     // Basic CD patterns (case insensitive)
     cr_assert(is_disc_folder("CD1"), "CD1 should be detected as disc folder");
     cr_assert(is_disc_folder("cd1"), "cd1 should be detected as disc folder");
@@ -92,7 +97,8 @@ Test(multi_disc, disc_folder_cd_patterns) {
 }
 
 // Test: is_disc_folder() recognizes "Disc" prefix patterns
-Test(multi_disc, disc_folder_disc_patterns) {
+Test(multi_disc, disc_folder_disc_patterns)
+{
     // Basic Disc patterns
     cr_assert(is_disc_folder("Disc1"), "Disc1 should be detected");
     cr_assert(is_disc_folder("disc1"), "disc1 should be detected");
@@ -111,7 +117,8 @@ Test(multi_disc, disc_folder_disc_patterns) {
 }
 
 // Test: is_disc_folder() recognizes word-based disc names
-Test(multi_disc, disc_folder_word_patterns) {
+Test(multi_disc, disc_folder_word_patterns)
+{
     // Word-based disc names (Disc One, Disc Two, etc.)
     cr_assert(is_disc_folder("Disc One"), "Disc One should be detected");
     cr_assert(is_disc_folder("Disc Two"), "Disc Two should be detected");
@@ -131,7 +138,8 @@ Test(multi_disc, disc_folder_word_patterns) {
 }
 
 // Test: is_disc_folder() recognizes short "D" prefix patterns
-Test(multi_disc, disc_folder_d_patterns) {
+Test(multi_disc, disc_folder_d_patterns)
+{
     // Short D prefix (must be followed directly by number)
     cr_assert(is_disc_folder("D1"), "D1 should be detected");
     cr_assert(is_disc_folder("d1"), "d1 should be detected");
@@ -145,7 +153,8 @@ Test(multi_disc, disc_folder_d_patterns) {
 }
 
 // Test: is_disc_folder() rejects non-disc folder names
-Test(multi_disc, disc_folder_false_positives) {
+Test(multi_disc, disc_folder_false_positives)
+{
     // Regular folder names should NOT be detected
     cr_assert(!is_disc_folder("Album"), "Album should NOT be detected");
     cr_assert(!is_disc_folder("Music"), "Music should NOT be detected");
@@ -174,7 +183,8 @@ Test(multi_disc, disc_folder_false_positives) {
 // ============================================================================
 
 // Test: get_disc_number_from_folder() extracts correct disc numbers
-Test(multi_disc, disc_number_extraction_basic) {
+Test(multi_disc, disc_number_extraction_basic)
+{
     // CD patterns
     cr_assert_eq(get_disc_number_from_folder("CD1"), 1, "CD1 -> 1");
     cr_assert_eq(get_disc_number_from_folder("CD2"), 2, "CD2 -> 2");
@@ -195,7 +205,8 @@ Test(multi_disc, disc_number_extraction_basic) {
 }
 
 // Test: get_disc_number_from_folder() handles word-based disc names
-Test(multi_disc, disc_number_extraction_words) {
+Test(multi_disc, disc_number_extraction_words)
+{
     cr_assert_eq(get_disc_number_from_folder("Disc One"), 1, "Disc One -> 1");
     cr_assert_eq(get_disc_number_from_folder("Disc Two"), 2, "Disc Two -> 2");
     cr_assert_eq(get_disc_number_from_folder("Disc Three"), 3, "Disc Three -> 3");
@@ -213,7 +224,8 @@ Test(multi_disc, disc_number_extraction_words) {
 }
 
 // Test: get_disc_number_from_folder() returns 0 for invalid inputs
-Test(multi_disc, disc_number_extraction_invalid) {
+Test(multi_disc, disc_number_extraction_invalid)
+{
     cr_assert_eq(get_disc_number_from_folder(NULL), 0, "NULL -> 0");
     cr_assert_eq(get_disc_number_from_folder(""), 0, "empty -> 0");
     cr_assert_eq(get_disc_number_from_folder("Album"), 0, "Album -> 0");
@@ -224,7 +236,8 @@ Test(multi_disc, disc_number_extraction_invalid) {
 }
 
 // Test: get_disc_number_from_folder() handles separator variations
-Test(multi_disc, disc_number_extraction_separators) {
+Test(multi_disc, disc_number_extraction_separators)
+{
     // Space separator
     cr_assert_eq(get_disc_number_from_folder("CD 1"), 1, "CD 1 -> 1");
     cr_assert_eq(get_disc_number_from_folder("CD 12"), 12, "CD 12 -> 12");
@@ -248,14 +261,26 @@ Test(multi_disc, disc_number_extraction_separators) {
 // ============================================================================
 
 // Test: Track upsert with disc_num field
-Test(multi_disc, db_track_disc_num_basic) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, db_track_disc_num_basic)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music/album", "Album", artist_id, 2024);
-    test_insert_track_full(db, album_id, "/music/album/cd1/track1.mp3", "Track 1",        1, 1, 180000, NULL, NULL, NULL, 0);
-    test_insert_track_full(db, album_id, "/music/album/cd2/track1.mp3", "Track 1 Disc 2", 1, 2, 200000, NULL, NULL, NULL, 0);
+    test_insert_track_full(
+        db, album_id, "/music/album/cd1/track1.mp3", "Track 1", 1, 1, 180000, NULL, NULL, NULL, 0);
+    test_insert_track_full(db,
+                           album_id,
+                           "/music/album/cd2/track1.mp3",
+                           "Track 1 Disc 2",
+                           1,
+                           2,
+                           200000,
+                           NULL,
+                           NULL,
+                           NULL,
+                           0);
 
     // Verify both tracks were inserted
     size_t count = 0;
@@ -266,18 +291,27 @@ Test(multi_disc, db_track_disc_num_basic) {
 }
 
 // Test: Track upsert with disc_num = 0 defaults to 1
-Test(multi_disc, db_track_disc_num_default) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, db_track_disc_num_default)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
-    int64_t track_id = test_insert_track_full(db, album_id, "/music/track.mp3", "Track",
-                                               1, 0 /* should default to 1 */, 180000,
-                                               NULL, NULL, NULL, 0);
+    int64_t track_id = test_insert_track_full(db,
+                                              album_id,
+                                              "/music/track.mp3",
+                                              "Track",
+                                              1,
+                                              0 /* should default to 1 */,
+                                              180000,
+                                              NULL,
+                                              NULL,
+                                              NULL,
+                                              0);
 
     // Retrieve track and verify disc_num
-    db_track_t* track = NULL;
+    db_track_t *track = NULL;
     cr_assert_eq(db_get_track(db, track_id, &track), QUADRATURE_OK);
     cr_assert_not_null(track);
     cr_assert_eq(track->disc_num, 1, "disc_num=0 should be stored as 1");
@@ -287,18 +321,19 @@ Test(multi_disc, db_track_disc_num_default) {
 }
 
 // Test: Track update preserves disc_num
-Test(multi_disc, db_track_disc_num_update) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, db_track_disc_num_update)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
-    int64_t track_id = test_insert_track_full(db, album_id, "/music/track.mp3", "Original Title",
-                                               5, 3, 180000, NULL, NULL, NULL, 0);
+    int64_t track_id = test_insert_track_full(
+        db, album_id, "/music/track.mp3", "Original Title", 5, 3, 180000, NULL, NULL, NULL, 0);
 
     /* Re-reconcile the same path with updated fields — should update, not insert. */
-    test_insert_track_full(db, album_id, "/music/track.mp3", "Updated Title",
-                            5, 4, 180000, NULL, NULL, NULL, 0);
+    test_insert_track_full(
+        db, album_id, "/music/track.mp3", "Updated Title", 5, 4, 180000, NULL, NULL, NULL, 0);
 
     // Verify count is still 1 (reconciler updates by path, not insert)
     size_t count = 0;
@@ -306,7 +341,7 @@ Test(multi_disc, db_track_disc_num_update) {
     cr_assert_eq(count, 1, "Should still have 1 track after re-reconcile");
 
     // Verify disc_num was updated
-    db_track_t* track = NULL;
+    db_track_t *track = NULL;
     cr_assert_eq(db_get_track(db, track_id, &track), QUADRATURE_OK);
     cr_assert_not_null(track);
     cr_assert_eq(track->disc_num, 4, "disc_num should be updated to 4");
@@ -317,15 +352,28 @@ Test(multi_disc, db_track_disc_num_update) {
 }
 
 // Test: Tracks with same track_num but different disc_num
-Test(multi_disc, db_track_multi_disc_same_track_num) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, db_track_multi_disc_same_track_num)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music/album", "Double Album", artist_id, 2024);
-    int64_t tid_d1t1 = test_insert_track_full(db, album_id, "/music/album/cd1/01.mp3", "Opening",             1, 1, 180000, NULL, NULL, NULL, 0);
-    int64_t tid_d2t1 = test_insert_track_full(db, album_id, "/music/album/cd2/01.mp3", "Second Half Opening", 1, 2, 200000, NULL, NULL, NULL, 0);
-    int64_t tid_d1t2 = test_insert_track_full(db, album_id, "/music/album/cd1/02.mp3", "Second Track",        2, 1, 190000, NULL, NULL, NULL, 0);
+    int64_t tid_d1t1 = test_insert_track_full(
+        db, album_id, "/music/album/cd1/01.mp3", "Opening", 1, 1, 180000, NULL, NULL, NULL, 0);
+    int64_t tid_d2t1 = test_insert_track_full(db,
+                                              album_id,
+                                              "/music/album/cd2/01.mp3",
+                                              "Second Half Opening",
+                                              1,
+                                              2,
+                                              200000,
+                                              NULL,
+                                              NULL,
+                                              NULL,
+                                              0);
+    int64_t tid_d1t2 = test_insert_track_full(
+        db, album_id, "/music/album/cd1/02.mp3", "Second Track", 2, 1, 190000, NULL, NULL, NULL, 0);
 
     // Verify all 3 tracks exist
     size_t count = 0;
@@ -333,7 +381,7 @@ Test(multi_disc, db_track_multi_disc_same_track_num) {
     cr_assert_eq(count, 3, "Should have 3 tracks total");
 
     // Retrieve and verify each track
-    db_track_t* track = NULL;
+    db_track_t *track = NULL;
 
     cr_assert_eq(db_get_track(db, tid_d1t1, &track), QUADRATURE_OK);
     cr_assert_eq(track->track_num, 1);
@@ -357,8 +405,9 @@ Test(multi_disc, db_track_multi_disc_same_track_num) {
 }
 
 // Test: High disc numbers (box sets)
-Test(multi_disc, db_track_high_disc_numbers) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, db_track_high_disc_numbers)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
@@ -370,10 +419,10 @@ Test(multi_disc, db_track_high_disc_numbers) {
         char title[64];
         snprintf(path, sizeof(path), "/music/boxset/cd%d/track1.mp3", disc);
         snprintf(title, sizeof(title), "Disc %d Track 1", disc);
-        int64_t tid = test_insert_track_full(db, album_id, path, title,
-                                               1, disc, 180000 + disc * 1000,
-                                               NULL, NULL, NULL, 0);
-        if (disc == 15) disc15_tid = tid;
+        int64_t tid = test_insert_track_full(
+            db, album_id, path, title, 1, disc, 180000 + disc * 1000, NULL, NULL, NULL, 0);
+        if (disc == 15)
+            disc15_tid = tid;
     }
 
     // Verify all 20 tracks
@@ -382,7 +431,7 @@ Test(multi_disc, db_track_high_disc_numbers) {
     cr_assert_eq(count, 20, "Should have 20 tracks (one per disc)");
 
     // Spot check a high disc number
-    db_track_t* track = NULL;
+    db_track_t *track = NULL;
     cr_assert_eq(db_get_track(db, disc15_tid, &track), QUADRATURE_OK);
     cr_assert_eq(track->disc_num, 15, "Track 15 should be on disc 15");
     db_tracks_free(track, 1);
@@ -395,7 +444,8 @@ Test(multi_disc, db_track_high_disc_numbers) {
 // ============================================================================
 
 // Test: Case sensitivity is handled correctly
-Test(multi_disc, case_sensitivity) {
+Test(multi_disc, case_sensitivity)
+{
     // All these should be equivalent (case insensitive)
     cr_assert_eq(get_disc_number_from_folder("CD1"), 1);
     cr_assert_eq(get_disc_number_from_folder("cd1"), 1);
@@ -413,7 +463,8 @@ Test(multi_disc, case_sensitivity) {
 }
 
 // Test: Maximum valid disc number (99)
-Test(multi_disc, disc_number_boundary) {
+Test(multi_disc, disc_number_boundary)
+{
     // Valid: 1-99
     cr_assert_eq(get_disc_number_from_folder("CD1"), 1);
     cr_assert_eq(get_disc_number_from_folder("CD50"), 50);
@@ -426,11 +477,12 @@ Test(multi_disc, disc_number_boundary) {
     // This tests the actual behavior
     uint16_t result = get_disc_number_from_folder("CD100");
     // The function may or may not handle 100+ - just verify it doesn't crash
-    (void)result;  // Suppress unused warning
+    (void)result; // Suppress unused warning
 }
 
 // Test: Disc folder detection with trailing characters
-Test(multi_disc, disc_folder_trailing_chars) {
+Test(multi_disc, disc_folder_trailing_chars)
+{
     // These might be ambiguous - test actual behavior
     // "CD1 Bonus" - is this disc 1 with suffix, or not a disc folder?
     // The current implementation should detect CD1 from "CD1" prefix
@@ -441,7 +493,8 @@ Test(multi_disc, disc_folder_trailing_chars) {
 }
 
 // Test: Whitespace handling
-Test(multi_disc, whitespace_handling) {
+Test(multi_disc, whitespace_handling)
+{
     // Multiple spaces
     cr_assert_eq(get_disc_number_from_folder("CD  1"), 1, "CD  1 -> 1");
     cr_assert_eq(get_disc_number_from_folder("Disc   2"), 2, "Disc   2 -> 2");
@@ -456,7 +509,8 @@ Test(multi_disc, whitespace_handling) {
 // ============================================================================
 
 // Test: Common disc folder naming conventions from real music libraries
-Test(multi_disc, real_world_folder_names) {
+Test(multi_disc, real_world_folder_names)
+{
     // iTunes/Apple Music style
     cr_assert(is_disc_folder("Disc 1"), "iTunes: Disc 1");
     cr_assert(is_disc_folder("Disc 2"), "iTunes: Disc 2");
@@ -485,7 +539,8 @@ Test(multi_disc, real_world_folder_names) {
 }
 
 // Test: Folder names that should NOT be detected as disc folders
-Test(multi_disc, non_disc_real_world_names) {
+Test(multi_disc, non_disc_real_world_names)
+{
     // Common non-disc folder names
     cr_assert(!is_disc_folder("Bonus Tracks"), "Bonus Tracks is not a disc");
     cr_assert(!is_disc_folder("Live"), "Live is not a disc");
@@ -516,7 +571,8 @@ Test(multi_disc, non_disc_real_world_names) {
 // ============================================================================
 
 // Test: "Digital Media" prefix (MusicBrainz/Picard convention for digital releases)
-Test(multi_disc, disc_folder_digital_media) {
+Test(multi_disc, disc_folder_digital_media)
+{
     // Basic detection
     cr_assert(is_disc_folder("Digital Media 01"), "Digital Media 01");
     cr_assert(is_disc_folder("Digital Media 02"), "Digital Media 02");
@@ -548,70 +604,81 @@ Test(multi_disc, disc_folder_digital_media) {
 // ============================================================================
 
 // Test: basic (feat. ...) extraction from title
-Test(multi_disc, title_feat_parentheses) {
-    char* clean = NULL;
-    char* feat = NULL;
+Test(multi_disc, title_feat_parentheses)
+{
+    char *clean = NULL;
+    char *feat = NULL;
 
     cr_assert(title_extract_featuring("Higher Ground (feat. Naomi Wild)", &clean, &feat));
     cr_assert_str_eq(clean, "Higher Ground");
     cr_assert_str_eq(feat, "Naomi Wild");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 }
 
 // Test: [feat. ...] with square brackets
-Test(multi_disc, title_feat_brackets) {
-    char* clean = NULL;
-    char* feat = NULL;
+Test(multi_disc, title_feat_brackets)
+{
+    char *clean = NULL;
+    char *feat = NULL;
 
     cr_assert(title_extract_featuring("Falls (Reprise) [feat. Sasha Alex Sloan]", &clean, &feat));
     cr_assert_str_eq(clean, "Falls (Reprise)");
     cr_assert_str_eq(feat, "Sasha Alex Sloan");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 }
 
 // Test: feat with multiple artists via &
-Test(multi_disc, title_feat_multiple_artists) {
-    char* clean = NULL;
-    char* feat = NULL;
+Test(multi_disc, title_feat_multiple_artists)
+{
+    char *clean = NULL;
+    char *feat = NULL;
 
     cr_assert(title_extract_featuring("Line of Sight (feat. WYNNE & Mansionair)", &clean, &feat));
     cr_assert_str_eq(clean, "Line of Sight");
     cr_assert_str_eq(feat, "WYNNE & Mansionair");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 }
 
 // Test: feat in middle of title with other parenthetical groups
-Test(multi_disc, title_feat_with_other_parens) {
-    char* clean = NULL;
-    char* feat = NULL;
+Test(multi_disc, title_feat_with_other_parens)
+{
+    char *clean = NULL;
+    char *feat = NULL;
 
     // (feat.) followed by [non-feat info]
     cr_assert(title_extract_featuring(
         "Memories That You Call (feat. Monsoonsiren) [ODESZA & Golden Features VIP Remix]",
-        &clean, &feat));
+        &clean,
+        &feat));
     cr_assert_str_eq(clean, "Memories That You Call [ODESZA & Golden Features VIP Remix]");
     cr_assert_str_eq(feat, "Monsoonsiren");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 
     // Non-feat parens before feat parens
-    cr_assert(title_extract_featuring(
-        "Wide Awake (Live) (Feat. Charlie Houston)", &clean, &feat));
+    cr_assert(title_extract_featuring("Wide Awake (Live) (Feat. Charlie Houston)", &clean, &feat));
     cr_assert_str_eq(clean, "Wide Awake (Live)");
     cr_assert_str_eq(feat, "Charlie Houston");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 
     // Feat between two non-feat parens
     cr_assert(title_extract_featuring(
         "Forgive Me (Live) (Feat. Izzy Bizu) (Odesza Vip Remix)", &clean, &feat));
     cr_assert_str_eq(clean, "Forgive Me (Live) (Odesza Vip Remix)");
     cr_assert_str_eq(feat, "Izzy Bizu");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 }
 
 // Test: no featuring info returns false
-Test(multi_disc, title_feat_none) {
-    char* clean = NULL;
-    char* feat = NULL;
+Test(multi_disc, title_feat_none)
+{
+    char *clean = NULL;
+    char *feat = NULL;
 
     cr_assert_not(title_extract_featuring("A Moment Apart", &clean, &feat));
     cr_assert_null(clean);
@@ -623,21 +690,25 @@ Test(multi_disc, title_feat_none) {
 }
 
 // Test: case insensitivity
-Test(multi_disc, title_feat_case_insensitive) {
-    char* clean = NULL;
-    char* feat = NULL;
+Test(multi_disc, title_feat_case_insensitive)
+{
+    char *clean = NULL;
+    char *feat = NULL;
 
     cr_assert(title_extract_featuring("Track (FEAT. Artist)", &clean, &feat));
     cr_assert_str_eq(feat, "Artist");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 
     cr_assert(title_extract_featuring("Track (Featuring Artist)", &clean, &feat));
     cr_assert_str_eq(feat, "Artist");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 
     cr_assert(title_extract_featuring("Track (ft. Artist)", &clean, &feat));
     cr_assert_str_eq(feat, "Artist");
-    g_free(clean); g_free(feat);
+    g_free(clean);
+    g_free(feat);
 }
 
 // ============================================================================
@@ -645,68 +716,76 @@ Test(multi_disc, title_feat_case_insensitive) {
 // ============================================================================
 
 // Test: slash delimiter detected when suffixes vary
-Test(multi_disc, delim_slash_varying) {
-    const char* tags[] = { "Odesza", "Odesza/Charlie Houston", "Odesza/Maro", "Odesza" };
-    cr_assert_eq(detect_artist_delimiter(tags, 4), '/',
-        "Varying slash suffixes should detect '/' delimiter");
+Test(multi_disc, delim_slash_varying)
+{
+    const char *tags[] = { "Odesza", "Odesza/Charlie Houston", "Odesza/Maro", "Odesza" };
+    cr_assert_eq(detect_artist_delimiter(tags, 4),
+                 '/',
+                 "Varying slash suffixes should detect '/' delimiter");
 }
 
 // Test: slash NOT detected when suffix is consistent (AC/DC case)
-Test(multi_disc, delim_slash_consistent) {
-    const char* tags[] = { "AC/DC", "AC/DC", "AC/DC", "AC/DC" };
-    cr_assert_eq(detect_artist_delimiter(tags, 4), '\0',
-        "Consistent 'AC/DC' should NOT be split");
+Test(multi_disc, delim_slash_consistent)
+{
+    const char *tags[] = { "AC/DC", "AC/DC", "AC/DC", "AC/DC" };
+    cr_assert_eq(detect_artist_delimiter(tags, 4), '\0', "Consistent 'AC/DC' should NOT be split");
 }
 
 // Test: semicolon delimiter detected when suffixes vary
-Test(multi_disc, delim_semicolon_varying) {
-    const char* tags[] = {
-        "Fred again..", "Sampha;Fred again..", "Jozzy;Fred again..;Jim Legxacy",
-        "Four Tet;Skrillex;Fred again.."
-    };
-    cr_assert_eq(detect_artist_delimiter(tags, 4), ';',
-        "Varying semicolon suffixes should detect ';' delimiter");
+Test(multi_disc, delim_semicolon_varying)
+{
+    const char *tags[] = { "Fred again..",
+                           "Sampha;Fred again..",
+                           "Jozzy;Fred again..;Jim Legxacy",
+                           "Four Tet;Skrillex;Fred again.." };
+    cr_assert_eq(detect_artist_delimiter(tags, 4),
+                 ';',
+                 "Varying semicolon suffixes should detect ';' delimiter");
 }
 
 // Test: semicolon NOT detected when suffix is consistent
-Test(multi_disc, delim_semicolon_consistent) {
-    const char* tags[] = { "Simon;Garfunkel", "Simon;Garfunkel", "Simon;Garfunkel" };
-    cr_assert_eq(detect_artist_delimiter(tags, 3), '\0',
-        "Consistent semicolons should NOT be split");
+Test(multi_disc, delim_semicolon_consistent)
+{
+    const char *tags[] = { "Simon;Garfunkel", "Simon;Garfunkel", "Simon;Garfunkel" };
+    cr_assert_eq(
+        detect_artist_delimiter(tags, 3), '\0', "Consistent semicolons should NOT be split");
 }
 
 // Test: semicolon takes priority over slash
-Test(multi_disc, delim_semicolon_priority) {
-    const char* tags[] = { "A;B", "A;C", "A/B", "A/C" };
-    cr_assert_eq(detect_artist_delimiter(tags, 4), ';',
-        "Semicolon should be checked before slash");
+Test(multi_disc, delim_semicolon_priority)
+{
+    const char *tags[] = { "A;B", "A;C", "A/B", "A/C" };
+    cr_assert_eq(detect_artist_delimiter(tags, 4), ';', "Semicolon should be checked before slash");
 }
 
 // Test: single occurrence → not a delimiter (conservative)
-Test(multi_disc, delim_single_occurrence) {
-    const char* tags[] = { "Odesza", "Odesza", "Odesza/Maro", "Odesza" };
-    cr_assert_eq(detect_artist_delimiter(tags, 4), '\0',
-        "Single slash occurrence should NOT be treated as delimiter");
+Test(multi_disc, delim_single_occurrence)
+{
+    const char *tags[] = { "Odesza", "Odesza", "Odesza/Maro", "Odesza" };
+    cr_assert_eq(detect_artist_delimiter(tags, 4),
+                 '\0',
+                 "Single slash occurrence should NOT be treated as delimiter");
 }
 
 // Test: no delimiters at all
-Test(multi_disc, delim_none) {
-    const char* tags[] = { "Odesza", "Coldplay", "Aphex Twin" };
-    cr_assert_eq(detect_artist_delimiter(tags, 3), '\0',
-        "No delimiters present → return '\\0'");
+Test(multi_disc, delim_none)
+{
+    const char *tags[] = { "Odesza", "Coldplay", "Aphex Twin" };
+    cr_assert_eq(detect_artist_delimiter(tags, 3), '\0', "No delimiters present → return '\\0'");
 }
 
 // Test: NULL tags handled gracefully
-Test(multi_disc, delim_null_tags) {
-    const char* tags[] = { NULL, "Odesza/A", NULL, "Odesza/B" };
-    cr_assert_eq(detect_artist_delimiter(tags, 4), '/',
-        "NULL tags should be skipped, slash still detected");
+Test(multi_disc, delim_null_tags)
+{
+    const char *tags[] = { NULL, "Odesza/A", NULL, "Odesza/B" };
+    cr_assert_eq(
+        detect_artist_delimiter(tags, 4), '/', "NULL tags should be skipped, slash still detected");
 }
 
 // Test: empty array
-Test(multi_disc, delim_empty) {
-    cr_assert_eq(detect_artist_delimiter(NULL, 0), '\0',
-        "Empty array → return '\\0'");
+Test(multi_disc, delim_empty)
+{
+    cr_assert_eq(detect_artist_delimiter(NULL, 0), '\0', "Empty array → return '\\0'");
 }
 
 // ============================================================================
@@ -714,37 +793,30 @@ Test(multi_disc, delim_empty) {
 // ============================================================================
 
 // Forward declaration for validate_album_track_numbering
-void validate_album_track_numbering(indexer_t* idx, const metadata_result_t* mr);
+void validate_album_track_numbering(indexer_t *idx, const metadata_result_t *mr);
 
 // Test: Continuous numbering - valid (no errors)
-Test(multi_disc, track_validation_continuous_valid) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, track_validation_continuous_valid)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     // Clear any previous errors
     db_clear_errors_for_path(db, "");
 
     // Create mock indexer context
-    indexer_t idx = {
-        .db = db,
-        .scan_generation = 1,
-        .error_count = 0
-    };
+    indexer_t idx = { .db = db, .scan_generation = 1, .error_count = 0 };
 
     // Create album with continuous numbering:
     // Disc 1: tracks 1-12
     // Disc 2: tracks 13-24
-    extracted_track_t tracks[24] = {0};
+    extracted_track_t tracks[24] = { 0 };
     for (int i = 0; i < 24; i++) {
         tracks[i].disc_num = (i < 12) ? 1 : 2;
-        tracks[i].track_num = i + 1;  // Continuous: 1-24
+        tracks[i].track_num = i + 1; // Continuous: 1-24
     }
 
-    metadata_result_t mr = {
-        .dir_path = "/test/album",
-        .tracks = tracks,
-        .track_count = 24
-    };
+    metadata_result_t mr = { .dir_path = "/test/album", .tracks = tracks, .track_count = 24 };
 
     // Validate - should NOT log any errors
     validate_album_track_numbering(&idx, &mr);
@@ -758,37 +830,30 @@ Test(multi_disc, track_validation_continuous_valid) {
 }
 
 // Test: Per-disc numbering - valid (no errors)
-Test(multi_disc, track_validation_per_disc_valid) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, track_validation_per_disc_valid)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
-    indexer_t idx = {
-        .db = db,
-        .scan_generation = 1,
-        .error_count = 0
-    };
+    indexer_t idx = { .db = db, .scan_generation = 1, .error_count = 0 };
 
     // Create album with per-disc numbering:
     // Disc 1: tracks 1-12
     // Disc 2: tracks 1-10 (resets to 1)
-    extracted_track_t tracks[22] = {0};
-    
+    extracted_track_t tracks[22] = { 0 };
+
     for (int i = 0; i < 12; i++) {
         tracks[i].disc_num = 1;
-        tracks[i].track_num = i + 1;  // 1-12
+        tracks[i].track_num = i + 1; // 1-12
     }
     for (int i = 12; i < 22; i++) {
         tracks[i].disc_num = 2;
-        tracks[i].track_num = (i - 12) + 1;  // 1-10 (reset)
+        tracks[i].track_num = (i - 12) + 1; // 1-10 (reset)
     }
 
-    metadata_result_t mr = {
-        .dir_path = "/test/album",
-        .tracks = tracks,
-        .track_count = 22
-    };
+    metadata_result_t mr = { .dir_path = "/test/album", .tracks = tracks, .track_count = 22 };
 
     validate_album_track_numbering(&idx, &mr);
 
@@ -801,38 +866,31 @@ Test(multi_disc, track_validation_per_disc_valid) {
 
 // Test: Continuous numbering with gaps - error
 // TODO: Fix crash in test - actual validation logic works in production
-Test(multi_disc, track_validation_continuous_gaps, .disabled = true) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, track_validation_continuous_gaps, .disabled = true)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
-    indexer_t idx = {
-        .db = db,
-        .scan_generation = 1,
-        .error_count = 0
-    };
+    indexer_t idx = { .db = db, .scan_generation = 1, .error_count = 0 };
 
     // Create album with continuous numbering BUT missing track 13:
     // Disc 1: tracks 1-12
     // Disc 2: tracks 14-24 (missing 13)
     extracted_track_t tracks[23];
     memset(tracks, 0, sizeof(tracks));
-    
+
     for (int i = 0; i < 12; i++) {
         tracks[i].disc_num = 1;
-        tracks[i].track_num = i + 1;  // 1-12
+        tracks[i].track_num = i + 1; // 1-12
     }
     for (int i = 12; i < 23; i++) {
         tracks[i].disc_num = 2;
-        tracks[i].track_num = (i + 2);  // 14-24 (skip 13)
+        tracks[i].track_num = (i + 2); // 14-24 (skip 13)
     }
 
-    metadata_result_t mr = {
-        .dir_path = "/test/album",
-        .tracks = tracks,
-        .track_count = 23
-    };
+    metadata_result_t mr = { .dir_path = "/test/album", .tracks = tracks, .track_count = 23 };
 
     validate_album_track_numbering(&idx, &mr);
 
@@ -846,45 +904,38 @@ Test(multi_disc, track_validation_continuous_gaps, .disabled = true) {
 
 // Test: Per-disc numbering with gaps - error
 // TODO: Fix crash in test - actual validation logic works in production
-Test(multi_disc, track_validation_per_disc_gaps, .disabled = true) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, track_validation_per_disc_gaps, .disabled = true)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
-    indexer_t idx = {
-        .db = db,
-        .scan_generation = 1,
-        .error_count = 0
-    };
+    indexer_t idx = { .db = db, .scan_generation = 1, .error_count = 0 };
 
     // Create album with per-disc numbering with gap on disc 1:
     // Disc 1: tracks 1, 3-12 (missing 2)
     // Disc 2: tracks 1-10
     extracted_track_t tracks[21];
     memset(tracks, 0, sizeof(tracks));
-    
+
     // Disc 1: track 1
     tracks[0].disc_num = 1;
     tracks[0].track_num = 1;
-    
+
     // Disc 1: tracks 3-12 (skip 2)
     for (int i = 1; i < 11; i++) {
         tracks[i].disc_num = 1;
-        tracks[i].track_num = i + 2;  // 3-12
+        tracks[i].track_num = i + 2; // 3-12
     }
-    
+
     // Disc 2: tracks 1-10
     for (int i = 11; i < 21; i++) {
         tracks[i].disc_num = 2;
-        tracks[i].track_num = (i - 11) + 1;  // 1-10
+        tracks[i].track_num = (i - 11) + 1; // 1-10
     }
 
-    metadata_result_t mr = {
-        .dir_path = "/test/album",
-        .tracks = tracks,
-        .track_count = 21
-    };
+    metadata_result_t mr = { .dir_path = "/test/album", .tracks = tracks, .track_count = 21 };
 
     validate_album_track_numbering(&idx, &mr);
 
@@ -897,32 +948,25 @@ Test(multi_disc, track_validation_per_disc_gaps, .disabled = true) {
 }
 
 // Test: Single disc album - uses per-disc logic
-Test(multi_disc, track_validation_single_disc) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, track_validation_single_disc)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
-    indexer_t idx = {
-        .db = db,
-        .scan_generation = 1,
-        .error_count = 0
-    };
+    indexer_t idx = { .db = db, .scan_generation = 1, .error_count = 0 };
 
     // Single disc with tracks 1-12
     extracted_track_t tracks[12];
     memset(tracks, 0, sizeof(tracks));
-    
+
     for (int i = 0; i < 12; i++) {
         tracks[i].disc_num = 1;
         tracks[i].track_num = i + 1;
     }
 
-    metadata_result_t mr = {
-        .dir_path = "/test/album",
-        .tracks = tracks,
-        .track_count = 12
-    };
+    metadata_result_t mr = { .dir_path = "/test/album", .tracks = tracks, .track_count = 12 };
 
     validate_album_track_numbering(&idx, &mr);
 
@@ -934,23 +978,16 @@ Test(multi_disc, track_validation_single_disc) {
 }
 
 // Test: Empty album (no tracks)
-Test(multi_disc, track_validation_empty) {
-    quadrature_db_t* db = NULL;
+Test(multi_disc, track_validation_empty)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
-    indexer_t idx = {
-        .db = db,
-        .scan_generation = 1,
-        .error_count = 0
-    };
+    indexer_t idx = { .db = db, .scan_generation = 1, .error_count = 0 };
 
-    metadata_result_t mr = {
-        .dir_path = "/test/album",
-        .tracks = NULL,
-        .track_count = 0
-    };
+    metadata_result_t mr = { .dir_path = "/test/album", .tracks = NULL, .track_count = 0 };
 
     validate_album_track_numbering(&idx, &mr);
 
@@ -962,38 +999,35 @@ Test(multi_disc, track_validation_empty) {
 }
 
 // Test: Multiple gaps in continuous numbering
-// TODO: Fix crash in test - actual validation logic works in production  
-Test(multi_disc, track_validation_continuous_multiple_gaps, .disabled = true) {
-    quadrature_db_t* db = NULL;
+// TODO: Fix crash in test - actual validation logic works in production
+Test(multi_disc, track_validation_continuous_multiple_gaps, .disabled = true)
+{
+    quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
     db_clear_errors_for_path(db, "");
 
-    indexer_t idx = {
-        .db = db,
-        .scan_generation = 1,
-        .error_count = 0
-    };
+    indexer_t idx = { .db = db, .scan_generation = 1, .error_count = 0 };
 
     // Tracks: 1-5, 7-10, 15-20 (missing 6, 11-14)
     extracted_track_t tracks[16];
     memset(tracks, 0, sizeof(tracks));
     int idx_pos = 0;
-    
+
     // Tracks 1-5
     for (int i = 1; i <= 5; i++) {
         tracks[idx_pos].disc_num = 1;
         tracks[idx_pos].track_num = i;
         idx_pos++;
     }
-    
+
     // Tracks 7-10 (skip 6)
     for (int i = 7; i <= 10; i++) {
         tracks[idx_pos].disc_num = 1;
         tracks[idx_pos].track_num = i;
         idx_pos++;
     }
-    
+
     // Tracks 15-20 (skip 11-14)
     for (int i = 15; i <= 20; i++) {
         tracks[idx_pos].disc_num = 2;
@@ -1001,11 +1035,7 @@ Test(multi_disc, track_validation_continuous_multiple_gaps, .disabled = true) {
         idx_pos++;
     }
 
-    metadata_result_t mr = {
-        .dir_path = "/test/album",
-        .tracks = tracks,
-        .track_count = 16
-    };
+    metadata_result_t mr = { .dir_path = "/test/album", .tracks = tracks, .track_count = 16 };
 
     validate_album_track_numbering(&idx, &mr);
 

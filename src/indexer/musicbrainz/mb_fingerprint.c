@@ -17,10 +17,11 @@
 
 // Chromaprint expects 16-bit signed samples at specific sample rate
 #define CHROMAPRINT_SAMPLE_RATE 11025
-#define CHROMAPRINT_CHANNELS 1
+#define CHROMAPRINT_CHANNELS    1
 
-quadrature_result_t mb_fingerprint_generate(const char* audio_path,
-                                             mb_fingerprint_t* fingerprint) {
+quadrature_result_t
+mb_fingerprint_generate(const char *audio_path, mb_fingerprint_t *fingerprint)
+{
     if (!audio_path || !fingerprint) {
         return QUADRATURE_ERROR_INVALID_PARAM;
     }
@@ -28,18 +29,18 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
     memset(fingerprint, 0, sizeof(mb_fingerprint_t));
 
     quadrature_result_t result = QUADRATURE_ERROR_INTERNAL;
-    AVFormatContext* fmt_ctx = NULL;
-    AVCodecContext* codec_ctx = NULL;
-    SwrContext* swr_ctx = NULL;
-    AVPacket* pkt = NULL;
-    AVFrame* frame = NULL;
-    ChromaprintContext* chromaprint_ctx = NULL;
-    int16_t* resample_buffer = NULL;
+    AVFormatContext *fmt_ctx = NULL;
+    AVCodecContext *codec_ctx = NULL;
+    SwrContext *swr_ctx = NULL;
+    AVPacket *pkt = NULL;
+    AVFrame *frame = NULL;
+    ChromaprintContext *chromaprint_ctx = NULL;
+    int16_t *resample_buffer = NULL;
 
     // Open input file with minimal probing — we only need the first audio stream.
     // Default probesize (5 MB) and analyzeduration (5s) cause excessive I/O on
     // network drives. 32 KB + 100ms is sufficient for all common audio formats.
-    AVDictionary* open_opts = NULL;
+    AVDictionary *open_opts = NULL;
     av_dict_set(&open_opts, "probesize", "32768", 0);
     av_dict_set(&open_opts, "analyzeduration", "100000", 0);
 
@@ -73,11 +74,11 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
         goto cleanup;
     }
 
-    AVStream* stream = fmt_ctx->streams[audio_stream];
-    AVCodecParameters* codecpar = stream->codecpar;
+    AVStream *stream = fmt_ctx->streams[audio_stream];
+    AVCodecParameters *codecpar = stream->codecpar;
 
     // Find decoder
-    const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
+    const AVCodec *codec = avcodec_find_decoder(codecpar->codec_id);
     if (!codec) {
         g_warning("Unsupported codec: %s", audio_path);
         result = QUADRATURE_ERROR_UNSUPPORTED_FORMAT;
@@ -107,8 +108,9 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
     if (codec_ctx->ch_layout.nb_channels > 0) {
         av_channel_layout_copy(&src_ch_layout, &codec_ctx->ch_layout);
     } else {
-        av_channel_layout_default(&src_ch_layout, codecpar->ch_layout.nb_channels > 0 ?
-                                   codecpar->ch_layout.nb_channels : 2);
+        av_channel_layout_default(
+            &src_ch_layout,
+            codecpar->ch_layout.nb_channels > 0 ? codecpar->ch_layout.nb_channels : 2);
     }
 
     // Setup resampler to convert to mono 11025Hz 16-bit
@@ -121,7 +123,9 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
                             &src_ch_layout,
                             codec_ctx->sample_fmt,
                             codec_ctx->sample_rate,
-                            0, NULL) < 0) {
+                            0,
+                            NULL)
+        < 0) {
         g_warning("Failed to set resampler options");
         av_channel_layout_uninit(&src_ch_layout);
         goto cleanup;
@@ -178,12 +182,11 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
 
         while (avcodec_receive_frame(codec_ctx, frame) >= 0) {
             // Calculate output samples
-            int out_samples = av_rescale_rnd(
-                swr_get_delay(swr_ctx, codec_ctx->sample_rate) + frame->nb_samples,
-                CHROMAPRINT_SAMPLE_RATE,
-                codec_ctx->sample_rate,
-                AV_ROUND_UP
-            );
+            int out_samples
+                = av_rescale_rnd(swr_get_delay(swr_ctx, codec_ctx->sample_rate) + frame->nb_samples,
+                                 CHROMAPRINT_SAMPLE_RATE,
+                                 codec_ctx->sample_rate,
+                                 AV_ROUND_UP);
 
             // Resize buffer if needed
             if (out_samples > resample_buffer_size) {
@@ -192,9 +195,11 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
             }
 
             // Resample
-            uint8_t* out_buf = (uint8_t*)resample_buffer;
-            int resampled = swr_convert(swr_ctx, &out_buf, out_samples,
-                                        (const uint8_t**)frame->extended_data,
+            uint8_t *out_buf = (uint8_t *)resample_buffer;
+            int resampled = swr_convert(swr_ctx,
+                                        &out_buf,
+                                        out_samples,
+                                        (const uint8_t **)frame->extended_data,
                                         frame->nb_samples);
 
             if (resampled > 0) {
@@ -229,7 +234,7 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
             resample_buffer_size = out_samples;
             resample_buffer = g_renew(int16_t, resample_buffer, resample_buffer_size);
         }
-        uint8_t* out_buf = (uint8_t*)resample_buffer;
+        uint8_t *out_buf = (uint8_t *)resample_buffer;
         int flushed = swr_convert(swr_ctx, &out_buf, out_samples, NULL, 0);
         if (flushed > 0) {
             chromaprint_feed(chromaprint_ctx, resample_buffer, flushed);
@@ -244,7 +249,7 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
     }
 
     // Get fingerprint
-    char* fp_str = NULL;
+    char *fp_str = NULL;
     if (!chromaprint_get_fingerprint(chromaprint_ctx, &fp_str)) {
         g_warning("Failed to get fingerprint");
         goto cleanup;
@@ -260,18 +265,27 @@ quadrature_result_t mb_fingerprint_generate(const char* audio_path,
 
 cleanup:
     g_free(resample_buffer);
-    if (chromaprint_ctx) chromaprint_free(chromaprint_ctx);
-    if (frame) av_frame_free(&frame);
-    if (pkt) av_packet_free(&pkt);
-    if (swr_ctx) swr_free(&swr_ctx);
-    if (codec_ctx) avcodec_free_context(&codec_ctx);
-    if (fmt_ctx) avformat_close_input(&fmt_ctx);
+    if (chromaprint_ctx)
+        chromaprint_free(chromaprint_ctx);
+    if (frame)
+        av_frame_free(&frame);
+    if (pkt)
+        av_packet_free(&pkt);
+    if (swr_ctx)
+        swr_free(&swr_ctx);
+    if (codec_ctx)
+        avcodec_free_context(&codec_ctx);
+    if (fmt_ctx)
+        avformat_close_input(&fmt_ctx);
 
     return result;
 }
 
-void mb_fingerprint_free(mb_fingerprint_t* fp) {
-    if (!fp) return;
+void
+mb_fingerprint_free(mb_fingerprint_t *fp)
+{
+    if (!fp)
+        return;
     g_free(fp->fingerprint);
     memset(fp, 0, sizeof(mb_fingerprint_t));
 }

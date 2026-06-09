@@ -10,10 +10,10 @@
 
 /* Libraries view */
 GtkWidget *make_libraries_view(UiWindow *w);
-LibEntry  *find_lib_entry(UiWindow *w, const char *path);
-void       libs_load(UiWindow *w);
-void       libs_rebuild(UiWindow *w);
-void       libs_free(UiWindow *w);
+LibEntry *find_lib_entry(UiWindow *w, const char *path);
+void libs_load(UiWindow *w);
+void libs_rebuild(UiWindow *w);
+void libs_free(UiWindow *w);
 
 /* Library availability */
 void update_lib_card_availability(UiWindow *w, int lib_idx, gboolean available);
@@ -22,21 +22,29 @@ void update_lib_card_availability(UiWindow *w, int lib_idx, gboolean available);
 void libs_load_entry_stats(LibEntry *e, UiWindow *w);
 void update_card_stats_labels(LibEntry *e);
 void refresh_library_views(UiWindow *w);
-int  find_lib_idx(UiWindow *w, const char *library_path);
+int find_lib_idx(UiWindow *w, const char *library_path);
 void on_cache_ready(void *data);
 
 /* Indexer signal handlers (connected in window.c build_ui) */
 void on_indexer_started(IndexerController *idx, const char *library_path, gpointer data);
-void on_indexer_progress(IndexerController *idx, const char *library_path,
-                         indexer_progress_t *p, gpointer data);
-void on_indexer_library_updated(IndexerController *idx, const char *library_path,
+void on_indexer_progress(IndexerController *idx,
+                         const char *library_path,
+                         indexer_progress_t *p,
+                         gpointer data);
+void on_indexer_library_updated(IndexerController *idx,
+                                const char *library_path,
                                 indexer_progress_t *p,
                                 library_cache_changeset_t *changeset,
                                 gpointer data);
-void on_indexer_artwork_updated(IndexerController *idx, const char *library_path,
-                                indexer_progress_t *p, gpointer data);
-void on_indexer_done(IndexerController *idx, const char *library_path,
-                     gboolean ok, indexer_progress_t *p, gpointer data);
+void on_indexer_artwork_updated(IndexerController *idx,
+                                const char *library_path,
+                                indexer_progress_t *p,
+                                gpointer data);
+void on_indexer_done(IndexerController *idx,
+                     const char *library_path,
+                     gboolean ok,
+                     indexer_progress_t *p,
+                     gpointer data);
 
 /* Cancel all pending debounced cache refreshes (call on window dispose). */
 void indexer_bridge_cancel_pending_refreshes(void);

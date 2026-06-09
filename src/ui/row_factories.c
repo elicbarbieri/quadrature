@@ -11,9 +11,9 @@
 #include "internal.h"
 #include <string.h>
 
-#define BADGE_SLOT_MAX 4     /* pre-allocated library badge labels per row */
-#define ART_STRIP_MAX_THUMBS 6  /* max pre-allocated art strip slots */
-#define ART_STRIP_SPACING 4     /* must match art_strip spacing in .ui template */
+#define BADGE_SLOT_MAX       4 /* pre-allocated library badge labels per row */
+#define ART_STRIP_MAX_THUMBS 6 /* max pre-allocated art strip slots */
+#define ART_STRIP_SPACING    4 /* must match art_strip spacing in .ui template */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Pre-allocated Library Badges — setup once, rebind by text + visibility
@@ -41,11 +41,12 @@
  *  Toggles visibility on pre-allocated GtkImage slots — no widget lifecycle.
  *  Expects art_strip to carry "art-strip-album-count" and "art-strip-thumb-px"
  *  via g_object_set_data (set during rebind). */
-static void art_strip_reflow(GtkWidget *art_strip, int budget) {
-    guint album_count = GPOINTER_TO_UINT(
-        g_object_get_data(G_OBJECT(art_strip), "art-strip-album-count"));
-    int thumb_px = GPOINTER_TO_INT(
-        g_object_get_data(G_OBJECT(art_strip), "art-strip-thumb-px"));
+static void
+art_strip_reflow(GtkWidget *art_strip, int budget)
+{
+    guint album_count
+        = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(art_strip), "art-strip-album-count"));
+    int thumb_px = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(art_strip), "art-strip-thumb-px"));
 
     if (album_count == 0 || thumb_px <= 0 || budget <= 0) {
         gtk_widget_set_visible(art_strip, album_count > 0 && thumb_px > 0);
@@ -58,9 +59,9 @@ static void art_strip_reflow(GtkWidget *art_strip, int budget) {
     }
 
     /* How many fit? First item has no leading spacing. */
-    guint max_fit = (guint)(budget >= thumb_px
-        ? 1 + (budget - thumb_px) / (thumb_px + ART_STRIP_SPACING)
-        : 0);
+    guint max_fit
+        = (guint)(budget >= thumb_px ? 1 + (budget - thumb_px) / (thumb_px + ART_STRIP_SPACING)
+                                     : 0);
     guint show = MIN(album_count, max_fit);
 
     /* Populated slots are 0..(album_count-1). Show the last `show` of those,
@@ -74,37 +75,47 @@ static void art_strip_reflow(GtkWidget *art_strip, int budget) {
 }
 
 /** ProportionalBox pre-allocate callback for the art strip column. */
-static void art_strip_pre_allocate(GtkWidget *col, int width, gpointer user_data) {
+static void
+art_strip_pre_allocate(GtkWidget *col, int width, gpointer user_data)
+{
     (void)col;
     art_strip_reflow(GTK_WIDGET(user_data), width);
 }
 
-static void format_artist_subtitle(const library_artist_info_t *artist,
-                                    library_cache_t *cache,
-                                    uint32_t library_mask,
-                                    char *buf, size_t len) {
+static void
+format_artist_subtitle(const library_artist_info_t *artist,
+                       library_cache_t *cache,
+                       uint32_t library_mask,
+                       char *buf,
+                       size_t len)
+{
     uint32_t albums = 0, appearances = 0;
-    library_cache_get_merged_artist_counts(cache, artist->artist_id,
-                                            library_mask, &albums, &appearances);
+    library_cache_get_merged_artist_counts(
+        cache, artist->artist_id, library_mask, &albums, &appearances);
     if (albums > 0 && appearances > 0)
-        snprintf(buf, len, "%u album%s \u00b7 Appears on %u track%s",
-                 albums, albums == 1 ? "" : "s",
-                 appearances, appearances == 1 ? "" : "s");
+        snprintf(buf,
+                 len,
+                 "%u album%s \u00b7 Appears on %u track%s",
+                 albums,
+                 albums == 1 ? "" : "s",
+                 appearances,
+                 appearances == 1 ? "" : "s");
     else if (albums > 0)
         snprintf(buf, len, "%u album%s", albums, albums == 1 ? "" : "s");
     else if (appearances > 0)
-        snprintf(buf, len, "Appears on %u track%s",
-                 appearances, appearances == 1 ? "" : "s");
+        snprintf(buf, len, "Appears on %u track%s", appearances, appearances == 1 ? "" : "s");
     else
         snprintf(buf, len, "No albums");
 }
 
-GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
-                                 library_cache_t *cache,
-                                 ArtworkManager *art_mgr,
-                                 gboolean show_art_strip,
-                                 UiRowSizeGroups *size_groups,
-                                 uint32_t library_mask) {
+GtkWidget *
+ui_create_artist_row(const library_artist_info_t *artist,
+                     library_cache_t *cache,
+                     ArtworkManager *art_mgr,
+                     gboolean show_art_strip,
+                     UiRowSizeGroups *size_groups,
+                     uint32_t library_mask)
+{
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
 
     GtkBuilder *builder;
@@ -128,10 +139,8 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
 
     /* Library badges */
     if (badges_box && cache) {
-        ui_populate_library_badges(badges_box, cache,
-                                    artist->artist_id,
-                                    BADGE_ENTITY_ARTIST,
-                                    col_left);
+        ui_populate_library_badges(
+            badges_box, cache, artist->artist_id, BADGE_ENTITY_ARTIST, col_left);
     }
 
     if (subtitle) {
@@ -142,14 +151,15 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
 
     if (art_strip) {
         if (show_art_strip && cache && art_mgr) {
-            GPtrArray *albums = library_cache_get_albums_by_artist(cache, artist->artist_id, library_mask);
+            GPtrArray *albums
+                = library_cache_get_albums_by_artist(cache, artist->artist_id, library_mask);
             guint album_count = 0;
             int thumb_px = 0;
             if (albums && albums->len > 0) {
                 album_count = MIN(albums->len, ART_STRIP_MAX_THUMBS);
                 thumb_px = artwork_manager_get_thumb_size(art_mgr);
-                guint start_idx = albums->len > ART_STRIP_MAX_THUMBS
-                                  ? albums->len - ART_STRIP_MAX_THUMBS : 0;
+                guint start_idx
+                    = albums->len > ART_STRIP_MAX_THUMBS ? albums->len - ART_STRIP_MAX_THUMBS : 0;
                 for (guint i = start_idx; i < albums->len; i++) {
                     const library_album_info_t *album = g_ptr_array_index(albums, i);
                     GtkWidget *img = gtk_image_new();
@@ -160,14 +170,12 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
                 }
             }
             g_clear_pointer(&albums, g_ptr_array_unref);
-            g_object_set_data(G_OBJECT(art_strip), "art-strip-album-count",
-                              GUINT_TO_POINTER(album_count));
-            g_object_set_data(G_OBJECT(art_strip), "art-strip-thumb-px",
-                              GINT_TO_POINTER(thumb_px));
+            g_object_set_data(
+                G_OBJECT(art_strip), "art-strip-album-count", GUINT_TO_POINTER(album_count));
+            g_object_set_data(G_OBJECT(art_strip), "art-strip-thumb-px", GINT_TO_POINTER(thumb_px));
             /* Pre-allocate callback reflows during ProportionalBox size_allocate */
             proportional_box_set_pre_allocate(
-                QUADRATURE_PROPORTIONAL_BOX(row), "right",
-                art_strip_pre_allocate, art_strip);
+                QUADRATURE_PROPORTIONAL_BOX(row), "right", art_strip_pre_allocate, art_strip);
         } else {
             gtk_widget_set_visible(art_strip, FALSE);
         }
@@ -193,21 +201,20 @@ GtkWidget *ui_create_artist_row(const library_artist_info_t *artist,
  * allocating ~15 widgets on every scroll.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-GtkWidget *ui_create_artist_row_shell(void) {
+GtkWidget *
+ui_create_artist_row_shell(void)
+{
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
 
     GtkBuilder *builder;
     GtkWidget *row = ui_builder_load("/org/quadrature/ui/library_artist_row.ui", "row", &builder);
 
     /* Store widget refs for fast access in rebind */
-    g_object_set_data(G_OBJECT(row), "w-artist-art",
-                      gtk_builder_get_object(builder, "artist_art"));
-    g_object_set_data(G_OBJECT(row), "w-title",
-                      gtk_builder_get_object(builder, "title"));
+    g_object_set_data(G_OBJECT(row), "w-artist-art", gtk_builder_get_object(builder, "artist_art"));
+    g_object_set_data(G_OBJECT(row), "w-title", gtk_builder_get_object(builder, "title"));
     GtkWidget *badges_box = GTK_WIDGET(gtk_builder_get_object(builder, "library_badges"));
     g_object_set_data(G_OBJECT(row), "w-library-badges", badges_box);
-    g_object_set_data(G_OBJECT(row), "w-subtitle",
-                      gtk_builder_get_object(builder, "subtitle"));
+    g_object_set_data(G_OBJECT(row), "w-subtitle", gtk_builder_get_object(builder, "subtitle"));
 
     GtkWidget *art_strip = GTK_WIDGET(gtk_builder_get_object(builder, "art_strip"));
     g_object_set_data(G_OBJECT(row), "w-art-strip", art_strip);
@@ -222,24 +229,25 @@ GtkWidget *ui_create_artist_row_shell(void) {
         }
         /* Register pre-allocate on ProportionalBox — reflows every size_allocate */
         proportional_box_set_pre_allocate(
-            QUADRATURE_PROPORTIONAL_BOX(row), "right",
-            art_strip_pre_allocate, art_strip);
+            QUADRATURE_PROPORTIONAL_BOX(row), "right", art_strip_pre_allocate, art_strip);
     }
 
     g_object_unref(builder);
     return row;
 }
 
-void ui_rebind_artist_row(GtkWidget *row,
-                           const library_artist_info_t *artist,
-                           library_cache_t *cache,
-                           ArtworkManager *art_mgr,
-                           uint32_t library_mask) {
+void
+ui_rebind_artist_row(GtkWidget *row,
+                     const library_artist_info_t *artist,
+                     library_cache_t *cache,
+                     ArtworkManager *art_mgr,
+                     uint32_t library_mask)
+{
     GtkWidget *artist_art = g_object_get_data(G_OBJECT(row), "w-artist-art");
-    GtkWidget *title      = g_object_get_data(G_OBJECT(row), "w-title");
+    GtkWidget *title = g_object_get_data(G_OBJECT(row), "w-title");
     GtkWidget *badges_box = g_object_get_data(G_OBJECT(row), "w-library-badges");
-    GtkWidget *subtitle   = g_object_get_data(G_OBJECT(row), "w-subtitle");
-    GtkWidget *art_strip  = g_object_get_data(G_OBJECT(row), "w-art-strip");
+    GtkWidget *subtitle = g_object_get_data(G_OBJECT(row), "w-subtitle");
+    GtkWidget *art_strip = g_object_get_data(G_OBJECT(row), "w-art-strip");
 
     /* Artist thumbnail */
     ui_set_artist_thumbnail(art_mgr, artist_art, artist->artist_id);
@@ -249,8 +257,7 @@ void ui_rebind_artist_row(GtkWidget *row,
         gtk_label_set_text(GTK_LABEL(title), artist->name);
 
     /* Library badges */
-    ui_populate_library_badges(badges_box, cache,
-                               artist->artist_id, BADGE_ENTITY_ARTIST, NULL);
+    ui_populate_library_badges(badges_box, cache, artist->artist_id, BADGE_ENTITY_ARTIST, NULL);
 
     /* Subtitle: album/track counts */
     if (subtitle) {
@@ -264,14 +271,15 @@ void ui_rebind_artist_row(GtkWidget *row,
         guint album_count = 0;
         int thumb_px = 0;
         if (cache && art_mgr) {
-            GPtrArray *albums = library_cache_get_albums_by_artist(cache, artist->artist_id, library_mask);
+            GPtrArray *albums
+                = library_cache_get_albums_by_artist(cache, artist->artist_id, library_mask);
             if (albums && albums->len > 0) {
                 album_count = MIN(albums->len, ART_STRIP_MAX_THUMBS);
                 thumb_px = artwork_manager_get_thumb_size(art_mgr);
                 /* Fill slots from the end: most recent albums in rightmost slots.
                  * Reflow will hide leading slots that don't fit the width. */
-                guint start_idx = albums->len > ART_STRIP_MAX_THUMBS
-                                  ? albums->len - ART_STRIP_MAX_THUMBS : 0;
+                guint start_idx
+                    = albums->len > ART_STRIP_MAX_THUMBS ? albums->len - ART_STRIP_MAX_THUMBS : 0;
                 guint slot = 0;
                 GtkWidget *img = gtk_widget_get_first_child(art_strip);
                 for (guint i = start_idx; i < albums->len && img; i++, slot++) {
@@ -287,10 +295,9 @@ void ui_rebind_artist_row(GtkWidget *row,
             g_clear_pointer(&albums, g_ptr_array_unref);
         }
         /* Store metadata for reflow (used by art_strip_reflow via pre-allocate) */
-        g_object_set_data(G_OBJECT(art_strip), "art-strip-album-count",
-                          GUINT_TO_POINTER(album_count));
-        g_object_set_data(G_OBJECT(art_strip), "art-strip-thumb-px",
-                          GINT_TO_POINTER(thumb_px));
+        g_object_set_data(
+            G_OBJECT(art_strip), "art-strip-album-count", GUINT_TO_POINTER(album_count));
+        g_object_set_data(G_OBJECT(art_strip), "art-strip-thumb-px", GINT_TO_POINTER(thumb_px));
         /* Pre-allocate callback runs during ProportionalBox size_allocate —
          * no manual reflow needed here. */
     }
@@ -303,22 +310,21 @@ void ui_rebind_artist_row(GtkWidget *row,
  * Album Row Shell / Rebind (for GtkListView factory recycling)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-GtkWidget *ui_create_album_row_shell(void) {
+GtkWidget *
+ui_create_album_row_shell(void)
+{
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
 
     GtkBuilder *builder;
     GtkWidget *row = ui_builder_load("/org/quadrature/ui/library_album_row.ui", "row", &builder);
 
     /* Store widget refs for fast access in rebind */
-    g_object_set_data(G_OBJECT(row), "w-art",
-                      gtk_builder_get_object(builder, "art"));
-    g_object_set_data(G_OBJECT(row), "w-title",
-                      gtk_builder_get_object(builder, "title"));
-    g_object_set_data(G_OBJECT(row), "w-count",
-                      gtk_builder_get_object(builder, "count"));
-    g_object_set_data(G_OBJECT(row), "w-year",
-                      gtk_builder_get_object(builder, "year"));
-    GtkWidget *primary_artists_box = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
+    g_object_set_data(G_OBJECT(row), "w-art", gtk_builder_get_object(builder, "art"));
+    g_object_set_data(G_OBJECT(row), "w-title", gtk_builder_get_object(builder, "title"));
+    g_object_set_data(G_OBJECT(row), "w-count", gtk_builder_get_object(builder, "count"));
+    g_object_set_data(G_OBJECT(row), "w-year", gtk_builder_get_object(builder, "year"));
+    GtkWidget *primary_artists_box
+        = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
     g_object_set_data(G_OBJECT(row), "w-primary-artists", primary_artists_box);
     GtkWidget *col_right = GTK_WIDGET(gtk_builder_get_object(builder, "col_right"));
     g_object_set_data(G_OBJECT(row), "w-col-right", col_right);
@@ -333,8 +339,8 @@ GtkWidget *ui_create_album_row_shell(void) {
     g_object_set_data(G_OBJECT(row), "w-genres", genres_box);
     GtkWidget *badges_box = GTK_WIDGET(gtk_builder_get_object(builder, "library_badges"));
     g_object_set_data(G_OBJECT(row), "w-library-badges", badges_box);
-    g_object_set_data(G_OBJECT(row), "w-credit-annotation",
-                      gtk_builder_get_object(builder, "credit_annotation"));
+    g_object_set_data(
+        G_OBJECT(row), "w-credit-annotation", gtk_builder_get_object(builder, "credit_annotation"));
 
     /* Pre-allocate artist button + label — toggled in rebind, never destroyed */
     if (primary_artists_box) {
@@ -358,20 +364,22 @@ GtkWidget *ui_create_album_row_shell(void) {
     return row;
 }
 
-void ui_rebind_album_row(GtkWidget *row,
-                          const library_album_info_t *album,
-                          library_cache_t *cache,
-                          ArtworkManager *art_mgr,
-                          gboolean show_count,
-                          RowCallbacks *artist_cbs) {
-    GtkWidget *art                = g_object_get_data(G_OBJECT(row), "w-art");
-    GtkWidget *title              = g_object_get_data(G_OBJECT(row), "w-title");
-    GtkWidget *count              = g_object_get_data(G_OBJECT(row), "w-count");
-    GtkWidget *year               = g_object_get_data(G_OBJECT(row), "w-year");
+void
+ui_rebind_album_row(GtkWidget *row,
+                    const library_album_info_t *album,
+                    library_cache_t *cache,
+                    ArtworkManager *art_mgr,
+                    gboolean show_count,
+                    RowCallbacks *artist_cbs)
+{
+    GtkWidget *art = g_object_get_data(G_OBJECT(row), "w-art");
+    GtkWidget *title = g_object_get_data(G_OBJECT(row), "w-title");
+    GtkWidget *count = g_object_get_data(G_OBJECT(row), "w-count");
+    GtkWidget *year = g_object_get_data(G_OBJECT(row), "w-year");
     GtkWidget *primary_artists_box = g_object_get_data(G_OBJECT(row), "w-primary-artists");
-    GtkWidget *genres_box         = g_object_get_data(G_OBJECT(row), "w-genres");
-    GtkWidget *badges_box         = g_object_get_data(G_OBJECT(row), "w-library-badges");
-    GtkWidget *credit_annotation  = g_object_get_data(G_OBJECT(row), "w-credit-annotation");
+    GtkWidget *genres_box = g_object_get_data(G_OBJECT(row), "w-genres");
+    GtkWidget *badges_box = g_object_get_data(G_OBJECT(row), "w-library-badges");
+    GtkWidget *credit_annotation = g_object_get_data(G_OBJECT(row), "w-credit-annotation");
 
     /* Album art */
     ui_set_album_thumbnail(art_mgr, art, album->album_id);
@@ -397,26 +405,26 @@ void ui_rebind_album_row(GtkWidget *row,
 
     /* Primary artist: reuse pre-allocated button/label, toggle visibility */
     if (primary_artists_box) {
-        GtkWidget *artist_btn   = g_object_get_data(G_OBJECT(row), "w-artist-btn");
+        GtkWidget *artist_btn = g_object_get_data(G_OBJECT(row), "w-artist-btn");
         GtkWidget *artist_label = g_object_get_data(G_OBJECT(row), "w-artist-label");
 
         gboolean has_name = album->artist_name && album->artist_name[0];
-        gboolean is_va    = has_name && ui_is_various_artists(album->artist_name);
-        gboolean use_btn  = has_name && artist_cbs && !is_va;
+        gboolean is_va = has_name && ui_is_various_artists(album->artist_name);
+        gboolean use_btn = has_name && artist_cbs && !is_va;
 
         if (artist_btn) {
             if (use_btn) {
                 gtk_button_set_label(GTK_BUTTON(artist_btn), album->artist_name);
-                g_object_set_data(G_OBJECT(artist_btn), "artist-id",
-                                  GSIZE_TO_POINTER((gsize)album->artist_id));
+                g_object_set_data(
+                    G_OBJECT(artist_btn), "artist-id", GSIZE_TO_POINTER((gsize)album->artist_id));
                 /* Connect handler once (idempotent: check for existing) */
                 if (!g_object_get_data(G_OBJECT(artist_btn), "artist-callbacks")) {
                     RowCallbacks *cbs_copy = g_new0(RowCallbacks, 1);
                     *cbs_copy = *artist_cbs;
-                    g_object_set_data_full(G_OBJECT(artist_btn), "artist-callbacks",
-                                           cbs_copy, g_free);
-                    g_signal_connect(artist_btn, "clicked",
-                                     G_CALLBACK(on_artist_button_clicked), cbs_copy);
+                    g_object_set_data_full(
+                        G_OBJECT(artist_btn), "artist-callbacks", cbs_copy, g_free);
+                    g_signal_connect(
+                        artist_btn, "clicked", G_CALLBACK(on_artist_button_clicked), cbs_copy);
                 }
             }
             gtk_widget_set_visible(artist_btn, use_btn);
@@ -424,9 +432,12 @@ void ui_rebind_album_row(GtkWidget *row,
         if (artist_label) {
             if (has_name && !use_btn) {
                 gtk_label_set_text(GTK_LABEL(artist_label), album->artist_name);
-                if (is_va)
+                /* Only invalidate CSS when dim state actually changes on this
+                 * recycled row — add/remove always trigger style recalc. */
+                gboolean was_dim = gtk_widget_has_css_class(artist_label, "text-dim");
+                if (is_va && !was_dim)
                     gtk_widget_add_css_class(artist_label, "text-dim");
-                else
+                else if (!is_va && was_dim)
                     gtk_widget_remove_css_class(artist_label, "text-dim");
             }
             gtk_widget_set_visible(artist_label, has_name && !use_btn);
@@ -438,8 +449,7 @@ void ui_rebind_album_row(GtkWidget *row,
 
     /* Library badges */
     if (cache) {
-        ui_populate_library_badges(badges_box, cache,
-                                   album->album_id, BADGE_ENTITY_ALBUM, NULL);
+        ui_populate_library_badges(badges_box, cache, album->album_id, BADGE_ENTITY_ALBUM, NULL);
     }
 
     /* Credit annotation: clear for list rows (credits only used in detail views) */
@@ -452,17 +462,19 @@ void ui_rebind_album_row(GtkWidget *row,
     g_object_set_data(G_OBJECT(row), "album-id", GSIZE_TO_POINTER((gsize)album->album_id));
 
     /* First track ID for keyboard shortcuts — cached on album info during warming */
-    g_object_set_data(G_OBJECT(row), "first-track-id",
-                      GSIZE_TO_POINTER((gsize)album->first_track_id));
+    g_object_set_data(
+        G_OBJECT(row), "first-track-id", GSIZE_TO_POINTER((gsize)album->first_track_id));
 }
 
-GtkWidget *ui_create_album_row(const library_album_info_t *album,
-                                library_cache_t *cache,
-                                ArtworkManager *art_mgr,
-                                gboolean show_count,
-                                RowCallbacks *artist_cbs,
-                                UiRowSizeGroups *size_groups,
-                                const UiAlbumCreditInfo *credit) {
+GtkWidget *
+ui_create_album_row(const library_album_info_t *album,
+                    library_cache_t *cache,
+                    ArtworkManager *art_mgr,
+                    gboolean show_count,
+                    RowCallbacks *artist_cbs,
+                    UiRowSizeGroups *size_groups,
+                    const UiAlbumCreditInfo *credit)
+{
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
 
     GtkBuilder *builder;
@@ -473,7 +485,8 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
     GtkWidget *col_left = GTK_WIDGET(gtk_builder_get_object(builder, "col_left"));
     GtkWidget *col_right = GTK_WIDGET(gtk_builder_get_object(builder, "col_right"));
     GtkWidget *badges_box = GTK_WIDGET(gtk_builder_get_object(builder, "library_badges"));
-    GtkWidget *primary_artists_box = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
+    GtkWidget *primary_artists_box
+        = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
     GtkWidget *count = GTK_WIDGET(gtk_builder_get_object(builder, "count"));
     GtkWidget *year = GTK_WIDGET(gtk_builder_get_object(builder, "year"));
     GtkWidget *template_genres = GTK_WIDGET(gtk_builder_get_object(builder, "genres_box"));
@@ -538,10 +551,8 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
 
     /* Library badges — bottom-left, consistent across all row types */
     if (badges_box && cache) {
-        ui_populate_library_badges(badges_box, cache,
-                                    album->album_id,
-                                    BADGE_ENTITY_ALBUM,
-                                    col_left);
+        ui_populate_library_badges(
+            badges_box, cache, album->album_id, BADGE_ENTITY_ALBUM, col_left);
     }
 
     /* Credit annotation: artist button (pinned) + role pills (items) + "…" */
@@ -551,8 +562,7 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
 
         GtkWidget *btn;
         if (credit->artist_id > 0 && artist_cbs) {
-            btn = create_artist_button(credit->artist_id,
-                                       credit->artist_name, artist_cbs);
+            btn = create_artist_button(credit->artist_id, credit->artist_name, artist_cbs);
         } else {
             btn = create_artist_button(0, credit->artist_name, NULL);
             gtk_widget_set_sensitive(btn, FALSE);
@@ -560,9 +570,8 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
         quadrature_overflow_box_append(ofb, btn);
         quadrature_overflow_box_set_pinned_count(ofb, 1);
 
-        populate_credit_pills(credit_annotation,
-                              (const char *const *)credit->roles,
-                              credit->role_count);
+        populate_credit_pills(
+            credit_annotation, (const char *const *)credit->roles, credit->role_count);
 
         gtk_widget_set_visible(credit_annotation, TRUE);
     }
@@ -571,20 +580,22 @@ GtkWidget *ui_create_album_row(const library_album_info_t *album,
     g_object_set_data(G_OBJECT(row), "album-id", GSIZE_TO_POINTER((gsize)album->album_id));
 
     /* First track ID for keyboard shortcuts — cached on album info */
-    g_object_set_data(G_OBJECT(row), "first-track-id",
-                      GSIZE_TO_POINTER((gsize)album->first_track_id));
+    g_object_set_data(
+        G_OBJECT(row), "first-track-id", GSIZE_TO_POINTER((gsize)album->first_track_id));
 
     return row;
 }
 
-GtkWidget *ui_create_track_row(const library_track_info_t *track,
-                                library_cache_t *cache,
-                                ArtworkManager *art_mgr,
-                                gboolean show_album_info,
-                                RowCallbacks *artist_cbs,
-                                RowCallbacks *album_cbs,
-                                UiRowSizeGroups *size_groups,
-                                const UiTrackCreditInfo *credit) {
+GtkWidget *
+ui_create_track_row(const library_track_info_t *track,
+                    library_cache_t *cache,
+                    ArtworkManager *art_mgr,
+                    gboolean show_album_info,
+                    RowCallbacks *artist_cbs,
+                    RowCallbacks *album_cbs,
+                    UiRowSizeGroups *size_groups,
+                    const UiTrackCreditInfo *credit)
+{
     /* Ensure QuadratureProportionalBox is registered before GtkBuilder runs */
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
 
@@ -595,17 +606,19 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
     GtkWidget *col_left = GTK_WIDGET(gtk_builder_get_object(builder, "col_left"));
     GtkWidget *title = GTK_WIDGET(gtk_builder_get_object(builder, "title"));
     GtkWidget *album_box = GTK_WIDGET(gtk_builder_get_object(builder, "album_box"));
-    GtkWidget *primary_artists_box = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
-    GtkWidget *secondary_artists_box = GTK_WIDGET(gtk_builder_get_object(builder, "secondary_artists_box"));
+    GtkWidget *primary_artists_box
+        = GTK_WIDGET(gtk_builder_get_object(builder, "primary_artists_box"));
+    GtkWidget *secondary_artists_box
+        = GTK_WIDGET(gtk_builder_get_object(builder, "secondary_artists_box"));
     GtkWidget *year = GTK_WIDGET(gtk_builder_get_object(builder, "year"));
     GtkWidget *duration = GTK_WIDGET(gtk_builder_get_object(builder, "duration"));
     GtkWidget *badges_box = GTK_WIDGET(gtk_builder_get_object(builder, "library_badges"));
     GtkWidget *credit_annotation = GTK_WIDGET(gtk_builder_get_object(builder, "credit_annotation"));
     GtkWidget *credit_artist_btn = GTK_WIDGET(gtk_builder_get_object(builder, "credit_artist_btn"));
-    GtkWidget *credit_artist_label = GTK_WIDGET(gtk_builder_get_object(builder, "credit_artist_label"));
+    GtkWidget *credit_artist_label
+        = GTK_WIDGET(gtk_builder_get_object(builder, "credit_artist_label"));
 
     g_object_unref(builder);
-
 
     /* Load album art */
     ui_set_album_thumbnail(art_mgr, art, track->album_id);
@@ -619,8 +632,10 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
     if (album_box) {
         if (show_album_info && track->album_title && track->album_title[0]) {
             GtkBuilder *album_builder;
-            GtkWidget *album_btn = ui_builder_load("/org/quadrature/ui/album_button.ui", "album_btn", &album_builder);
-            GtkWidget *album_label = GTK_WIDGET(gtk_builder_get_object(album_builder, "album_label"));
+            GtkWidget *album_btn = ui_builder_load(
+                "/org/quadrature/ui/album_button.ui", "album_btn", &album_builder);
+            GtkWidget *album_label
+                = GTK_WIDGET(gtk_builder_get_object(album_builder, "album_label"));
             g_object_unref(album_builder);
 
             if (album_label) {
@@ -628,14 +643,16 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
             }
 
             /* Store album ID */
-            g_object_set_data(G_OBJECT(album_btn), "album-id", GSIZE_TO_POINTER((gsize)track->album_id));
+            g_object_set_data(
+                G_OBJECT(album_btn), "album-id", GSIZE_TO_POINTER((gsize)track->album_id));
 
             /* Attach click handler */
             if (album_cbs) {
                 RowCallbacks *cbs_copy = g_new0(RowCallbacks, 1);
                 *cbs_copy = *album_cbs;
                 g_object_set_data_full(G_OBJECT(album_btn), "album-callbacks", cbs_copy, g_free);
-                g_signal_connect(album_btn, "clicked", G_CALLBACK(on_album_button_clicked), cbs_copy);
+                g_signal_connect(
+                    album_btn, "clicked", G_CALLBACK(on_album_button_clicked), cbs_copy);
             }
 
             gtk_box_append(GTK_BOX(album_box), album_btn);
@@ -657,17 +674,26 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
      * after the first layout pass.  Passing the column slot as the constraint
      * ensures the overflow logic uses the correct width from frame one. */
     if (primary_artists_box) {
-        populate_artist_buttons(primary_artists_box, cache, track->track_id,
-                               LIBRARY_ARTIST_ROLE_PRIMARY, artist_cbs, FALSE);
+        populate_artist_buttons(primary_artists_box,
+                                cache,
+                                track->track_id,
+                                LIBRARY_ARTIST_ROLE_PRIMARY,
+                                artist_cbs,
+                                FALSE);
     }
 
     if (secondary_artists_box) {
-        populate_artist_buttons(secondary_artists_box, cache, track->track_id,
-                               LIBRARY_ARTIST_ROLE_FEATURING, artist_cbs, TRUE);
+        populate_artist_buttons(secondary_artists_box,
+                                cache,
+                                track->track_id,
+                                LIBRARY_ARTIST_ROLE_FEATURING,
+                                artist_cbs,
+                                TRUE);
     }
 
     /* Credit annotation (optional — for artist detail / credit search views) */
-    if (credit_annotation && credit && credit->roles && credit->role_count > 0 && credit->artist_name) {
+    if (credit_annotation && credit && credit->roles && credit->role_count > 0
+        && credit->artist_name) {
         if (credit_artist_label)
             gtk_label_set_text(GTK_LABEL(credit_artist_label), credit->artist_name);
 
@@ -676,40 +702,46 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
             gboolean suppressed = FALSE;
 
             /* Suppress if this credit artist is the one we're currently viewing */
-            if (artist_cbs && credit->artist_id > 0 &&
-                artist_cbs->suppress_id == credit->artist_id) {
+            if (artist_cbs && credit->artist_id > 0
+                && artist_cbs->suppress_id == credit->artist_id) {
                 suppressed = TRUE;
-            } else if (artist_cbs && credit->artist_mbid &&
-                       artist_cbs->suppress_mbid &&
-                       g_strcmp0(credit->artist_mbid, artist_cbs->suppress_mbid) == 0) {
+            } else if (artist_cbs && credit->artist_mbid && artist_cbs->suppress_mbid
+                       && g_strcmp0(credit->artist_mbid, artist_cbs->suppress_mbid) == 0) {
                 suppressed = TRUE;
             }
 
             if (suppressed) {
                 gtk_widget_set_sensitive(credit_artist_btn, FALSE);
             } else if (credit->artist_id > 0 && artist_cbs && artist_cbs->on_activate) {
-                g_object_set_data(G_OBJECT(credit_artist_btn), "artist-id",
+                g_object_set_data(G_OBJECT(credit_artist_btn),
+                                  "artist-id",
                                   GSIZE_TO_POINTER((gsize)credit->artist_id));
                 RowCallbacks *cbs_copy = g_new0(RowCallbacks, 1);
                 *cbs_copy = *artist_cbs;
-                g_object_set_data_full(G_OBJECT(credit_artist_btn), "artist-callbacks",
-                                       cbs_copy, g_free);
-                g_signal_connect(credit_artist_btn, "clicked",
-                                 G_CALLBACK(on_artist_button_clicked), cbs_copy);
+                g_object_set_data_full(
+                    G_OBJECT(credit_artist_btn), "artist-callbacks", cbs_copy, g_free);
+                g_signal_connect(
+                    credit_artist_btn, "clicked", G_CALLBACK(on_artist_button_clicked), cbs_copy);
             } else if (credit->artist_mbid && artist_cbs && artist_cbs->on_mbid_navigate) {
-                g_object_set_data_full(G_OBJECT(credit_artist_btn), "artist-mbid",
-                                       g_strdup(credit->artist_mbid), g_free);
-                g_object_set_data_full(G_OBJECT(credit_artist_btn), "artist-name",
-                                       g_strdup(credit->artist_name), g_free);
+                g_object_set_data_full(G_OBJECT(credit_artist_btn),
+                                       "artist-mbid",
+                                       g_strdup(credit->artist_mbid),
+                                       g_free);
+                g_object_set_data_full(G_OBJECT(credit_artist_btn),
+                                       "artist-name",
+                                       g_strdup(credit->artist_name),
+                                       g_free);
                 if (credit->artist_type)
-                    g_object_set_data_full(G_OBJECT(credit_artist_btn), "artist-type",
-                                           g_strdup(credit->artist_type), g_free);
+                    g_object_set_data_full(G_OBJECT(credit_artist_btn),
+                                           "artist-type",
+                                           g_strdup(credit->artist_type),
+                                           g_free);
                 RowCallbacks *cbs_copy = g_new0(RowCallbacks, 1);
                 *cbs_copy = *artist_cbs;
-                g_object_set_data_full(G_OBJECT(credit_artist_btn), "artist-callbacks",
-                                       cbs_copy, g_free);
-                g_signal_connect(credit_artist_btn, "clicked",
-                                 G_CALLBACK(on_credit_mbid_navigate), cbs_copy);
+                g_object_set_data_full(
+                    G_OBJECT(credit_artist_btn), "artist-callbacks", cbs_copy, g_free);
+                g_signal_connect(
+                    credit_artist_btn, "clicked", G_CALLBACK(on_credit_mbid_navigate), cbs_copy);
             } else {
                 gtk_widget_set_sensitive(credit_artist_btn, FALSE);
             }
@@ -717,9 +749,8 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
 
         /* Role pills as items + "…" overflow — the credit_artist_btn is
          * pinned[0] declared in the track row template. */
-        populate_credit_pills(credit_annotation,
-                              (const char *const *)credit->roles,
-                              credit->role_count);
+        populate_credit_pills(
+            credit_annotation, (const char *const *)credit->roles, credit->role_count);
 
         gtk_widget_set_visible(credit_annotation, TRUE);
     }
@@ -756,10 +787,8 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
 
     /* Library badges — bottom-left, consistent with album/artist rows */
     if (badges_box && cache) {
-        ui_populate_library_badges(badges_box, cache,
-                                    track->track_id,
-                                    BADGE_ENTITY_TRACK,
-                                    col_left);
+        ui_populate_library_badges(
+            badges_box, cache, track->track_id, BADGE_ENTITY_TRACK, col_left);
     }
 
     /* Store track ID for handler access (path resolved on demand) */
@@ -768,14 +797,17 @@ GtkWidget *ui_create_track_row(const library_track_info_t *track,
     return row;
 }
 
-GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
-                                               library_cache_t *cache,
-                                               RowCallbacks *artist_cbs,
-                                               int64_t album_artist_id) {
+GtkWidget *
+ui_create_album_detail_track_item(const library_track_info_t *track,
+                                  library_cache_t *cache,
+                                  RowCallbacks *artist_cbs,
+                                  int64_t album_artist_id)
+{
     g_type_ensure(QUADRATURE_TYPE_PROPORTIONAL_BOX);
 
     GtkBuilder *builder;
-    GtkWidget *row = ui_builder_load("/org/quadrature/ui/album_detail_track_item.ui", "row", &builder);
+    GtkWidget *row
+        = ui_builder_load("/org/quadrature/ui/album_detail_track_item.ui", "row", &builder);
 
     GtkWidget *track_num = GTK_WIDGET(gtk_builder_get_object(builder, "track_num"));
     GtkWidget *title = GTK_WIDGET(gtk_builder_get_object(builder, "title"));
@@ -800,11 +832,9 @@ GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
      * header already shows who the album artist is.  Only show non-album-
      * artist primaries (e.g. "Baths" on an ODESZA album). */
     if (artists_box) {
-        gboolean show_primary = (album_artist_id == 0) ||
-                                (track->artist_id != album_artist_id);
-        populate_artist_buttons_combined(artists_box, cache,
-                                         track->track_id, artist_cbs,
-                                         show_primary);
+        gboolean show_primary = (album_artist_id == 0) || (track->artist_id != album_artist_id);
+        populate_artist_buttons_combined(
+            artists_box, cache, track->track_id, artist_cbs, show_primary);
     }
 
     if (duration) {
@@ -817,7 +847,8 @@ GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
     g_object_set_data(G_OBJECT(row), "track-id", GSIZE_TO_POINTER((gsize)track->track_id));
     g_object_set_data(G_OBJECT(row), "disc-num", GSIZE_TO_POINTER((gsize)track->disc_num));
     g_object_set_data(G_OBJECT(row), "track-num", GSIZE_TO_POINTER((gsize)track->track_num));
-    g_object_set_data(G_OBJECT(row), "library-index", GSIZE_TO_POINTER((gsize)track->library_index));
+    g_object_set_data(
+        G_OBJECT(row), "library-index", GSIZE_TO_POINTER((gsize)track->library_index));
 
     /* Expose info button for signal connection by detail view */
     if (info_btn)
@@ -829,27 +860,31 @@ GtkWidget *ui_create_album_detail_track_item(const library_track_info_t *track,
 /* GtkListBoxUpdateHeaderFunc — inserts disc headers between disc boundaries.
  * Each track content widget stores "quad-disc" (uint16_t disc_num via GUINT_TO_POINTER).
  * Only fires for multi-disc albums (set via gtk_list_box_set_header_func). */
-static void disc_header_func(GtkListBoxRow *row,
-                              GtkListBoxRow *before,
-                              gpointer       data) {
+static void
+disc_header_func(GtkListBoxRow *row, GtkListBoxRow *before, gpointer data)
+{
     (void)data;
     GtkWidget *child = gtk_list_box_row_get_child(row);
     gpointer disc_ptr = child ? g_object_get_data(G_OBJECT(child), "quad-disc") : NULL;
-    if (!disc_ptr) return;
+    if (!disc_ptr)
+        return;
 
     uint16_t disc = GPOINTER_TO_UINT(disc_ptr);
     uint16_t prev_disc = 0;
     if (before) {
         GtkWidget *prev_child = gtk_list_box_row_get_child(before);
-        gpointer prev_ptr = prev_child ? g_object_get_data(G_OBJECT(prev_child), "quad-disc") : NULL;
-        if (prev_ptr) prev_disc = GPOINTER_TO_UINT(prev_ptr);
+        gpointer prev_ptr
+            = prev_child ? g_object_get_data(G_OBJECT(prev_child), "quad-disc") : NULL;
+        if (prev_ptr)
+            prev_disc = GPOINTER_TO_UINT(prev_ptr);
     }
 
     if (disc != prev_disc) {
         GtkWidget *existing = gtk_list_box_row_get_header(row);
         if (existing) {
             gpointer existing_disc = g_object_get_data(G_OBJECT(existing), "quad-header-disc");
-            if (existing_disc && GPOINTER_TO_UINT(existing_disc) == disc) return;
+            if (existing_disc && GPOINTER_TO_UINT(existing_disc) == disc)
+                return;
         }
         char buf[32];
         snprintf(buf, sizeof(buf), "Disc %u", disc);
@@ -866,13 +901,15 @@ static void disc_header_func(GtkListBoxRow *row,
  * "2024-03"    → "March 2024"
  * "2024"       → "2024"
  * Returns a g_malloc'd string. */
-char *ui_format_release_date(const char *date) {
-    static const char *months[] = {
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    };
+char *
+ui_format_release_date(const char *date)
+{
+    static const char *months[]
+        = { "January", "February", "March",     "April",   "May",      "June",
+            "July",    "August",   "September", "October", "November", "December" };
 
-    if (!date || !date[0]) return NULL;
+    if (!date || !date[0])
+        return NULL;
 
     int y = 0, m = 0, d = 0;
     int parts = sscanf(date, "%d-%d-%d", &y, &m, &d);
@@ -890,19 +927,20 @@ char *ui_format_release_date(const char *date) {
 }
 
 /* Callback: open album directory in file manager */
-static void on_path_btn_clicked(GtkButton *btn, gpointer user_data) {
+static void
+on_path_btn_clicked(GtkButton *btn, gpointer user_data)
+{
     (void)user_data;
     const char *dir_path = g_object_get_data(G_OBJECT(btn), "dir-path");
-    if (!dir_path) return;
+    if (!dir_path)
+        return;
 
     /* Hyprland: launch as centered floating window */
     if (g_getenv("HYPRLAND_INSTANCE_SIGNATURE")) {
         char *quoted = g_shell_quote(dir_path);
-        char *rule = g_strdup_printf("[float;center;size 60%% 70%%] nautilus %s",
-                                     quoted);
-        char *argv[] = {"hyprctl", "dispatch", "exec", rule, NULL};
-        g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                      NULL, NULL, NULL, NULL);
+        char *rule = g_strdup_printf("[float;center;size 60%% 70%%] nautilus %s", quoted);
+        char *argv[] = { "hyprctl", "dispatch", "exec", rule, NULL };
+        g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL);
         g_free(quoted);
         g_free(rule);
         return;
@@ -916,17 +954,20 @@ static void on_path_btn_clicked(GtkButton *btn, gpointer user_data) {
     g_object_unref(file);
 }
 
-GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
-                                        const GPtrArray *tracks,
-                                        library_cache_t *cache,
-                                        ArtworkManager *art_mgr,
-                                        guint max_preview_tracks,
-                                        RowCallbacks *track_cbs,
-                                        RowCallbacks *artist_cbs) {
+GtkWidget *
+ui_create_album_detail_card(const library_album_info_t *album,
+                            const GPtrArray *tracks,
+                            library_cache_t *cache,
+                            ArtworkManager *art_mgr,
+                            guint max_preview_tracks,
+                            RowCallbacks *track_cbs,
+                            RowCallbacks *artist_cbs)
+{
     /* Fetch enriched release info (label, release date) from metadata DB */
     db_meta_release_t *meta_release = NULL;
     int lib_idx = album->library_index;
-    if (lib_idx < 0) lib_idx = LIBRARY_GLOBAL_ID_LIB(album->album_id);
+    if (lib_idx < 0)
+        lib_idx = LIBRARY_GLOBAL_ID_LIB(album->album_id);
     if (album->musicbrainz_release_id && album->musicbrainz_release_id[0] && lib_idx >= 0) {
         quadrature_meta_db_t *meta_db = library_cache_get_dbs(cache, lib_idx).meta;
         if (meta_db)
@@ -959,15 +1000,16 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
         gtk_button_set_label(GTK_BUTTON(artist_link), album->artist_name);
         gtk_widget_set_tooltip_text(artist_link, "View artist");
         /* Store artist ID for caller to access */
-        g_object_set_data(G_OBJECT(artist_link), "artist-id",
-                         GSIZE_TO_POINTER((gsize)album->artist_id));
+        g_object_set_data(
+            G_OBJECT(artist_link), "artist-id", GSIZE_TO_POINTER((gsize)album->artist_id));
     }
 
     /* Release info: "Type · Date" or just date or just type */
     if (release_info) {
-        const char *type = (meta_release && meta_release->release_type &&
-                            meta_release->release_type[0])
-                           ? meta_release->release_type : NULL;
+        const char *type
+            = (meta_release && meta_release->release_type && meta_release->release_type[0])
+                  ? meta_release->release_type
+                  : NULL;
         char *date_str = NULL;
         if (meta_release && meta_release->release_date)
             date_str = ui_format_release_date(meta_release->release_date);
@@ -996,8 +1038,8 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
 
     if (stats) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "%u track%s",
-                 album->track_count, album->track_count == 1 ? "" : "s");
+        snprintf(
+            buf, sizeof(buf), "%u track%s", album->track_count, album->track_count == 1 ? "" : "s");
         gtk_label_set_text(GTK_LABEL(stats), buf);
     }
 
@@ -1017,12 +1059,12 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
         GPtrArray *clean = g_ptr_array_new();
         for (guint i = 0; raw[i]; i++) {
             g_strstrip(raw[i]);
-            if (raw[i][0]) g_ptr_array_add(clean, raw[i]);
+            if (raw[i][0])
+                g_ptr_array_add(clean, raw[i]);
         }
 
-        QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(
-            g_object_new(QUADRATURE_TYPE_OVERFLOW_BOX,
-                         "spacing", 6, "row-spacing", 4, "max-rows", 3, NULL));
+        QuadratureOverflowBox *ofb = QUADRATURE_OVERFLOW_BOX(g_object_new(
+            QUADRATURE_TYPE_OVERFLOW_BOX, "spacing", 6, "row-spacing", 4, "max-rows", 3, NULL));
         for (guint i = 0; i < clean->len; i++) {
             GtkWidget *pill = gtk_label_new(g_ptr_array_index(clean, i));
             gtk_widget_add_css_class(pill, "genre-pill");
@@ -1066,7 +1108,8 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
     if (track_list && tracks && tracks->len > 0) {
         guint track_count = tracks->len;
         guint preview_count = (max_preview_tracks > 0 && track_count > max_preview_tracks)
-                              ? max_preview_tracks : track_count;
+                                  ? max_preview_tracks
+                                  : track_count;
 
         /* Connect row-activated for Enter key / double-click */
         g_signal_connect(track_list, "row-activated", G_CALLBACK(ui_list_box_row_activated), NULL);
@@ -1075,14 +1118,15 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
         uint16_t max_disc = 1;
         for (guint i = 0; i < track_count; i++) {
             const library_track_info_t *t = g_ptr_array_index(tracks, i);
-            if (t->disc_num > max_disc) max_disc = t->disc_num;
+            if (t->disc_num > max_disc)
+                max_disc = t->disc_num;
         }
         gboolean multi_disc = (max_disc > 1);
         if (multi_disc)
             gtk_list_box_set_header_func(GTK_LIST_BOX(track_list), disc_header_func, NULL, NULL);
 
         uint16_t current_disc = 0;
-        GtkWidget *prev_content = NULL;  /* previous track content for section position classes */
+        GtkWidget *prev_content = NULL; /* previous track content for section position classes */
         for (guint i = 0; i < preview_count; i++) {
             const library_track_info_t *track = g_ptr_array_index(tracks, i);
 
@@ -1097,7 +1141,8 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
             }
 
             /* Create track row using helper (stores track-id) */
-            GtkWidget *content = ui_create_album_detail_track_item(track, cache, artist_cbs, album->artist_id);
+            GtkWidget *content
+                = ui_create_album_detail_track_item(track, cache, artist_cbs, album->artist_id);
             if (track_cbs) {
                 ui_row_attach_handlers(content, track_cbs);
             }
@@ -1105,12 +1150,14 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
             /* Wrap in GtkListBoxRow from template - CANNOT avoid C wrapping
              * Reason: Dynamic number of tracks, must be created in loop */
             GtkBuilder *row_builder;
-            GtkWidget *row = ui_builder_load("/org/quadrature/ui/album_detail_track_row_wrapper.ui", "track_row", &row_builder);
+            GtkWidget *row = ui_builder_load(
+                "/org/quadrature/ui/album_detail_track_row_wrapper.ui", "track_row", &row_builder);
             g_object_unref(row_builder);
 
             gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), content);
             if (multi_disc)
-                g_object_set_data(G_OBJECT(content), "quad-disc", GUINT_TO_POINTER(track->disc_num));
+                g_object_set_data(
+                    G_OBJECT(content), "quad-disc", GUINT_TO_POINTER(track->disc_num));
             gtk_list_box_append(GTK_LIST_BOX(track_list), row);
 
             /* Section position classes for library-list styling */
@@ -1126,8 +1173,8 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
     /* Store album ID and MusicBrainz release MBID for handler access */
     g_object_set_data(G_OBJECT(card), "album-id", GSIZE_TO_POINTER((gsize)album->album_id));
     if (album->musicbrainz_release_id && album->musicbrainz_release_id[0])
-        g_object_set_data_full(G_OBJECT(card), "release-mbid",
-                               g_strdup(album->musicbrainz_release_id), g_free);
+        g_object_set_data_full(
+            G_OBJECT(card), "release-mbid", g_strdup(album->musicbrainz_release_id), g_free);
 
     db_meta_release_free(meta_release);
     return card;

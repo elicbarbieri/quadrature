@@ -32,14 +32,14 @@ typedef struct axia_gpio_t axia_gpio_t;
 
 /* Pin assignments (Axia Livewire+ GPIO pins) */
 typedef enum {
-    AXIA_PIN_ON_AIR = 1,     /* Fader on/off state (console → app: play/stop) */
-    AXIA_PIN_PREVIEW = 2,    /* Preview/PFL state (bidirectional) */
+    AXIA_PIN_ON_AIR = 1,  /* Fader on/off state (console → app: play/stop) */
+    AXIA_PIN_PREVIEW = 2, /* Preview/PFL state (bidirectional) */
 } axia_pin_t;
 
 /* Pin state */
 typedef enum {
-    AXIA_STATE_LOW = 0,      /* Pin inactive (LED off, button not pressed) */
-    AXIA_STATE_HIGH = 1,     /* Pin active (LED on, button pressed) */
+    AXIA_STATE_LOW = 0,  /* Pin inactive (LED off, button not pressed) */
+    AXIA_STATE_HIGH = 1, /* Pin active (LED on, button pressed) */
 } axia_state_t;
 
 /* Callback for incoming GPIO state changes (console → app)
@@ -49,7 +49,10 @@ typedef enum {
  * @param state New state of the pin
  * @param user_data Opaque user data passed to axia_gpio_set_callback()
  */
-typedef void (*axia_gpio_callback_t)(int channel_id, axia_pin_t pin, axia_state_t state, void *user_data);
+typedef void (*axia_gpio_callback_t)(int channel_id,
+                                     axia_pin_t pin,
+                                     axia_state_t state,
+                                     void *user_data);
 
 /* Connection status callback (optional)
  * Called from GTK main thread when connection state changes
@@ -72,9 +75,8 @@ typedef void (*axia_gpio_status_callback_t)(int channel_id, bool connected, void
  * @param out Output pointer for created gpio handle
  * @return QUADRATURE_OK on success, QUADRATURE_ERROR_INVALID_PARAM for invalid address
  */
-quadrature_result_t axia_gpio_create(const char *address, int channel_id,
-                                     const char *password,
-                                     axia_gpio_t **out);
+quadrature_result_t
+axia_gpio_create(const char *address, int channel_id, const char *password, axia_gpio_t **out);
 
 /**
  * Destroy GPIO handler and stop listener thread
@@ -100,7 +102,9 @@ void axia_gpio_set_callback(axia_gpio_t *gpio, axia_gpio_callback_t callback, vo
  * @param callback Function to call on status changes (may be NULL to disable)
  * @param user_data Opaque pointer passed to callback
  */
-void axia_gpio_set_status_callback(axia_gpio_t *gpio, axia_gpio_status_callback_t callback, void *user_data);
+void axia_gpio_set_status_callback(axia_gpio_t *gpio,
+                                   axia_gpio_status_callback_t callback,
+                                   void *user_data);
 
 /**
  * Start listener thread (auto-reconnects on disconnect)

@@ -14,9 +14,9 @@ GtkWidget *make_help_view(void);
 
 /* Device settings */
 GtkWidget *make_channel_settings_frame(UiWindow *w, int channel);
-void       populate_devices_async(UiWindow *w);
-void       setup_device_monitor(UiWindow *w);
-void       teardown_device_monitor(UiWindow *w);
+void populate_devices_async(UiWindow *w);
+void setup_device_monitor(UiWindow *w);
+void teardown_device_monitor(UiWindow *w);
 
 /* GPIO bridge — callbacks connected in window.c */
 void restart_gpio_handler(UiWindow *w, int channel_id);

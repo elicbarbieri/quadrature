@@ -11,12 +11,14 @@
 
 #include "internal.h"
 
-guint ui_overflow_box_plan_layout(int budget,
-                                  const int *item_widths,
-                                  guint item_count,
-                                  int overflow_width,
-                                  int spacing,
-                                  gboolean *needs_overflow) {
+guint
+ui_overflow_box_plan_layout(int budget,
+                            const int *item_widths,
+                            guint item_count,
+                            int overflow_width,
+                            int spacing,
+                            gboolean *needs_overflow)
+{
     if (item_count == 0) {
         *needs_overflow = FALSE;
         return 0;
@@ -42,8 +44,7 @@ guint ui_overflow_box_plan_layout(int budget,
     guint shown = 0;
 
     for (guint i = 0; i < item_count; i++) {
-        int candidate = accumulated + item_widths[i]
-                      + (int)(shown + 1) * spacing + overflow_width;
+        int candidate = accumulated + item_widths[i] + (int)(shown + 1) * spacing + overflow_width;
         if (candidate > budget)
             break;
         accumulated += item_widths[i];

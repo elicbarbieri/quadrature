@@ -30,34 +30,37 @@
 #include <string.h>
 
 struct change_tracker {
-    quadrature_db_t *db;        /* Non-owning. */
+    quadrature_db_t *db; /* Non-owning. */
 
-    GMutex       lock;
-    GHashTable  *artists;       /* int64_t rowid → self (set semantics) */
-    GHashTable  *albums;
-    GHashTable  *tracks;
-    gboolean     track_artists_dirty;
+    GMutex lock;
+    GHashTable *artists; /* int64_t rowid → self (set semantics) */
+    GHashTable *albums;
+    GHashTable *tracks;
+    gboolean track_artists_dirty;
 };
 
 /* Insert rowid into set iff not already present. */
-static void set_add(GHashTable *set, sqlite3_int64 rowid) {
+static void
+set_add(GHashTable *set, sqlite3_int64 rowid)
+{
     int64_t v = (int64_t)rowid;
-    if (g_hash_table_contains(set, &v)) return;
+    if (g_hash_table_contains(set, &v))
+        return;
     int64_t *key = g_new(int64_t, 1);
     *key = v;
     g_hash_table_add(set, key);
 }
 
 /* sqlite3_update_hook callback. op is SQLITE_INSERT / SQLITE_UPDATE / SQLITE_DELETE. */
-static void update_hook(void *user_data,
-                        int op,
-                        const char *db_name,
-                        const char *table_name,
-                        sqlite3_int64 rowid) {
+static void
+update_hook(
+    void *user_data, int op, const char *db_name, const char *table_name, sqlite3_int64 rowid)
+{
     (void)op;
     (void)db_name;
     change_tracker_t *ct = user_data;
-    if (!ct || !table_name) return;
+    if (!ct || !table_name)
+        return;
 
     g_mutex_lock(&ct->lock);
     if (g_strcmp0(table_name, "artists") == 0) {
@@ -75,7 +78,9 @@ static void update_hook(void *user_data,
     g_mutex_unlock(&ct->lock);
 }
 
-change_tracker_t *change_tracker_new(quadrature_db_t *db) {
+change_tracker_t *
+change_tracker_new(quadrature_db_t *db)
+{
     g_return_val_if_fail(db != NULL, NULL);
     g_return_val_if_fail(db->db != NULL, NULL);
 
@@ -83,8 +88,8 @@ change_tracker_t *change_tracker_new(quadrature_db_t *db) {
     ct->db = db;
     g_mutex_init(&ct->lock);
     ct->artists = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
-    ct->albums  = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
-    ct->tracks  = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+    ct->albums = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
+    ct->tracks = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
     ct->track_artists_dirty = FALSE;
 
     /* Register the hook. Returns the previous user_data (we don't chain). */
@@ -92,8 +97,11 @@ change_tracker_t *change_tracker_new(quadrature_db_t *db) {
     return ct;
 }
 
-void change_tracker_destroy(change_tracker_t *ct) {
-    if (!ct) return;
+void
+change_tracker_destroy(change_tracker_t *ct)
+{
+    if (!ct)
+        return;
     /* Unregister the hook before tearing down state (the hook dereferences ct). */
     if (ct->db && ct->db->db)
         sqlite3_update_hook(ct->db->db, NULL, NULL);
@@ -106,7 +114,9 @@ void change_tracker_destroy(change_tracker_t *ct) {
 }
 
 /* Drain a hashset into a freshly-allocated int64 array. */
-static int64_t *drain_set(GHashTable *set, size_t *out_count) {
+static int64_t *
+drain_set(GHashTable *set, size_t *out_count)
+{
     guint n = g_hash_table_size(set);
     if (n == 0) {
         *out_count = 0;
@@ -126,15 +136,18 @@ static int64_t *drain_set(GHashTable *set, size_t *out_count) {
     return arr;
 }
 
-library_cache_changeset_t *change_tracker_snapshot_and_clear(change_tracker_t *ct) {
-    if (!ct) return NULL;
+library_cache_changeset_t *
+change_tracker_snapshot_and_clear(change_tracker_t *ct)
+{
+    if (!ct)
+        return NULL;
 
     library_cache_changeset_t *cs = library_cache_changeset_new();
 
     g_mutex_lock(&ct->lock);
     cs->artists = drain_set(ct->artists, &cs->artists_count);
-    cs->albums  = drain_set(ct->albums,  &cs->albums_count);
-    cs->tracks  = drain_set(ct->tracks,  &cs->tracks_count);
+    cs->albums = drain_set(ct->albums, &cs->albums_count);
+    cs->tracks = drain_set(ct->tracks, &cs->tracks_count);
     cs->track_artists_dirty = ct->track_artists_dirty;
     ct->track_artists_dirty = FALSE;
     g_mutex_unlock(&ct->lock);
@@ -142,8 +155,11 @@ library_cache_changeset_t *change_tracker_snapshot_and_clear(change_tracker_t *c
     return cs;
 }
 
-void change_tracker_reset(change_tracker_t *ct) {
-    if (!ct) return;
+void
+change_tracker_reset(change_tracker_t *ct)
+{
+    if (!ct)
+        return;
     g_mutex_lock(&ct->lock);
     g_hash_table_remove_all(ct->artists);
     g_hash_table_remove_all(ct->albums);

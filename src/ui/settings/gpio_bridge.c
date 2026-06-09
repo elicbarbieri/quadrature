@@ -10,23 +10,30 @@
 #include "internal.h"
 #include <string.h>
 
-void on_gpio_changed(GtkEditable *editable, gpointer data) {
+void
+on_gpio_changed(GtkEditable *editable, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
 
-    if (w->settings_initializing) return;
+    if (w->settings_initializing)
+        return;
 
     int ch = -1;
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (GTK_WIDGET(editable) == w->gpio_entries[i]) { ch = i; break; }
+        if (GTK_WIDGET(editable) == w->gpio_entries[i]) {
+            ch = i;
+            break;
+        }
     }
-    if (ch < 0) return;
+    if (ch < 0)
+        return;
 
     const char *text = gtk_editable_get_text(editable);
     if (w->settings) {
         app_settings_set_channel_gpio(w->settings, ch, text);
         settings_save_debounced(w);
     }
-    
+
     /* Restart GPIO handler with new address */
     restart_gpio_handler(w, ch);
 }
@@ -36,18 +43,24 @@ void on_gpio_changed(GtkEditable *editable, gpointer data) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Called when Axia console button is pressed (console → app) */
-void on_axia_gpio_event(int channel_id, axia_pin_t pin, axia_state_t state, void *user_data) {
+void
+on_axia_gpio_event(int channel_id, axia_pin_t pin, axia_state_t state, void *user_data)
+{
     UiWindow *w = (UiWindow *)user_data;
-    
-    g_info("Axia GPIO Event: channel=%d, pin=%d, state=%s", 
-           channel_id + 1, pin, state == AXIA_STATE_HIGH ? "HIGH" : "LOW");
-    
+
+    g_info("Axia GPIO Event: channel=%d, pin=%d, state=%s",
+           channel_id + 1,
+           pin,
+           state == AXIA_STATE_HIGH ? "HIGH" : "LOW");
+
     UiChannelStrip *strip = w->channels[channel_id];
-    if (!strip) return;
-    
+    if (!strip)
+        return;
+
     /* Only respond to rising edge (button press, not release) */
-    if (state != AXIA_STATE_HIGH) return;
-    
+    if (state != AXIA_STATE_HIGH)
+        return;
+
     switch (pin) {
     case AXIA_PIN_ON_AIR:
         /* Fader ON/OFF from console */
@@ -62,7 +75,7 @@ void on_axia_gpio_event(int channel_id, axia_pin_t pin, axia_state_t state, void
             }
         }
         break;
-        
+
     case AXIA_PIN_PREVIEW:
         /* Toggle preview from console */
         {
@@ -76,7 +89,7 @@ void on_axia_gpio_event(int channel_id, axia_pin_t pin, axia_state_t state, void
             }
         }
         break;
-        
+
     default:
         g_warning("Axia GPIO: Unknown pin %d", pin);
         break;
@@ -84,14 +97,17 @@ void on_axia_gpio_event(int channel_id, axia_pin_t pin, axia_state_t state, void
 }
 
 /* Called when GPIO connection status changes */
-void on_axia_status_changed(int channel_id, bool connected, void *user_data) {
+void
+on_axia_status_changed(int channel_id, bool connected, void *user_data)
+{
     UiWindow *w = (UiWindow *)user_data;
-    
+
     g_info("Axia Status: channel=%d, connected=%s", channel_id + 1, connected ? "YES" : "NO");
-    
+
     UiChannelStrip *strip = w->channels[channel_id];
-    if (!strip) return;
-    
+    if (!strip)
+        return;
+
     /* Update device state based on GPIO connection status */
     if (connected) {
         /* GPIO connected - restore normal device state */
@@ -108,33 +124,36 @@ void on_axia_status_changed(int channel_id, bool connected, void *user_data) {
 }
 
 /* Called when channel mode changes (app → console LED feedback) */
-void on_channel_mode_changed(UiChannelStrip *strip, int channel_id, int mode, gpointer user_data) {
+void
+on_channel_mode_changed(UiChannelStrip *strip, int channel_id, int mode, gpointer user_data)
+{
     (void)strip;
     UiWindow *w = (UiWindow *)user_data;
     axia_gpio_t *gpio = w->gpio_handlers[channel_id];
-    
-    if (!gpio || !axia_gpio_is_connected(gpio)) return;
-    
+
+    if (!gpio || !axia_gpio_is_connected(gpio))
+        return;
+
     g_info("Mode Changed: channel=%d, mode=%d → updating console LEDs", channel_id + 1, mode);
-    
+
     /* Update console LEDs based on new mode */
     switch ((ChannelMode)mode) {
     case CHANNEL_MODE_IDLE:
         axia_gpio_set(gpio, AXIA_PIN_ON_AIR, AXIA_STATE_LOW);
         axia_gpio_set(gpio, AXIA_PIN_PREVIEW, AXIA_STATE_LOW);
         break;
-        
+
     case CHANNEL_MODE_PREVIEW:
         axia_gpio_set(gpio, AXIA_PIN_ON_AIR, AXIA_STATE_LOW);
         axia_gpio_set(gpio, AXIA_PIN_PREVIEW, AXIA_STATE_HIGH);
         break;
-        
+
     case CHANNEL_MODE_QUEUED:
         /* QUEUED doesn't have a dedicated LED - just turn off ON_AIR */
         axia_gpio_set(gpio, AXIA_PIN_ON_AIR, AXIA_STATE_LOW);
         axia_gpio_set(gpio, AXIA_PIN_PREVIEW, AXIA_STATE_LOW);
         break;
-        
+
     case CHANNEL_MODE_ON_AIR:
         axia_gpio_set(gpio, AXIA_PIN_ON_AIR, AXIA_STATE_HIGH);
         axia_gpio_set(gpio, AXIA_PIN_PREVIEW, AXIA_STATE_LOW);
@@ -143,21 +162,23 @@ void on_channel_mode_changed(UiChannelStrip *strip, int channel_id, int mode, gp
 }
 
 /* Start or restart GPIO handler for a channel */
-void restart_gpio_handler(UiWindow *w, int channel_id) {
+void
+restart_gpio_handler(UiWindow *w, int channel_id)
+{
     /* Stop existing handler */
     if (w->gpio_handlers[channel_id]) {
         axia_gpio_stop(w->gpio_handlers[channel_id]);
         axia_gpio_destroy(w->gpio_handlers[channel_id]);
         w->gpio_handlers[channel_id] = NULL;
     }
-    
+
     /* Get GPIO address from settings */
     const char *gpio_addr = app_settings_get_channel_gpio(w->settings, channel_id);
     if (!gpio_addr || !gpio_addr[0]) {
         g_info("Channel %d: GPIO address cleared", channel_id + 1);
-        return;  /* No address configured */
+        return; /* No address configured */
     }
-    
+
     /* Get global Axia password (LWRP LOGIN command) */
     const char *password = app_settings_get_axia_password(w->settings);
 
@@ -168,11 +189,11 @@ void restart_gpio_handler(UiWindow *w, int channel_id) {
         g_warning("Failed to create Axia GPIO for channel %d: %d", channel_id + 1, res);
         return;
     }
-    
+
     /* Set callbacks */
     axia_gpio_set_callback(gpio, on_axia_gpio_event, w);
     axia_gpio_set_status_callback(gpio, on_axia_status_changed, w);
-    
+
     /* Start listener thread */
     res = axia_gpio_start(gpio);
     if (res != QUADRATURE_OK) {
@@ -180,7 +201,7 @@ void restart_gpio_handler(UiWindow *w, int channel_id) {
         axia_gpio_destroy(gpio);
         return;
     }
-    
+
     w->gpio_handlers[channel_id] = gpio;
     g_info("Channel %d: Axia GPIO started (%s)", channel_id + 1, gpio_addr);
 }

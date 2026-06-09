@@ -39,12 +39,12 @@ typedef enum {
 } library_search_filter_t;
 
 typedef struct {
-    GPtrArray *artists;      /* library_artist_info_t*, borrowed from cache */
-    GPtrArray *albums;       /* library_album_info_t*,  borrowed from cache */
-    GPtrArray *tracks;       /* library_track_info_t*,  borrowed from cache */
-    size_t     total_artists;
-    size_t     total_albums;
-    size_t     total_tracks;
+    GPtrArray *artists; /* library_artist_info_t*, borrowed from cache */
+    GPtrArray *albums;  /* library_album_info_t*,  borrowed from cache */
+    GPtrArray *tracks;  /* library_track_info_t*,  borrowed from cache */
+    size_t total_artists;
+    size_t total_albums;
+    size_t total_tracks;
 } library_search_results_t;
 
 /**
@@ -60,11 +60,11 @@ typedef struct {
  * @return Caller-owned results; free with library_search_results_free().
  */
 library_search_results_t *library_cache_search(library_cache_t *cache,
-                                                const char *query,
-                                                library_search_filter_t filter,
-                                                size_t limit,
-                                                const db_search_opts_t *opts,
-                                                uint32_t library_mask);
+                                               const char *query,
+                                               library_search_filter_t filter,
+                                               size_t limit,
+                                               const db_search_opts_t *opts,
+                                               uint32_t library_mask);
 
 void library_search_results_free(library_search_results_t *results);
 
@@ -73,19 +73,19 @@ void library_search_results_free(library_search_results_t *results);
  * ============================================================================= */
 
 typedef struct {
-    GPtrArray *roles;          /* char *, one per unique role label            */
-    char      *artist_name;    /* MusicBrainz artist name that produced match  */
-    char      *artist_mbid;    /* MusicBrainz artist MBID                      */
+    GPtrArray *roles;  /* char *, one per unique role label            */
+    char *artist_name; /* MusicBrainz artist name that produced match  */
+    char *artist_mbid; /* MusicBrainz artist MBID                      */
 } library_credit_info_t;
 
 typedef struct {
     /* Global track_ids (int64_t) that survived cross-library dedup.
      * Order is insertion order from the first library that produced each one. */
-    GArray     *track_ids;
+    GArray *track_ids;
 
     /* Global album_ids (int64_t) derived from surviving tracks,
      * deduped by release-group MBID. */
-    GArray     *album_ids;
+    GArray *album_ids;
 
     /* Surviving-track_id → library_credit_info_t. Roles from all libraries
      * that produced the same recording are merged into the survivor. */
@@ -93,7 +93,7 @@ typedef struct {
 
     /* Unique meta artists matched across all libraries as
      * packed "mbid\tname\ttype" strings (owned). */
-    GPtrArray  *meta_artists;
+    GPtrArray *meta_artists;
 } library_credit_search_result_t;
 
 /**
@@ -107,11 +107,10 @@ typedef struct {
  * @return Newly-allocated result; never NULL.
  *         Free with library_credit_search_result_free().
  */
-library_credit_search_result_t *library_credit_search(
-    library_cache_t *cache,
-    const char *credit_text,
-    const char *role_gid,
-    uint32_t library_mask);
+library_credit_search_result_t *library_credit_search(library_cache_t *cache,
+                                                      const char *credit_text,
+                                                      const char *role_gid,
+                                                      uint32_t library_mask);
 
 void library_credit_search_result_free(library_credit_search_result_t *r);
 

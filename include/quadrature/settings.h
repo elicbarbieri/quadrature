@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define APP_SETTINGS_MAX_CHANNELS 4
+#define APP_SETTINGS_MAX_CHANNELS    4
 #define APP_SETTINGS_DEFAULT_QUANTUM 256
 
 /**
@@ -24,11 +24,11 @@ extern "C" {
  * Index corresponds to dropdown selection order.
  */
 typedef enum {
-    OUTPUT_FORMAT_16BIT_44100 = 0,   // CD quality
-    OUTPUT_FORMAT_16BIT_48000,       // Standard broadcast
-    OUTPUT_FORMAT_24BIT_44100,       // High-res CD rate
-    OUTPUT_FORMAT_24BIT_48000,       // High-res broadcast
-    OUTPUT_FORMAT_24BIT_96000,       // Studio quality
+    OUTPUT_FORMAT_16BIT_44100 = 0, // CD quality
+    OUTPUT_FORMAT_16BIT_48000,     // Standard broadcast
+    OUTPUT_FORMAT_24BIT_44100,     // High-res CD rate
+    OUTPUT_FORMAT_24BIT_48000,     // High-res broadcast
+    OUTPUT_FORMAT_24BIT_96000,     // Studio quality
     OUTPUT_FORMAT_COUNT
 } output_format_t;
 
@@ -36,12 +36,12 @@ typedef enum {
  * Per-channel configuration structure.
  */
 typedef struct {
-    char *device_name;               // node.name (NULL = unconfigured)
-    gboolean enabled;                // explicit enable state
-    gboolean exclusive;              // PipeWire exclusive mode (default: TRUE)
-    output_format_t output_format;   // audio output format
-    uint32_t quantum_frames;         // PipeWire quantum / buffer size (default: 512)
-    char *livewire_gpio_address;     // Livewire+ GPIO address (NULL = not configured)
+    char *device_name;             // node.name (NULL = unconfigured)
+    gboolean enabled;              // explicit enable state
+    gboolean exclusive;            // PipeWire exclusive mode (default: TRUE)
+    output_format_t output_format; // audio output format
+    uint32_t quantum_frames;       // PipeWire quantum / buffer size (default: 512)
+    char *livewire_gpio_address;   // Livewire+ GPIO address (NULL = not configured)
 } channel_config_t;
 
 /**
@@ -49,15 +49,15 @@ typedef struct {
  * All per-library state lives here — no parallel arrays.
  */
 typedef struct {
-    char *path;           // Music folder root (required, heap-owned)
-    char *name;           // Display name (NULL = use basename of path)
-    char *data_path;      // Index/DB location (NULL = same as path)
-    int   mb_resolve;     // -1 = inherit global, 0 = disabled, 1 = enabled
-    int   acoustid;       // -1 = inherit global, 0 = disabled, 1 = enabled
-    int   fanart;         // -1 = inherit global, 0 = disabled, 1 = enabled
-    int   wikipedia;      // -1 = inherit global, 0 = disabled, 1 = enabled
-    int   locked;         // 0 = unlocked, 1 = locked (prevents reorder + edit)
-    int   library_index;  // Stable slot ID; persisted as sort key in settings.ini
+    char *path;        // Music folder root (required, heap-owned)
+    char *name;        // Display name (NULL = use basename of path)
+    char *data_path;   // Index/DB location (NULL = same as path)
+    int mb_resolve;    // -1 = inherit global, 0 = disabled, 1 = enabled
+    int acoustid;      // -1 = inherit global, 0 = disabled, 1 = enabled
+    int fanart;        // -1 = inherit global, 0 = disabled, 1 = enabled
+    int wikipedia;     // -1 = inherit global, 0 = disabled, 1 = enabled
+    int locked;        // 0 = unlocked, 1 = locked (prevents reorder + edit)
+    int library_index; // Stable slot ID; persisted as sort key in settings.ini
 } library_config_t;
 
 /**
@@ -80,26 +80,26 @@ typedef struct {
     int max_concurrent_library_scans; // Max libraries scanning simultaneously (default: 2)
 
     // Integration toggles (global defaults; per-library overrides in library_config_t)
-    gboolean musicbrainz_resolve;     // Resolve MusicBrainz metadata after indexing
-    gboolean fanart_resolve;          // Resolve fanart.tv artist images after indexing
-    gboolean acoustid_fingerprint;    // Fingerprint tracks missing MUSICBRAINZ_ tags
-    gboolean wikipedia_bios;          // Fetch artist biographies from Wikipedia
+    gboolean musicbrainz_resolve;  // Resolve MusicBrainz metadata after indexing
+    gboolean fanart_resolve;       // Resolve fanart.tv artist images after indexing
+    gboolean acoustid_fingerprint; // Fingerprint tracks missing MUSICBRAINZ_ tags
+    gboolean wikipedia_bios;       // Fetch artist biographies from Wikipedia
 
     // Integration connection strings
-    char *musicbrainz_pg_conninfo;    // libpq conninfo for self-hosted MB PG (NULL → use HTTP)
-    char *acoustid_pg_conninfo;       // libpq conninfo for AcoustID PostgreSQL
-    char *acoustid_index_url;         // AcoustID index HTTP endpoint URL
-    char *mb_solr_url;                // MusicBrainz Solr search URL (e.g., "http://host:8983")
-    char *fanart_api_key;             // fanart.tv personal API key
+    char *musicbrainz_pg_conninfo; // libpq conninfo for self-hosted MB PG (NULL → use HTTP)
+    char *acoustid_pg_conninfo;    // libpq conninfo for AcoustID PostgreSQL
+    char *acoustid_index_url;      // AcoustID index HTTP endpoint URL
+    char *mb_solr_url;             // MusicBrainz Solr search URL (e.g., "http://host:8983")
+    char *fanart_api_key;          // fanart.tv personal API key
 
     // Axia Livewire+ GPIO credentials (global for all channels)
-    char *axia_username;              // LWRP username (NULL if not required)
-    char *axia_password;              // LWRP password (NULL if not required)
+    char *axia_username; // LWRP username (NULL if not required)
+    char *axia_password; // LWRP password (NULL if not required)
 
     // Libraries — ordered array, position = display order.
     // library_config_t.library_index is the stable slot ID for cache/artwork.
-    library_config_t *libraries;      // Heap-owned array (NULL if none)
-    int               library_count;  // Number of configured libraries
+    library_config_t *libraries; // Heap-owned array (NULL if none)
+    int library_count;           // Number of configured libraries
 } app_settings_t;
 
 /**
@@ -141,7 +141,8 @@ const char *app_settings_get_channel_device(const app_settings_t *settings, int 
  * @param channel Channel index (0-3)
  * @param device_name Device name (NULL to clear)
  */
-void app_settings_set_channel_device(app_settings_t *settings, int channel, const char *device_name);
+void
+app_settings_set_channel_device(app_settings_t *settings, int channel, const char *device_name);
 
 /**
  * Get a channel's exclusive mode setting.
@@ -265,7 +266,8 @@ int app_settings_find_library(const app_settings_t *settings, const char *path);
  * @param channel Channel index (0-3)
  * @param quantum_frames Buffer size (must be power-of-2, 32-2048)
  */
-void app_settings_set_channel_quantum(app_settings_t *settings, int channel, uint32_t quantum_frames);
+void
+app_settings_set_channel_quantum(app_settings_t *settings, int channel, uint32_t quantum_frames);
 
 /**
  * Get a channel's PipeWire quantum (buffer size in frames).

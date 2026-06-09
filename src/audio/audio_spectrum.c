@@ -9,18 +9,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-quadrature_result_t spectrum_init(spectrum_state_t* s, int num_bars, int sample_rate) {
+quadrature_result_t
+spectrum_init(spectrum_state_t *s, int num_bars, int sample_rate)
+{
     g_assert(s != NULL);
     g_assert(num_bars > 0 && num_bars <= 64);
     g_assert(sample_rate > 0);
 
     memset(s, 0, sizeof(*s));
+    s->sample_rate = sample_rate;
 
-    s->plan = cava_init(num_bars, (unsigned int)sample_rate, 2, 1, 0.77, 50, 10000);
+    s->plan = cava_init(num_bars, (unsigned int)sample_rate, 2, 1, 0.30, 50, 10000);
     if (!s->plan || s->plan->status != 0) {
         g_critical("spectrum_init: cava_init failed: %s",
                    s->plan ? s->plan->error_message : "allocation failed");
-        if (s->plan) { cava_destroy(s->plan); s->plan = NULL; }
+        if (s->plan) {
+            cava_destroy(s->plan);
+            s->plan = NULL;
+        }
         return QUADRATURE_ERROR_INTERNAL;
     }
 
@@ -32,22 +38,49 @@ quadrature_result_t spectrum_init(spectrum_state_t* s, int num_bars, int sample_
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
 
+    spectrum_set_refresh_hz(s, 60.0);
     return QUADRATURE_OK;
 }
 
-void spectrum_cleanup(spectrum_state_t* s) {
-    if (!s) return;
-    if (s->plan) { cava_destroy(s->plan); s->plan = NULL; }
-    free(s->input_buffer);  s->input_buffer = NULL;
-    free(s->output_bars);   s->output_bars = NULL;
+void
+spectrum_set_refresh_hz(spectrum_state_t *s, double hz)
+{
+    g_assert(s != NULL);
+    if (hz < 30.0)
+        hz = 30.0;
+    if (hz > 165.0)
+        hz = 165.0;
+    int samples_per_frame = (int)((double)s->sample_rate / hz);
+    atomic_store(&s->fft_threshold, samples_per_frame * 2);
+}
+
+void
+spectrum_cleanup(spectrum_state_t *s)
+{
+    if (!s)
+        return;
+    if (s->plan) {
+        cava_destroy(s->plan);
+        s->plan = NULL;
+    }
+    free(s->input_buffer);
+    s->input_buffer = NULL;
+    free(s->output_bars);
+    s->output_bars = NULL;
     s->input_buffer_fill = 0;
 }
 
-void spectrum_process(spectrum_state_t* s, const float* in, uint32_t frames,
-                      _Atomic float* bars, _Atomic uint32_t* generation) {
-    if (!s->plan || !in || frames == 0) return;
+void
+spectrum_process(spectrum_state_t *s,
+                 const float *in,
+                 uint32_t frames,
+                 _Atomic float *bars,
+                 _Atomic uint32_t *generation)
+{
+    if (!s->plan || !in || frames == 0)
+        return;
 
-    size_t to_read = (size_t)frames * 2;  /* stereo interleaved */
+    size_t to_read = (size_t)frames * 2; /* stereo interleaved */
 
     /* Prevent overflow: discard stale samples rather than memmove on the RT thread.
      * This path fires only if we somehow accumulate >4096 samples without hitting
@@ -62,20 +95,24 @@ void spectrum_process(spectrum_state_t* s, const float* in, uint32_t frames,
         dst[i] = (double)in[i];
     s->input_buffer_fill += to_read;
 
-    /* Run FFT when enough samples accumulated */
-    if (s->input_buffer_fill >= 512) {
-        cava_execute(s->input_buffer, (int)s->input_buffer_fill,
-                     s->output_bars, s->plan);
+    /* Run FFT when enough samples accumulated for one display frame. */
+    size_t threshold = (size_t)atomic_load(&s->fft_threshold);
+    if (s->input_buffer_fill >= threshold) {
+        cava_execute(s->input_buffer, (int)s->input_buffer_fill, s->output_bars, s->plan);
         s->input_buffer_fill = 0;
 
         /* Write clamped stereo results atomically */
         for (int b = 0; b < SPECTRUM_BARS; b++) {
             float left = (float)s->output_bars[b];
             float right = (float)s->output_bars[SPECTRUM_BARS + b];
-            if (left < 0.0f) left = 0.0f;
-            if (left > 1.0f) left = 1.0f;
-            if (right < 0.0f) right = 0.0f;
-            if (right > 1.0f) right = 1.0f;
+            if (left < 0.0f)
+                left = 0.0f;
+            if (left > 1.0f)
+                left = 1.0f;
+            if (right < 0.0f)
+                right = 0.0f;
+            if (right > 1.0f)
+                right = 1.0f;
             atomic_store(&bars[b], left);
             atomic_store(&bars[SPECTRUM_BARS + b], right);
         }

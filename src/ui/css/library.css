@@ -567,18 +567,23 @@
 
 
 /* ── Unified Row Styling ───────────────────────────────────────────────
- * All library rows use ProportionalBox. Row wrapper is transparent.
- * Child proportional-box carries background, dividers, selection highlight.
- * Section position classes (library-row-first/last) on the child. */
+ * Each row in a .library-list contains a single content child (the
+ * ProportionalBox) that carries the visual chrome — background, dividers,
+ * hover/selection border, end-cap rounded corners.
+ *
+ * Row position is resolved structurally via :first-child / :last-child for
+ * flat list views (zero runtime cost — no per-bind class toggling). The
+ * .library-row-first / .library-row-last classes are still honored as
+ * explicit section markers in lists that contain multiple sub-sections
+ * (search results, multi-disc track listings).
+ */
 
 .library-list > row {
     padding: 0;
     border: none;
     background: transparent;
+    outline: none;
 }
-
-.library-list > row:focus,
-.library-list > row:focus-visible { outline: none; }
 
 .library-list > row > :first-child {
     padding: 3px 7px;
@@ -588,26 +593,28 @@
     border-top-color: rgba(255, 255, 255, 0.04);
 }
 
-.library-list > row > .library-row-first { border-radius: 8px 8px 0 0; border-top-color: transparent; }
-.library-list > row > .library-row-last  { border-radius: 0 0 8px 8px; }
-.library-list > row > .library-row-first.library-row-last { border-radius: 8px; }
-
-.library-list > row:hover > :first-child {
+/* End caps — structural pseudo-classes for flat lists, explicit classes for
+ * sectioned lists. Same rule for both forms; whichever matches fires. */
+.library-list > row:first-child > :first-child,
+.library-list > row > .library-row-first {
+    border-radius: 8px 8px 0 0;
+    border-top-color: transparent;
+}
+.library-list > row:last-child > :first-child,
+.library-list > row > .library-row-last {
+    border-radius: 0 0 8px 8px;
+}
+.library-list > row:first-child:last-child > :first-child,
+.library-list > row > .library-row-first.library-row-last {
     border-radius: 8px;
-    border-color: alpha(@green_3, 0.22);
 }
 
-.library-list > row:selected > :first-child {
-    border-radius: 8px;
-    border-color: alpha(@green_3, 0.35);
-}
-
-.library-list:focus-within > row:selected > :first-child {
-    border-color: @green_3;
-}
+/* Hover + selection — fully rounded "popped-out" border. */
+.library-list > row:hover > :first-child       { border-radius: 8px; border-color: alpha(@green_3, 0.22); }
+.library-list > row:selected > :first-child    { border-radius: 8px; border-color: alpha(@green_3, 0.35); }
+.library-list:focus-within > row:selected > :first-child { border-color: @green_3; }
 
 .library-list > row:hover .library-row-title { color: #ffffff; }
-
 .library-list > row:hover .genre-pill {
     background-color: #333333;
     border-color: #444444;

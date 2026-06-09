@@ -44,7 +44,8 @@
 #include <libavformat/avformat.h>
 
 // Initialize FFmpeg before any tests run (before Criterion forks)
-ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
+ReportHook(PRE_ALL)(struct criterion_test_set *tests)
+{
     (void)tests;
     avformat_network_init();
 }
@@ -61,56 +62,66 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests) {
 /* Totally Enormous Extinct Dinosaurs — credited on BRONSON track 10 (DAWN).
  * MB's canonical artist name is "TEED"; Picard writes the credit-as-credited
  * ("Totally Enormous Extinct Dinosaurs") in ARTISTS but ships the same MBID. */
-#define MBID_TEED_ARTIST           "bd075a82-b196-4752-a1bb-3d87be3236a0"
+#define MBID_TEED_ARTIST "bd075a82-b196-4752-a1bb-3d87be3236a0"
 
 /* Daft Punk — Random Access Memories */
-#define MBID_DAFT_PUNK_ARTIST      "056e4f3e-d505-4dad-8ec1-d04f521cbb56"
-#define MBID_RAM_RELEASE           "8ecfafd1-89a8-423a-968f-3fff47f0b0f9"
-#define MBID_RAM_RELEASE_GROUP     "aa997ea0-2936-40bd-884d-3af8a0e064dc"
+#define MBID_DAFT_PUNK_ARTIST  "056e4f3e-d505-4dad-8ec1-d04f521cbb56"
+#define MBID_RAM_RELEASE       "8ecfafd1-89a8-423a-968f-3fff47f0b0f9"
+#define MBID_RAM_RELEASE_GROUP "aa997ea0-2936-40bd-884d-3af8a0e064dc"
 
 /* ODESZA — The Last Goodbye Tour Live (digital release, 27 tracks) */
-#define MBID_ODESZA_ARTIST              "2e222fce-02ae-4221-b1c6-3c3242b423b6"
-#define MBID_ODESZA_LIVE_RELEASE        "c3f6f487-f59a-467f-94a8-0f006a5deaf4"
-#define MBID_ODESZA_LIVE_RELEASE_GROUP  "2502f14d-0b97-4085-aba5-c62e1c166a65"
+#define MBID_ODESZA_ARTIST             "2e222fce-02ae-4221-b1c6-3c3242b423b6"
+#define MBID_ODESZA_LIVE_RELEASE       "c3f6f487-f59a-467f-94a8-0f006a5deaf4"
+#define MBID_ODESZA_LIVE_RELEASE_GROUP "2502f14d-0b97-4085-aba5-c62e1c166a65"
 
 /* BRONSON track titles + durations (seconds, from MB release 5ed617d7) */
-static const char *BRONSON_TRACKS[] = {
-    "FOUNDATION", "HEART ATTACK", "BLINE", "KNOW ME", "VAULTS",
-    "TENSE", "CALL OUT", "CONTACT", "KEEP MOVING", "DAWN"
-};
-static const int BRONSON_DURATIONS[] = {
-    184, 209, 265, 180, 244, 200, 179, 207, 246, 443
-};
+static const char *BRONSON_TRACKS[]
+    = { "FOUNDATION", "HEART ATTACK", "BLINE",   "KNOW ME",     "VAULTS",
+        "TENSE",      "CALL OUT",     "CONTACT", "KEEP MOVING", "DAWN" };
+static const int BRONSON_DURATIONS[] = { 184, 209, 265, 180, 244, 200, 179, 207, 246, 443 };
 #define BRONSON_TRACK_COUNT 10
 
 /* RAM disc 1 track titles + durations (seconds, from MB release 5000a285) */
-static const char *RAM_TRACKS[] = {
-    "Give Life Back to Music", "The Game of Love", "Giorgio by Moroder",
-    "Within", "Instant Crush", "Lose Yourself to Dance", "Touch",
-    "Get Lucky", "Beyond", "Motherboard", "Fragments of Time",
-    "Doin It Right", "Contact"
-};
-static const int RAM_DURATIONS[] = {
-    274, 321, 544, 228, 337, 353, 498, 367, 290, 341, 279, 251, 381
-};
+static const char *RAM_TRACKS[] = { "Give Life Back to Music",
+                                    "The Game of Love",
+                                    "Giorgio by Moroder",
+                                    "Within",
+                                    "Instant Crush",
+                                    "Lose Yourself to Dance",
+                                    "Touch",
+                                    "Get Lucky",
+                                    "Beyond",
+                                    "Motherboard",
+                                    "Fragments of Time",
+                                    "Doin It Right",
+                                    "Contact" };
+static const int RAM_DURATIONS[]
+    = { 274, 321, 544, 228, 337, 353, 498, 367, 290, 341, 279, 251, 381 };
 #define RAM_TRACK_COUNT 13
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Connection helpers (same pattern as test_mb_resolve.c)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static const char *env_or(const char *name, const char *fallback) {
+static const char *
+env_or(const char *name, const char *fallback)
+{
     const char *val = getenv(name);
     return (val && val[0]) ? val : fallback;
 }
 
-static const char *mb_pg_conninfo(void) {
+static const char *
+mb_pg_conninfo(void)
+{
     /* HTTP test mode: return NULL → resolver picks the HTTP backend. */
-    if (quad_test_use_http()) return NULL;
+    if (quad_test_use_http())
+        return NULL;
     const char *pw = getenv("MB_PG_PASSWORD");
-    if (!pw || !pw[0]) return NULL;
+    if (!pw || !pw[0])
+        return NULL;
     static char buf[512];
-    snprintf(buf, sizeof(buf),
+    snprintf(buf,
+             sizeof(buf),
              "host=%s dbname=%s user=%s password=%s connect_timeout=%s",
              env_or("MB_HOST", "localhost"),
              env_or("MB_DBNAME", "musicbrainz_db"),
@@ -120,9 +131,12 @@ static const char *mb_pg_conninfo(void) {
     return buf;
 }
 
-static const char *mb_solr_url(void) {
+static const char *
+mb_solr_url(void)
+{
     /* HTTP backend has built-in Solr equivalent (ws/2 search) — no env URL. */
-    if (quad_test_use_http()) return NULL;
+    if (quad_test_use_http())
+        return NULL;
     return env_or("MB_SOLR_URL", NULL);
 }
 
@@ -130,9 +144,10 @@ static const char *mb_solr_url(void) {
  * FLAC file generation
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void mkdirs(const char *path) {
-    cr_assert_eq(g_mkdir_with_parents(path, 0755), 0,
-                 "g_mkdir_with_parents failed for %s", path);
+static void
+mkdirs(const char *path)
+{
+    cr_assert_eq(g_mkdir_with_parents(path, 0755), 0, "g_mkdir_with_parents failed for %s", path);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -146,7 +161,9 @@ static void mkdirs(const char *path) {
  * ODESZA/The Last Goodbye Tour Live/ — basic tags, tracks 17-18 credit "Bronson/Odesza"
  * Daft Punk/Random Access Memories (2013)/CD 01/ — basic tags, multi-disc
  */
-static void build_lib_a(const char *root) {
+static void
+build_lib_a(const char *root)
+{
     char path[1024], tracknum[32], title_tag[256];
 
     /* BRONSON — tag-less files (the real elicb_music pattern).
@@ -154,26 +171,33 @@ static void build_lib_a(const char *root) {
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON (2020)", root);
     mkdirs(path);
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
-        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s (FLAC 828 kbps).flac", path, i + 1, BRONSON_TRACKS[i]);
+        g_autofree char *fpath
+            = g_strdup_printf("%s/%02d - %s (FLAC 828 kbps).flac", path, i + 1, BRONSON_TRACKS[i]);
         const char *tags[] = { "date=2020", "genre=Electronic", NULL };
-        cr_assert_eq(create_flac(fpath, tags, BRONSON_DURATIONS[i]), 0,
-                     "Failed to create: %s", fpath);
+        cr_assert_eq(
+            create_flac(fpath, tags, BRONSON_DURATIONS[i]), 0, "Failed to create: %s", fpath);
     }
 
     /* ODESZA — basic tags, tracks 17-18 credit Bronson */
     snprintf(path, sizeof(path), "%s/ODESZA/The Last Goodbye Tour Live", root);
     mkdirs(path);
 
-    struct { int num; const char *title; const char *artist; int dur; } odesza_tracks[] = {
-        { 1,  "This Version Of You (Live)", "Odesza",        186 },
-        { 2,  "Behind the Sun (Live)",      "Odesza",        190 },
-        { 3,  "Wide Awake (Live)",          "Odesza",        202 },
-        { 17, "TENSE (Live)",               "Bronson/Odesza", 194 },
-        { 18, "Keep Moving (Live)",         "Bronson/Odesza", 142 },
+    struct {
+        int num;
+        const char *title;
+        const char *artist;
+        int dur;
+    } odesza_tracks[] = {
+        { 1, "This Version Of You (Live)", "Odesza", 186 },
+        { 2, "Behind the Sun (Live)", "Odesza", 190 },
+        { 3, "Wide Awake (Live)", "Odesza", 202 },
+        { 17, "TENSE (Live)", "Bronson/Odesza", 194 },
+        { 18, "Keep Moving (Live)", "Bronson/Odesza", 142 },
     };
 
-    for (size_t i = 0; i < sizeof(odesza_tracks)/sizeof(odesza_tracks[0]); i++) {
-        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, odesza_tracks[i].num, odesza_tracks[i].title);
+    for (size_t i = 0; i < sizeof(odesza_tracks) / sizeof(odesza_tracks[0]); i++) {
+        g_autofree char *fpath = g_strdup_printf(
+            "%s/%02d - %s.flac", path, odesza_tracks[i].num, odesza_tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", odesza_tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", odesza_tracks[i].title);
 
@@ -182,9 +206,8 @@ static void build_lib_a(const char *root) {
         snprintf(aa_tag, sizeof(aa_tag), "album_artist=%s", odesza_tracks[i].artist);
 
         const char *tags[] = {
-            title_tag, artist_tag, aa_tag,
-            "album=The Last Goodbye Tour Live",
-            tracknum, "date=2024", "genre=Electronic", NULL
+            title_tag,   artist_tag,         aa_tag, "album=The Last Goodbye Tour Live", tracknum,
+            "date=2024", "genre=Electronic", NULL
         };
         cr_assert_eq(create_flac(fpath, tags, odesza_tracks[i].dur), 0);
     }
@@ -197,44 +220,50 @@ static void build_lib_a(const char *root) {
     snprintf(path, sizeof(path), "%s/ODESZA/A Moment Apart (2017)", root);
     mkdirs(path);
     {
-        struct { int num; const char *title; const char *artist; int dur; } ama[] = {
-            { 1, "Intro",                 "Odesza",                50  },
-            { 2, "A Moment Apart",        "Odesza",                258 },
-            { 3, "Higher Ground",         "Odesza/Naomi Wild",     239 },
-            { 4, "Boy",                   "Odesza",                222 },
-            { 5, "Line of Sight",         "Odesza/WYNNE/Mansionair", 249 },
-            { 6, "Late Night",            "Odesza",                258 },
+        struct {
+            int num;
+            const char *title;
+            const char *artist;
+            int dur;
+        } ama[] = {
+            { 1, "Intro", "Odesza", 50 },
+            { 2, "A Moment Apart", "Odesza", 258 },
+            { 3, "Higher Ground", "Odesza/Naomi Wild", 239 },
+            { 4, "Boy", "Odesza", 222 },
+            { 5, "Line of Sight", "Odesza/WYNNE/Mansionair", 249 },
+            { 6, "Late Night", "Odesza", 258 },
         };
-        for (size_t i = 0; i < sizeof(ama)/sizeof(ama[0]); i++) {
-            g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, ama[i].num, ama[i].title);
+        for (size_t i = 0; i < sizeof(ama) / sizeof(ama[0]); i++) {
+            g_autofree char *fpath
+                = g_strdup_printf("%s/%02d - %s.flac", path, ama[i].num, ama[i].title);
             snprintf(tracknum, sizeof(tracknum), "track=%d", ama[i].num);
             snprintf(title_tag, sizeof(title_tag), "title=%s", ama[i].title);
             char artist_tag[256], aa_tag[256];
             snprintf(artist_tag, sizeof(artist_tag), "artist=%s", ama[i].artist);
             snprintf(aa_tag, sizeof(aa_tag), "album_artist=%s", ama[i].artist);
-            const char *tags[] = {
-                title_tag, artist_tag, aa_tag,
-                "album=A Moment Apart", tracknum,
-                "date=2017", "genre=Electronic", NULL
-            };
+            const char *tags[]
+                = { title_tag,   artist_tag,         aa_tag, "album=A Moment Apart", tracknum,
+                    "date=2017", "genre=Electronic", NULL };
             cr_assert_eq(create_flac(fpath, tags, ama[i].dur), 0);
         }
     }
 
     /* Daft Punk — basic tags, multi-disc, no MB */
-    snprintf(path, sizeof(path),
-             "%s/Daft Punk/Random Access Memories (2013)/CD 01", root);
+    snprintf(path, sizeof(path), "%s/Daft Punk/Random Access Memories (2013)/CD 01", root);
     mkdirs(path);
     for (int i = 0; i < RAM_TRACK_COUNT; i++) {
         g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, i + 1, RAM_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", RAM_TRACKS[i]);
-        const char *tags[] = {
-            title_tag, "artist=Daft Punk",
-            "album=Random Access Memories (10th Anniversary Edition)",
-            "album_artist=Daft Punk", tracknum,
-            "disc=1", "date=2023", "genre=Dance", NULL
-        };
+        const char *tags[] = { title_tag,
+                               "artist=Daft Punk",
+                               "album=Random Access Memories (10th Anniversary Edition)",
+                               "album_artist=Daft Punk",
+                               tracknum,
+                               "disc=1",
+                               "date=2023",
+                               "genre=Dance",
+                               NULL };
         cr_assert_eq(create_flac(fpath, tags, RAM_DURATIONS[i]), 0);
     }
 }
@@ -245,7 +274,9 @@ static void build_lib_a(const char *root) {
  * BRONSON/BRONSON/ — full Picard tags
  * Daft Punk/Random Access Memories/ — full Picard tags
  */
-static void build_lib_b(const char *root) {
+static void
+build_lib_b(const char *root)
+{
     char path[1024], tracknum[32], title_tag[256];
 
     /* BRONSON — full Picard tags.
@@ -259,27 +290,29 @@ static void build_lib_b(const char *root) {
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
         const bool is_dawn = (i == BRONSON_TRACK_COUNT - 1);
 
-        g_autofree char *fpath = g_strdup_printf("%s/%02d BRONSON - %s.flac",
-                                                  path, i + 1, BRONSON_TRACKS[i]);
+        g_autofree char *fpath
+            = g_strdup_printf("%s/%02d BRONSON - %s.flac", path, i + 1, BRONSON_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", BRONSON_TRACKS[i]);
 
-        const char *artist_tag = is_dawn
-            ? "artist=BRONSON feat. Totally Enormous Extinct Dinosaurs"
-            : "artist=BRONSON";
-        const char *mb_artistid_tag = is_dawn
-            ? "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST ";" MBID_TEED_ARTIST
-            : "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST;
+        const char *artist_tag = is_dawn ? "artist=BRONSON feat. Totally Enormous Extinct Dinosaurs"
+                                         : "artist=BRONSON";
+        const char *mb_artistid_tag = is_dawn ? "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST
+                                                ";" MBID_TEED_ARTIST
+                                              : "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST;
 
-        const char *tags[] = {
-            title_tag, artist_tag, "album=BRONSON", "album_artist=BRONSON",
-            tracknum, "date=2020", "genre=Electronic",
-            "MUSICBRAINZ_ALBUMID=" MBID_BRONSON_RELEASE,
-            mb_artistid_tag,
-            "MUSICBRAINZ_RELEASEGROUPID=" MBID_BRONSON_RELEASE_GROUP,
-            "MUSICBRAINZ_ALBUMARTISTID=" MBID_BRONSON_ARTIST,
-            NULL
-        };
+        const char *tags[] = { title_tag,
+                               artist_tag,
+                               "album=BRONSON",
+                               "album_artist=BRONSON",
+                               tracknum,
+                               "date=2020",
+                               "genre=Electronic",
+                               "MUSICBRAINZ_ALBUMID=" MBID_BRONSON_RELEASE,
+                               mb_artistid_tag,
+                               "MUSICBRAINZ_RELEASEGROUPID=" MBID_BRONSON_RELEASE_GROUP,
+                               "MUSICBRAINZ_ALBUMARTISTID=" MBID_BRONSON_ARTIST,
+                               NULL };
         cr_assert_eq(create_flac(fpath, tags, BRONSON_DURATIONS[i]), 0);
     }
 
@@ -290,15 +323,19 @@ static void build_lib_b(const char *root) {
         g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, i + 1, RAM_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", RAM_TRACKS[i]);
-        const char *tags[] = {
-            title_tag, "artist=Daft Punk", "album=Random Access Memories",
-            "album_artist=Daft Punk", tracknum, "disc=1", "date=2023", "genre=Dance",
-            "MUSICBRAINZ_ALBUMID=" MBID_RAM_RELEASE,
-            "MUSICBRAINZ_ARTISTID=" MBID_DAFT_PUNK_ARTIST,
-            "MUSICBRAINZ_RELEASEGROUPID=" MBID_RAM_RELEASE_GROUP,
-            "MUSICBRAINZ_ALBUMARTISTID=" MBID_DAFT_PUNK_ARTIST,
-            NULL
-        };
+        const char *tags[] = { title_tag,
+                               "artist=Daft Punk",
+                               "album=Random Access Memories",
+                               "album_artist=Daft Punk",
+                               tracknum,
+                               "disc=1",
+                               "date=2023",
+                               "genre=Dance",
+                               "MUSICBRAINZ_ALBUMID=" MBID_RAM_RELEASE,
+                               "MUSICBRAINZ_ARTISTID=" MBID_DAFT_PUNK_ARTIST,
+                               "MUSICBRAINZ_RELEASEGROUPID=" MBID_RAM_RELEASE_GROUP,
+                               "MUSICBRAINZ_ALBUMARTISTID=" MBID_DAFT_PUNK_ARTIST,
+                               NULL };
         cr_assert_eq(create_flac(fpath, tags, RAM_DURATIONS[i]), 0);
     }
 }
@@ -313,10 +350,10 @@ static void build_lib_b(const char *root) {
 
 typedef struct {
     library_cache_t *cache;
-    int              bitmap_index;       /* Which slot to refresh */
-    atomic_int       lib_updated;        /* Count of INDEXER_LIBRARY_UPDATED */
-    atomic_int       completed;          /* 1 once COMPLETED/CANCELLED/ERROR */
-    atomic_int       errored;
+    int bitmap_index;       /* Which slot to refresh */
+    atomic_int lib_updated; /* Count of INDEXER_LIBRARY_UPDATED */
+    atomic_int completed;   /* 1 once COMPLETED/CANCELLED/ERROR */
+    atomic_int errored;
 } ProdParityTracker;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -356,28 +393,31 @@ static void rm_rf(const char *path);
 /* (ProdParityTracker typedef is up with the shared fixture state so
  *  story_teardown can reach it.) */
 
-static void prod_parity_cb(indexer_event_t event,
-                           const indexer_progress_t *progress,
-                           const library_cache_changeset_t *changeset,
-                           void *user_data) {
+static void
+prod_parity_cb(indexer_event_t event,
+               const indexer_progress_t *progress,
+               const library_cache_changeset_t *changeset,
+               void *user_data)
+{
     (void)progress;
     (void)changeset;
     ProdParityTracker *t = user_data;
     switch (event) {
-        case INDEXER_LIBRARY_UPDATED:
-            atomic_fetch_add(&t->lib_updated, 1);
-            break;
-        case INDEXER_COMPLETED:
-            atomic_store(&t->completed, 1);
-            break;
-        case INDEXER_CANCELLED:
-            atomic_store(&t->completed, 1);
-            break;
-        case INDEXER_ERROR:
-            atomic_store(&t->errored, 1);
-            atomic_store(&t->completed, 1);
-            break;
-        default: break;
+    case INDEXER_LIBRARY_UPDATED:
+        atomic_fetch_add(&t->lib_updated, 1);
+        break;
+    case INDEXER_COMPLETED:
+        atomic_store(&t->completed, 1);
+        break;
+    case INDEXER_CANCELLED:
+        atomic_store(&t->completed, 1);
+        break;
+    case INDEXER_ERROR:
+        atomic_store(&t->errored, 1);
+        atomic_store(&t->completed, 1);
+        break;
+    default:
+        break;
     }
 }
 
@@ -385,12 +425,16 @@ static void prod_parity_cb(indexer_event_t event,
  * what prod does implicitly on first app launch after `make db-clean`:
  * library_cache_create_multi must see a valid schema even though no
  * indexing has written any data yet. */
-static void bootstrap_empty_db(const char *data_dir) {
+static void
+bootstrap_empty_db(const char *data_dir)
+{
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/quadrature.sqlite", data_dir);
     quadrature_db_t *db = NULL;
-    cr_assert_eq(db_open(db_path, false, &db), QUADRATURE_OK,
-        "bootstrap_empty_db: failed to create schema at %s", db_path);
+    cr_assert_eq(db_open(db_path, false, &db),
+                 QUADRATURE_OK,
+                 "bootstrap_empty_db: failed to create schema at %s",
+                 db_path);
     db_close(db);
 }
 
@@ -399,9 +443,9 @@ static void bootstrap_empty_db(const char *data_dir) {
  * counter; every increment above the last-seen value triggers a fresh
  * refresh + await on that library's slot. Blocks until both indexers
  * have emitted COMPLETED and all generated refreshes have drained. */
-static void pump_until_indexers_done(library_cache_t *lib_cache,
-                                      ProdParityTracker *trackers,
-                                      int tracker_count) {
+static void
+pump_until_indexers_done(library_cache_t *lib_cache, ProdParityTracker *trackers, int tracker_count)
+{
     int *seen = g_new0(int, tracker_count);
 
     for (;;) {
@@ -413,7 +457,8 @@ static void pump_until_indexers_done(library_cache_t *lib_cache,
                 library_cache_await_slot(lib_cache, trackers[i].bitmap_index);
                 seen[i]++;
             }
-            if (!atomic_load(&trackers[i].completed)) all_done = 0;
+            if (!atomic_load(&trackers[i].completed))
+                all_done = 0;
         }
         if (all_done) {
             /* Drain any straggler events that landed after the completion
@@ -430,7 +475,8 @@ static void pump_until_indexers_done(library_cache_t *lib_cache,
                     pending++;
                 }
             }
-            if (!pending) break;
+            if (!pending)
+                break;
         }
         g_usleep(10000); /* 10 ms — keep CPU load low */
     }
@@ -455,7 +501,9 @@ static void pump_until_indexers_done(library_cache_t *lib_cache,
  *                             cumulatively refreshes its slots.
  * ──────────────────────────────────────────────────────────────────────── */
 
-static void setup_prod_cache(void) {
+static void
+setup_prod_cache(void)
+{
     bootstrap_empty_db(lib_a_data);
     bootstrap_empty_db(lib_b_data);
 
@@ -463,10 +511,8 @@ static void setup_prod_cache(void) {
     snprintf(db_a, sizeof(db_a), "%s/quadrature.sqlite", lib_a_data);
     snprintf(db_b, sizeof(db_b), "%s/quadrature.sqlite", lib_b_data);
     library_cache_source_t sources[2] = {
-        { .db_path = db_a, .music_base = lib_a_root,
-          .display_name = "Elicb", .bitmap_index = 0 },
-        { .db_path = db_b, .music_base = lib_b_root,
-          .display_name = "Music", .bitmap_index = 1 },
+        { .db_path = db_a, .music_base = lib_a_root, .display_name = "Elicb", .bitmap_index = 0 },
+        { .db_path = db_b, .music_base = lib_b_root, .display_name = "Music", .bitmap_index = 1 },
     };
     cr_assert_eq(library_cache_create_multi(sources, 2, &cache), QUADRATURE_OK);
     library_cache_warm_slot(cache, 0);
@@ -475,26 +521,36 @@ static void setup_prod_cache(void) {
     library_cache_await_slot(cache, 1);
 }
 
-static void run_prod_indexers(bool scan_a, bool scan_b,
-                               const char *pg, const char *solr) {
+static void
+run_prod_indexers(bool scan_a, bool scan_b, const char *pg, const char *solr)
+{
     cr_assert(cache != NULL,
-        "run_prod_indexers: cache not created — call setup_prod_cache() first");
+              "run_prod_indexers: cache not created — call setup_prod_cache() first");
     cr_assert(scan_a || scan_b, "run_prod_indexers: nothing to scan");
 
-    ProdParityTracker trackers[2] = {0};
-    trackers[0].cache = cache; trackers[0].bitmap_index = 0;
-    trackers[1].cache = cache; trackers[1].bitmap_index = 1;
+    ProdParityTracker trackers[2] = { 0 };
+    trackers[0].cache = cache;
+    trackers[0].bitmap_index = 0;
+    trackers[1].cache = cache;
+    trackers[1].bitmap_index = 1;
     /* If a slot is not scanned this round, mark its tracker completed so
      * pump_until_indexers_done doesn't wait for it. lib_updated stays 0
      * → no spurious refresh fires for the idle slot. */
-    if (!scan_a) atomic_store(&trackers[0].completed, 1);
-    if (!scan_b) atomic_store(&trackers[1].completed, 1);
+    if (!scan_a)
+        atomic_store(&trackers[0].completed, 1);
+    if (!scan_b)
+        atomic_store(&trackers[1].completed, 1);
 
     indexer_config_t cfg = {
-        .thread_count = 2, .process_artwork = false, .mb_resolve = true,
-        .pg_conninfo = pg, .mb_solr_url = solr,
-        .acoustid_pg_conninfo = NULL, .acoustid_index_url = NULL,
-        .fetch_artist_art = false, .fanart_api_key = NULL,
+        .thread_count = 2,
+        .process_artwork = false,
+        .mb_resolve = true,
+        .pg_conninfo = pg,
+        .mb_solr_url = solr,
+        .acoustid_pg_conninfo = NULL,
+        .acoustid_index_url = NULL,
+        .fetch_artist_art = false,
+        .fanart_api_key = NULL,
         .fetch_artist_bios = false,
         .callback = prod_parity_cb,
     };
@@ -514,82 +570,100 @@ static void run_prod_indexers(bool scan_a, bool scan_b,
     pump_until_indexers_done(cache, trackers, 2);
 
     if (scan_a) {
-        cr_assert(!atomic_load(&trackers[0].errored),
-            "lib_a indexer reported INDEXER_ERROR");
+        cr_assert(!atomic_load(&trackers[0].errored), "lib_a indexer reported INDEXER_ERROR");
         cr_assert(atomic_load(&trackers[0].lib_updated) >= 1,
-            "lib_a indexer emitted no LIBRARY_UPDATED events");
+                  "lib_a indexer emitted no LIBRARY_UPDATED events");
     }
     if (scan_b) {
-        cr_assert(!atomic_load(&trackers[1].errored),
-            "lib_b indexer reported INDEXER_ERROR");
+        cr_assert(!atomic_load(&trackers[1].errored), "lib_b indexer reported INDEXER_ERROR");
         cr_assert(atomic_load(&trackers[1].lib_updated) >= 1,
-            "lib_b indexer emitted no LIBRARY_UPDATED events");
+                  "lib_b indexer emitted no LIBRARY_UPDATED events");
     }
 
-    if (ia) indexer_destroy(ia);
-    if (ib) indexer_destroy(ib);
+    if (ia)
+        indexer_destroy(ia);
+    if (ib)
+        indexer_destroy(ib);
 }
 
 /* Convenience: shared common prologue for every story — resolve tmp paths,
  * scrub them, recreate data dirs. Does NOT build libs or cache (caller
  * chooses build_lib_a/build_lib_b and the indexer sequence). */
-static void story_common_paths_init(void) {
+static void
+story_common_paths_init(void)
+{
     pid_t pid = getpid();
     snprintf(lib_a_root, sizeof(lib_a_root), "/tmp/quad_e2e_%d_lib_a", pid);
     snprintf(lib_b_root, sizeof(lib_b_root), "/tmp/quad_e2e_%d_lib_b", pid);
     snprintf(lib_a_data, sizeof(lib_a_data), "/tmp/quad_e2e_%d_data_a", pid);
     snprintf(lib_b_data, sizeof(lib_b_data), "/tmp/quad_e2e_%d_data_b", pid);
-    rm_rf(lib_a_root); rm_rf(lib_b_root);
-    rm_rf(lib_a_data); rm_rf(lib_b_data);
-    mkdirs(lib_a_data); mkdirs(lib_b_data);
+    rm_rf(lib_a_root);
+    rm_rf(lib_b_root);
+    rm_rf(lib_a_data);
+    rm_rf(lib_b_data);
+    mkdirs(lib_a_data);
+    mkdirs(lib_b_data);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Cache query helpers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static int count_artist_name(const GPtrArray *artists, const char *name) {
+static int
+count_artist_name(const GPtrArray *artists, const char *name)
+{
     int count = 0;
     for (guint i = 0; i < artists->len; i++) {
         const library_artist_info_t *a = g_ptr_array_index(artists, i);
-        if (g_ascii_strcasecmp(a->name, name) == 0) count++;
+        if (g_ascii_strcasecmp(a->name, name) == 0)
+            count++;
     }
     return count;
 }
 
-static const library_artist_info_t *find_artist(const GPtrArray *artists,
-                                                  const char *name) {
+static const library_artist_info_t *
+find_artist(const GPtrArray *artists, const char *name)
+{
     for (guint i = 0; i < artists->len; i++) {
         const library_artist_info_t *a = g_ptr_array_index(artists, i);
-        if (g_ascii_strcasecmp(a->name, name) == 0) return a;
+        if (g_ascii_strcasecmp(a->name, name) == 0)
+            return a;
     }
     return NULL;
 }
 
-static int count_album_title(const GPtrArray *albums, const char *title) {
+static int
+count_album_title(const GPtrArray *albums, const char *title)
+{
     int count = 0;
     for (guint i = 0; i < albums->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums, i);
-        if (g_ascii_strcasecmp(a->title, title) == 0) count++;
+        if (g_ascii_strcasecmp(a->title, title) == 0)
+            count++;
     }
     return count;
 }
 
-static int count_album_title_prefix(const GPtrArray *albums, const char *prefix) {
+static int
+count_album_title_prefix(const GPtrArray *albums, const char *prefix)
+{
     int count = 0;
     size_t len = strlen(prefix);
     for (guint i = 0; i < albums->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums, i);
-        if (g_ascii_strncasecmp(a->title, prefix, len) == 0) count++;
+        if (g_ascii_strncasecmp(a->title, prefix, len) == 0)
+            count++;
     }
     return count;
 }
 
-static int64_t find_artist_id_in_library(library_cache_t *c,
-                                         const char *name, uint32_t mask) {
-    GPtrArray *artists = library_cache_get_artists_filtered(
-        c, LIBRARY_SORT_NAME_ASC, name, NULL, mask);
-    if (!artists) return 0;
+static int64_t
+find_artist_id_in_library(library_cache_t *c, const char *name, uint32_t mask)
+{
+    GPtrArray *artists
+        = library_cache_get_artists_filtered(c, LIBRARY_SORT_NAME_ASC, name, NULL, mask);
+    if (!artists)
+        return 0;
     int64_t found_id = 0;
     for (guint i = 0; i < artists->len; i++) {
         const library_artist_info_t *a = g_ptr_array_index(artists, i);
@@ -602,7 +676,9 @@ static int64_t find_artist_id_in_library(library_cache_t *c,
     return found_id;
 }
 
-static void rm_rf(const char *path) {
+static void
+rm_rf(const char *path)
+{
     g_autofree char *cmd = g_strdup_printf("rm -rf '%s'", path);
     cr_assert_eq(system(cmd), 0, "rm -rf failed for %s", path);
 }
@@ -621,14 +697,18 @@ static void rm_rf(const char *path) {
  * Verify: the ALL view shows correct artists, albums, dedup, search, nav.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void story_import_setup(void) {
+static void
+story_import_setup(void)
+{
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
     /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
      * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
     if (!quad_test_use_http()) {
-        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-        if (!solr) cr_skip("MB_SOLR_URL not set");
+        if (!pg)
+            cr_skip("MB_PG_PASSWORD not set");
+        if (!solr)
+            cr_skip("MB_SOLR_URL not set");
     }
 
     story_common_paths_init();
@@ -642,15 +722,25 @@ static void story_import_setup(void) {
     run_prod_indexers(true, true, pg, solr);
 }
 
-static void story_teardown(void) {
-    if (cache) { library_cache_destroy(cache); cache = NULL; }
-    rm_rf(lib_a_root); rm_rf(lib_b_root);
-    rm_rf(lib_a_data); rm_rf(lib_b_data);
+static void
+story_teardown(void)
+{
+    if (cache) {
+        library_cache_destroy(cache);
+        cache = NULL;
+    }
+    rm_rf(lib_a_root);
+    rm_rf(lib_b_root);
+    rm_rf(lib_a_data);
+    rm_rf(lib_b_data);
 }
 
-Test(e2e, user_imports_two_messy_libraries,
-     .init = story_import_setup, .fini = story_teardown, .timeout = 300) {
-
+Test(e2e,
+     user_imports_two_messy_libraries,
+     .init = story_import_setup,
+     .fini = story_teardown,
+     .timeout = 300)
+{
     /* ── Artist dedup in ALL view ──────────────────────────────────── */
 
     GPtrArray *artists = library_cache_get_artists_filtered(
@@ -660,26 +750,30 @@ Test(e2e, user_imports_two_messy_libraries,
     /* BRONSON: lib_a has "Bronson" (ODESZA track credit, no MBID) + tag-less
      * BRONSON album ("Unknown Artist"). lib_b has "BRONSON" (full MBID).
      * After resolution, user expects 1 artist. */
-    cr_assert_eq(count_artist_name(artists, "BRONSON"), 1,
-        "BRONSON should appear as 1 artist in ALL view — track credit "
-        "'Bronson' and tag-less album must merge with Picard-tagged 'BRONSON'");
+    cr_assert_eq(count_artist_name(artists, "BRONSON"),
+                 1,
+                 "BRONSON should appear as 1 artist in ALL view — track credit "
+                 "'Bronson' and tag-less album must merge with Picard-tagged 'BRONSON'");
 
     /* ODESZA: only in lib_a, should appear once */
     int odesza = count_artist_name(artists, "ODESZA");
-    if (!odesza) odesza = count_artist_name(artists, "Odesza");
+    if (!odesza)
+        odesza = count_artist_name(artists, "Odesza");
     cr_assert_eq(odesza, 1, "ODESZA should appear as 1 artist");
 
     /* Daft Punk: in both libraries, should be deduped to 1 */
-    cr_assert_eq(count_artist_name(artists, "Daft Punk"), 1,
-        "Daft Punk should appear as 1 artist (deduped across libraries)");
+    cr_assert_eq(count_artist_name(artists, "Daft Punk"),
+                 1,
+                 "Daft Punk should appear as 1 artist (deduped across libraries)");
 
     /* ── Artist MBIDs ──────────────────────────────────────────────── */
 
     const library_artist_info_t *bronson = find_artist(artists, "BRONSON");
-    if (!bronson) bronson = find_artist(artists, "Bronson");
+    if (!bronson)
+        bronson = find_artist(artists, "Bronson");
     cr_assert_not_null(bronson, "BRONSON artist not found");
     cr_assert(bronson->musicbrainz_id != NULL && bronson->musicbrainz_id[0],
-        "BRONSON artist should have MBID after resolution");
+              "BRONSON artist should have MBID after resolution");
     cr_assert_str_eq(bronson->musicbrainz_id, MBID_BRONSON_ARTIST);
 
     /* ── TEED (feat. artist on DAWN) — no orphan alias row ─────────────
@@ -693,28 +787,27 @@ Test(e2e, user_imports_two_messy_libraries,
         const library_artist_info_t *a = g_ptr_array_index(artists, i);
         if (a->musicbrainz_id && strcmp(a->musicbrainz_id, MBID_TEED_ARTIST) == 0) {
             cr_assert_null(teed,
-                "Two artist rows share the TEED MBID — Phase 2 split credits "
-                "off ARTIST without consuming MUSICBRAINZ_ARTISTID, then Phase "
-                "6 inserted a second TEED row with the MBID.");
+                           "Two artist rows share the TEED MBID — Phase 2 split credits "
+                           "off ARTIST without consuming MUSICBRAINZ_ARTISTID, then Phase "
+                           "6 inserted a second TEED row with the MBID.");
             teed = a;
         }
     }
     cr_assert_not_null(teed,
-        "TEED artist (MBID %s) not found — feat. credit on DAWN not resolved",
-        MBID_TEED_ARTIST);
+                       "TEED artist (MBID %s) not found — feat. credit on DAWN not resolved",
+                       MBID_TEED_ARTIST);
 
     /* The orphan from the original bug: a row named literally "Totally
      * Enormous Extinct Dinosaurs" (no MBID) left behind by Phase 2 when it
      * ignored MUSICBRAINZ_ARTISTID. Must not exist after a clean index. */
     cr_assert_null(find_artist(artists, "Totally Enormous Extinct Dinosaurs"),
-        "Orphan artist 'Totally Enormous Extinct Dinosaurs' (no MBID) still "
-        "present — Phase 2 created it from the ARTIST tag and Phase 6 could "
-        "not merge it into the canonical 'TEED' row.");
+                   "Orphan artist 'Totally Enormous Extinct Dinosaurs' (no MBID) still "
+                   "present — Phase 2 created it from the ARTIST tag and Phase 6 could "
+                   "not merge it into the canonical 'TEED' row.");
 
     const library_artist_info_t *dp = find_artist(artists, "Daft Punk");
     cr_assert_not_null(dp, "Daft Punk not found");
-    cr_assert(dp->musicbrainz_id != NULL && dp->musicbrainz_id[0],
-        "Daft Punk should have MBID");
+    cr_assert(dp->musicbrainz_id != NULL && dp->musicbrainz_id[0], "Daft Punk should have MBID");
     cr_assert_str_eq(dp->musicbrainz_id, MBID_DAFT_PUNK_ARTIST);
 
     int64_t bronson_id = bronson->artist_id;
@@ -728,13 +821,15 @@ Test(e2e, user_imports_two_messy_libraries,
 
     /* BRONSON album: lib_a has "BRONSON (2020)" (from folder, no RGID),
      * lib_b has "BRONSON" (Picard, with RGID). Should dedup to 1. */
-    cr_assert_eq(count_album_title(albums, "BRONSON"), 1,
-        "BRONSON album should appear once in ALL view (deduped by RGID)");
+    cr_assert_eq(count_album_title(albums, "BRONSON"),
+                 1,
+                 "BRONSON album should appear once in ALL view (deduped by RGID)");
 
     /* RAM: lib_a has "Random Access Memories (10th Anniversary Edition)",
      * lib_b has "Random Access Memories". Same release_group_id → dedup to 1. */
-    cr_assert_eq(count_album_title_prefix(albums, "Random Access Memories"), 1,
-        "Random Access Memories should appear once (deduped across editions)");
+    cr_assert_eq(count_album_title_prefix(albums, "Random Access Memories"),
+                 1,
+                 "Random Access Memories should appear once (deduped across editions)");
 
     /* ── Album MBID fields ─────────────────────────────────────────── */
 
@@ -742,9 +837,8 @@ Test(e2e, user_imports_two_messy_libraries,
         const library_album_info_t *a = g_ptr_array_index(albums, i);
         if (g_ascii_strcasecmp(a->title, "BRONSON") == 0) {
             cr_assert(a->musicbrainz_release_group_id != NULL,
-                "BRONSON album should have release_group_id");
-            cr_assert_str_eq(a->musicbrainz_release_group_id,
-                MBID_BRONSON_RELEASE_GROUP);
+                      "BRONSON album should have release_group_id");
+            cr_assert_str_eq(a->musicbrainz_release_group_id, MBID_BRONSON_RELEASE_GROUP);
             break;
         }
     }
@@ -752,16 +846,16 @@ Test(e2e, user_imports_two_messy_libraries,
 
     /* ── Tag-less BRONSON in lib_a resolved via SOLR ───────────────── */
 
-    GPtrArray *albums_a = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *albums_a
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     cr_assert_not_null(albums_a);
     for (guint i = 0; i < albums_a->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums_a, i);
         if (strstr(a->title, "BRONSON") != NULL) {
-            cr_assert(a->musicbrainz_release_group_id != NULL &&
-                      a->musicbrainz_release_group_id[0] != '\0',
-                "Tag-less BRONSON in lib_a should have been resolved by SOLR. "
-                "release_group_id is NULL — folder-path fallback not working");
+            cr_assert(a->musicbrainz_release_group_id != NULL
+                          && a->musicbrainz_release_group_id[0] != '\0',
+                      "Tag-less BRONSON in lib_a should have been resolved by SOLR. "
+                      "release_group_id is NULL — folder-path fallback not working");
             break;
         }
     }
@@ -769,13 +863,14 @@ Test(e2e, user_imports_two_messy_libraries,
 
     /* ── BRONSON featured appearances ──────────────────────────────── */
 
-    GPtrArray *appearances = library_cache_get_artist_appearance_tracks(
-        cache, bronson_id, LIBRARY_MASK_ALL);
+    GPtrArray *appearances
+        = library_cache_get_artist_appearance_tracks(cache, bronson_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(appearances,
-        "BRONSON should have appearance tracks (credited on ODESZA album)");
+                       "BRONSON should have appearance tracks (credited on ODESZA album)");
     cr_assert(appearances->len >= 2,
-        "BRONSON should appear on >= 2 ODESZA tracks (TENSE, KEEP MOVING), "
-        "got %u", appearances->len);
+              "BRONSON should appear on >= 2 ODESZA tracks (TENSE, KEEP MOVING), "
+              "got %u",
+              appearances->len);
     g_ptr_array_unref(appearances);
 
     /* ── Search ────────────────────────────────────────────────────── */
@@ -788,13 +883,13 @@ Test(e2e, user_imports_two_messy_libraries,
     if (results->artists) {
         for (guint i = 0; i < results->artists->len; i++) {
             const library_artist_info_t *a = g_ptr_array_index(results->artists, i);
-            if (g_ascii_strcasecmp(a->name, "BRONSON") == 0 ||
-                g_ascii_strcasecmp(a->name, "Bronson") == 0)
+            if (g_ascii_strcasecmp(a->name, "BRONSON") == 0
+                || g_ascii_strcasecmp(a->name, "Bronson") == 0)
                 search_artists++;
         }
     }
-    cr_assert_eq(search_artists, 1,
-        "Search 'Bronson' should return 1 artist, got %d", search_artists);
+    cr_assert_eq(
+        search_artists, 1, "Search 'Bronson' should return 1 artist, got %d", search_artists);
 
     bool search_found_album = false;
     if (results->albums) {
@@ -822,8 +917,7 @@ Test(e2e, user_imports_two_messy_libraries,
     g_ptr_array_unref(all_albums);
     cr_assert(odesza_album_id > 0, "ODESZA live album not found");
 
-    GPtrArray *tracks = library_cache_get_tracks_by_album(
-        cache, odesza_album_id, LIBRARY_MASK_ALL);
+    GPtrArray *tracks = library_cache_get_tracks_by_album(cache, odesza_album_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(tracks);
     cr_assert(tracks->len >= 3, "ODESZA album should have >= 3 tracks, got %u", tracks->len);
 
@@ -848,14 +942,14 @@ Test(e2e, user_imports_two_messy_libraries,
 
     /* ── Single-library filters show own content only ─────────────── */
 
-    GPtrArray *artists_a = library_cache_get_artists_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *artists_a
+        = library_cache_get_artists_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     cr_assert_not_null(artists_a);
     cr_assert(artists_a->len >= 1, "lib_a should have artists");
     g_ptr_array_unref(artists_a);
 
-    GPtrArray *artists_b = library_cache_get_artists_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_B);
+    GPtrArray *artists_b
+        = library_cache_get_artists_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_B);
     cr_assert_not_null(artists_b);
     cr_assert(artists_b->len >= 1, "lib_b should have artists");
     g_ptr_array_unref(artists_b);
@@ -868,21 +962,20 @@ Test(e2e, user_imports_two_messy_libraries,
     cr_assert(dp_id_b > 0, "Daft Punk should be in lib_b");
 
     /* Both IDs should resolve to the same albums in ALL view */
-    GPtrArray *dp_albums_a = library_cache_get_albums_by_artist(
-        cache, dp_id_a, LIBRARY_MASK_ALL);
-    GPtrArray *dp_albums_b = library_cache_get_albums_by_artist(
-        cache, dp_id_b, LIBRARY_MASK_ALL);
+    GPtrArray *dp_albums_a = library_cache_get_albums_by_artist(cache, dp_id_a, LIBRARY_MASK_ALL);
+    GPtrArray *dp_albums_b = library_cache_get_albums_by_artist(cache, dp_id_b, LIBRARY_MASK_ALL);
     cr_assert_not_null(dp_albums_a);
     cr_assert_not_null(dp_albums_b);
-    cr_assert_eq(dp_albums_a->len, dp_albums_b->len,
-        "Both Daft Punk IDs should return same album count in ALL view");
+    cr_assert_eq(dp_albums_a->len,
+                 dp_albums_b->len,
+                 "Both Daft Punk IDs should return same album count in ALL view");
     g_ptr_array_unref(dp_albums_a);
     g_ptr_array_unref(dp_albums_b);
 
     /* ── RAM deduped across editions (same RGID) ──────────────────── */
 
-    GPtrArray *albums_a2 = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *albums_a2
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     bool found_ram_a = false;
     for (guint i = 0; i < albums_a2->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums_a2, i);
@@ -892,8 +985,8 @@ Test(e2e, user_imports_two_messy_libraries,
     cr_assert(found_ram_a, "lib_a should have its own RAM edition");
     g_ptr_array_unref(albums_a2);
 
-    GPtrArray *albums_b2 = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_B);
+    GPtrArray *albums_b2
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_B);
     bool found_ram_b = false;
     for (guint i = 0; i < albums_b2->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums_b2, i);
@@ -906,8 +999,9 @@ Test(e2e, user_imports_two_messy_libraries,
     /* But ALL view shows only 1 (deduped by RGID) */
     GPtrArray *all_albums2 = library_cache_get_albums_filtered(
         cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
-    cr_assert_eq(count_album_title_prefix(all_albums2, "Random Access Memories"), 1,
-        "RAM should be deduped to 1 in ALL view (same RGID, different editions)");
+    cr_assert_eq(count_album_title_prefix(all_albums2, "Random Access Memories"),
+                 1,
+                 "RAM should be deduped to 1 in ALL view (same RGID, different editions)");
     g_ptr_array_unref(all_albums2);
 
     /* ── Search dedup: searching returns merged results ────────────── */
@@ -923,12 +1017,12 @@ Test(e2e, user_imports_two_messy_libraries,
                 dp_artist_count++;
         }
     }
-    cr_assert_eq(dp_artist_count, 1,
-        "Search 'Daft Punk' should return 1 artist (deduped), got %d",
-        dp_artist_count);
+    cr_assert_eq(dp_artist_count,
+                 1,
+                 "Search 'Daft Punk' should return 1 artist (deduped), got %d",
+                 dp_artist_count);
     library_search_results_free(dp_search);
 }
-
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * STORY 2: User tags a library with Picard
@@ -942,14 +1036,18 @@ Test(e2e, user_imports_two_messy_libraries,
  *        re-index lib_a, also index lib_b. Verify merged state.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void story_picard_setup(void) {
+static void
+story_picard_setup(void)
+{
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
     /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
      * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
     if (!quad_test_use_http()) {
-        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-        if (!solr) cr_skip("MB_SOLR_URL not set");
+        if (!pg)
+            cr_skip("MB_PG_PASSWORD not set");
+        if (!solr)
+            cr_skip("MB_SOLR_URL not set");
     }
 
     story_common_paths_init();
@@ -969,18 +1067,22 @@ static void story_picard_setup(void) {
     snprintf(path, sizeof(path), "%s/BRONSON/BRONSON (2020)", lib_a_root);
     for (int i = 0; i < BRONSON_TRACK_COUNT; i++) {
         char tracknum[32], title_tag[256];
-        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s (FLAC 828 kbps).flac", path, i + 1, BRONSON_TRACKS[i]);
+        g_autofree char *fpath
+            = g_strdup_printf("%s/%02d - %s (FLAC 828 kbps).flac", path, i + 1, BRONSON_TRACKS[i]);
         snprintf(tracknum, sizeof(tracknum), "track=%d", i + 1);
         snprintf(title_tag, sizeof(title_tag), "title=%s", BRONSON_TRACKS[i]);
-        const char *tags[] = {
-            title_tag, "artist=BRONSON", "album=BRONSON", "album_artist=BRONSON",
-            tracknum, "date=2020", "genre=Electronic",
-            "MUSICBRAINZ_ALBUMID=" MBID_BRONSON_RELEASE,
-            "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST,
-            "MUSICBRAINZ_RELEASEGROUPID=" MBID_BRONSON_RELEASE_GROUP,
-            "MUSICBRAINZ_ALBUMARTISTID=" MBID_BRONSON_ARTIST,
-            NULL
-        };
+        const char *tags[] = { title_tag,
+                               "artist=BRONSON",
+                               "album=BRONSON",
+                               "album_artist=BRONSON",
+                               tracknum,
+                               "date=2020",
+                               "genre=Electronic",
+                               "MUSICBRAINZ_ALBUMID=" MBID_BRONSON_RELEASE,
+                               "MUSICBRAINZ_ARTISTID=" MBID_BRONSON_ARTIST,
+                               "MUSICBRAINZ_RELEASEGROUPID=" MBID_BRONSON_RELEASE_GROUP,
+                               "MUSICBRAINZ_ALBUMARTISTID=" MBID_BRONSON_ARTIST,
+                               NULL };
         cr_assert_eq(create_flac(fpath, tags, BRONSON_DURATIONS[i]), 0);
     }
 
@@ -989,31 +1091,32 @@ static void story_picard_setup(void) {
     run_prod_indexers(/*scan_a=*/true, /*scan_b=*/true, pg, solr);
 }
 
-Test(e2e, user_tags_library_with_picard,
-     .init = story_picard_setup, .fini = story_teardown, .timeout = 300) {
-
+Test(e2e,
+     user_tags_library_with_picard,
+     .init = story_picard_setup,
+     .fini = story_teardown,
+     .timeout = 300)
+{
     /* After Picard tagging + re-index, BRONSON in lib_a should now be resolved */
 
     /* ── lib_a BRONSON should now have RGID ────────────────────────── */
 
-    GPtrArray *albums_a = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *albums_a
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     cr_assert_not_null(albums_a);
     bool found_resolved = false;
     for (guint i = 0; i < albums_a->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums_a, i);
         if (strstr(a->title, "BRONSON") != NULL) {
-            if (a->musicbrainz_release_group_id &&
-                a->musicbrainz_release_group_id[0]) {
+            if (a->musicbrainz_release_group_id && a->musicbrainz_release_group_id[0]) {
                 found_resolved = true;
                 cr_assert_str_eq(a->musicbrainz_release_group_id,
-                    MBID_BRONSON_RELEASE_GROUP,
-                    "After Picard, BRONSON RGID should match");
+                                 MBID_BRONSON_RELEASE_GROUP,
+                                 "After Picard, BRONSON RGID should match");
             }
         }
     }
-    cr_assert(found_resolved,
-        "After Picard tagging, lib_a BRONSON should have release_group_id");
+    cr_assert(found_resolved, "After Picard tagging, lib_a BRONSON should have release_group_id");
     g_ptr_array_unref(albums_a);
 
     /* ── Cross-library dedup should now work ────────────────────────── */
@@ -1023,8 +1126,9 @@ Test(e2e, user_tags_library_with_picard,
     cr_assert_not_null(albums);
 
     /* Both lib_a and lib_b have BRONSON with same RGID → dedup to 1 */
-    cr_assert_eq(count_album_title(albums, "BRONSON"), 1,
-        "After Picard, BRONSON should be deduped to 1 in ALL view");
+    cr_assert_eq(count_album_title(albums, "BRONSON"),
+                 1,
+                 "After Picard, BRONSON should be deduped to 1 in ALL view");
     g_ptr_array_unref(albums);
 
     /* ── BRONSON artist should be merged with MBID ─────────────────── */
@@ -1033,13 +1137,14 @@ Test(e2e, user_tags_library_with_picard,
         cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(artists);
 
-    cr_assert_eq(count_artist_name(artists, "BRONSON"), 1,
-        "After Picard, BRONSON should be 1 artist in ALL view");
+    cr_assert_eq(count_artist_name(artists, "BRONSON"),
+                 1,
+                 "After Picard, BRONSON should be 1 artist in ALL view");
 
     const library_artist_info_t *bronson = find_artist(artists, "BRONSON");
     cr_assert_not_null(bronson);
-    cr_assert_str_eq(bronson->musicbrainz_id, MBID_BRONSON_ARTIST,
-        "BRONSON MBID should match after Picard");
+    cr_assert_str_eq(
+        bronson->musicbrainz_id, MBID_BRONSON_ARTIST, "BRONSON MBID should match after Picard");
 
     /* NOTE: "Bronson" track credit on ODESZA tracks does NOT merge here —
      * the ODESZA album hasn't been MB-resolved yet, so track credits still
@@ -1047,7 +1152,6 @@ Test(e2e, user_tags_library_with_picard,
 
     g_ptr_array_unref(artists);
 }
-
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * STORY 3: User moves an album between libraries
@@ -1060,8 +1164,12 @@ Test(e2e, user_tags_library_with_picard,
  *        refresh cache. Verify orphan handling.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(e2e, user_moves_album_between_libraries,
-     .init = story_import_setup, .fini = story_teardown, .timeout = 300) {
+Test(e2e,
+     user_moves_album_between_libraries,
+     .init = story_import_setup,
+     .fini = story_teardown,
+     .timeout = 300)
+{
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
 
@@ -1078,12 +1186,13 @@ Test(e2e, user_moves_album_between_libraries,
 
     /* ── Orphan BRONSON album should be gone from lib_a ────────────── */
 
-    GPtrArray *albums_a = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *albums_a
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     cr_assert_not_null(albums_a);
-    cr_assert_eq(count_album_title_prefix(albums_a, "BRONSON"), 0,
-        "After deleting BRONSON folder from lib_a, no BRONSON album should "
-        "remain in lib_a view (orphan rows should be pruned)");
+    cr_assert_eq(count_album_title_prefix(albums_a, "BRONSON"),
+                 0,
+                 "After deleting BRONSON folder from lib_a, no BRONSON album should "
+                 "remain in lib_a view (orphan rows should be pruned)");
     g_ptr_array_unref(albums_a);
 
     /* ── ALL view should show exactly 1 BRONSON (from lib_b) ───────── */
@@ -1091,18 +1200,22 @@ Test(e2e, user_moves_album_between_libraries,
     GPtrArray *artists = library_cache_get_artists_filtered(
         cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     int bronson_count = count_artist_name(artists, "BRONSON");
-    if (!bronson_count) bronson_count = count_artist_name(artists, "Bronson");
-    cr_assert_eq(bronson_count, 1,
-        "After move, BRONSON should appear once in ALL view (from lib_b only), "
-        "got %d (orphan artist from lib_a leaking)", bronson_count);
+    if (!bronson_count)
+        bronson_count = count_artist_name(artists, "Bronson");
+    cr_assert_eq(bronson_count,
+                 1,
+                 "After move, BRONSON should appear once in ALL view (from lib_b only), "
+                 "got %d (orphan artist from lib_a leaking)",
+                 bronson_count);
     g_ptr_array_unref(artists);
 
     /* ── ODESZA tracks still in lib_a, "Bronson" credit still there ── */
 
-    GPtrArray *odesza_artists = library_cache_get_artists_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *odesza_artists
+        = library_cache_get_artists_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     int odesza = count_artist_name(odesza_artists, "ODESZA");
-    if (!odesza) odesza = count_artist_name(odesza_artists, "Odesza");
+    if (!odesza)
+        odesza = count_artist_name(odesza_artists, "Odesza");
     cr_assert(odesza >= 1, "ODESZA should still be in lib_a");
     g_ptr_array_unref(odesza_artists);
 
@@ -1126,7 +1239,6 @@ Test(e2e, user_moves_album_between_libraries,
     g_ptr_array_unref(all_albums);
 }
 
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * STORY 4: User deletes album folder and re-indexes
  *
@@ -1137,18 +1249,23 @@ Test(e2e, user_moves_album_between_libraries,
  *        refresh cache. Verify the album and its tracks are gone.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(e2e, user_deletes_album_folder,
-     .init = story_import_setup, .fini = story_teardown, .timeout = 300) {
+Test(e2e,
+     user_deletes_album_folder,
+     .init = story_import_setup,
+     .fini = story_teardown,
+     .timeout = 300)
+{
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
 
     /* Verify ODESZA album exists before deletion */
-    GPtrArray *before = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *before
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     bool had_odesza = false;
     for (guint i = 0; i < before->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(before, i);
-        if (strstr(a->title, "Last Goodbye")) had_odesza = true;
+        if (strstr(a->title, "Last Goodbye"))
+            had_odesza = true;
     }
     cr_assert(had_odesza, "ODESZA album should exist before deletion");
     g_ptr_array_unref(before);
@@ -1163,21 +1280,22 @@ Test(e2e, user_deletes_album_folder,
 
     /* ── ODESZA album should be gone from lib_a ────────────────────── */
 
-    GPtrArray *albums_a = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *albums_a
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     cr_assert_not_null(albums_a);
     for (guint i = 0; i < albums_a->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums_a, i);
         cr_assert(strstr(a->title, "Last Goodbye") == NULL,
-            "ODESZA album should not appear after folder deletion, "
-            "but found '%s' (orphan rows persisting)", a->title);
+                  "ODESZA album should not appear after folder deletion, "
+                  "but found '%s' (orphan rows persisting)",
+                  a->title);
     }
     g_ptr_array_unref(albums_a);
 
     /* ── Verify Phase 6 artist rename: "Bronson" → "BRONSON" ─────── */
 
-    GPtrArray *artists_a = library_cache_get_artists_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *artists_a
+        = library_cache_get_artists_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
 
     /* Phase 2 created "Bronson" (no MBID) from the ODESZA track credit split.
      * Phase 6 resolved the ODESZA album via SOLR and called
@@ -1186,18 +1304,19 @@ Test(e2e, user_deletes_album_folder,
      * to "BRONSON" with MBID. After deleting ODESZA, the BRONSON album still
      * references this artist → it persists. There should be exactly 1 entry
      * matching "BRONSON" (the merged result), not a separate "Bronson". */
-    cr_assert_eq(count_artist_name(artists_a, "BRONSON"), 1,
-        "BRONSON should still be in lib_a — Phase 6 renamed 'Bronson' → 'BRONSON' "
-        "with MBID, and the BRONSON album still references it");
+    cr_assert_eq(count_artist_name(artists_a, "BRONSON"),
+                 1,
+                 "BRONSON should still be in lib_a — Phase 6 renamed 'Bronson' → 'BRONSON' "
+                 "with MBID, and the BRONSON album still references it");
 
     /* ODESZA artist should also be gone if their only album was deleted */
     int odesza_a = count_artist_name(artists_a, "ODESZA");
-    if (!odesza_a) odesza_a = count_artist_name(artists_a, "Odesza");
-    cr_assert_eq(odesza_a, 0,
-        "ODESZA should be pruned from lib_a after their only album is deleted");
+    if (!odesza_a)
+        odesza_a = count_artist_name(artists_a, "Odesza");
+    cr_assert_eq(
+        odesza_a, 0, "ODESZA should be pruned from lib_a after their only album is deleted");
     g_ptr_array_unref(artists_a);
 }
-
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * STORY 5: User removes a library entirely
@@ -1208,9 +1327,8 @@ Test(e2e, user_deletes_album_folder,
  * Setup: index both, remove lib_a slot from cache.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-Test(e2e, user_removes_library,
-     .init = story_import_setup, .fini = story_teardown, .timeout = 300) {
-
+Test(e2e, user_removes_library, .init = story_import_setup, .fini = story_teardown, .timeout = 300)
+{
     /* Verify both libraries visible before removal */
     GPtrArray *before = library_cache_get_artists_filtered(
         cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
@@ -1228,17 +1346,18 @@ Test(e2e, user_removes_library,
 
     /* BRONSON from lib_b should still be there */
     cr_assert(count_artist_name(artists, "BRONSON") >= 1,
-        "BRONSON should still be visible from lib_b");
+              "BRONSON should still be visible from lib_b");
 
     /* No "Unknown Artist" or orphan junk from lib_a */
-    cr_assert_eq(count_artist_name(artists, "Unknown Artist"), 0,
-        "No 'Unknown Artist' should remain after lib_a removal");
+    cr_assert_eq(count_artist_name(artists, "Unknown Artist"),
+                 0,
+                 "No 'Unknown Artist' should remain after lib_a removal");
 
     /* ODESZA was only in lib_a — should be gone */
     int odesza = count_artist_name(artists, "ODESZA");
-    if (!odesza) odesza = count_artist_name(artists, "Odesza");
-    cr_assert_eq(odesza, 0,
-        "ODESZA (only in lib_a) should not appear after lib_a removal");
+    if (!odesza)
+        odesza = count_artist_name(artists, "Odesza");
+    cr_assert_eq(odesza, 0, "ODESZA (only in lib_a) should not appear after lib_a removal");
 
     g_ptr_array_unref(artists);
 
@@ -1263,14 +1382,13 @@ Test(e2e, user_removes_library,
         cache, "Daft Punk", LIBRARY_SEARCH_FILTER_ALL, 0, NULL, LIBRARY_MASK_ALL);
     cr_assert_not_null(results);
     cr_assert(results->artists && results->artists->len >= 1,
-        "Search 'Daft Punk' should still work after lib_a removal");
+              "Search 'Daft Punk' should still work after lib_a removal");
     library_search_results_free(results);
 
     /* ── Clean destroy — ASan catches leaks ────────────────────────── */
     library_cache_destroy(cache);
     cache = NULL;
 }
-
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * STORY 6: MB resolution updates featured artist credits
@@ -1286,14 +1404,18 @@ Test(e2e, user_removes_library,
  *        re-index lib_a, refresh cache. Verify artist credit merge.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void story_mb_credits_setup(void) {
+static void
+story_mb_credits_setup(void)
+{
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
     /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
      * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
     if (!quad_test_use_http()) {
-        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-        if (!solr) cr_skip("MB_SOLR_URL not set");
+        if (!pg)
+            cr_skip("MB_PG_PASSWORD not set");
+        if (!solr)
+            cr_skip("MB_SOLR_URL not set");
     }
 
     story_common_paths_init();
@@ -1309,17 +1431,23 @@ static void story_mb_credits_setup(void) {
     char path[1024];
     snprintf(path, sizeof(path), "%s/ODESZA/The Last Goodbye Tour Live", lib_a_root);
 
-    struct { int num; const char *title; const char *artist; int dur; } odesza_tracks[] = {
-        { 1,  "This Version Of You (Live)", "Odesza",        186 },
-        { 2,  "Behind the Sun (Live)",      "Odesza",        190 },
-        { 3,  "Wide Awake (Live)",          "Odesza",        202 },
-        { 17, "TENSE (Live)",               "Bronson/Odesza", 194 },
-        { 18, "Keep Moving (Live)",         "Bronson/Odesza", 142 },
+    struct {
+        int num;
+        const char *title;
+        const char *artist;
+        int dur;
+    } odesza_tracks[] = {
+        { 1, "This Version Of You (Live)", "Odesza", 186 },
+        { 2, "Behind the Sun (Live)", "Odesza", 190 },
+        { 3, "Wide Awake (Live)", "Odesza", 202 },
+        { 17, "TENSE (Live)", "Bronson/Odesza", 194 },
+        { 18, "Keep Moving (Live)", "Bronson/Odesza", 142 },
     };
 
-    for (size_t i = 0; i < sizeof(odesza_tracks)/sizeof(odesza_tracks[0]); i++) {
+    for (size_t i = 0; i < sizeof(odesza_tracks) / sizeof(odesza_tracks[0]); i++) {
         char tracknum[32], title_tag[256];
-        g_autofree char *fpath = g_strdup_printf("%s/%02d - %s.flac", path, odesza_tracks[i].num, odesza_tracks[i].title);
+        g_autofree char *fpath = g_strdup_printf(
+            "%s/%02d - %s.flac", path, odesza_tracks[i].num, odesza_tracks[i].title);
         snprintf(tracknum, sizeof(tracknum), "track=%d", odesza_tracks[i].num);
         snprintf(title_tag, sizeof(title_tag), "title=%s", odesza_tracks[i].title);
 
@@ -1327,16 +1455,18 @@ static void story_mb_credits_setup(void) {
         snprintf(artist_tag, sizeof(artist_tag), "artist=%s", odesza_tracks[i].artist);
         snprintf(aa_tag, sizeof(aa_tag), "album_artist=%s", odesza_tracks[i].artist);
 
-        const char *tags[] = {
-            title_tag, artist_tag, aa_tag,
-            "album=The Last Goodbye Tour Live",
-            tracknum, "date=2024", "genre=Electronic",
-            "MUSICBRAINZ_ALBUMID=" MBID_ODESZA_LIVE_RELEASE,
-            "MUSICBRAINZ_ARTISTID=" MBID_ODESZA_ARTIST,
-            "MUSICBRAINZ_RELEASEGROUPID=" MBID_ODESZA_LIVE_RELEASE_GROUP,
-            "MUSICBRAINZ_ALBUMARTISTID=" MBID_ODESZA_ARTIST,
-            NULL
-        };
+        const char *tags[] = { title_tag,
+                               artist_tag,
+                               aa_tag,
+                               "album=The Last Goodbye Tour Live",
+                               tracknum,
+                               "date=2024",
+                               "genre=Electronic",
+                               "MUSICBRAINZ_ALBUMID=" MBID_ODESZA_LIVE_RELEASE,
+                               "MUSICBRAINZ_ARTISTID=" MBID_ODESZA_ARTIST,
+                               "MUSICBRAINZ_RELEASEGROUPID=" MBID_ODESZA_LIVE_RELEASE_GROUP,
+                               "MUSICBRAINZ_ALBUMARTISTID=" MBID_ODESZA_ARTIST,
+                               NULL };
         cr_assert_eq(create_flac(fpath, tags, odesza_tracks[i].dur), 0);
     }
 
@@ -1347,9 +1477,12 @@ static void story_mb_credits_setup(void) {
     run_prod_indexers(/*scan_a=*/true, /*scan_b=*/false, pg, solr);
 }
 
-Test(e2e, mb_resolution_updates_featured_credits,
-     .init = story_mb_credits_setup, .fini = story_teardown, .timeout = 300) {
-
+Test(e2e,
+     mb_resolution_updates_featured_credits,
+     .init = story_mb_credits_setup,
+     .fini = story_teardown,
+     .timeout = 300)
+{
     /* ── Phase 6 should have replaced "Bronson" with "BRONSON" (MBID) ─ */
 
     /* After MB resolution, the ODESZA album's track credits are sourced from
@@ -1364,58 +1497,62 @@ Test(e2e, mb_resolution_updates_featured_credits,
      * was replaced by Phase 6's "BRONSON" (MBID), which merges with lib_b's
      * BRONSON. No duplicate "Bronson" vs "BRONSON" in ALL view. */
     int bronson_count = count_artist_name(artists, "BRONSON");
-    if (!bronson_count) bronson_count = count_artist_name(artists, "Bronson");
-    cr_assert_eq(bronson_count, 1,
-        "After MB resolution of ODESZA album, BRONSON should appear as 1 artist "
-        "(Phase 6 replaced 'Bronson' credit with 'BRONSON' + MBID)");
+    if (!bronson_count)
+        bronson_count = count_artist_name(artists, "Bronson");
+    cr_assert_eq(bronson_count,
+                 1,
+                 "After MB resolution of ODESZA album, BRONSON should appear as 1 artist "
+                 "(Phase 6 replaced 'Bronson' credit with 'BRONSON' + MBID)");
 
     /* Find BRONSON and verify it has the correct MBID */
     const library_artist_info_t *bronson = find_artist(artists, "BRONSON");
-    if (!bronson) bronson = find_artist(artists, "Bronson");
+    if (!bronson)
+        bronson = find_artist(artists, "Bronson");
     cr_assert_not_null(bronson, "BRONSON artist not found after MB resolution");
     cr_assert(bronson->musicbrainz_id != NULL && bronson->musicbrainz_id[0],
-        "BRONSON should have MBID after Phase 6 rewrote track credits");
-    cr_assert_str_eq(bronson->musicbrainz_id, MBID_BRONSON_ARTIST,
-        "BRONSON MBID should be correct");
+              "BRONSON should have MBID after Phase 6 rewrote track credits");
+    cr_assert_str_eq(
+        bronson->musicbrainz_id, MBID_BRONSON_ARTIST, "BRONSON MBID should be correct");
 
     int64_t bronson_id = bronson->artist_id;
 
     /* ── BRONSON should have appearance tracks from ODESZA album ───── */
 
-    GPtrArray *appearances = library_cache_get_artist_appearance_tracks(
-        cache, bronson_id, LIBRARY_MASK_ALL);
+    GPtrArray *appearances
+        = library_cache_get_artist_appearance_tracks(cache, bronson_id, LIBRARY_MASK_ALL);
     cr_assert_not_null(appearances,
-        "BRONSON should have appearance tracks after ODESZA MB resolution — "
-        "Phase 6 should have written BRONSON (MBID) as track artist for "
-        "tracks 17-18, enabling the appearance lookup");
+                       "BRONSON should have appearance tracks after ODESZA MB resolution — "
+                       "Phase 6 should have written BRONSON (MBID) as track artist for "
+                       "tracks 17-18, enabling the appearance lookup");
     cr_assert(appearances->len >= 2,
-        "BRONSON should appear on >= 2 ODESZA tracks (TENSE, KEEP MOVING), "
-        "got %u", appearances->len);
+              "BRONSON should appear on >= 2 ODESZA tracks (TENSE, KEEP MOVING), "
+              "got %u",
+              appearances->len);
     g_ptr_array_unref(appearances);
 
     /* ── ODESZA should also have MBID ──────────────────────────────── */
 
     const library_artist_info_t *odesza = find_artist(artists, "ODESZA");
-    if (!odesza) odesza = find_artist(artists, "Odesza");
+    if (!odesza)
+        odesza = find_artist(artists, "Odesza");
     cr_assert_not_null(odesza, "ODESZA should exist");
     cr_assert(odesza->musicbrainz_id != NULL && odesza->musicbrainz_id[0],
-        "ODESZA should have MBID after album resolution");
+              "ODESZA should have MBID after album resolution");
 
     g_ptr_array_unref(artists);
 
     /* ── Verify ODESZA album has release_group_id ──────────────────── */
 
-    GPtrArray *albums = library_cache_get_albums_filtered(
-        cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
+    GPtrArray *albums
+        = library_cache_get_albums_filtered(cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, MASK_A);
     cr_assert_not_null(albums);
     bool found_odesza_album = false;
     for (guint i = 0; i < albums->len; i++) {
         const library_album_info_t *a = g_ptr_array_index(albums, i);
         if (strstr(a->title, "Last Goodbye") != NULL) {
             found_odesza_album = true;
-            cr_assert(a->musicbrainz_release_group_id != NULL &&
-                      a->musicbrainz_release_group_id[0],
-                "ODESZA live album should have release_group_id after resolution");
+            cr_assert(a->musicbrainz_release_group_id != NULL && a->musicbrainz_release_group_id[0],
+                      "ODESZA live album should have release_group_id after resolution");
             break;
         }
     }
@@ -1431,14 +1568,16 @@ Test(e2e, mb_resolution_updates_featured_credits,
     if (results->artists) {
         for (guint i = 0; i < results->artists->len; i++) {
             const library_artist_info_t *a = g_ptr_array_index(results->artists, i);
-            if (g_ascii_strcasecmp(a->name, "BRONSON") == 0 ||
-                g_ascii_strcasecmp(a->name, "Bronson") == 0)
+            if (g_ascii_strcasecmp(a->name, "BRONSON") == 0
+                || g_ascii_strcasecmp(a->name, "Bronson") == 0)
                 search_artists++;
         }
     }
-    cr_assert_eq(search_artists, 1,
-        "Search 'Bronson' should return 1 artist after MB credit resolution, "
-        "got %d (Phase 2 'Bronson' orphan leaking)", search_artists);
+    cr_assert_eq(search_artists,
+                 1,
+                 "Search 'Bronson' should return 1 artist after MB credit resolution, "
+                 "got %d (Phase 2 'Bronson' orphan leaking)",
+                 search_artists);
     library_search_results_free(results);
 }
 
@@ -1481,14 +1620,18 @@ Test(e2e, mb_resolution_updates_featured_credits,
 /* (prod_trackers / prod_indexer_a / prod_indexer_b declared near top-level
  *  fixture statics so story_teardown can reach them.) */
 
-static void story_fresh_db_clean_setup(void) {
+static void
+story_fresh_db_clean_setup(void)
+{
     const char *pg = mb_pg_conninfo();
     const char *solr = mb_solr_url();
     /* In HTTP mode pg/solr are NULL → resolver dispatches to HTTP backend.
      * In PG mode both must be set; the public Solr-equivalent isn't reachable. */
     if (!quad_test_use_http()) {
-        if (!pg)   cr_skip("MB_PG_PASSWORD not set");
-        if (!solr) cr_skip("MB_SOLR_URL not set");
+        if (!pg)
+            cr_skip("MB_PG_PASSWORD not set");
+        if (!solr)
+            cr_skip("MB_SOLR_URL not set");
     }
 
     story_common_paths_init();
@@ -1523,15 +1666,18 @@ static void story_fresh_db_clean_setup(void) {
         /* Dump every artist visible in this slot so the failing assertion
          * below has the full picture in the test log. */
         g_printerr("=== slot %d (%s): %u artists ===\n",
-            slot_idx, slot_idx == 0 ? "Elicb" : "Music", a->len);
+                   slot_idx,
+                   slot_idx == 0 ? "Elicb" : "Music",
+                   a->len);
         int stale_count = 0;
         const library_artist_info_t *first_stale = NULL;
         for (guint i = 0; i < a->len; i++) {
             const library_artist_info_t *x = g_ptr_array_index(a, i);
             bool has_mbid = x->musicbrainz_id && x->musicbrainz_id[0];
             g_printerr("  [gid=%" G_GINT64_FORMAT "] name='%s' mbid='%s'\n",
-                x->artist_id, x->name,
-                has_mbid ? x->musicbrainz_id : "(NULL — STALE)");
+                       x->artist_id,
+                       x->name,
+                       has_mbid ? x->musicbrainz_id : "(NULL — STALE)");
             /* The MB-resolved tag-less libraries here (ODESZA's A Moment
              * Apart, The Last Goodbye Tour Live, BRONSON) pull every artist
              * from MB recording data — which always carries an MBID. So
@@ -1540,34 +1686,40 @@ static void story_fresh_db_clean_setup(void) {
              * both zero would be a harmless ghost (no DB references left). */
             if (!has_mbid && (x->album_count > 0 || x->track_count > 0)) {
                 stale_count++;
-                if (!first_stale) first_stale = x;
+                if (!first_stale)
+                    first_stale = x;
             }
         }
         g_ptr_array_unref(a);
 
-        cr_assert_eq(stale_count, 0,
-            "BUG REPRO — slot %d has %d stale artist entities with NULL MBID "
-            "but live album/track references. First stale: "
-            "name='%s' gid=%" G_GINT64_FORMAT ". "
-            "Root cause: library_cache.c:1742-1746 seeds artists from the old "
-            "slot unconditionally via RC_ACQUIRE (no change-set gate for "
-            "artists); library_cache.c:468 then skips the DB re-read because "
-            "the shadow is already populated. When Phase 6 renames an artist "
-            "in place (db_write.c:278 rename_artist_inplace), the DB row gets "
-            "the canonical name + MBID but the cache entity retains the "
-            "Phase-2 name/NULL-MBID forever. This is the cross-library merge "
-            "failure from the prod screenshot, reproduced via the full "
-            "indexer_scan → INDEXER_LIBRARY_UPDATED → library_cache_refresh_slot "
-            "chain the UI runs.",
-            slot_idx, stale_count,
-            first_stale ? first_stale->name : "(none)",
-            first_stale ? first_stale->artist_id : 0);
+        cr_assert_eq(stale_count,
+                     0,
+                     "BUG REPRO — slot %d has %d stale artist entities with NULL MBID "
+                     "but live album/track references. First stale: "
+                     "name='%s' gid=%" G_GINT64_FORMAT ". "
+                     "Root cause: library_cache.c:1742-1746 seeds artists from the old "
+                     "slot unconditionally via RC_ACQUIRE (no change-set gate for "
+                     "artists); library_cache.c:468 then skips the DB re-read because "
+                     "the shadow is already populated. When Phase 6 renames an artist "
+                     "in place (db_write.c:278 rename_artist_inplace), the DB row gets "
+                     "the canonical name + MBID but the cache entity retains the "
+                     "Phase-2 name/NULL-MBID forever. This is the cross-library merge "
+                     "failure from the prod screenshot, reproduced via the full "
+                     "indexer_scan → INDEXER_LIBRARY_UPDATED → library_cache_refresh_slot "
+                     "chain the UI runs.",
+                     slot_idx,
+                     stale_count,
+                     first_stale ? first_stale->name : "(none)",
+                     first_stale ? first_stale->artist_id : 0);
     }
 }
 
-Test(e2e, fresh_db_clean_reindex_merges_cross_library_artists,
-     .init = story_fresh_db_clean_setup, .fini = story_teardown, .timeout = 300) {
-
+Test(e2e,
+     fresh_db_clean_reindex_merges_cross_library_artists,
+     .init = story_fresh_db_clean_setup,
+     .fini = story_teardown,
+     .timeout = 300)
+{
     /* ── Precondition sanity: both DBs resolved BRONSON with the same MBID ── */
 
     quadrature_db_t *db_a = NULL, *db_b = NULL;
@@ -1596,26 +1748,28 @@ Test(e2e, fresh_db_clean_reindex_merges_cross_library_artists,
     const library_artist_info_t *first_bronson = NULL;
     for (guint i = 0; i < artists->len; i++) {
         const library_artist_info_t *a = g_ptr_array_index(artists, i);
-        if (g_ascii_strcasecmp(a->name, "BRONSON") == 0 ||
-            g_ascii_strcasecmp(a->name, "Bronson") == 0) {
+        if (g_ascii_strcasecmp(a->name, "BRONSON") == 0
+            || g_ascii_strcasecmp(a->name, "Bronson") == 0) {
             bronson_entities++;
-            if (!first_bronson) first_bronson = a;
+            if (!first_bronson)
+                first_bronson = a;
         }
     }
 
-    cr_assert_eq(bronson_entities, 1,
-        "BUG REPRO: library_cache_get_artists_filtered(MASK_ALL) returned %d "
-        "BRONSON entities. Prod shows two cards (\"BRONSON\" uppercase + "
-        "\"Bronson\" case-variant) even though both library DBs hold a single "
-        "artists row with the same MBID 887b5b46…. MBID dedup in the cache "
-        "merge path is not firing for this pair.",
-        bronson_entities);
+    cr_assert_eq(bronson_entities,
+                 1,
+                 "BUG REPRO: library_cache_get_artists_filtered(MASK_ALL) returned %d "
+                 "BRONSON entities. Prod shows two cards (\"BRONSON\" uppercase + "
+                 "\"Bronson\" case-variant) even though both library DBs hold a single "
+                 "artists row with the same MBID 887b5b46…. MBID dedup in the cache "
+                 "merge path is not firing for this pair.",
+                 bronson_entities);
 
     cr_assert_not_null(first_bronson, "BRONSON entity missing from cache");
     cr_assert(first_bronson->musicbrainz_id && first_bronson->musicbrainz_id[0],
-        "Merged BRONSON entity must carry the MBID — without it, artist "
-        "artwork lookup (keyed by UUID) returns the no-art sentinel and "
-        "the UI renders a blank placeholder (as seen in the screenshot).");
+              "Merged BRONSON entity must carry the MBID — without it, artist "
+              "artwork lookup (keyed by UUID) returns the no-art sentinel and "
+              "the UI renders a blank placeholder (as seen in the screenshot).");
     cr_assert_str_eq(first_bronson->musicbrainz_id, MBID_BRONSON_ARTIST);
 
     g_ptr_array_unref(artists);
@@ -1633,16 +1787,17 @@ Test(e2e, fresh_db_clean_reindex_merges_cross_library_artists,
     int search_bronson = 0;
     for (guint i = 0; i < results->artists->len; i++) {
         const library_artist_info_t *a = g_ptr_array_index(results->artists, i);
-        if (g_ascii_strcasecmp(a->name, "BRONSON") == 0 ||
-            g_ascii_strcasecmp(a->name, "Bronson") == 0)
+        if (g_ascii_strcasecmp(a->name, "BRONSON") == 0
+            || g_ascii_strcasecmp(a->name, "Bronson") == 0)
             search_bronson++;
     }
 
-    cr_assert_eq(search_bronson, 1,
-        "BUG REPRO: library_cache_search(\"BRONSON\", MASK_ALL) returned "
-        "%d BRONSON results. Screenshot case: search should collapse the "
-        "two per-library BRONSON rows into one entity via MBID dedup.",
-        search_bronson);
+    cr_assert_eq(search_bronson,
+                 1,
+                 "BUG REPRO: library_cache_search(\"BRONSON\", MASK_ALL) returned "
+                 "%d BRONSON results. Screenshot case: search should collapse the "
+                 "two per-library BRONSON rows into one entity via MBID dedup.",
+                 search_bronson);
 
     library_search_results_free(results);
 
@@ -1655,17 +1810,19 @@ Test(e2e, fresh_db_clean_reindex_merges_cross_library_artists,
     artists = library_cache_get_artists_filtered(
         cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, LIBRARY_MASK_ALL);
     const library_artist_info_t *bronson = find_artist(artists, "BRONSON");
-    if (!bronson) bronson = find_artist(artists, "Bronson");
+    if (!bronson)
+        bronson = find_artist(artists, "Bronson");
     cr_assert_not_null(bronson);
     int64_t bronson_gid = bronson->artist_id;
     g_ptr_array_unref(artists);
 
-    GPtrArray *appearances = library_cache_get_artist_appearance_tracks(
-        cache, bronson_gid, LIBRARY_MASK_ALL);
+    GPtrArray *appearances
+        = library_cache_get_artist_appearance_tracks(cache, bronson_gid, LIBRARY_MASK_ALL);
     cr_assert_not_null(appearances,
-        "Merged BRONSON entity should expose 2 appearance tracks "
-        "(ODESZA TENSE + KEEP MOVING from lib_a, via track_artists).");
+                       "Merged BRONSON entity should expose 2 appearance tracks "
+                       "(ODESZA TENSE + KEEP MOVING from lib_a, via track_artists).");
     cr_assert(appearances->len >= 2,
-        "Expected >= 2 appearances on merged BRONSON, got %u", appearances->len);
+              "Expected >= 2 appearances on merged BRONSON, got %u",
+              appearances->len);
     g_ptr_array_unref(appearances);
 }

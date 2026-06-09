@@ -31,34 +31,34 @@
  * LibrarySlot — per-library state (owned by library_cache.c)
  * ============================================================================= */
 
-typedef struct library_cache LibraryCachePriv;  /* avoid forward-decl loop */
+typedef struct library_cache LibraryCachePriv; /* avoid forward-decl loop */
 
 typedef struct {
-    int    lib_idx;
-    int    bitmap_index;
-    char  *db_path;
-    char  *music_base;
-    char  *display_name;
+    int lib_idx;
+    int bitmap_index;
+    char *db_path;
+    char *music_base;
+    char *display_name;
 
     library_artist_info_t **artists;
-    size_t                  artists_capacity;
-    library_album_info_t  **albums;
-    size_t                  albums_capacity;
-    library_track_info_t  **tracks;
-    size_t                  tracks_capacity;
+    size_t artists_capacity;
+    library_album_info_t **albums;
+    size_t albums_capacity;
+    library_track_info_t **tracks;
+    size_t tracks_capacity;
 
-    GArray    **album_tracks;
-    size_t      album_tracks_capacity;
+    GArray **album_tracks;
+    size_t album_tracks_capacity;
     GPtrArray **track_artists;
-    size_t      track_artists_capacity;
+    size_t track_artists_capacity;
     GPtrArray **artist_albums;
-    size_t      artist_albums_capacity;
+    size_t artist_albums_capacity;
     GPtrArray **artist_appearances;
-    size_t      artist_appearances_capacity;
+    size_t artist_appearances_capacity;
     GPtrArray **artist_appearance_tracks;
-    size_t      artist_appearance_tracks_capacity;
+    size_t artist_appearance_tracks_capacity;
     GPtrArray **album_tracks_ptrs;
-    size_t      album_tracks_ptrs_capacity;
+    size_t album_tracks_ptrs_capacity;
 
     quadrature_db_t *db;
     quadrature_db_t *db_warm;
@@ -66,9 +66,9 @@ typedef struct {
     quadrature_meta_db_t *meta_db;
     quadrature_bios_db_t *bios_db;
 
-    GThread    *warm_thread;
-    atomic_int  warm_cancel;
-    atomic_int  warm_state;
+    GThread *warm_thread;
+    atomic_int warm_cancel;
+    atomic_int warm_state;
 
     atomic_bool available;
 
@@ -96,17 +96,17 @@ struct mbrid_album_entry {
 };
 
 struct library_cache {
-    LibrarySlot  *slots;
-    int           slot_count;
+    LibrarySlot *slots;
+    int slot_count;
 
     LibrarySlot **bitmap_map;
-    int           bitmap_capacity;
+    int bitmap_capacity;
 
-    char        **search_vocab;
-    size_t        search_vocab_count;
+    char **search_vocab;
+    size_t search_vocab_count;
 
     library_cache_ready_cb ready_cb;
-    void                  *ready_cb_data;
+    void *ready_cb_data;
 
     GMutex lock;
 
@@ -121,26 +121,35 @@ struct library_cache {
     } mbrid_album_index;
 
     GAsyncQueue *prefetch_queue;
-    GThread     *prefetch_thread;
-    atomic_int   prefetch_shutdown;
+    GThread *prefetch_thread;
+    atomic_int prefetch_shutdown;
 };
 
 /* =============================================================================
  * Flat-array accessors (inline; safe across TUs)
  * ============================================================================= */
 
-static inline library_artist_info_t *slot_get_artist(LibrarySlot *slot, int64_t local_id) {
-    if (local_id <= 0 || (size_t)local_id >= slot->artists_capacity) return NULL;
+static inline library_artist_info_t *
+slot_get_artist(LibrarySlot *slot, int64_t local_id)
+{
+    if (local_id <= 0 || (size_t)local_id >= slot->artists_capacity)
+        return NULL;
     return slot->artists[local_id];
 }
 
-static inline library_album_info_t *slot_get_album(LibrarySlot *slot, int64_t local_id) {
-    if (local_id <= 0 || (size_t)local_id >= slot->albums_capacity) return NULL;
+static inline library_album_info_t *
+slot_get_album(LibrarySlot *slot, int64_t local_id)
+{
+    if (local_id <= 0 || (size_t)local_id >= slot->albums_capacity)
+        return NULL;
     return slot->albums[local_id];
 }
 
-static inline library_track_info_t *slot_get_track(LibrarySlot *slot, int64_t local_id) {
-    if (local_id <= 0 || (size_t)local_id >= slot->tracks_capacity) return NULL;
+static inline library_track_info_t *
+slot_get_track(LibrarySlot *slot, int64_t local_id)
+{
+    if (local_id <= 0 || (size_t)local_id >= slot->tracks_capacity)
+        return NULL;
     return slot->tracks[local_id];
 }
 

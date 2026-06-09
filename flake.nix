@@ -67,12 +67,29 @@
 
         devShells.default = pkgs.mkShell {
           name = "quadrature-dev";
-          buildInputs = coreDeps ++ buildDeps ++ uiDeps ++ devTools ++ [ pkgs.dconf ];
+          buildInputs = coreDeps ++ buildDeps ++ uiDeps ++ devTools
+            ++ [
+              pkgs.dconf
+              pkgs.libglvnd
+              pkgs.vulkan-loader
+              pkgs.perf
+              pkgs.clang-tools
+            ];
 
           shellHook = ''
             unset NIX_ENFORCE_NO_NATIVE
             export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:$XDG_DATA_DIRS"
             export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules:${pkgs.dconf.lib}/lib/gio/modules"
+            # NixOS host GL/Vulkan vendor drivers live in /run/opengl-driver.
+            # libglvnd / vulkan-loader (in buildInputs) provide the dispatchers;
+            # this path lets them find the actual NVIDIA/Mesa ICDs at runtime.
+            # libglvnd provides the libEGL.so.1 / libGL.so.1 dispatcher stubs;
+            # /run/opengl-driver/lib provides the vendor ICDs (libEGL_nvidia,
+            # libGLX_nvidia, etc.) that the dispatcher dlopen()s.
+            export LD_LIBRARY_PATH="${pkgs.libglvnd}/lib:${pkgs.vulkan-loader}/lib:/run/opengl-driver/lib:$LD_LIBRARY_PATH"
+            # Tell the libglvnd EGL loader where to find vendor ICD JSON
+            # descriptors (NixOS puts them under /run/opengl-driver, not /usr).
+            export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d"
           '';
         };
 

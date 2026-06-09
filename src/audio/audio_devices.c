@@ -14,25 +14,33 @@ typedef struct {
     audio_device_list_t *list;
     struct pw_registry *registry;
     struct spa_hook registry_listener;
-    struct pw_thread_loop *loop;  // For signaling when done
+    struct pw_thread_loop *loop; // For signaling when done
     int pending_sync;
     int done;
 } enum_context_t;
 
-static void device_list_add(audio_device_list_t *list, const audio_device_t *device) {
+static void
+device_list_add(audio_device_list_t *list, const audio_device_t *device)
+{
     if (list->count >= list->capacity) {
         int new_cap = list->capacity == 0 ? 8 : list->capacity * 2;
         audio_device_t *new_devices = g_realloc(list->devices, new_cap * sizeof(audio_device_t));
-        if (!new_devices) return;
+        if (!new_devices)
+            return;
         list->devices = new_devices;
         list->capacity = new_cap;
     }
     list->devices[list->count++] = *device;
 }
 
-static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
-                                   const char *type, uint32_t version,
-                                   const struct spa_dict *props) {
+static void
+registry_event_global(void *data,
+                      uint32_t id,
+                      uint32_t permissions,
+                      const char *type,
+                      uint32_t version,
+                      const struct spa_dict *props)
+{
     (void)permissions;
     (void)version;
     enum_context_t *ctx = data;
@@ -57,7 +65,7 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
     if (!node_name)
         return;
 
-    audio_device_t device = {0};
+    audio_device_t device = { 0 };
     device.id = id;
 
     g_strlcpy(device.node_name, node_name, sizeof(device.node_name));
@@ -78,7 +86,9 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
     g_debug("Found audio sink: %s (%s)", device.description, device.node_name);
 }
 
-static void registry_event_global_remove(void *data, uint32_t id) {
+static void
+registry_event_global_remove(void *data, uint32_t id)
+{
     (void)data;
     (void)id;
     // We don't need to handle removal during enumeration
@@ -90,7 +100,9 @@ static const struct pw_registry_events registry_events = {
     .global_remove = registry_event_global_remove,
 };
 
-static void on_core_done(void *data, uint32_t id, int seq) {
+static void
+on_core_done(void *data, uint32_t id, int seq)
+{
     enum_context_t *ctx = data;
     if (id == PW_ID_CORE && seq == ctx->pending_sync) {
         ctx->done = 1;
@@ -103,7 +115,9 @@ static const struct pw_core_events core_events = {
     .done = on_core_done,
 };
 
-quadrature_result_t audio_devices_enumerate(audio_pipeline_t *pipeline, audio_device_list_t *list) {
+quadrature_result_t
+audio_devices_enumerate(audio_pipeline_t *pipeline, audio_device_list_t *list)
+{
     if (!pipeline || !list)
         return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -124,7 +138,7 @@ quadrature_result_t audio_devices_enumerate(audio_pipeline_t *pipeline, audio_de
     if (!core || !loop)
         return QUADRATURE_ERROR_INTERNAL;
 
-    enum_context_t ctx = {0};
+    enum_context_t ctx = { 0 };
     ctx.list = list;
     ctx.loop = loop;
 
@@ -153,7 +167,7 @@ quadrature_result_t audio_devices_enumerate(audio_pipeline_t *pipeline, audio_de
         int wait_result = pw_thread_loop_timed_wait(loop, DEVICE_ENUM_TIMEOUT_SEC);
         if (wait_result != 0) {
             g_warning("Device enumeration timed out after %d seconds", DEVICE_ENUM_TIMEOUT_SEC);
-            break;  // Return partial results
+            break; // Return partial results
         }
     }
 
@@ -168,7 +182,9 @@ quadrature_result_t audio_devices_enumerate(audio_pipeline_t *pipeline, audio_de
     return QUADRATURE_OK;
 }
 
-void audio_devices_free(audio_device_list_t *list) {
+void
+audio_devices_free(audio_device_list_t *list)
+{
     if (!list)
         return;
 
@@ -188,10 +204,16 @@ void audio_devices_free(audio_device_list_t *list) {
  * All event handlers run on the PipeWire thread.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void monitor_registry_global(void *data, uint32_t id, uint32_t permissions,
-                                    const char *type, uint32_t version,
-                                    const struct spa_dict *props) {
-    (void)permissions; (void)version;
+static void
+monitor_registry_global(void *data,
+                        uint32_t id,
+                        uint32_t permissions,
+                        const char *type,
+                        uint32_t version,
+                        const struct spa_dict *props)
+{
+    (void)permissions;
+    (void)version;
     audio_pipeline_t *pipeline = data;
 
     if (!props || !type)
@@ -215,7 +237,9 @@ static void monitor_registry_global(void *data, uint32_t id, uint32_t permission
         pipeline->device_changed_cb(pipeline->device_changed_user_data);
 }
 
-static void monitor_registry_global_remove(void *data, uint32_t id) {
+static void
+monitor_registry_global_remove(void *data, uint32_t id)
+{
     audio_pipeline_t *pipeline = data;
 
     if (!pipeline->device_monitor_settled)
@@ -234,11 +258,13 @@ static void monitor_registry_global_remove(void *data, uint32_t id) {
 
 static const struct pw_registry_events monitor_registry_events = {
     PW_VERSION_REGISTRY_EVENTS,
-    .global        = monitor_registry_global,
+    .global = monitor_registry_global,
     .global_remove = monitor_registry_global_remove,
 };
 
-static void monitor_core_done(void *data, uint32_t id, int seq) {
+static void
+monitor_core_done(void *data, uint32_t id, int seq)
+{
     audio_pipeline_t *pipeline = data;
     if (id == PW_ID_CORE && seq == pipeline->device_monitor_sync_seq) {
         pipeline->device_monitor_settled = true;
@@ -255,9 +281,11 @@ static const struct pw_core_events monitor_core_events = {
     .done = monitor_core_done,
 };
 
-quadrature_result_t audio_devices_monitor_start(audio_pipeline_t *pipeline,
-                                                  void (*cb)(void *user_data),
-                                                  void *user_data) {
+quadrature_result_t
+audio_devices_monitor_start(audio_pipeline_t *pipeline,
+                            void (*cb)(void *user_data),
+                            void *user_data)
+{
     if (!pipeline || !cb)
         return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -267,13 +295,13 @@ quadrature_result_t audio_devices_monitor_start(audio_pipeline_t *pipeline,
 
     pw_thread_loop_lock(pipeline->loop);
 
-    pipeline->device_changed_cb        = cb;
+    pipeline->device_changed_cb = cb;
     pipeline->device_changed_user_data = user_data;
-    pipeline->device_monitor_settled   = false;
-    pipeline->device_monitor_sink_ids  = g_hash_table_new(NULL, NULL);
+    pipeline->device_monitor_settled = false;
+    pipeline->device_monitor_sink_ids = g_hash_table_new(NULL, NULL);
 
-    pipeline->device_monitor_registry =
-        pw_core_get_registry(pipeline->core, PW_VERSION_REGISTRY, 0);
+    pipeline->device_monitor_registry
+        = pw_core_get_registry(pipeline->core, PW_VERSION_REGISTRY, 0);
 
     if (!pipeline->device_monitor_registry) {
         pw_thread_loop_unlock(pipeline->loop);
@@ -286,13 +314,10 @@ quadrature_result_t audio_devices_monitor_start(audio_pipeline_t *pipeline,
                              pipeline);
 
     /* Add a core listener to receive the sync round-trip that marks "settled" */
-    pw_core_add_listener(pipeline->core,
-                         &pipeline->device_monitor_core_listener,
-                         &monitor_core_events,
-                         pipeline);
+    pw_core_add_listener(
+        pipeline->core, &pipeline->device_monitor_core_listener, &monitor_core_events, pipeline);
 
-    pipeline->device_monitor_sync_seq =
-        pw_core_sync(pipeline->core, PW_ID_CORE, 0);
+    pipeline->device_monitor_sync_seq = pw_core_sync(pipeline->core, PW_ID_CORE, 0);
 
     pw_thread_loop_unlock(pipeline->loop);
 
@@ -300,13 +325,15 @@ quadrature_result_t audio_devices_monitor_start(audio_pipeline_t *pipeline,
     return QUADRATURE_OK;
 }
 
-void audio_devices_monitor_stop(audio_pipeline_t *pipeline) {
+void
+audio_devices_monitor_stop(audio_pipeline_t *pipeline)
+{
     if (!pipeline || !pipeline->device_monitor_registry)
         return;
 
     pw_thread_loop_lock(pipeline->loop);
 
-    pipeline->device_changed_cb        = NULL;
+    pipeline->device_changed_cb = NULL;
     pipeline->device_changed_user_data = NULL;
 
     /* Remove listeners FIRST — stops all callback dispatch.
@@ -320,7 +347,7 @@ void audio_devices_monitor_stop(audio_pipeline_t *pipeline) {
      * map so any stale events are silently discarded by PipeWire's core. */
     pw_proxy_destroy((struct pw_proxy *)pipeline->device_monitor_registry);
     pipeline->device_monitor_registry = NULL;
-    pipeline->device_monitor_settled  = false;
+    pipeline->device_monitor_settled = false;
 
     if (pipeline->device_monitor_sink_ids) {
         g_hash_table_destroy(pipeline->device_monitor_sink_ids);

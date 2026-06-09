@@ -19,13 +19,16 @@
 #include <sys/types.h>
 
 /* Single-library cache helper for tests */
-static quadrature_result_t test_cache_create(const char *db_path,
-                                              const char *music_base,
-                                              library_cache_t **out) {
-    if (!db_path || !out) return QUADRATURE_ERROR_INVALID_PARAM;
+static quadrature_result_t
+test_cache_create(const char *db_path, const char *music_base, library_cache_t **out)
+{
+    if (!db_path || !out)
+        return QUADRATURE_ERROR_INVALID_PARAM;
     library_cache_source_t src = {
-        .db_path = db_path, .music_base = music_base,
-        .display_name = NULL, .bitmap_index = 0,
+        .db_path = db_path,
+        .music_base = music_base,
+        .display_name = NULL,
+        .bitmap_index = 0,
     };
     return library_cache_create_multi(&src, 1, out);
 }
@@ -37,12 +40,15 @@ static quadrature_result_t test_cache_create(const char *db_path,
 static char test_db_path[256];
 static const char *MUSIC_BASE = "/home/user/Music";
 
-static void init_test_db_path(void) {
-    snprintf(test_db_path, sizeof(test_db_path),
-             "/tmp/test_path_resolution_%d.db", getpid());
+static void
+init_test_db_path(void)
+{
+    snprintf(test_db_path, sizeof(test_db_path), "/tmp/test_path_resolution_%d.db", getpid());
 }
 
-static void cleanup_test_db(void) {
+static void
+cleanup_test_db(void)
+{
     char wal_path[280], shm_path[280];
     snprintf(wal_path, sizeof(wal_path), "%s-wal", test_db_path);
     snprintf(shm_path, sizeof(shm_path), "%s-shm", test_db_path);
@@ -55,11 +61,13 @@ static void cleanup_test_db(void) {
  * Insert one album + one track and return the track_id.
  * Caller must already be inside a transaction.
  */
-static int64_t insert_album_track(quadrature_db_t *db,
-                                  const char *album_path,
-                                  const char *album_title,
-                                  const char *track_path,
-                                  const char *track_title) {
+static int64_t
+insert_album_track(quadrature_db_t *db,
+                   const char *album_path,
+                   const char *album_title,
+                   const char *track_path,
+                   const char *track_title)
+{
     int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
     cr_assert(artist_id > 0);
 
@@ -68,16 +76,17 @@ static int64_t insert_album_track(quadrature_db_t *db,
     const int64_t ta[1] = { artist_id };
     const char *names[1] = { "Test Artist" };
     const char *joins[1] = { "" };
-    return test_insert_track_full(db, album_id, track_path, track_title,
-                                    1, 1, 240000, ta, names, joins, 1);
+    return test_insert_track_full(
+        db, album_id, track_path, track_title, 1, 1, 240000, ta, names, joins, 1);
 }
 
 /**
  * Create a DB with a single album+track, build a cache, and resolve the path.
  * Returns the resolved absolute path (caller must g_free).
  */
-static char *resolve_one(const char *album_path,
-                         const char *track_path) {
+static char *
+resolve_one(const char *album_path, const char *track_path)
+{
     init_test_db_path();
     cleanup_test_db();
 
@@ -85,14 +94,12 @@ static char *resolve_one(const char *album_path,
     cr_assert_eq(db_open(test_db_path, false, &db), QUADRATURE_OK);
 
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
-    int64_t track_id = insert_album_track(db, album_path, "Album",
-                                           track_path, "Track");
+    int64_t track_id = insert_album_track(db, album_path, "Album", track_path, "Track");
     cr_assert_eq(db_commit(db), QUADRATURE_OK);
     db_close(db);
 
     library_cache_t *cache = NULL;
-    cr_assert_eq(test_cache_create(test_db_path, MUSIC_BASE, &cache),
-                 QUADRATURE_OK);
+    cr_assert_eq(test_cache_create(test_db_path, MUSIC_BASE, &cache), QUADRATURE_OK);
     library_cache_warm_slot_blocking(cache, 0);
 
     char *resolved = library_cache_resolve_track_path(cache, track_id);
@@ -106,55 +113,54 @@ static char *resolve_one(const char *album_path,
 // Test Cases
 // =============================================================================
 
-Test(path_resolution, simple_relative_path) {
-    char *path = resolve_one("rock/Beatles/Abbey-Road",
-                             "01-come-together.flac");
+Test(path_resolution, simple_relative_path)
+{
+    char *path = resolve_one("rock/Beatles/Abbey-Road", "01-come-together.flac");
     cr_assert_not_null(path);
-    cr_assert_str_eq(path,
-        "/home/user/Music/rock/Beatles/Abbey-Road/01-come-together.flac");
+    cr_assert_str_eq(path, "/home/user/Music/rock/Beatles/Abbey-Road/01-come-together.flac");
     g_free(path);
 }
 
-Test(path_resolution, track_in_subdirectory) {
-    char *path = resolve_one("rock/Pink-Floyd/The-Wall",
-                             "CD1/01-in-the-flesh.flac");
+Test(path_resolution, track_in_subdirectory)
+{
+    char *path = resolve_one("rock/Pink-Floyd/The-Wall", "CD1/01-in-the-flesh.flac");
     cr_assert_not_null(path);
-    cr_assert_str_eq(path,
-        "/home/user/Music/rock/Pink-Floyd/The-Wall/CD1/01-in-the-flesh.flac");
+    cr_assert_str_eq(path, "/home/user/Music/rock/Pink-Floyd/The-Wall/CD1/01-in-the-flesh.flac");
     g_free(path);
 }
 
-Test(path_resolution, multi_disc_cross_directory) {
-    char *path = resolve_one("rock/Tool/Lateralus Disc 1",
-                             "../Lateralus Disc 2/01-the-grudge.flac");
+Test(path_resolution, multi_disc_cross_directory)
+{
+    char *path
+        = resolve_one("rock/Tool/Lateralus Disc 1", "../Lateralus Disc 2/01-the-grudge.flac");
     cr_assert_not_null(path);
-    cr_assert_str_eq(path,
-        "/home/user/Music/rock/Tool/Lateralus Disc 2/01-the-grudge.flac");
+    cr_assert_str_eq(path, "/home/user/Music/rock/Tool/Lateralus Disc 2/01-the-grudge.flac");
     g_free(path);
 }
 
-Test(path_resolution, multi_disc_deep_traversal) {
+Test(path_resolution, multi_disc_deep_traversal)
+{
     /* From "rock/Tool/Lateralus Disc 1", two ".." levels reach "rock/".
      * So "../../jazz/Compilation/01-bonus.flac" → "rock/jazz/Compilation/..." */
-    char *path = resolve_one("rock/Tool/Lateralus Disc 1",
-                             "../../jazz/Compilation/01-bonus.flac");
+    char *path = resolve_one("rock/Tool/Lateralus Disc 1", "../../jazz/Compilation/01-bonus.flac");
     cr_assert_not_null(path);
-    cr_assert_str_eq(path,
-        "/home/user/Music/rock/jazz/Compilation/01-bonus.flac");
+    cr_assert_str_eq(path, "/home/user/Music/rock/jazz/Compilation/01-bonus.flac");
     g_free(path);
 }
 
-Test(path_resolution, spaces_in_path) {
-    char *path = resolve_one("rock/Led Zeppelin/Houses of the Holy",
-                             "01 The Song Remains The Same.flac");
+Test(path_resolution, spaces_in_path)
+{
+    char *path
+        = resolve_one("rock/Led Zeppelin/Houses of the Holy", "01 The Song Remains The Same.flac");
     cr_assert_not_null(path);
     cr_assert_str_eq(path,
-        "/home/user/Music/rock/Led Zeppelin/Houses of the Holy/"
-        "01 The Song Remains The Same.flac");
+                     "/home/user/Music/rock/Led Zeppelin/Houses of the Holy/"
+                     "01 The Song Remains The Same.flac");
     g_free(path);
 }
 
-Test(path_resolution, nonexistent_track_returns_null) {
+Test(path_resolution, nonexistent_track_returns_null)
+{
     init_test_db_path();
     cleanup_test_db();
 
@@ -164,8 +170,7 @@ Test(path_resolution, nonexistent_track_returns_null) {
     db_close(db);
 
     library_cache_t *cache = NULL;
-    cr_assert_eq(test_cache_create(test_db_path, MUSIC_BASE, &cache),
-                 QUADRATURE_OK);
+    cr_assert_eq(test_cache_create(test_db_path, MUSIC_BASE, &cache), QUADRATURE_OK);
     library_cache_warm_slot_blocking(cache, 0);
 
     char *path = library_cache_resolve_track_path(cache, 99999);
@@ -175,16 +180,16 @@ Test(path_resolution, nonexistent_track_returns_null) {
     cleanup_test_db();
 }
 
-Test(path_resolution, null_cache_returns_null) {
+Test(path_resolution, null_cache_returns_null)
+{
     char *path = library_cache_resolve_track_path(NULL, 1);
     cr_assert_null(path);
 }
 
-Test(path_resolution, dot_in_relative_path) {
-    char *path = resolve_one("rock/Artist/Album",
-                             "./01-track.flac");
+Test(path_resolution, dot_in_relative_path)
+{
+    char *path = resolve_one("rock/Artist/Album", "./01-track.flac");
     cr_assert_not_null(path);
-    cr_assert_str_eq(path,
-        "/home/user/Music/rock/Artist/Album/01-track.flac");
+    cr_assert_str_eq(path, "/home/user/Music/rock/Artist/Album/01-track.flac");
     g_free(path);
 }

@@ -8,7 +8,7 @@
 #ifndef QUADRATURE_CLI_INTERNAL_H
 #define QUADRATURE_CLI_INTERNAL_H
 
-int cli_indexer(int argc, char** argv);
-int cli_setup_rt(int argc, char** argv);
+int cli_indexer(int argc, char **argv);
+int cli_setup_rt(int argc, char **argv);
 
 #endif // QUADRATURE_CLI_INTERNAL_H

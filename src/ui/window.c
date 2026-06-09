@@ -17,24 +17,30 @@
 #include "quadrature/library.h"
 #include "quadrature/metadata.h"
 #include "quadrature/gpio.h"
-#include "../audio/internal.h"  /* For audio_devices and perf access */
+#include "../audio/internal.h" /* For audio_devices and perf access */
 #include <string.h>
 
 /* View names for content stack pages */
 static const char *VIEW_SEARCH = "search";
 
 /* Map view name to display label for back button. */
-static const struct { const char *view; const char *label; } VIEW_LABELS[] = {
-    { "search",  "Search"  },
+static const struct {
+    const char *view;
+    const char *label;
+} VIEW_LABELS[] = {
+    { "search", "Search" },
     { "artists", "Artists" },
-    { "albums",  "Albums"  },
+    { "albums", "Albums" },
 };
 
-static const char *view_display_name(const char *view) {
+static const char *
+view_display_name(const char *view)
+{
     for (size_t i = 0; i < G_N_ELEMENTS(VIEW_LABELS); i++) {
-        if (g_strcmp0(view, VIEW_LABELS[i].view) == 0) return VIEW_LABELS[i].label;
+        if (g_strcmp0(view, VIEW_LABELS[i].view) == 0)
+            return VIEW_LABELS[i].label;
     }
-    return VIEW_LABELS[G_N_ELEMENTS(VIEW_LABELS) - 1].label;  /* default: Albums */
+    return VIEW_LABELS[G_N_ELEMENTS(VIEW_LABELS) - 1].label; /* default: Albums */
 }
 
 G_DEFINE_FINAL_TYPE(UiWindow, ui_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -47,15 +53,21 @@ static void build_ui(UiWindow *w);
 static gboolean hide_toast(gpointer data);
 
 /* Debounced settings save — coalesces rapid changes into a single disk write */
-static gboolean settings_save_tick(gpointer data) {
+static gboolean
+settings_save_tick(gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     w->settings_save_timer = 0;
-    if (w->settings) app_settings_save(w->settings);
+    if (w->settings)
+        app_settings_save(w->settings);
     return G_SOURCE_REMOVE;
 }
 
-void settings_save_debounced(UiWindow *w) {
-    if (w->settings_save_timer) g_source_remove(w->settings_save_timer);
+void
+settings_save_debounced(UiWindow *w)
+{
+    if (w->settings_save_timer)
+        g_source_remove(w->settings_save_timer);
     w->settings_save_timer = g_timeout_add(200, settings_save_tick, w);
 }
 
@@ -65,16 +77,56 @@ static void on_library_play(const PlaybackIntent *intent, gpointer data);
 static void on_library_back(gpointer data);
 static void on_track_info(int64_t track_id, gpointer data);
 static void on_channel_strip_clicked(UiChannelStrip *strip, int channel_id, gpointer data);
-static void on_channel_strip_mode_changed(UiChannelStrip *strip, int channel_id, int new_mode, gpointer data);
+static void
+on_channel_strip_mode_changed(UiChannelStrip *strip, int channel_id, int new_mode, gpointer data);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Callbacks
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static gboolean on_update_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer data) {
-    (void)widget; (void)clock;
+static void
+apply_monitor_refresh(UiWindow *w, GdkMonitor *m)
+{
+    if (!w->pipeline || !m)
+        return;
+    int mhz = gdk_monitor_get_refresh_rate(m);
+    double hz = (mhz > 0) ? (mhz / 1000.0) : 60.0;
+    audio_pipeline_set_spectrum_refresh_hz(w->pipeline, hz);
+}
+
+static void
+on_surface_enter_monitor(GdkSurface *surface, GdkMonitor *monitor, gpointer data)
+{
+    (void)surface;
+    apply_monitor_refresh(UI_WINDOW(data), monitor);
+}
+
+static void
+on_window_realize(GtkWidget *widget, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (!w->pipeline) return G_SOURCE_CONTINUE;
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(widget));
+    if (!surface)
+        return;
+
+    g_signal_connect(surface, "enter-monitor", G_CALLBACK(on_surface_enter_monitor), w);
+
+    GListModel *monitors = gdk_display_get_monitors(gtk_widget_get_display(widget));
+    if (g_list_model_get_n_items(monitors) > 0) {
+        GdkMonitor *m = g_list_model_get_item(monitors, 0);
+        apply_monitor_refresh(w, m);
+        g_object_unref(m);
+    }
+}
+
+static gboolean
+on_update_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer data)
+{
+    (void)widget;
+    (void)clock;
+    UiWindow *w = UI_WINDOW(data);
+    if (!w->pipeline)
+        return G_SOURCE_CONTINUE;
 
     for (int i = 0; i < MAX_CHANNELS; i++) {
         if (w->channels[i] && UI_IS_CHANNEL_STRIP(w->channels[i]))
@@ -85,7 +137,9 @@ static gboolean on_update_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer
 
 /** Install or remove the per-frame tick callback based on channel state.
  *  Option A: tick runs whenever any channel has a loaded track. */
-static void ensure_update_tick(UiWindow *w) {
+static void
+ensure_update_tick(UiWindow *w)
+{
     gboolean need_tick = FALSE;
     for (int i = 0; i < MAX_CHANNELS; i++) {
         if (w->channels[i] && ui_channel_strip_has_track(w->channels[i])) {
@@ -94,8 +148,7 @@ static void ensure_update_tick(UiWindow *w) {
         }
     }
     if (need_tick && !w->update_tick_id) {
-        w->update_tick_id = gtk_widget_add_tick_callback(
-            GTK_WIDGET(w), on_update_tick, w, NULL);
+        w->update_tick_id = gtk_widget_add_tick_callback(GTK_WIDGET(w), on_update_tick, w, NULL);
     } else if (!need_tick && w->update_tick_id) {
         gtk_widget_remove_tick_callback(GTK_WIDGET(w), w->update_tick_id);
         w->update_tick_id = 0;
@@ -106,10 +159,14 @@ static void ensure_update_tick(UiWindow *w) {
  * Track changed callback - called when audio pipeline auto-advances to next track.
  * Updates the channel strip display with the new track's metadata.
  */
-static void on_track_changed(int player_id, int64_t track_id, void* user_data) {
+static void
+on_track_changed(int player_id, int64_t track_id, void *user_data)
+{
     UiWindow *w = UI_WINDOW(user_data);
-    if (!w || player_id < 0 || player_id >= MAX_CHANNELS) return;
-    if (!w->channels[player_id]) return;
+    if (!w || player_id < 0 || player_id >= MAX_CHANNELS)
+        return;
+    if (!w->channels[player_id])
+        return;
 
     if (track_id <= 0) {
         /* Playback ended (no next track) */
@@ -122,27 +179,31 @@ static void on_track_changed(int player_id, int64_t track_id, void* user_data) {
         const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
         if (track) {
             g_info("Channel %d: auto-advanced to \"%s\" by %s",
-                   player_id + 1, track->title, track->artist_display);
+                   player_id + 1,
+                   track->title,
+                   track->artist_display);
 
             /* Update channel strip display with new track metadata.
              * Use update_track_display, not load_track - track is already
              * loaded in engine, we just need to refresh the UI. */
             char *resolved = library_cache_resolve_track_path(w->library_cache, track_id);
             ui_channel_strip_update_track_display(w->channels[player_id],
-                &(PlaybackIntent){
-                    .track_id = track_id,
-                    .path     = resolved,
-                    .title    = track->title,
-                    .artist   = track->artist_display,
-                    .album    = track->album_title,
-                });
+                                                  &(PlaybackIntent){
+                                                      .track_id = track_id,
+                                                      .path = resolved,
+                                                      .title = track->title,
+                                                      .artist = track->artist_display,
+                                                      .album = track->album_title,
+                                                  });
             g_free(resolved);
         }
     }
 }
 
 /* Navigate action handler - triggered by nav bar buttons */
-static void on_navigate_action(GSimpleAction *action, GVariant *param, gpointer data) {
+static void
+on_navigate_action(GSimpleAction *action, GVariant *param, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     const char *view = g_variant_get_string(param, NULL);
 
@@ -158,13 +219,17 @@ static void on_navigate_action(GSimpleAction *action, GVariant *param, gpointer 
     gtk_stack_set_visible_child_name(GTK_STACK(w->stack), view);
 }
 
-static void on_channel_strip_clicked(UiChannelStrip *strip, int channel_id, gpointer data) {
+static void
+on_channel_strip_clicked(UiChannelStrip *strip, int channel_id, gpointer data)
+{
     (void)strip;
     UiWindow *w = UI_WINDOW(data);
     ui_window_set_focused_channel(w, channel_id);
 }
 
-static void on_channel_strip_mode_changed(UiChannelStrip *strip, int channel_id, int new_mode, gpointer data) {
+static void
+on_channel_strip_mode_changed(UiChannelStrip *strip, int channel_id, int new_mode, gpointer data)
+{
     (void)strip;
     UiWindow *w = UI_WINDOW(data);
 
@@ -176,8 +241,11 @@ static void on_channel_strip_mode_changed(UiChannelStrip *strip, int channel_id,
     }
 }
 
-static void on_channel_album_clicked(UiChannelStrip *strip, int channel_id, int64_t album_id, gpointer data) {
-    (void)strip; (void)channel_id;
+static void
+on_channel_album_clicked(UiChannelStrip *strip, int channel_id, int64_t album_id, gpointer data)
+{
+    (void)strip;
+    (void)channel_id;
     UiWindow *w = UI_WINDOW(data);
 
     if (album_id > 0) {
@@ -193,8 +261,11 @@ static void on_channel_album_clicked(UiChannelStrip *strip, int channel_id, int6
     }
 }
 
-static void on_channel_artist_clicked(UiChannelStrip *strip, int channel_id, int64_t artist_id, gpointer data) {
-    (void)strip; (void)channel_id;
+static void
+on_channel_artist_clicked(UiChannelStrip *strip, int channel_id, int64_t artist_id, gpointer data)
+{
+    (void)strip;
+    (void)channel_id;
     UiWindow *w = UI_WINDOW(data);
 
     if (artist_id > 0) {
@@ -221,26 +292,34 @@ static void on_channel_artist_clicked(UiChannelStrip *strip, int channel_id, int
 static void on_load_to_channel(int channel, int64_t track_id, gpointer data);
 
 /* Helper: Get track ID from selected row in a list box */
-static int64_t get_selected_track_id(GtkWidget *list_box) {
-    if (!list_box) return 0;
+static int64_t
+get_selected_track_id(GtkWidget *list_box)
+{
+    if (!list_box)
+        return 0;
 
     GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list_box));
-    if (!row) return 0;
+    if (!row)
+        return 0;
 
     GtkWidget *child = gtk_list_box_row_get_child(row);
-    if (!child) return 0;
+    if (!child)
+        return 0;
 
     /* Check for track-id (track rows) or first-track-id (album rows) */
     gpointer p = g_object_get_data(G_OBJECT(child), "track-id");
     if (!p)
         p = g_object_get_data(G_OBJECT(child), "first-track-id");
-    if (!p) return 0;
+    if (!p)
+        return 0;
 
     return (int64_t)GPOINTER_TO_SIZE(p);
 }
 
 /* Helper: Get selected track from the current view */
-static int64_t get_current_view_selected_track(UiWindow *w) {
+static int64_t
+get_current_view_selected_track(UiWindow *w)
+{
     if (g_strcmp0(w->current_view, "search") == 0) {
         return get_selected_track_id(w->search_results_list);
     } else if (g_strcmp0(w->current_view, "detail") == 0) {
@@ -252,7 +331,9 @@ static int64_t get_current_view_selected_track(UiWindow *w) {
 }
 
 /* Action: Load selected track to channel N (1-4 keys) */
-static void on_action_load_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+static void
+on_action_load_channel(GSimpleAction *action, GVariant *param, gpointer data)
+{
     (void)param;
     UiWindow *w = UI_WINDOW(data);
 
@@ -294,7 +375,9 @@ static void on_action_load_channel(GSimpleAction *action, GVariant *param, gpoin
 }
 
 /* Action: Focus channel N (Ctrl+1-4 keys) */
-static void on_action_focus_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+static void
+on_action_focus_channel(GSimpleAction *action, GVariant *param, gpointer data)
+{
     (void)param;
     UiWindow *w = UI_WINDOW(data);
 
@@ -326,10 +409,13 @@ static void on_action_focus_channel(GSimpleAction *action, GVariant *param, gpoi
 }
 
 /* Action: Play channel N (F1-F4 keys) */
-static void on_action_play_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+static void
+on_action_play_channel(GSimpleAction *action, GVariant *param, gpointer data)
+{
     (void)param;
     UiWindow *w = UI_WINDOW(data);
-    if (!w->pipeline) return;
+    if (!w->pipeline)
+        return;
 
     const char *name = g_action_get_name(G_ACTION(action));
     int ch = name[strlen(name) - 1] - '1';
@@ -339,10 +425,13 @@ static void on_action_play_channel(GSimpleAction *action, GVariant *param, gpoin
 }
 
 /* Action: Stop channel N (Shift+F1-F4 keys) */
-static void on_action_stop_channel(GSimpleAction *action, GVariant *param, gpointer data) {
+static void
+on_action_stop_channel(GSimpleAction *action, GVariant *param, gpointer data)
+{
     (void)param;
     UiWindow *w = UI_WINDOW(data);
-    if (!w->pipeline) return;
+    if (!w->pipeline)
+        return;
 
     const char *name = g_action_get_name(G_ACTION(action));
     int ch = name[strlen(name) - 1] - '1';
@@ -351,10 +440,12 @@ static void on_action_stop_channel(GSimpleAction *action, GVariant *param, gpoin
         audio_pipeline_player_stop(w->pipeline, ch);
 }
 
-
 /* Action: Navigate to search (Ctrl+F) */
-static void on_action_search(GSimpleAction *action, GVariant *param, gpointer data) {
-    (void)action; (void)param;
+static void
+on_action_search(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action;
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
     ui_window_navigate_to(w, VIEW_SEARCH);
     set_search_filter(w, 0);
@@ -362,8 +453,11 @@ static void on_action_search(GSimpleAction *action, GVariant *param, gpointer da
 }
 
 /* Action: Navigate to search with Artists filter (Ctrl+A) */
-static void on_action_filter_artists(GSimpleAction *action, GVariant *param, gpointer data) {
-    (void)action; (void)param;
+static void
+on_action_filter_artists(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action;
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
     ui_window_navigate_to(w, VIEW_SEARCH);
     set_search_filter(w, 1);
@@ -371,8 +465,11 @@ static void on_action_filter_artists(GSimpleAction *action, GVariant *param, gpo
 }
 
 /* Action: Navigate to search with Albums filter (Ctrl+B) */
-static void on_action_filter_albums(GSimpleAction *action, GVariant *param, gpointer data) {
-    (void)action; (void)param;
+static void
+on_action_filter_albums(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action;
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
     ui_window_navigate_to(w, VIEW_SEARCH);
     set_search_filter(w, 2);
@@ -380,8 +477,11 @@ static void on_action_filter_albums(GSimpleAction *action, GVariant *param, gpoi
 }
 
 /* Action: Navigate to search with Tracks filter (Ctrl+T) */
-static void on_action_filter_tracks(GSimpleAction *action, GVariant *param, gpointer data) {
-    (void)action; (void)param;
+static void
+on_action_filter_tracks(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action;
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
     ui_window_navigate_to(w, VIEW_SEARCH);
     set_search_filter(w, 3);
@@ -389,21 +489,25 @@ static void on_action_filter_tracks(GSimpleAction *action, GVariant *param, gpoi
 }
 
 /* Action: Toggle metadata search mode (Ctrl+M) */
-static void on_action_toggle_metadata(GSimpleAction *action, GVariant *param, gpointer data) {
-    (void)action; (void)param;
+static void
+on_action_toggle_metadata(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action;
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
     /* In search view: toggle the metadata button */
     if (w->filter_metadata_btn && g_strcmp0(w->current_view, "search") == 0) {
-        gboolean active = gtk_toggle_button_get_active(
-            GTK_TOGGLE_BUTTON(w->filter_metadata_btn));
-        gtk_toggle_button_set_active(
-            GTK_TOGGLE_BUTTON(w->filter_metadata_btn), !active);
+        gboolean active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->filter_metadata_btn));
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w->filter_metadata_btn), !active);
     }
 }
 
 /* Action: Clear filters in current view (Ctrl+R) */
-static void on_action_clear_filters(GSimpleAction *action, GVariant *param, gpointer data) {
-    (void)action; (void)param;
+static void
+on_action_clear_filters(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action;
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
     if (g_strcmp0(w->current_view, "search") == 0)
         clear_search_view_filters(w);
@@ -414,8 +518,11 @@ static void on_action_clear_filters(GSimpleAction *action, GVariant *param, gpoi
 }
 
 /* Action: Escape key - context-dependent behavior */
-static void on_action_close_errors(GSimpleAction *action, GVariant *param, gpointer data) {
-    (void)action; (void)param;
+static void
+on_action_close_errors(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action;
+    (void)param;
     UiWindow *w = UI_WINDOW(data);
 
     /* Priority 1: In detail view, navigate back */
@@ -433,65 +540,87 @@ static void on_action_close_errors(GSimpleAction *action, GVariant *param, gpoin
     }
 }
 
-static gboolean on_window_key_pressed(GtkEventControllerKey*, guint, guint, GdkModifierType, gpointer);
+static gboolean
+on_window_key_pressed(GtkEventControllerKey *, guint, guint, GdkModifierType, gpointer);
 
 /* Setup all keyboard shortcut actions */
-static void setup_keyboard_actions(UiWindow *w) {
+static void
+setup_keyboard_actions(UiWindow *w)
+{
     GtkApplication *app = gtk_window_get_application(GTK_WINDOW(w));
     g_assert(app != NULL);
 
     /* Action entries for window */
     static const GActionEntry entries[] = {
-        { "load-channel-1", on_action_load_channel, NULL, NULL, NULL, {0} },
-        { "load-channel-2", on_action_load_channel, NULL, NULL, NULL, {0} },
-        { "load-channel-3", on_action_load_channel, NULL, NULL, NULL, {0} },
-        { "load-channel-4", on_action_load_channel, NULL, NULL, NULL, {0} },
-        { "focus-channel-1", on_action_focus_channel, NULL, NULL, NULL, {0} },
-        { "focus-channel-2", on_action_focus_channel, NULL, NULL, NULL, {0} },
-        { "focus-channel-3", on_action_focus_channel, NULL, NULL, NULL, {0} },
-        { "focus-channel-4", on_action_focus_channel, NULL, NULL, NULL, {0} },
-        { "play-channel-1", on_action_play_channel, NULL, NULL, NULL, {0} },
-        { "play-channel-2", on_action_play_channel, NULL, NULL, NULL, {0} },
-        { "play-channel-3", on_action_play_channel, NULL, NULL, NULL, {0} },
-        { "play-channel-4", on_action_play_channel, NULL, NULL, NULL, {0} },
-        { "stop-channel-1", on_action_stop_channel, NULL, NULL, NULL, {0} },
-        { "stop-channel-2", on_action_stop_channel, NULL, NULL, NULL, {0} },
-        { "stop-channel-3", on_action_stop_channel, NULL, NULL, NULL, {0} },
-        { "stop-channel-4", on_action_stop_channel, NULL, NULL, NULL, {0} },
-        { "search", on_action_search, NULL, NULL, NULL, {0} },
-        { "filter-artists", on_action_filter_artists, NULL, NULL, NULL, {0} },
-        { "filter-albums", on_action_filter_albums, NULL, NULL, NULL, {0} },
-        { "filter-tracks", on_action_filter_tracks, NULL, NULL, NULL, {0} },
-        { "toggle-metadata", on_action_toggle_metadata, NULL, NULL, NULL, {0} },
-        { "clear-filters", on_action_clear_filters, NULL, NULL, NULL, {0} },
-        { "close-errors", on_action_close_errors, NULL, NULL, NULL, {0} },
+        { "load-channel-1", on_action_load_channel, NULL, NULL, NULL, { 0 } },
+        { "load-channel-2", on_action_load_channel, NULL, NULL, NULL, { 0 } },
+        { "load-channel-3", on_action_load_channel, NULL, NULL, NULL, { 0 } },
+        { "load-channel-4", on_action_load_channel, NULL, NULL, NULL, { 0 } },
+        { "focus-channel-1", on_action_focus_channel, NULL, NULL, NULL, { 0 } },
+        { "focus-channel-2", on_action_focus_channel, NULL, NULL, NULL, { 0 } },
+        { "focus-channel-3", on_action_focus_channel, NULL, NULL, NULL, { 0 } },
+        { "focus-channel-4", on_action_focus_channel, NULL, NULL, NULL, { 0 } },
+        { "play-channel-1", on_action_play_channel, NULL, NULL, NULL, { 0 } },
+        { "play-channel-2", on_action_play_channel, NULL, NULL, NULL, { 0 } },
+        { "play-channel-3", on_action_play_channel, NULL, NULL, NULL, { 0 } },
+        { "play-channel-4", on_action_play_channel, NULL, NULL, NULL, { 0 } },
+        { "stop-channel-1", on_action_stop_channel, NULL, NULL, NULL, { 0 } },
+        { "stop-channel-2", on_action_stop_channel, NULL, NULL, NULL, { 0 } },
+        { "stop-channel-3", on_action_stop_channel, NULL, NULL, NULL, { 0 } },
+        { "stop-channel-4", on_action_stop_channel, NULL, NULL, NULL, { 0 } },
+        { "search", on_action_search, NULL, NULL, NULL, { 0 } },
+        { "filter-artists", on_action_filter_artists, NULL, NULL, NULL, { 0 } },
+        { "filter-albums", on_action_filter_albums, NULL, NULL, NULL, { 0 } },
+        { "filter-tracks", on_action_filter_tracks, NULL, NULL, NULL, { 0 } },
+        { "toggle-metadata", on_action_toggle_metadata, NULL, NULL, NULL, { 0 } },
+        { "clear-filters", on_action_clear_filters, NULL, NULL, NULL, { 0 } },
+        { "close-errors", on_action_close_errors, NULL, NULL, NULL, { 0 } },
     };
 
     g_action_map_add_action_entries(G_ACTION_MAP(w), entries, G_N_ELEMENTS(entries), w);
 
     /* Set accelerators (1-4 handled by window key controller, not global accels) */
-    gtk_application_set_accels_for_action(app, "win.focus-channel-1", (const char*[]){"<Control>1", NULL});
-    gtk_application_set_accels_for_action(app, "win.focus-channel-2", (const char*[]){"<Control>2", NULL});
-    gtk_application_set_accels_for_action(app, "win.focus-channel-3", (const char*[]){"<Control>3", NULL});
-    gtk_application_set_accels_for_action(app, "win.focus-channel-4", (const char*[]){"<Control>4", NULL});
+    gtk_application_set_accels_for_action(
+        app, "win.focus-channel-1", (const char *[]){ "<Control>1", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.focus-channel-2", (const char *[]){ "<Control>2", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.focus-channel-3", (const char *[]){ "<Control>3", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.focus-channel-4", (const char *[]){ "<Control>4", NULL });
 
-    gtk_application_set_accels_for_action(app, "win.play-channel-1", (const char*[]){"F1", NULL});
-    gtk_application_set_accels_for_action(app, "win.play-channel-2", (const char*[]){"F2", NULL});
-    gtk_application_set_accels_for_action(app, "win.play-channel-3", (const char*[]){"F3", NULL});
-    gtk_application_set_accels_for_action(app, "win.play-channel-4", (const char*[]){"F4", NULL});
+    gtk_application_set_accels_for_action(
+        app, "win.play-channel-1", (const char *[]){ "F1", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.play-channel-2", (const char *[]){ "F2", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.play-channel-3", (const char *[]){ "F3", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.play-channel-4", (const char *[]){ "F4", NULL });
 
-    gtk_application_set_accels_for_action(app, "win.stop-channel-1", (const char*[]){"<Shift>F1", NULL});
-    gtk_application_set_accels_for_action(app, "win.stop-channel-2", (const char*[]){"<Shift>F2", NULL});
-    gtk_application_set_accels_for_action(app, "win.stop-channel-3", (const char*[]){"<Shift>F3", NULL});
-    gtk_application_set_accels_for_action(app, "win.stop-channel-4", (const char*[]){"<Shift>F4", NULL});
+    gtk_application_set_accels_for_action(
+        app, "win.stop-channel-1", (const char *[]){ "<Shift>F1", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.stop-channel-2", (const char *[]){ "<Shift>F2", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.stop-channel-3", (const char *[]){ "<Shift>F3", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.stop-channel-4", (const char *[]){ "<Shift>F4", NULL });
 
-    gtk_application_set_accels_for_action(app, "win.search", (const char*[]){"<Control>f", NULL});
-    gtk_application_set_accels_for_action(app, "win.filter-artists", (const char*[]){"<Control>a", NULL});
-    gtk_application_set_accels_for_action(app, "win.filter-albums", (const char*[]){"<Control>b", NULL});
-    gtk_application_set_accels_for_action(app, "win.filter-tracks", (const char*[]){"<Control>t", NULL});
-    gtk_application_set_accels_for_action(app, "win.toggle-metadata", (const char*[]){"<Control>m", NULL});
-    gtk_application_set_accels_for_action(app, "win.clear-filters", (const char*[]){"<Control>r", NULL});
-    gtk_application_set_accels_for_action(app, "win.close-errors", (const char*[]){"Escape", NULL});
+    gtk_application_set_accels_for_action(
+        app, "win.search", (const char *[]){ "<Control>f", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.filter-artists", (const char *[]){ "<Control>a", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.filter-albums", (const char *[]){ "<Control>b", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.filter-tracks", (const char *[]){ "<Control>t", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.toggle-metadata", (const char *[]){ "<Control>m", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.clear-filters", (const char *[]){ "<Control>r", NULL });
+    gtk_application_set_accels_for_action(
+        app, "win.close-errors", (const char *[]){ "Escape", NULL });
 
     /* Window-level key controller for 1-4 (bubble phase: text entries get first crack) */
     GtkEventController *win_key_ctl = gtk_event_controller_key_new();
@@ -507,12 +636,16 @@ static void setup_keyboard_actions(UiWindow *w) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Track: activate navigates to album detail with track pre-selected */
-static void on_track_activate(int64_t track_id, gpointer data) {
+static void
+on_track_activate(int64_t track_id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (!w->library_cache) return;
+    if (!w->library_cache)
+        return;
 
     const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
-    if (!track) return;
+    if (!track)
+        return;
 
     /* Navigate to album detail with this track selected */
     const char *source = NULL;
@@ -526,57 +659,78 @@ static void on_track_activate(int64_t track_id, gpointer data) {
     w->current_view = "detail";
 }
 
-static void on_track_secondary(int64_t track_id, gpointer data) {
+static void
+on_track_secondary(int64_t track_id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (!w->library_cache) return;
+    if (!w->library_cache)
+        return;
 
     const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
-    if (!track) return;
+    if (!track)
+        return;
 
     char *resolved = library_cache_resolve_track_path(w->library_cache, track_id);
-    on_library_play(&(PlaybackIntent){
-        .track_id = track->track_id,
-        .path     = resolved,
-        .title    = track->title,
-        .artist   = track->artist_display,
-        .album    = track->album_title,
-    }, w);
+    on_library_play(
+        &(PlaybackIntent){
+            .track_id = track->track_id,
+            .path = resolved,
+            .title = track->title,
+            .artist = track->artist_display,
+            .album = track->album_title,
+        },
+        w);
     g_free(resolved);
 }
 
 /* Album: activate navigates to album detail, right-click queues track_1 */
-static void on_album_activate(int64_t album_id, gpointer data) {
+static void
+on_album_activate(int64_t album_id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     on_library_navigate(LIBRARY_ITEM_ALBUM, album_id, w);
 }
 
-static void on_album_secondary(int64_t album_id, gpointer data) {
+static void
+on_album_secondary(int64_t album_id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (!w->library_cache) return;
+    if (!w->library_cache)
+        return;
 
-    GPtrArray *tracks = library_cache_get_tracks_by_album(w->library_cache, album_id, LIBRARY_MASK_ALL);
-    if (!tracks || tracks->len == 0) { g_clear_pointer(&tracks, g_ptr_array_unref); return; }
+    GPtrArray *tracks
+        = library_cache_get_tracks_by_album(w->library_cache, album_id, LIBRARY_MASK_ALL);
+    if (!tracks || tracks->len == 0) {
+        g_clear_pointer(&tracks, g_ptr_array_unref);
+        return;
+    }
 
     const library_track_info_t *track = g_ptr_array_index(tracks, 0);
     char *resolved = library_cache_resolve_track_path(w->library_cache, track->track_id);
-    on_library_play(&(PlaybackIntent){
-        .track_id = track->track_id,
-        .path     = resolved,
-        .title    = track->title,
-        .artist   = track->artist_display,
-        .album    = track->album_title,
-    }, w);
+    on_library_play(
+        &(PlaybackIntent){
+            .track_id = track->track_id,
+            .path = resolved,
+            .title = track->title,
+            .artist = track->artist_display,
+            .album = track->album_title,
+        },
+        w);
     g_free(resolved);
     g_ptr_array_unref(tracks);
 }
 
 /* Artist: activate navigates to artist detail, no right-click action */
-static void on_artist_activate(int64_t artist_id, gpointer data) {
+static void
+on_artist_activate(int64_t artist_id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     on_library_navigate(LIBRARY_ITEM_ARTIST, artist_id, w);
 }
 
-static void on_artist_mbid_navigate(const char *mbid, const char *name, const char *type, gpointer data) {
+static void
+on_artist_mbid_navigate(const char *mbid, const char *name, const char *type, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
 
     /* Try MBID bridge: check if this artist exists in any library's main DB */
@@ -613,10 +767,12 @@ static void on_artist_mbid_navigate(const char *mbid, const char *name, const ch
 }
 
 /* Window-level 1-4 key handler (bubble phase — text entries get first crack) */
-static gboolean on_window_key_pressed(GtkEventControllerKey *ctl, guint keyval,
-                                       guint keycode, GdkModifierType state,
-                                       gpointer data) {
-    (void)ctl; (void)keycode;
+static gboolean
+on_window_key_pressed(
+    GtkEventControllerKey *ctl, guint keyval, guint keycode, GdkModifierType state, gpointer data)
+{
+    (void)ctl;
+    (void)keycode;
     UiWindow *w = UI_WINDOW(data);
 
     /* Let editable widgets handle bare keypresses */
@@ -631,8 +787,8 @@ static gboolean on_window_key_pressed(GtkEventControllerKey *ctl, guint keyval,
 
     if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_4) {
         char action_name[32];
-        snprintf(action_name, sizeof(action_name), "load-channel-%d",
-                 (int)(keyval - GDK_KEY_1) + 1);
+        snprintf(
+            action_name, sizeof(action_name), "load-channel-%d", (int)(keyval - GDK_KEY_1) + 1);
         g_action_group_activate_action(G_ACTION_GROUP(w), action_name, NULL);
         return GDK_EVENT_STOP;
     }
@@ -644,7 +800,9 @@ static gboolean on_window_key_pressed(GtkEventControllerKey *ctl, guint keyval,
  * Library View Callbacks
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void on_library_navigate(LibraryItemKind kind, int64_t id, gpointer data) {
+static void
+on_library_navigate(LibraryItemKind kind, int64_t id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     gboolean from_detail = (g_strcmp0(w->current_view, "detail") == 0);
     const char *source = from_detail ? NULL : view_display_name(w->current_view);
@@ -667,7 +825,9 @@ static void on_library_navigate(LibraryItemKind kind, int64_t id, gpointer data)
     w->current_view = "detail";
 }
 
-static void on_library_play(const PlaybackIntent *intent, gpointer data) {
+static void
+on_library_play(const PlaybackIntent *intent, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     g_return_if_fail(intent != NULL);
 
@@ -683,8 +843,9 @@ static void on_library_play(const PlaybackIntent *intent, gpointer data) {
     /* Check if a channel is focused */
     if (w->focused_channel < 0) {
         ui_window_show_toast(w,
-            "No channel focused \u2014 click a channel or press Ctrl+1\u20114",
-            TOAST_WARNING, 3000);
+                             "No channel focused \u2014 click a channel or press Ctrl+1\u20114",
+                             TOAST_WARNING,
+                             3000);
         return;
     }
 
@@ -712,7 +873,11 @@ static void on_library_play(const PlaybackIntent *intent, gpointer data) {
     }
 
     g_info("Load Track → Channel %d: '%s' by %s from '%s' (track_id=%" G_GINT64_FORMAT ")",
-           ch + 1, intent->title, intent->artist, intent->album, intent->track_id);
+           ch + 1,
+           intent->title,
+           intent->artist,
+           intent->album,
+           intent->track_id);
 
     if (!w->channels[ch])
         return;
@@ -722,7 +887,9 @@ static void on_library_play(const PlaybackIntent *intent, gpointer data) {
     ensure_update_tick(w);
 }
 
-static void on_library_back(gpointer data) {
+static void
+on_library_back(gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
 
     /* on_back is only called when detail view's internal nav is exhausted
@@ -733,12 +900,16 @@ static void on_library_back(gpointer data) {
     }
 }
 
-static void on_track_info(int64_t track_id, gpointer data) {
+static void
+on_track_info(int64_t track_id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (!w->library_cache || track_id <= 0) return;
+    if (!w->library_cache || track_id <= 0)
+        return;
 
     const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
-    if (!track) return;
+    if (!track)
+        return;
 
     char *resolved = library_cache_resolve_track_path(w->library_cache, track_id);
     GtkWidget *dialog = ui_metadata_dialog_new(GTK_WINDOW(w), track, resolved);
@@ -746,9 +917,12 @@ static void on_track_info(int64_t track_id, gpointer data) {
     gtk_window_present(GTK_WINDOW(dialog));
 }
 
-static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
+static void
+on_load_to_channel(int channel, int64_t track_id, gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (!w->library_cache || track_id <= 0) return;
+    if (!w->library_cache || track_id <= 0)
+        return;
 
     /* Reject tracks from disconnected libraries */
     int lib_idx = LIBRARY_GLOBAL_ID_LIB(track_id);
@@ -759,7 +933,7 @@ static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
 
     /* Validate channel */
     if (channel < 0 || channel >= MAX_CHANNELS || !w->channels[channel])
-        return;  /* Fail silently */
+        return; /* Fail silently */
 
     /* Check if target channel can receive tracks - fail silently if not */
     if (!ui_channel_strip_is_active(w->channels[channel]))
@@ -767,19 +941,26 @@ static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
 
     /* Look up track info */
     const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
-    if (!track) return;
+    if (!track)
+        return;
 
-    g_info("Keyboard Shortcut → Load Track to Channel %d: '%s' by %s from '%s' (track_id=%" G_GINT64_FORMAT ")",
-           channel + 1, track->title, track->artist_display, track->album_title, track_id);
+    g_info("Keyboard Shortcut → Load Track to Channel %d: '%s' by %s from '%s' "
+           "(track_id=%" G_GINT64_FORMAT ")",
+           channel + 1,
+           track->title,
+           track->artist_display,
+           track->album_title,
+           track_id);
 
     char *resolved = library_cache_resolve_track_path(w->library_cache, track_id);
-    ui_channel_strip_load_track(w->channels[channel], &(PlaybackIntent){
-        .track_id = track_id,
-        .path     = resolved,
-        .title    = track->title,
-        .artist   = track->artist_display,
-        .album    = track->album_title,
-    });
+    ui_channel_strip_load_track(w->channels[channel],
+                                &(PlaybackIntent){
+                                    .track_id = track_id,
+                                    .path = resolved,
+                                    .title = track->title,
+                                    .artist = track->artist_display,
+                                    .album = track->album_title,
+                                });
     g_free(resolved);
     ensure_update_tick(w);
 }
@@ -788,11 +969,13 @@ static void on_load_to_channel(int channel, int64_t track_id, gpointer data) {
  * UI Building
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void load_css(UiWindow *w) {
+static void
+load_css(UiWindow *w)
+{
     w->css = gtk_css_provider_new();
 
-    GBytes *bytes = g_resources_lookup_data("/org/quadrature/ui/quadrature.css",
-                                            G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+    GBytes *bytes = g_resources_lookup_data(
+        "/org/quadrature/ui/quadrature.css", G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
     if (bytes) {
         gsize size;
         const char *data = g_bytes_get_data(bytes, &size);
@@ -802,37 +985,43 @@ static void load_css(UiWindow *w) {
         g_bytes_unref(bytes);
     }
 
-    gtk_style_context_add_provider_for_display(
-        gdk_display_get_default(),
-        GTK_STYLE_PROVIDER(w->css),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(),
+                                               GTK_STYLE_PROVIDER(w->css),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Library Bar (global multi-toggle filter)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void sync_library_toggles(UiWindow *w) {
+static void
+sync_library_toggles(UiWindow *w)
+{
     w->library_toggle_updating = TRUE;
     for (int i = 0; i < w->library_toggle_count; i++) {
-        int bi = GPOINTER_TO_INT(g_object_get_data(
-            G_OBJECT(w->library_toggles[i]), "lib-idx"));
+        int bi = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w->library_toggles[i]), "lib-idx"));
         gboolean active = (w->library_mask & (1u << bi)) != 0;
         gtk_toggle_button_set_active(w->library_toggles[i], active);
     }
     w->library_toggle_updating = FALSE;
 }
 
-static void set_library_mask(UiWindow *w, uint32_t mask) {
-    if (mask == w->library_mask) return;  /* No change — skip reflow */
+static void
+set_library_mask(UiWindow *w, uint32_t mask)
+{
+    if (mask == w->library_mask)
+        return; /* No change — skip reflow */
     w->library_mask = mask;
     sync_library_toggles(w);
     refresh_library_views(w);
 }
 
-static void on_library_left_click(GtkGestureClick *gesture, int n_press,
-                                  double x, double y, gpointer data) {
-    (void)n_press; (void)x; (void)y;
+static void
+on_library_left_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data)
+{
+    (void)n_press;
+    (void)x;
+    (void)y;
     UiWindow *w = UI_WINDOW(data);
 
     /* Claim the gesture so GtkToggleButton's default handler doesn't fire */
@@ -841,8 +1030,8 @@ static void on_library_left_click(GtkGestureClick *gesture, int n_press,
     GtkWidget *btn = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
     int lib_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "lib-idx"));
 
-    GdkModifierType mods = gtk_event_controller_get_current_event_state(
-        GTK_EVENT_CONTROLLER(gesture));
+    GdkModifierType mods
+        = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
 
     uint32_t new_mask;
     if (mods & GDK_SHIFT_MASK) {
@@ -856,14 +1045,20 @@ static void on_library_left_click(GtkGestureClick *gesture, int n_press,
     set_library_mask(w, new_mask);
 }
 
-static void on_library_right_click(GtkGestureClick *gesture, int n_press,
-                                   double x, double y, gpointer data) {
-    (void)gesture; (void)n_press; (void)x; (void)y;
+static void
+on_library_right_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data)
+{
+    (void)gesture;
+    (void)n_press;
+    (void)x;
+    (void)y;
     UiWindow *w = UI_WINDOW(data);
     set_library_mask(w, LIBRARY_MASK_ALL);
 }
 
-static void build_library_bar(UiWindow *w) {
+static void
+build_library_bar(UiWindow *w)
+{
     int lib_count = library_cache_get_library_count(w->library_cache);
     if (lib_count <= 1) {
         gtk_widget_set_visible(w->library_bar, FALSE);
@@ -877,7 +1072,7 @@ static void build_library_bar(UiWindow *w) {
 
     /* Toggle buttons */
     w->library_toggle_count = lib_count;
-    w->library_toggles = g_new0(GtkToggleButton*, lib_count);
+    w->library_toggles = g_new0(GtkToggleButton *, lib_count);
 
     for (int i = 0; i < lib_count; i++) {
         int bi = library_cache_get_bitmap_index(w->library_cache, i);
@@ -886,8 +1081,7 @@ static void build_library_bar(UiWindow *w) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
         gtk_widget_add_css_class(btn, "library-toggle");
         g_object_set_data(G_OBJECT(btn), "lib-idx", GINT_TO_POINTER(bi));
-        gtk_widget_set_tooltip_text(btn,
-            "Click: toggle\nShift+Click: solo\nRight-click: show all");
+        gtk_widget_set_tooltip_text(btn, "Click: toggle\nShift+Click: solo\nRight-click: show all");
 
         /* Left-click (with modifier detection) */
         GtkGesture *lc = gtk_gesture_click_new();
@@ -915,7 +1109,9 @@ static void build_library_bar(UiWindow *w) {
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
-static void build_ui(UiWindow *w) {
+static void
+build_ui(UiWindow *w)
+{
     /* Template already set window title and size, load CSS */
     load_css(w);
 
@@ -944,48 +1140,35 @@ static void build_ui(UiWindow *w) {
         .on_track_info = on_track_info,
         .on_load_to_channel = on_load_to_channel,
         /* Track rows in search/lists: activate navigates to album */
-        .track_cbs = {
-            .on_activate = on_track_activate,
-            .on_secondary = on_track_secondary,
-            .user_data = w
-        },
+        .track_cbs
+        = { .on_activate = on_track_activate, .on_secondary = on_track_secondary, .user_data = w },
         /* Track rows in album detail: no on_activate (already viewing album) */
-        .album_track_cbs = {
-            .on_secondary = on_track_secondary,
-            .user_data = w
-        },
-        .album_cbs = {
-            .on_activate = on_album_activate,
-            .on_secondary = on_album_secondary,
-            .user_data = w
-        },
-        .artist_cbs = {
-            .on_activate = on_artist_activate,
-            .on_mbid_navigate = on_artist_mbid_navigate,
-            .user_data = w
-        },
+        .album_track_cbs = { .on_secondary = on_track_secondary, .user_data = w },
+        .album_cbs
+        = { .on_activate = on_album_activate, .on_secondary = on_album_secondary, .user_data = w },
+        .artist_cbs = { .on_activate = on_artist_activate,
+                        .on_mbid_navigate = on_artist_mbid_navigate,
+                        .user_data = w },
         .user_data = w
     };
 
-    w->artists_view = library_view_new(LIBRARY_ITEM_ARTIST, w->library_cache,
-                                        w->artwork_mgr, &w->lib_cbs, w->settings);
+    w->artists_view = library_view_new(
+        LIBRARY_ITEM_ARTIST, w->library_cache, w->artwork_mgr, &w->lib_cbs, w->settings);
     gtk_stack_add_named(GTK_STACK(w->stack), w->artists_view, "artists");
 
-    w->albums_view = library_view_new(LIBRARY_ITEM_ALBUM, w->library_cache,
-                                       w->artwork_mgr, &w->lib_cbs, w->settings);
+    w->albums_view = library_view_new(
+        LIBRARY_ITEM_ALBUM, w->library_cache, w->artwork_mgr, &w->lib_cbs, w->settings);
     gtk_stack_add_named(GTK_STACK(w->stack), w->albums_view, "albums");
 
     gtk_stack_add_named(GTK_STACK(w->stack), make_libraries_view(w), "libraries");
     gtk_stack_add_named(GTK_STACK(w->stack), make_settings_view(w), "settings");
-    gtk_stack_add_named(GTK_STACK(w->stack),
-                        perf_view_new(w->pipeline, w->library_cache, w->artwork_mgr),
-                        "perf");
+    gtk_stack_add_named(
+        GTK_STACK(w->stack), perf_view_new(w->pipeline, w->library_cache, w->artwork_mgr), "perf");
     gtk_stack_add_named(GTK_STACK(w->stack), make_help_view(), "help");
 
     /* Unified detail view */
-    w->detail_view = library_unified_detail_view_new(w->library_cache,
-                                                      w->artwork_mgr, &w->lib_cbs,
-                                                      w->settings);
+    w->detail_view = library_unified_detail_view_new(
+        w->library_cache, w->artwork_mgr, &w->lib_cbs, w->settings);
     gtk_stack_add_named(GTK_STACK(w->stack), w->detail_view, "detail");
 
     /* Build library bar (hidden for single library) */
@@ -1002,7 +1185,7 @@ static void build_ui(UiWindow *w) {
         g_signal_connect(strip, "mode-changed", G_CALLBACK(on_channel_strip_mode_changed), w);
         g_signal_connect(strip, "album-clicked", G_CALLBACK(on_channel_album_clicked), w);
         g_signal_connect(strip, "artist-clicked", G_CALLBACK(on_channel_artist_clicked), w);
-        
+
         /* Connect mode-changed signal for GPIO LED feedback */
         g_signal_connect(strip, "mode-changed", G_CALLBACK(on_channel_mode_changed), w);
     }
@@ -1021,7 +1204,9 @@ static void build_ui(UiWindow *w) {
  * GObject Implementation
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void ui_window_dispose(GObject *obj) {
+static void
+ui_window_dispose(GObject *obj)
+{
     UiWindow *w = UI_WINDOW(obj);
 
     /* Library bar cleanup */
@@ -1073,18 +1258,37 @@ static void ui_window_dispose(GObject *obj) {
 
     /* ── 2. Remove GLib timers / tick callbacks ─────────────────────────── */
 
-    if (w->update_tick_id) { gtk_widget_remove_tick_callback(GTK_WIDGET(w), w->update_tick_id); w->update_tick_id = 0; }
-    if (w->search_debounce_timer) { g_source_remove(w->search_debounce_timer); w->search_debounce_timer = 0; }
-    if (w->credit_search_cancel) { g_cancellable_cancel(w->credit_search_cancel); g_clear_object(&w->credit_search_cancel); }
-    if (w->toast_timer) { g_source_remove(w->toast_timer); w->toast_timer = 0; }
-    if (w->device_hotplug_timer_id) { g_source_remove(w->device_hotplug_timer_id); w->device_hotplug_timer_id = 0; }
-    if (w->device_rebuild_idle_id) { g_source_remove(w->device_rebuild_idle_id); w->device_rebuild_idle_id = 0; }
+    if (w->update_tick_id) {
+        gtk_widget_remove_tick_callback(GTK_WIDGET(w), w->update_tick_id);
+        w->update_tick_id = 0;
+    }
+    if (w->search_debounce_timer) {
+        g_source_remove(w->search_debounce_timer);
+        w->search_debounce_timer = 0;
+    }
+    if (w->credit_search_cancel) {
+        g_cancellable_cancel(w->credit_search_cancel);
+        g_clear_object(&w->credit_search_cancel);
+    }
+    if (w->toast_timer) {
+        g_source_remove(w->toast_timer);
+        w->toast_timer = 0;
+    }
+    if (w->device_hotplug_timer_id) {
+        g_source_remove(w->device_hotplug_timer_id);
+        w->device_hotplug_timer_id = 0;
+    }
+    if (w->device_rebuild_idle_id) {
+        g_source_remove(w->device_rebuild_idle_id);
+        w->device_rebuild_idle_id = 0;
+    }
     indexer_bridge_cancel_pending_refreshes();
     /* Flush any pending debounced settings save before shutdown */
     if (w->settings_save_timer) {
         g_source_remove(w->settings_save_timer);
         w->settings_save_timer = 0;
-        if (w->settings) app_settings_save(w->settings);
+        if (w->settings)
+            app_settings_save(w->settings);
     }
 
     /* ── 3. Free UI-owned resources ─────────────────────────────────────── */
@@ -1115,8 +1319,14 @@ static void ui_window_dispose(GObject *obj) {
     w->errors_library_path = NULL;
     filter_bar_destroy(&w->search_filter_bar);
 
-    if (w->artwork_mgr) { artwork_manager_free(w->artwork_mgr); w->artwork_mgr = NULL; }
-    if (w->errors_lib_db) { db_close(w->errors_lib_db); w->errors_lib_db = NULL; }
+    if (w->artwork_mgr) {
+        artwork_manager_free(w->artwork_mgr);
+        w->artwork_mgr = NULL;
+    }
+    if (w->errors_lib_db) {
+        db_close(w->errors_lib_db);
+        w->errors_lib_db = NULL;
+    }
 
     /* ── 4. Clear borrowed pointers (owned by main.c / on_shutdown) ─────── */
 
@@ -1127,13 +1337,15 @@ static void ui_window_dispose(GObject *obj) {
     G_OBJECT_CLASS(ui_window_parent_class)->dispose(obj);
 }
 
-static void ui_window_class_init(UiWindowClass *klass) {
+static void
+ui_window_class_init(UiWindowClass *klass)
+{
     GtkWidgetClass *widget_class = GTK_WIDGET_CLASS(klass);
     G_OBJECT_CLASS(klass)->dispose = ui_window_dispose;
 
     /* Set up composite template */
     gtk_widget_class_set_template_from_resource(widget_class,
-        "/org/quadrature/ui/quadrature_window.ui");
+                                                "/org/quadrature/ui/quadrature_window.ui");
 
     /* Bind template children */
     gtk_widget_class_bind_template_child(widget_class, UiWindow, main_box);
@@ -1144,7 +1356,9 @@ static void ui_window_class_init(UiWindowClass *klass) {
     gtk_widget_class_bind_template_child(widget_class, UiWindow, toast_label);
 }
 
-static void ui_window_init(UiWindow *w) {
+static void
+ui_window_init(UiWindow *w)
+{
     /* Initialize template - this populates all bound children */
     gtk_widget_init_template(GTK_WIDGET(w));
 
@@ -1203,7 +1417,9 @@ static void ui_window_init(UiWindow *w) {
  * Public API
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static gboolean init_devices_idle(gpointer data) {
+static gboolean
+init_devices_idle(gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     populate_devices_async(w);
     setup_device_monitor(w);
@@ -1215,10 +1431,12 @@ static gboolean init_devices_idle(gpointer data) {
  * Library availability changed — drive mounted/unmounted
  * ============================================================================= */
 
-static void on_library_availability_changed(LibraryMonitor *mon,
-                                             int            bitmap_idx,
-                                             gboolean       available,
-                                             gpointer       data) {
+static void
+on_library_availability_changed(LibraryMonitor *mon,
+                                int bitmap_idx,
+                                gboolean available,
+                                gpointer data)
+{
     (void)mon;
     UiWindow *w = UI_WINDOW(data);
 
@@ -1235,12 +1453,10 @@ static void on_library_availability_changed(LibraryMonitor *mon,
 
     /* 1. Toast notification */
     char *name = (si >= 0) ? app_settings_get_library_name(w->settings, si) : NULL;
-    char *msg = g_strdup_printf("Library \"%s\" %s",
-                                name ? name : "Unknown",
-                                available ? "reconnected" : "disconnected");
-    ui_window_show_toast(w, msg,
-                         available ? TOAST_SUCCESS : TOAST_WARNING,
-                         available ? 3000 : 5000);
+    char *msg = g_strdup_printf(
+        "Library \"%s\" %s", name ? name : "Unknown", available ? "reconnected" : "disconnected");
+    ui_window_show_toast(
+        w, msg, available ? TOAST_SUCCESS : TOAST_WARNING, available ? 3000 : 5000);
     g_free(msg);
     g_free(name);
 
@@ -1260,8 +1476,7 @@ static void on_library_availability_changed(LibraryMonitor *mon,
     } else {
         /* Cancel any running indexer for this library */
         if (w->indexer && si >= 0)
-            indexer_controller_cancel_library(w->indexer,
-                                              w->settings->libraries[si].path);
+            indexer_controller_cancel_library(w->indexer, w->settings->libraries[si].path);
 
         /* If detail view is showing entity from this library, navigate back */
         if (w->current_view && g_strcmp0(w->current_view, "detail") == 0 && w->detail_view) {
@@ -1282,10 +1497,12 @@ static void on_library_availability_changed(LibraryMonitor *mon,
     refresh_library_views(w);
 }
 
-static gboolean auto_scan_idle(gpointer data) {
+static gboolean
+auto_scan_idle(gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
-    if (w->indexer && w->settings && w->settings->auto_scan_on_startup &&
-        w->settings->library_count > 0) {
+    if (w->indexer && w->settings && w->settings->auto_scan_on_startup
+        && w->settings->library_count > 0) {
         /* Build arrays of only available libraries */
         int total = w->settings->library_count;
         const char **paths = g_new(const char *, total);
@@ -1295,7 +1512,7 @@ static gboolean auto_scan_idle(gpointer data) {
             if (!library_cache_get_available(w->library_cache,
                                              w->settings->libraries[i].library_index))
                 continue;
-            paths[count]  = w->settings->libraries[i].path;
+            paths[count] = w->settings->libraries[i].path;
             dpaths[count] = app_settings_get_library_data_path(w->settings, i);
             count++;
         }
@@ -1307,14 +1524,21 @@ static gboolean auto_scan_idle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
-                         library_cache_t *library_cache, app_settings_t *settings) {
+GtkWidget *
+ui_window_new(GtkApplication *app,
+              audio_pipeline_t *pipeline,
+              library_cache_t *library_cache,
+              app_settings_t *settings)
+{
     UiWindow *w = g_object_new(UI_TYPE_WINDOW, "application", app, NULL);
     w->pipeline = pipeline;           /* borrowed from main.c */
     w->library_cache = library_cache; /* borrowed from main.c */
     w->settings = settings;           /* borrowed from main.c */
 
-    if (settings) w->show_spectrum = settings->show_spectrum;
+    g_signal_connect(w, "realize", G_CALLBACK(on_window_realize), w);
+
+    if (settings)
+        w->show_spectrum = settings->show_spectrum;
 
     /* Create indexer (DB is opened per-library by the worker thread) */
     w->indexer = indexer_controller_new();
@@ -1345,8 +1569,8 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
             art_sources[i].music_root = settings->libraries[i].path;
         }
     }
-    w->artwork_mgr = artwork_manager_new(
-        w->library_cache, art_sources, art_source_count, thumb_size, 0);
+    w->artwork_mgr
+        = artwork_manager_new(w->library_cache, art_sources, art_source_count, thumb_size, 0);
     g_free(art_sources);
 
     build_ui(w);
@@ -1365,17 +1589,17 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
     }
 
     if (w->indexer) {
-        g_signal_connect(w->indexer, "started",       G_CALLBACK(on_indexer_started),       w);
-        g_signal_connect(w->indexer, "progress",      G_CALLBACK(on_indexer_progress),      w);
+        g_signal_connect(w->indexer, "started", G_CALLBACK(on_indexer_started), w);
+        g_signal_connect(w->indexer, "progress", G_CALLBACK(on_indexer_progress), w);
         g_signal_connect(w->indexer, "library-updated", G_CALLBACK(on_indexer_library_updated), w);
         g_signal_connect(w->indexer, "artwork-updated", G_CALLBACK(on_indexer_artwork_updated), w);
-        g_signal_connect(w->indexer, "completed",     G_CALLBACK(on_indexer_done),          w);
+        g_signal_connect(w->indexer, "completed", G_CALLBACK(on_indexer_done), w);
     }
 
     /* Library availability monitor (GVolumeMonitor + stat() heartbeat) */
     w->lib_monitor = library_monitor_new(w->library_cache, w->settings);
-    g_signal_connect(w->lib_monitor, "availability-changed",
-                     G_CALLBACK(on_library_availability_changed), w);
+    g_signal_connect(
+        w->lib_monitor, "availability-changed", G_CALLBACK(on_library_availability_changed), w);
     library_monitor_start(w->lib_monitor);
 
     g_idle_add(init_devices_idle, w);
@@ -1386,7 +1610,9 @@ GtkWidget *ui_window_new(GtkApplication *app, audio_pipeline_t *pipeline,
     return GTK_WIDGET(w);
 }
 
-void ui_window_navigate_to(UiWindow *w, const char *view) {
+void
+ui_window_navigate_to(UiWindow *w, const char *view)
+{
     g_return_if_fail(UI_IS_WINDOW(w));
     g_return_if_fail(view != NULL);
 
@@ -1398,7 +1624,9 @@ void ui_window_navigate_to(UiWindow *w, const char *view) {
         g_simple_action_set_state(w->navigate_action, g_variant_new_string(view));
 }
 
-void ui_window_set_spectrum_visible(UiWindow *w, gboolean visible) {
+void
+ui_window_set_spectrum_visible(UiWindow *w, gboolean visible)
+{
     g_return_if_fail(UI_IS_WINDOW(w));
     w->show_spectrum = visible;
     for (int i = 0; i < MAX_CHANNELS; i++) {
@@ -1411,7 +1639,9 @@ void ui_window_set_spectrum_visible(UiWindow *w, gboolean visible) {
  * Focus Management (New API)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void ui_window_set_focused_channel(UiWindow *w, int ch) {
+void
+ui_window_set_focused_channel(UiWindow *w, int ch)
+{
     g_return_if_fail(UI_IS_WINDOW(w));
 
     /* Check if the channel can be focused */
@@ -1443,7 +1673,8 @@ void ui_window_set_focused_channel(UiWindow *w, int ch) {
     }
 
     /* Clear previous focus */
-    if (w->focused_channel >= 0 && w->focused_channel < MAX_CHANNELS && w->channels[w->focused_channel])
+    if (w->focused_channel >= 0 && w->focused_channel < MAX_CHANNELS
+        && w->channels[w->focused_channel])
         ui_channel_strip_set_focused(w->channels[w->focused_channel], FALSE);
 
     w->focused_channel = ch;
@@ -1452,15 +1683,20 @@ void ui_window_set_focused_channel(UiWindow *w, int ch) {
         ui_channel_strip_set_focused(w->channels[ch], TRUE);
 }
 
-int ui_window_get_focused_channel(UiWindow *w) {
+int
+ui_window_get_focused_channel(UiWindow *w)
+{
     g_return_val_if_fail(UI_IS_WINDOW(w), -1);
     return w->focused_channel;
 }
 
-void ui_window_clear_focus(UiWindow *w) {
+void
+ui_window_clear_focus(UiWindow *w)
+{
     g_return_if_fail(UI_IS_WINDOW(w));
 
-    if (w->focused_channel >= 0 && w->focused_channel < MAX_CHANNELS && w->channels[w->focused_channel])
+    if (w->focused_channel >= 0 && w->focused_channel < MAX_CHANNELS
+        && w->channels[w->focused_channel])
         ui_channel_strip_set_focused(w->channels[w->focused_channel], FALSE);
 
     w->focused_channel = -1;
@@ -1470,7 +1706,9 @@ void ui_window_clear_focus(UiWindow *w) {
  * Toast Notifications
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static gboolean hide_toast(gpointer data) {
+static gboolean
+hide_toast(gpointer data)
+{
     UiWindow *w = UI_WINDOW(data);
     if (w->toast_overlay)
         gtk_widget_set_visible(w->toast_overlay, FALSE);
@@ -1479,7 +1717,9 @@ static gboolean hide_toast(gpointer data) {
 }
 
 /* Apply/remove variant CSS class on the toast box */
-static void apply_toast_variant(GtkWidget *toast_box, ToastVariant variant) {
+static void
+apply_toast_variant(GtkWidget *toast_box, ToastVariant variant)
+{
     static const char *classes[] = { NULL, "toast-success", "toast-warning", "toast-error" };
     for (int i = 1; i <= 3; i++)
         gtk_widget_remove_css_class(toast_box, classes[i]);
@@ -1487,8 +1727,10 @@ static void apply_toast_variant(GtkWidget *toast_box, ToastVariant variant) {
         gtk_widget_add_css_class(toast_box, classes[variant]);
 }
 
-static void show_toast_impl(UiWindow *w, const char *content, gboolean is_markup,
-                             ToastVariant variant, guint duration_ms) {
+static void
+show_toast_impl(
+    UiWindow *w, const char *content, gboolean is_markup, ToastVariant variant, guint duration_ms)
+{
     g_assert(w->toast_overlay != NULL);
     g_assert(w->toast_label != NULL);
 
@@ -1500,17 +1742,25 @@ static void show_toast_impl(UiWindow *w, const char *content, gboolean is_markup
     apply_toast_variant(w->toast_overlay, variant);
     gtk_widget_set_visible(w->toast_overlay, TRUE);
 
-    if (w->toast_timer) g_source_remove(w->toast_timer);
+    if (w->toast_timer)
+        g_source_remove(w->toast_timer);
     w->toast_timer = g_timeout_add(duration_ms ? duration_ms : 3000, hide_toast, w);
 }
 
-void ui_window_show_toast(UiWindow *w, const char *message, ToastVariant variant, guint duration_ms) {
+void
+ui_window_show_toast(UiWindow *w, const char *message, ToastVariant variant, guint duration_ms)
+{
     g_return_if_fail(UI_IS_WINDOW(w));
     g_return_if_fail(message != NULL);
     show_toast_impl(w, message, FALSE, variant, duration_ms);
 }
 
-void ui_window_show_toast_markup(UiWindow *w, const char *markup, ToastVariant variant, guint duration_ms) {
+void
+ui_window_show_toast_markup(UiWindow *w,
+                            const char *markup,
+                            ToastVariant variant,
+                            guint duration_ms)
+{
     g_return_if_fail(UI_IS_WINDOW(w));
     g_return_if_fail(markup != NULL);
     show_toast_impl(w, markup, TRUE, variant, duration_ms);

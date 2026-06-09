@@ -30,15 +30,15 @@
 static const FilterBarSortOption ARTIST_SORT_OPTIONS[] = {
     { "Name (A-Z)", LIBRARY_SORT_NAME_ASC },
     { "Name (Z-A)", LIBRARY_SORT_NAME_DESC },
-    { "Recent",     LIBRARY_SORT_RECENT },
+    { "Recent", LIBRARY_SORT_RECENT },
 };
 #define NUM_ARTIST_SORTS 3
 
 static const FilterBarSortOption ALBUM_SORT_OPTIONS[] = {
-    { "Name (A-Z)",      LIBRARY_SORT_NAME_ASC },
-    { "Date (newest)",   LIBRARY_SORT_YEAR_DESC },
-    { "Artist (A-Z)",    LIBRARY_SORT_ARTIST_ASC },
-    { "Recent",          LIBRARY_SORT_RECENT },
+    { "Name (A-Z)", LIBRARY_SORT_NAME_ASC },
+    { "Date (newest)", LIBRARY_SORT_YEAR_DESC },
+    { "Artist (A-Z)", LIBRARY_SORT_ARTIST_ASC },
+    { "Recent", LIBRARY_SORT_RECENT },
 };
 #define NUM_ALBUM_SORTS 4
 
@@ -51,7 +51,7 @@ typedef struct {
     library_cache_t *cache;
     ArtworkManager *art_mgr;
     LibraryCallbacks cbs;
-    app_settings_t *settings;       /* For credit search (library paths) */
+    app_settings_t *settings; /* For credit search (library paths) */
 
     GtkWidget *container;
     GtkWidget *subtitle;
@@ -74,9 +74,9 @@ typedef struct {
     FilterBarState filter_bar;
 
     /* Index scrubber overlay */
-    GtkWidget *scrubber_overlay;    /* GtkOverlay wrapping scroll */
-    GtkWidget *scrubber;            /* QuadScrubber widget */
-    GtkWidget *scrubber_badge;      /* GtkLabel badge, sibling overlay child */
+    GtkWidget *scrubber_overlay; /* GtkOverlay wrapping scroll */
+    GtkWidget *scrubber;         /* QuadScrubber widget */
+    GtkWidget *scrubber_badge;   /* GtkLabel badge, sibling overlay child */
 } ViewData;
 
 static const char *VIEW_DATA_KEY = "library-view-data";
@@ -85,7 +85,9 @@ static const char *VIEW_DATA_KEY = "library-view-data";
 static void update_subtitle(ViewData *vd);
 static void rebuild_scrubber_buckets(ViewData *vd);
 
-static void view_data_free(gpointer data) {
+static void
+view_data_free(gpointer data)
+{
     ViewData *vd = data;
     if (vd->credit_cancel) {
         g_cancellable_cancel(vd->credit_cancel);
@@ -123,9 +125,12 @@ typedef struct {
     uint32_t library_mask;
 } CreditEntityInput;
 
-static void credit_entity_input_free(gpointer data) {
+static void
+credit_entity_input_free(gpointer data)
+{
     CreditEntityInput *in = data;
-    if (!in) return;
+    if (!in)
+        return;
     g_free(in->credit_text);
     g_free(in->role_gid);
     g_free(in);
@@ -143,33 +148,37 @@ static void credit_entity_input_free(gpointer data) {
  * primary artist_id of each (the cache's MBID index collapses cross-library
  * artists at display time, so raw artist_ids here are safe membership keys).
  */
-static GHashTable *build_credit_entity_set_impl(library_cache_t *cache,
-                                                  LibraryItemKind kind,
-                                                  const char *credit_text,
-                                                  const char *role_gid,
-                                                  uint32_t library_mask) {
-    GHashTable *entity_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                                    g_free, NULL);
+static GHashTable *
+build_credit_entity_set_impl(library_cache_t *cache,
+                             LibraryItemKind kind,
+                             const char *credit_text,
+                             const char *role_gid,
+                             uint32_t library_mask)
+{
+    GHashTable *entity_ids = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, NULL);
 
-    library_credit_search_result_t *r =
-        library_credit_search(cache, credit_text, role_gid, library_mask);
+    library_credit_search_result_t *r
+        = library_credit_search(cache, credit_text, role_gid, library_mask);
 
     if (kind == LIBRARY_ITEM_ALBUM) {
         for (guint i = 0; i < r->album_ids->len; i++) {
             int64_t eid = g_array_index(r->album_ids, int64_t, i);
             if (!g_hash_table_contains(entity_ids, &eid)) {
-                int64_t *key = g_new(int64_t, 1); *key = eid;
+                int64_t *key = g_new(int64_t, 1);
+                *key = eid;
                 g_hash_table_add(entity_ids, key);
             }
         }
-    } else {  /* LIBRARY_ITEM_ARTIST */
+    } else { /* LIBRARY_ITEM_ARTIST */
         for (guint i = 0; i < r->track_ids->len; i++) {
             int64_t tid = g_array_index(r->track_ids, int64_t, i);
             const library_track_info_t *track = library_cache_get_track(cache, tid);
-            if (!track) continue;
+            if (!track)
+                continue;
             int64_t eid = track->artist_id;
             if (!g_hash_table_contains(entity_ids, &eid)) {
-                int64_t *key = g_new(int64_t, 1); *key = eid;
+                int64_t *key = g_new(int64_t, 1);
+                *key = eid;
                 g_hash_table_add(entity_ids, key);
             }
         }
@@ -180,12 +189,14 @@ static GHashTable *build_credit_entity_set_impl(library_cache_t *cache,
 }
 
 /* GTask worker thread for credit entity search */
-static void credit_entity_search_thread(GTask *task, gpointer src,
-                                          gpointer data, GCancellable *cancel) {
+static void
+credit_entity_search_thread(GTask *task, gpointer src, gpointer data, GCancellable *cancel)
+{
     (void)src;
     CreditEntityInput *in = data;
 
-    if (g_cancellable_is_cancelled(cancel)) return;
+    if (g_cancellable_is_cancelled(cancel))
+        return;
 
     GHashTable *result = build_credit_entity_set_impl(
         in->cache, in->kind, in->credit_text, in->role_gid, in->library_mask);
@@ -199,8 +210,9 @@ static void credit_entity_search_thread(GTask *task, gpointer src,
 }
 
 /* Completion: apply credit set intersection and notify GTK filter */
-static void on_credit_entity_search_done(GObject *src, GAsyncResult *res,
-                                           gpointer data) {
+static void
+on_credit_entity_search_done(GObject *src, GAsyncResult *res, gpointer data)
+{
     (void)src;
     ViewData *vd = data;
     GError *error = NULL;
@@ -241,17 +253,20 @@ static void on_credit_entity_search_done(GObject *src, GAsyncResult *res,
  * When no filters are active, filter_match_ids is NULL and all items pass.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static gboolean view_filter_func(gpointer item, gpointer user_data) {
+static gboolean
+view_filter_func(gpointer item, gpointer user_data)
+{
     ViewData *vd = user_data;
 
     /* "Show Featuring" filter — hide artists with no albums of their own */
-    if (vd->kind == LIBRARY_ITEM_ARTIST && QUAD_IS_ARTIST_ITEM(item) &&
-        !filter_bar_get_show_featuring(&vd->filter_bar)) {
+    if (vd->kind == LIBRARY_ITEM_ARTIST && QUAD_IS_ARTIST_ITEM(item)
+        && !filter_bar_get_show_featuring(&vd->filter_bar)) {
         if (QUAD_ARTIST_ITEM(item)->info->album_count < 1)
             return FALSE;
     }
 
-    if (!vd->filter_match_ids) return TRUE;
+    if (!vd->filter_match_ids)
+        return TRUE;
 
     int64_t eid;
     if (QUAD_IS_ARTIST_ITEM(item))
@@ -266,59 +281,68 @@ static gboolean view_filter_func(gpointer item, gpointer user_data) {
  * GtkCustomSorter — in-memory sort comparisons
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static int safe_utf8_collate(const char *a, const char *b) {
-    if (!a && !b) return 0;
-    if (!a) return -1;
-    if (!b) return 1;
+static int
+safe_utf8_collate(const char *a, const char *b)
+{
+    if (!a && !b)
+        return 0;
+    if (!a)
+        return -1;
+    if (!b)
+        return 1;
     return g_utf8_collate(a, b);
 }
 
-static int artist_sort_func(gconstpointer a, gconstpointer b, gpointer user_data) {
+static int
+artist_sort_func(gconstpointer a, gconstpointer b, gpointer user_data)
+{
     ViewData *vd = user_data;
     const library_artist_info_t *aa = QUAD_ARTIST_ITEM((gpointer)a)->info;
     const library_artist_info_t *bb = QUAD_ARTIST_ITEM((gpointer)b)->info;
     library_sort_t sort = filter_bar_get_sort(&vd->filter_bar);
 
     switch (sort) {
-        case LIBRARY_SORT_NAME_ASC:
-            return safe_utf8_collate(aa->name, bb->name);
-        case LIBRARY_SORT_NAME_DESC:
-            return safe_utf8_collate(bb->name, aa->name);
-        case LIBRARY_SORT_RECENT:
-            /* Higher ID = more recently added */
-            return (bb->artist_id > aa->artist_id) - (bb->artist_id < aa->artist_id);
-        default:
-            return 0;
+    case LIBRARY_SORT_NAME_ASC:
+        return safe_utf8_collate(aa->name, bb->name);
+    case LIBRARY_SORT_NAME_DESC:
+        return safe_utf8_collate(bb->name, aa->name);
+    case LIBRARY_SORT_RECENT:
+        /* Higher ID = more recently added */
+        return (bb->artist_id > aa->artist_id) - (bb->artist_id < aa->artist_id);
+    default:
+        return 0;
     }
 }
 
-static int album_sort_func(gconstpointer a, gconstpointer b, gpointer user_data) {
+static int
+album_sort_func(gconstpointer a, gconstpointer b, gpointer user_data)
+{
     ViewData *vd = user_data;
     const library_album_info_t *aa = QUAD_ALBUM_ITEM((gpointer)a)->info;
     const library_album_info_t *bb = QUAD_ALBUM_ITEM((gpointer)b)->info;
     library_sort_t sort = filter_bar_get_sort(&vd->filter_bar);
 
     switch (sort) {
-        case LIBRARY_SORT_NAME_ASC:
-            return safe_utf8_collate(aa->title, bb->title);
-        case LIBRARY_SORT_NAME_DESC:
-            return safe_utf8_collate(bb->title, aa->title);
-        case LIBRARY_SORT_YEAR_ASC: {
-            int cmp = (int)aa->year - (int)bb->year;
-            return cmp != 0 ? cmp : safe_utf8_collate(aa->title, bb->title);
-        }
-        case LIBRARY_SORT_YEAR_DESC: {
-            int cmp = (int)bb->year - (int)aa->year;
-            return cmp != 0 ? cmp : safe_utf8_collate(aa->title, bb->title);
-        }
-        case LIBRARY_SORT_ARTIST_ASC: {
-            int cmp = safe_utf8_collate(aa->artist_name, bb->artist_name);
-            return cmp != 0 ? cmp : safe_utf8_collate(aa->title, bb->title);
-        }
-        case LIBRARY_SORT_RECENT:
-            return (bb->album_id > aa->album_id) - (bb->album_id < aa->album_id);
-        default:
-            return 0;
+    case LIBRARY_SORT_NAME_ASC:
+        return safe_utf8_collate(aa->title, bb->title);
+    case LIBRARY_SORT_NAME_DESC:
+        return safe_utf8_collate(bb->title, aa->title);
+    case LIBRARY_SORT_YEAR_ASC: {
+        int cmp = (int)aa->year - (int)bb->year;
+        return cmp != 0 ? cmp : safe_utf8_collate(aa->title, bb->title);
+    }
+    case LIBRARY_SORT_YEAR_DESC: {
+        int cmp = (int)bb->year - (int)aa->year;
+        return cmp != 0 ? cmp : safe_utf8_collate(aa->title, bb->title);
+    }
+    case LIBRARY_SORT_ARTIST_ASC: {
+        int cmp = safe_utf8_collate(aa->artist_name, bb->artist_name);
+        return cmp != 0 ? cmp : safe_utf8_collate(aa->title, bb->title);
+    }
+    case LIBRARY_SORT_RECENT:
+        return (bb->album_id > aa->album_id) - (bb->album_id < aa->album_id);
+    default:
+        return 0;
     }
 }
 
@@ -326,30 +350,22 @@ static int album_sort_func(gconstpointer a, gconstpointer b, gpointer user_data)
  * Artist Factory Callbacks
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void artist_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
-    (void)f; (void)data;
+static void
+artist_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
+    (void)f;
+    (void)data;
     GtkWidget *row = ui_create_artist_row_shell();
     gtk_list_item_set_child(li, row);
 }
 
-/**
- * Apply library-row-first / library-row-last classes based on position.
- * Handles both adding AND removing so unbind doesn't need to touch CSS at all.
- * GTK add/remove are no-ops when the class is already present/absent.
- */
-static void sync_section_position_classes(GtkWidget *child, guint position, guint n_items) {
-    if (position == 0)
-        gtk_widget_add_css_class(child, "library-row-first");
-    else
-        gtk_widget_remove_css_class(child, "library-row-first");
+/* Row position styling (first/last in list) is handled in CSS via the
+ * :first-child / :last-child pseudo-classes on the row element — no per-bind
+ * class toggling required. */
 
-    if (position == n_items - 1)
-        gtk_widget_add_css_class(child, "library-row-last");
-    else
-        gtk_widget_remove_css_class(child, "library-row-last");
-}
-
-static void artist_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
+static void
+artist_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
     (void)f;
     ViewData *vd = data;
     QuadArtistItem *item = QUAD_ARTIST_ITEM(gtk_list_item_get_item(li));
@@ -357,21 +373,23 @@ static void artist_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer dat
     UiWindow *w = UI_WINDOW(vd->cbs.user_data);
     uint32_t mask = w ? w->library_mask : LIBRARY_MASK_ALL;
     ui_rebind_artist_row(row, item->info, vd->cache, vd->art_mgr, mask);
-    guint pos = gtk_list_item_get_position(li);
-    guint n = g_list_model_get_n_items(lazy_list_get_filtered_model(vd->lazy_list));
-    sync_section_position_classes(row, pos, n);
 }
 
-static void artist_row_unbind(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
-    (void)f; (void)li; (void)data;
-    /* CSS classes are now managed entirely in bind via sync_section_position_classes */
+static void
+artist_row_unbind(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
+    (void)f;
+    (void)li;
+    (void)data;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Album Factory Callbacks
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void album_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
+static void
+album_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
     (void)f;
     ViewData *vd = data;
     GtkWidget *row = ui_create_album_row_shell();
@@ -379,20 +397,22 @@ static void album_row_setup(GtkListItemFactory *f, GtkListItem *li, gpointer dat
     gtk_list_item_set_child(li, row);
 }
 
-static void album_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
+static void
+album_row_bind(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
     (void)f;
     ViewData *vd = data;
     QuadAlbumItem *item = QUAD_ALBUM_ITEM(gtk_list_item_get_item(li));
     GtkWidget *row = gtk_list_item_get_child(li);
     ui_rebind_album_row(row, item->info, vd->cache, vd->art_mgr, TRUE, &vd->cbs.artist_cbs);
-    guint pos = gtk_list_item_get_position(li);
-    guint n = g_list_model_get_n_items(lazy_list_get_filtered_model(vd->lazy_list));
-    sync_section_position_classes(row, pos, n);
 }
 
-static void album_row_unbind(GtkListItemFactory *f, GtkListItem *li, gpointer data) {
-    (void)f; (void)li; (void)data;
-    /* CSS classes are now managed entirely in bind via sync_section_position_classes */
+static void
+album_row_unbind(GtkListItemFactory *f, GtkListItem *li, gpointer data)
+{
+    (void)f;
+    (void)li;
+    (void)data;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -411,7 +431,9 @@ typedef struct {
     LibraryCallbacks cbs;
 } NavigateIdleData;
 
-static gboolean navigate_idle(gpointer data) {
+static gboolean
+navigate_idle(gpointer data)
+{
     NavigateIdleData *nd = data;
     if (nd->cbs.on_navigate)
         nd->cbs.on_navigate(nd->kind, nd->id, nd->cbs.user_data);
@@ -419,11 +441,14 @@ static gboolean navigate_idle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-static void on_artist_activate(guint position, gpointer data) {
+static void
+on_artist_activate(guint position, gpointer data)
+{
     ViewData *vd = data;
     GListModel *model = lazy_list_get_filtered_model(vd->lazy_list);
     QuadArtistItem *item = QUAD_ARTIST_ITEM(g_list_model_get_item(model, position));
-    if (!item) return;
+    if (!item)
+        return;
 
     NavigateIdleData *nd = g_new0(NavigateIdleData, 1);
     nd->kind = LIBRARY_ITEM_ARTIST;
@@ -434,11 +459,14 @@ static void on_artist_activate(guint position, gpointer data) {
     g_object_unref(item);
 }
 
-static void on_album_activate(guint position, gpointer data) {
+static void
+on_album_activate(guint position, gpointer data)
+{
     ViewData *vd = data;
     GListModel *model = lazy_list_get_filtered_model(vd->lazy_list);
     QuadAlbumItem *item = QUAD_ALBUM_ITEM(g_list_model_get_item(model, position));
-    if (!item) return;
+    if (!item)
+        return;
 
     NavigateIdleData *nd = g_new0(NavigateIdleData, 1);
     nd->kind = LIBRARY_ITEM_ALBUM;
@@ -456,31 +484,42 @@ static void on_album_activate(guint position, gpointer data) {
  * NOT called on filter/sort changes — those invalidate the model wrappers.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static uint32_t view_library_mask(ViewData *vd) {
+static uint32_t
+view_library_mask(ViewData *vd)
+{
     UiWindow *w = UI_WINDOW(vd->cbs.user_data);
     return w ? w->library_mask : LIBRARY_MASK_ALL;
 }
 
 typedef GObject *(*ItemNewFn)(gconstpointer info);
 
-static GObject *artist_item_new_wrap(gconstpointer info) {
+static GObject *
+artist_item_new_wrap(gconstpointer info)
+{
     return G_OBJECT(quad_artist_item_new(info));
 }
-static GObject *album_item_new_wrap(gconstpointer info) {
+static GObject *
+album_item_new_wrap(gconstpointer info)
+{
     return G_OBJECT(quad_album_item_new(info));
 }
 
-typedef GPtrArray *(*CacheQueryFn)(library_cache_t *cache, library_sort_t sort,
-                                    const char *search, const db_search_opts_t *opts,
-                                    uint32_t mask);
+typedef GPtrArray *(*CacheQueryFn)(library_cache_t *cache,
+                                   library_sort_t sort,
+                                   const char *search,
+                                   const db_search_opts_t *opts,
+                                   uint32_t mask);
 
 /** Reload the base store with all items for the current library mask. */
-static void reload_store(ViewData *vd) {
+static void
+reload_store(ViewData *vd)
+{
     GListStore *store = lazy_list_get_store(vd->lazy_list);
     guint old_count = g_list_model_get_n_items(G_LIST_MODEL(store));
 
     if (!vd->cache) {
-        if (old_count > 0) g_list_store_remove_all(store);
+        if (old_count > 0)
+            g_list_store_remove_all(store);
         return;
     }
 
@@ -499,7 +538,8 @@ static void reload_store(ViewData *vd) {
     /* Fetch ALL items (no search, no genre/year filters) */
     GPtrArray *all = query_fn(vd->cache, LIBRARY_SORT_NAME_ASC, NULL, NULL, mask);
     if (!all) {
-        if (old_count > 0) g_list_store_remove_all(store);
+        if (old_count > 0)
+            g_list_store_remove_all(store);
         return;
     }
 
@@ -520,7 +560,9 @@ static void reload_store(ViewData *vd) {
  * the GtkCustomFilter function.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void invalidate_filter(ViewData *vd) {
+static void
+invalidate_filter(ViewData *vd)
+{
     /* Clear previous filter state */
     g_clear_pointer(&vd->filter_match_ids, g_hash_table_unref);
 
@@ -536,7 +578,8 @@ static void invalidate_filter(ViewData *vd) {
         return;
     }
 
-    gboolean metadata_mode = (filter_bar_get_search_mode(&vd->filter_bar) == FILTER_SEARCH_METADATA);
+    gboolean metadata_mode
+        = (filter_bar_get_search_mode(&vd->filter_bar) == FILTER_SEARCH_METADATA);
     const char *credit_text = metadata_mode ? filter_bar_get_search_text(&vd->filter_bar) : NULL;
 
     if (metadata_mode && credit_text) {
@@ -546,15 +589,16 @@ static void invalidate_filter(ViewData *vd) {
 
         const char **genre_arr = NULL;
         size_t genre_count = 0;
-        db_search_opts_t filter_opts = filter_bar_build_search_opts(
-            &vd->filter_bar, &genre_arr, &genre_count);
-        const db_search_opts_t *opts = (genre_count > 0 || filter_opts.year_mask) ? &filter_opts : NULL;
+        db_search_opts_t filter_opts
+            = filter_bar_build_search_opts(&vd->filter_bar, &genre_arr, &genre_count);
+        const db_search_opts_t *opts
+            = (genre_count > 0 || filter_opts.year_mask) ? &filter_opts : NULL;
         uint32_t mask = view_library_mask(vd);
 
         /* Start with all entities (no text filter), optionally narrowed by genre/year */
         CacheQueryFn query_fn = (vd->kind == LIBRARY_ITEM_ARTIST)
-            ? (CacheQueryFn)library_cache_get_artists_filtered
-            : (CacheQueryFn)library_cache_get_albums_filtered;
+                                    ? (CacheQueryFn)library_cache_get_artists_filtered
+                                    : (CacheQueryFn)library_cache_get_albums_filtered;
 
         GPtrArray *filtered = query_fn(vd->cache, LIBRARY_SORT_NAME_ASC, NULL, opts, mask);
 
@@ -563,7 +607,8 @@ static void invalidate_filter(ViewData *vd) {
             for (guint i = 0; i < filtered->len; i++) {
                 int64_t eid;
                 if (vd->kind == LIBRARY_ITEM_ARTIST)
-                    eid = ((const library_artist_info_t *)g_ptr_array_index(filtered, i))->artist_id;
+                    eid = ((const library_artist_info_t *)g_ptr_array_index(filtered, i))
+                              ->artist_id;
                 else
                     eid = ((const library_album_info_t *)g_ptr_array_index(filtered, i))->album_id;
 
@@ -590,8 +635,7 @@ static void invalidate_filter(ViewData *vd) {
         g_free(role_gids);
 
         vd->credit_cancel = g_cancellable_new();
-        GTask *task = g_task_new(NULL, vd->credit_cancel,
-                                  on_credit_entity_search_done, vd);
+        GTask *task = g_task_new(NULL, vd->credit_cancel, on_credit_entity_search_done, vd);
         g_task_set_task_data(task, input, credit_entity_input_free);
         g_task_run_in_thread(task, credit_entity_search_thread);
         g_object_unref(task);
@@ -602,15 +646,16 @@ static void invalidate_filter(ViewData *vd) {
         /* ── Default mode: text search + genre/year filters applied synchronously ── */
 
         CacheQueryFn query_fn = (vd->kind == LIBRARY_ITEM_ARTIST)
-            ? (CacheQueryFn)library_cache_get_artists_filtered
-            : (CacheQueryFn)library_cache_get_albums_filtered;
+                                    ? (CacheQueryFn)library_cache_get_artists_filtered
+                                    : (CacheQueryFn)library_cache_get_albums_filtered;
 
         const char *search_text = filter_bar_get_search_text(&vd->filter_bar);
         const char **genre_arr = NULL;
         size_t genre_count = 0;
-        db_search_opts_t filter_opts = filter_bar_build_search_opts(
-            &vd->filter_bar, &genre_arr, &genre_count);
-        const db_search_opts_t *opts = (genre_count > 0 || filter_opts.year_mask) ? &filter_opts : NULL;
+        db_search_opts_t filter_opts
+            = filter_bar_build_search_opts(&vd->filter_bar, &genre_arr, &genre_count);
+        const db_search_opts_t *opts
+            = (genre_count > 0 || filter_opts.year_mask) ? &filter_opts : NULL;
         uint32_t mask = view_library_mask(vd);
 
         GPtrArray *filtered = query_fn(vd->cache, LIBRARY_SORT_NAME_ASC, search_text, opts, mask);
@@ -620,7 +665,8 @@ static void invalidate_filter(ViewData *vd) {
             for (guint i = 0; i < filtered->len; i++) {
                 int64_t eid;
                 if (vd->kind == LIBRARY_ITEM_ARTIST)
-                    eid = ((const library_artist_info_t *)g_ptr_array_index(filtered, i))->artist_id;
+                    eid = ((const library_artist_info_t *)g_ptr_array_index(filtered, i))
+                              ->artist_id;
                 else
                     eid = ((const library_album_info_t *)g_ptr_array_index(filtered, i))->album_id;
 
@@ -642,56 +688,56 @@ static void invalidate_filter(ViewData *vd) {
  * Subtitle + Scrubber Updates (after filter/sort changes)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void update_subtitle(ViewData *vd) {
-    if (!vd->subtitle) return;
+static void
+update_subtitle(ViewData *vd)
+{
+    if (!vd->subtitle)
+        return;
     const char *noun = (vd->kind == LIBRARY_ITEM_ARTIST) ? "artist" : "album";
     guint total = g_list_model_get_n_items(G_LIST_MODEL(lazy_list_get_store(vd->lazy_list)));
     guint shown = g_list_model_get_n_items(lazy_list_get_filtered_model(vd->lazy_list));
 
     char buf[96];
     if (shown != total)
-        snprintf(buf, sizeof(buf), "%u %s%s (%u shown)",
-                 total, noun, total == 1 ? "" : "s", shown);
+        snprintf(buf, sizeof(buf), "%u %s%s (%u shown)", total, noun, total == 1 ? "" : "s", shown);
     else
-        snprintf(buf, sizeof(buf), "%u %s%s",
-                 total, noun, total == 1 ? "" : "s");
+        snprintf(buf, sizeof(buf), "%u %s%s", total, noun, total == 1 ? "" : "s");
     gtk_label_set_text(GTK_LABEL(vd->subtitle), buf);
 }
 
-static void rebuild_scrubber_buckets(ViewData *vd) {
-    if (!vd->scrubber) return;
+static void
+rebuild_scrubber_buckets(ViewData *vd)
+{
+    if (!vd->scrubber)
+        return;
 
     GListModel *model = lazy_list_get_filtered_model(vd->lazy_list);
     guint n = g_list_model_get_n_items(model);
 
     library_sort_t current_sort = filter_bar_get_sort(&vd->filter_bar);
-    gboolean is_year = (current_sort == LIBRARY_SORT_YEAR_ASC ||
-                        current_sort == LIBRARY_SORT_YEAR_DESC);
-    gboolean show    = (current_sort == LIBRARY_SORT_NAME_ASC  ||
-                        current_sort == LIBRARY_SORT_NAME_DESC  ||
-                        current_sort == LIBRARY_SORT_ARTIST_ASC ||
-                        is_year);
+    gboolean is_year
+        = (current_sort == LIBRARY_SORT_YEAR_ASC || current_sort == LIBRARY_SORT_YEAR_DESC);
+    gboolean show = (current_sort == LIBRARY_SORT_NAME_ASC || current_sort == LIBRARY_SORT_NAME_DESC
+                     || current_sort == LIBRARY_SORT_ARTIST_ASC || is_year);
 
     if (!show || n == 0) {
         quad_scrubber_clear(QUAD_SCRUBBER(vd->scrubber));
         return;
     }
 
-    GPtrArray *buckets = g_ptr_array_new_with_free_func(
-        (GDestroyNotify)scrubber_bucket_free);
+    GPtrArray *buckets = g_ptr_array_new_with_free_func((GDestroyNotify)scrubber_bucket_free);
 
-    char cur_key[16] = {0};
+    char cur_key[16] = { 0 };
 
     for (guint i = 0; i < n; i++) {
         GObject *obj = g_list_model_get_item(model, i);
         char key[16];
 
         if (is_year) {
-            uint16_t year = QUAD_IS_ALBUM_ITEM(obj)
-                            ? QUAD_ALBUM_ITEM(obj)->info->year
-                            : 0;
+            uint16_t year = QUAD_IS_ALBUM_ITEM(obj) ? QUAD_ALBUM_ITEM(obj)->info->year : 0;
             g_snprintf(key, sizeof(key), "%u", year > 0 ? (guint)year : 0u);
-            if (year == 0) g_strlcpy(key, "?", sizeof(key));
+            if (year == 0)
+                g_strlcpy(key, "?", sizeof(key));
         } else {
             const char *name = NULL;
 
@@ -699,8 +745,8 @@ static void rebuild_scrubber_buckets(ViewData *vd) {
                 name = QUAD_ARTIST_ITEM(obj)->info->name;
             } else if (QUAD_IS_ALBUM_ITEM(obj)) {
                 name = (current_sort == LIBRARY_SORT_ARTIST_ASC)
-                       ? QUAD_ALBUM_ITEM(obj)->info->artist_name
-                       : QUAD_ALBUM_ITEM(obj)->info->title;
+                           ? QUAD_ALBUM_ITEM(obj)->info->artist_name
+                           : QUAD_ALBUM_ITEM(obj)->info->title;
             }
 
             if (!name || !name[0]) {
@@ -718,9 +764,9 @@ static void rebuild_scrubber_buckets(ViewData *vd) {
 
         if (g_strcmp0(key, cur_key) != 0) {
             ScrubberBucket *b = g_new0(ScrubberBucket, 1);
-            b->label    = g_strdup(key);
+            b->label = g_strdup(key);
             b->position = i;
-            b->count    = 1;
+            b->count = 1;
             g_ptr_array_add(buckets, b);
             g_strlcpy(cur_key, key, sizeof(cur_key));
         } else {
@@ -739,7 +785,9 @@ static void rebuild_scrubber_buckets(ViewData *vd) {
  * Filter/Sort Change Callback
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void on_filter_changed(gpointer data) {
+static void
+on_filter_changed(gpointer data)
+{
     ViewData *vd = data;
 
     /* Re-compute matching ID set and invalidate the GTK filter */
@@ -757,11 +805,13 @@ static void on_filter_changed(gpointer data) {
  * Main View Constructor
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-GtkWidget *library_view_new(LibraryItemKind kind,
-                             library_cache_t *cache,
-                             ArtworkManager *art_mgr,
-                             const LibraryCallbacks *cbs,
-                             app_settings_t *settings) {
+GtkWidget *
+library_view_new(LibraryItemKind kind,
+                 library_cache_t *cache,
+                 ArtworkManager *art_mgr,
+                 const LibraryCallbacks *cbs,
+                 app_settings_t *settings)
+{
     GtkBuilder *builder = gtk_builder_new_from_resource("/org/quadrature/ui/library_list_view.ui");
     GtkWidget *box = GTK_WIDGET(gtk_builder_get_object(builder, "container"));
     g_object_ref(box);
@@ -771,7 +821,8 @@ GtkWidget *library_view_new(LibraryItemKind kind,
     vd->settings = settings;
     vd->cache = cache;
     vd->art_mgr = art_mgr;
-    if (cbs) vd->cbs = *cbs;
+    if (cbs)
+        vd->cbs = *cbs;
     vd->container = box;
     g_object_set_data_full(G_OBJECT(box), VIEW_DATA_KEY, vd, view_data_free);
 
@@ -781,12 +832,12 @@ GtkWidget *library_view_new(LibraryItemKind kind,
     vd->scroll = GTK_WIDGET(gtk_builder_get_object(builder, "scroll"));
 
     /* Set title */
-    const char *titles[] = {"Artists", "Albums", "Songs"};
+    const char *titles[] = { "Artists", "Albums", "Songs" };
     gtk_label_set_text(GTK_LABEL(title), titles[kind]);
 
     /* Create LazyList with appropriate factory callbacks (before filter setup
      * since filter signal handlers trigger on_filter_changed which needs the list) */
-    LazyListCallbacks ll_cbs = {0};
+    LazyListCallbacks ll_cbs = { 0 };
 
     if (kind == LIBRARY_ITEM_ARTIST) {
         ll_cbs.setup = artist_row_setup;
@@ -805,8 +856,7 @@ GtkWidget *library_view_new(LibraryItemKind kind,
     }
 
     /* ── Set up model pipeline: Sort → Filter ── */
-    GCompareDataFunc sort_fn = (kind == LIBRARY_ITEM_ARTIST)
-        ? artist_sort_func : album_sort_func;
+    GCompareDataFunc sort_fn = (kind == LIBRARY_ITEM_ARTIST) ? artist_sort_func : album_sort_func;
     vd->sorter = gtk_custom_sorter_new(sort_fn, vd, NULL);
     lazy_list_set_sorter(vd->lazy_list, GTK_SORTER(vd->sorter));
 
@@ -847,8 +897,7 @@ GtkWidget *library_view_new(LibraryItemKind kind,
     quad_scrubber_set_list_view(QUAD_SCRUBBER(vd->scrubber),
                                 GTK_LIST_VIEW(lazy_list_get_widget(vd->lazy_list)));
     quad_scrubber_set_vadj(QUAD_SCRUBBER(vd->scrubber),
-                           gtk_scrolled_window_get_vadjustment(
-                               GTK_SCROLLED_WINDOW(vd->scroll)));
+                           gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(vd->scroll)));
     quad_scrubber_set_badge(QUAD_SCRUBBER(vd->scrubber), vd->scrubber_badge);
 
     gtk_box_append(GTK_BOX(vd->container), vd->scrubber_overlay);
@@ -866,9 +915,8 @@ GtkWidget *library_view_new(LibraryItemKind kind,
             sort_count = NUM_ALBUM_SORTS;
         }
 
-        GtkWidget *bar = filter_bar_init(&vd->filter_bar, cache,
-                                          sort_opts, sort_count,
-                                          on_filter_changed, vd);
+        GtkWidget *bar
+            = filter_bar_init(&vd->filter_bar, cache, sort_opts, sort_count, on_filter_changed, vd);
 
         /* Insert filter bar between subtitle and scrubber overlay */
         gtk_box_insert_child_after(GTK_BOX(vd->container), bar, vd->subtitle);
@@ -894,10 +942,13 @@ GtkWidget *library_view_new(LibraryItemKind kind,
  * Refresh
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void library_view_refresh(GtkWidget *view) {
+void
+library_view_refresh(GtkWidget *view)
+{
     g_assert(view != NULL);
     ViewData *vd = g_object_get_data(G_OBJECT(view), VIEW_DATA_KEY);
-    if (!vd) return;
+    if (!vd)
+        return;
 
     /* Rebuild genre popover from (now-warm) cache */
     filter_bar_rebuild_genre_popover(&vd->filter_bar);
@@ -910,13 +961,17 @@ void library_view_refresh(GtkWidget *view) {
     rebuild_scrubber_buckets(vd);
 }
 
-int64_t library_view_get_selected_track_id(GtkWidget *view) {
+int64_t
+library_view_get_selected_track_id(GtkWidget *view)
+{
     g_assert(view != NULL);
     ViewData *vd = g_object_get_data(G_OBJECT(view), VIEW_DATA_KEY);
-    if (!vd) return 0;
+    if (!vd)
+        return 0;
 
     GObject *item = lazy_list_get_selected_item(vd->lazy_list);
-    if (!item) return 0;
+    if (!item)
+        return 0;
 
     if (vd->kind == LIBRARY_ITEM_ALBUM && QUAD_IS_ALBUM_ITEM(item)) {
         QuadAlbumItem *ai = QUAD_ALBUM_ITEM(item);
@@ -926,10 +981,13 @@ int64_t library_view_get_selected_track_id(GtkWidget *view) {
     return 0;
 }
 
-void library_view_clear_filters(GtkWidget *view) {
+void
+library_view_clear_filters(GtkWidget *view)
+{
     g_assert(view != NULL);
     ViewData *vd = g_object_get_data(G_OBJECT(view), VIEW_DATA_KEY);
-    if (!vd) return;
+    if (!vd)
+        return;
 
     filter_bar_clear(&vd->filter_bar);
 }

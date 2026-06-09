@@ -40,15 +40,15 @@ typedef struct library_cache library_cache_t;
  * and can be polled by performance dashboards or logging systems.
  */
 typedef enum {
-    AUDIO_EVENT_BUFFER_UNDERRUN,      /**< Audio buffer couldn't provide requested frames */
-    AUDIO_EVENT_DEQUEUE_FAILURE,      /**< PipeWire couldn't provide output buffer */
-    AUDIO_EVENT_SCRUBBER_UNDERFLOW,   /**< Rubberband couldn't fill requested frames */
-    AUDIO_EVENT_BUDGET_OVERRUN,       /**< Callback exceeded 50% of period budget */
-    AUDIO_EVENT_INSTANT_ADVANCE,      /**< Track advanced with preloaded next track */
-    AUDIO_EVENT_DEFERRED_ADVANCE,     /**< Track advanced without preload (audible gap) */
-    AUDIO_EVENT_PW_XRUN,             /**< PipeWire buffer underrun/overrun detected */
-    AUDIO_EVENT_PW_ERROR,            /**< PipeWire stream entered ERROR state */
-    AUDIO_EVENT_SCHEDULING_DELAY,     /**< Callback arrived >2x period late */
+    AUDIO_EVENT_BUFFER_UNDERRUN,    /**< Audio buffer couldn't provide requested frames */
+    AUDIO_EVENT_DEQUEUE_FAILURE,    /**< PipeWire couldn't provide output buffer */
+    AUDIO_EVENT_SCRUBBER_UNDERFLOW, /**< Rubberband couldn't fill requested frames */
+    AUDIO_EVENT_BUDGET_OVERRUN,     /**< Callback exceeded 50% of period budget */
+    AUDIO_EVENT_INSTANT_ADVANCE,    /**< Track advanced with preloaded next track */
+    AUDIO_EVENT_DEFERRED_ADVANCE,   /**< Track advanced without preload (audible gap) */
+    AUDIO_EVENT_PW_XRUN,            /**< PipeWire buffer underrun/overrun detected */
+    AUDIO_EVENT_PW_ERROR,           /**< PipeWire stream entered ERROR state */
+    AUDIO_EVENT_SCHEDULING_DELAY,   /**< Callback arrived >2x period late */
 } audio_event_type_t;
 
 /**
@@ -56,44 +56,44 @@ typedef enum {
  * Union-based storage for space efficiency.
  */
 typedef struct {
-    uint64_t timestamp_ns;        /**< Monotonic timestamp in nanoseconds (from time_ns()) */
-    audio_event_type_t type;      /**< Event type */
-    int player_id;                /**< Player that generated event (0-3) */
-    int64_t track_id;             /**< Track ID associated with event */
+    uint64_t timestamp_ns;   /**< Monotonic timestamp in nanoseconds (from time_ns()) */
+    audio_event_type_t type; /**< Event type */
+    int player_id;           /**< Player that generated event (0-3) */
+    int64_t track_id;        /**< Track ID associated with event */
 
     /* Context-specific data (union for space efficiency) */
     union {
-        struct {  /* BUFFER_UNDERRUN, SCRUBBER_UNDERFLOW */
+        struct { /* BUFFER_UNDERRUN, SCRUBBER_UNDERFLOW */
             uint32_t requested_frames;
             uint32_t available_frames;
-            uint32_t scrub_fill;  /**< Only for scrubber underflow */
+            uint32_t scrub_fill; /**< Only for scrubber underflow */
             float speed;
         } underrun;
 
-        struct {  /* DEQUEUE_FAILURE */
+        struct { /* DEQUEUE_FAILURE */
             uint32_t queue_size;
         } dequeue;
 
-        struct {  /* BUDGET_OVERRUN */
+        struct { /* BUDGET_OVERRUN */
             uint64_t elapsed_ns;
             uint64_t budget_ns;
         } budget;
 
-        struct {  /* ZONE_TRANSITION, INSTANT_ADVANCE, DEFERRED_ADVANCE */
+        struct { /* ZONE_TRANSITION, INSTANT_ADVANCE, DEFERRED_ADVANCE */
             float speed;
             uint32_t old_queue_size;
             uint32_t new_queue_size;
-            uint32_t scrub_fill;  /**< For deferred advance */
+            uint32_t scrub_fill; /**< For deferred advance */
         } transition;
 
-        struct {  /* PW_XRUN */
+        struct { /* PW_XRUN */
             uint32_t avail_buffers;
             uint32_t queued_buffers;
         } pw_xrun;
 
-        struct {  /* SCHEDULING_DELAY */
-            int64_t deviation_ns;    /**< How late the callback arrived (positive = late) */
-            int64_t expected_ns;     /**< Expected callback period */
+        struct {                  /* SCHEDULING_DELAY */
+            int64_t deviation_ns; /**< How late the callback arrived (positive = late) */
+            int64_t expected_ns;  /**< Expected callback period */
         } scheduling;
     } data;
 } audio_pipeline_event_t;
@@ -109,7 +109,7 @@ typedef struct {
  * @param track_id   New track ID (0 if playback ended)
  * @param user_data  User data from set_track_changed_callback
  */
-typedef void (*audio_track_changed_cb)(int player_id, int64_t track_id, void* user_data);
+typedef void (*audio_track_changed_cb)(int player_id, int64_t track_id, void *user_data);
 
 /* =============================================================================
  * Pipeline Lifecycle
@@ -123,11 +123,10 @@ typedef void (*audio_track_changed_cb)(int player_id, int64_t track_id, void* us
  * @param pipeline     Output pointer to created pipeline
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t audio_pipeline_create(library_cache_t* library,
-                                           uint32_t sample_rate,
-                                           audio_pipeline_t** pipeline);
+quadrature_result_t
+audio_pipeline_create(library_cache_t *library, uint32_t sample_rate, audio_pipeline_t **pipeline);
 
-void audio_pipeline_destroy(audio_pipeline_t* pipeline);
+void audio_pipeline_destroy(audio_pipeline_t *pipeline);
 
 /* =============================================================================
  * Player Control - Track ID Based
@@ -144,9 +143,8 @@ void audio_pipeline_destroy(audio_pipeline_t* pipeline);
  * @param track_id   Track ID to load
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline,
-                                                     int player_id,
-                                                     int64_t track_id);
+quadrature_result_t
+audio_pipeline_set_player_track(audio_pipeline_t *pipeline, int player_id, int64_t track_id);
 
 /**
  * Get current track ID for a player.
@@ -155,7 +153,7 @@ quadrature_result_t audio_pipeline_set_player_track(audio_pipeline_t* pipeline,
  * @param player_id  Player index (0-3)
  * @return Current track ID or 0 if no track loaded
  */
-int64_t audio_pipeline_get_player_track_id(audio_pipeline_t* pipeline, int player_id);
+int64_t audio_pipeline_get_player_track_id(audio_pipeline_t *pipeline, int player_id);
 
 /**
  * Set track changed callback.
@@ -166,18 +164,18 @@ int64_t audio_pipeline_get_player_track_id(audio_pipeline_t* pipeline, int playe
  * @param callback   Callback function (NULL to clear)
  * @param user_data  User data passed to callback
  */
-void audio_pipeline_set_track_changed_callback(audio_pipeline_t* pipeline,
-                                                audio_track_changed_cb callback,
-                                                void* user_data);
-
+void audio_pipeline_set_track_changed_callback(audio_pipeline_t *pipeline,
+                                               audio_track_changed_cb callback,
+                                               void *user_data);
 
 /* =============================================================================
  * Playback Control
  * ============================================================================= */
 
-quadrature_result_t audio_pipeline_player_play(audio_pipeline_t* pipeline, int player_id);
-quadrature_result_t audio_pipeline_player_stop(audio_pipeline_t* pipeline, int player_id);
-quadrature_result_t audio_pipeline_player_seek(audio_pipeline_t* pipeline, int player_id, uint64_t position);
+quadrature_result_t audio_pipeline_player_play(audio_pipeline_t *pipeline, int player_id);
+quadrature_result_t audio_pipeline_player_stop(audio_pipeline_t *pipeline, int player_id);
+quadrature_result_t
+audio_pipeline_player_seek(audio_pipeline_t *pipeline, int player_id, uint64_t position);
 
 /**
  * Seek a player to an absolute position in seconds.
@@ -185,15 +183,15 @@ quadrature_result_t audio_pipeline_player_seek(audio_pipeline_t* pipeline, int p
  *
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t audio_pipeline_player_seek_seconds(audio_pipeline_t* pipeline,
-                                                       int player_id, double seconds);
+quadrature_result_t
+audio_pipeline_player_seek_seconds(audio_pipeline_t *pipeline, int player_id, double seconds);
 
 /**
  * Toggle between play and pause.
  * If playing, pauses. If stopped/paused, plays.
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t audio_pipeline_player_toggle_play(audio_pipeline_t* pipeline, int player_id);
+quadrature_result_t audio_pipeline_player_toggle_play(audio_pipeline_t *pipeline, int player_id);
 
 /* =============================================================================
  * Playback Speed Control
@@ -210,8 +208,8 @@ quadrature_result_t audio_pipeline_player_toggle_play(audio_pipeline_t* pipeline
  * @param speed  Playback speed: -4.0 to +4.0 (1.0 = normal)
  * @return QUADRATURE_OK on success, error if track not cached
  */
-quadrature_result_t audio_pipeline_player_set_speed(audio_pipeline_t* pipeline,
-                                                     int player_id, float speed);
+quadrature_result_t
+audio_pipeline_player_set_speed(audio_pipeline_t *pipeline, int player_id, float speed);
 
 /**
  * Set shuttle mode for a player.
@@ -226,8 +224,9 @@ quadrature_result_t audio_pipeline_player_set_speed(audio_pipeline_t* pipeline,
  * @param mode       Shuttle mode
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t* pipeline,
-                                                           int player_id, shuttle_mode_t mode);
+quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t *pipeline,
+                                                           int player_id,
+                                                           shuttle_mode_t mode);
 
 /* =============================================================================
  * End-of-Track Behavior
@@ -235,17 +234,18 @@ quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t* pip
  * Single enum replaces the old mutually-exclusive repeat/autoplay booleans.
  * ============================================================================= */
 
-quadrature_result_t audio_pipeline_player_set_end_mode(audio_pipeline_t* pipeline,
+quadrature_result_t audio_pipeline_player_set_end_mode(audio_pipeline_t *pipeline,
                                                        int player_id,
                                                        track_end_mode_t mode);
-track_end_mode_t    audio_pipeline_player_get_end_mode(audio_pipeline_t* pipeline,
-                                                       int player_id);
+track_end_mode_t audio_pipeline_player_get_end_mode(audio_pipeline_t *pipeline, int player_id);
 
 /* =============================================================================
  * Device Routing
  * ============================================================================= */
 
-quadrature_result_t audio_pipeline_set_player_device(audio_pipeline_t* pipeline, int player_id, const char* device_name);
+quadrature_result_t audio_pipeline_set_player_device(audio_pipeline_t *pipeline,
+                                                     int player_id,
+                                                     const char *device_name);
 
 /**
  * Set PipeWire exclusive mode for a player.
@@ -256,7 +256,7 @@ quadrature_result_t audio_pipeline_set_player_device(audio_pipeline_t* pipeline,
  * @param player_id  Player index (0-3)
  * @param exclusive  true to enable exclusive mode
  */
-void audio_pipeline_set_player_exclusive(audio_pipeline_t* pipeline, int player_id, bool exclusive);
+void audio_pipeline_set_player_exclusive(audio_pipeline_t *pipeline, int player_id, bool exclusive);
 
 /**
  * Set PipeWire quantum (buffer size) for a player, recreating the stream.
@@ -266,7 +266,9 @@ void audio_pipeline_set_player_exclusive(audio_pipeline_t* pipeline, int player_
  * @param quantum_frames  Buffer size in frames (power-of-2, 32-2048)
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t audio_pipeline_set_player_quantum(audio_pipeline_t* pipeline, int player_id, uint32_t quantum_frames);
+quadrature_result_t audio_pipeline_set_player_quantum(audio_pipeline_t *pipeline,
+                                                      int player_id,
+                                                      uint32_t quantum_frames);
 
 /* =============================================================================
  * Monitoring
@@ -284,9 +286,9 @@ quadrature_result_t audio_pipeline_set_player_quantum(audio_pipeline_t* pipeline
  */
 typedef struct {
     channel_state_t state;
-    double  position_seconds;   /**< Smooth-interpolated position */
-    double  length_seconds;     /**< Track length, 0 if not loaded */
-    float   speed;              /**< Signed playback speed (-4.0..+4.0) */
+    double position_seconds; /**< Smooth-interpolated position */
+    double length_seconds;   /**< Track length, 0 if not loaded */
+    float speed;             /**< Signed playback speed (-4.0..+4.0) */
 } audio_player_display_t;
 
 /**
@@ -295,9 +297,9 @@ typedef struct {
  * Thread-safe; reads atomics and a seqlocked position snapshot. Intended to
  * be called once per UI frame per channel strip.
  */
-void audio_pipeline_get_player_display(audio_pipeline_t* pipeline,
+void audio_pipeline_get_player_display(audio_pipeline_t *pipeline,
                                        int player_id,
-                                       audio_player_display_t* out);
+                                       audio_player_display_t *out);
 
 /* =============================================================================
  * Spectrum Analyzer
@@ -312,8 +314,14 @@ void audio_pipeline_get_player_display(audio_pipeline_t* pipeline,
  * @param right     Output buffer for right channel bar values (0.0-1.0)
  * @param num_bars  Number of bars per channel to retrieve (max 24)
  */
-void audio_pipeline_get_player_spectrum(audio_pipeline_t* pipeline, int player_id,
-                                        float* left, float* right, int num_bars);
+void audio_pipeline_get_player_spectrum(
+    audio_pipeline_t *pipeline, int player_id, float *left, float *right, int num_bars);
+
+/**
+ * Set the target FFT update rate for all players' spectrum analyzers.
+ * Clamped to [30, 165] Hz. Safe to call from any thread.
+ */
+void audio_pipeline_set_spectrum_refresh_hz(audio_pipeline_t *pipeline, double hz);
 
 /* =============================================================================
  * Statistics
@@ -331,14 +339,14 @@ void audio_pipeline_get_player_spectrum(audio_pipeline_t* pipeline, int player_i
  */
 typedef struct {
     /* Callback performance */
-    float callback_time_avg_us;   /**< Average processing time per callback */
-    float callback_time_max_us;   /**< All-time peak processing time */
-    float budget_pct;             /**< Avg processing time as % of period budget */
-    uint64_t budget_overruns;     /**< Callbacks exceeding 50% of period budget */
+    float callback_time_avg_us; /**< Average processing time per callback */
+    float callback_time_max_us; /**< All-time peak processing time */
+    float budget_pct;           /**< Avg processing time as % of period budget */
+    uint64_t budget_overruns;   /**< Callbacks exceeding 50% of period budget */
 
     /* Audio health */
-    float underrun_rate_pct;      /**< Underruns as % of total callbacks (0 = healthy) */
-    float jitter_ms;              /**< Average callback scheduling jitter */
+    float underrun_rate_pct; /**< Underruns as % of total callbacks (0 = healthy) */
+    float jitter_ms;         /**< Average callback scheduling jitter */
 
     /* Fault events (should be 0 in normal operation) */
     uint64_t dequeue_failures;    /**< PipeWire couldn't provide output buffer */
@@ -346,7 +354,7 @@ typedef struct {
     uint64_t deferred_advances;   /**< Track advance with audible gap (preload miss) */
 
     /* Advance quality */
-    float advance_hit_rate_pct;   /**< Preloaded advances as % of total (100 = perfect) */
+    float advance_hit_rate_pct; /**< Preloaded advances as % of total (100 = perfect) */
 } audio_player_stats_t;
 
 /**
@@ -358,9 +366,9 @@ typedef struct {
  * @param player_id  Player index (0-3)
  * @param stats      Output stats
  */
-void audio_pipeline_get_player_stats(audio_pipeline_t* pipeline,
+void audio_pipeline_get_player_stats(audio_pipeline_t *pipeline,
                                      int player_id,
-                                     audio_player_stats_t* stats);
+                                     audio_player_stats_t *stats);
 
 /* =============================================================================
  * Performance Event Polling
@@ -378,9 +386,7 @@ void audio_pipeline_get_player_stats(audio_pipeline_t* pipeline,
  * @param max       Maximum events to read
  * @return          Number of events read (0 to max)
  */
-int audio_pipeline_get_events(audio_pipeline_t* pipeline,
-                               audio_pipeline_event_t* out,
-                               int max);
+int audio_pipeline_get_events(audio_pipeline_t *pipeline, audio_pipeline_event_t *out, int max);
 
 #ifdef __cplusplus
 }

@@ -11,14 +11,6 @@ channel-strip > box {
     padding: 8px;
 }
 
-.channel-strip {
-    border: 3px solid #555555;
-    border-radius: 6px;
-    padding: 4px;
-    background-color: #1e1e1e;
-    min-height: 96px;
-}
-
 /* Preview/PFL state — outline instead of box-shadow (GPU-native, no blur rasterization) */
 channel-strip.channel-strip-preview {
     border-color: #ff9500;

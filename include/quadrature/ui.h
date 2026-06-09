@@ -22,10 +22,10 @@ typedef struct _UiChannelStrip UiChannelStrip;
 
 /* Channel operational modes (broadcast automation states) */
 typedef enum {
-    CHANNEL_MODE_IDLE = 0,       /* Normal operation */
-    CHANNEL_MODE_PREVIEW,        /* PFL (Pre-Fader Listen) active */
-    CHANNEL_MODE_QUEUED,         /* Ready for on-air */
-    CHANNEL_MODE_ON_AIR          /* Live broadcast */
+    CHANNEL_MODE_IDLE = 0, /* Normal operation */
+    CHANNEL_MODE_PREVIEW,  /* PFL (Pre-Fader Listen) active */
+    CHANNEL_MODE_QUEUED,   /* Ready for on-air */
+    CHANNEL_MODE_ON_AIR    /* Live broadcast */
 } ChannelMode;
 
 /* ═══════════════════════════════════════════════════════════════════════════

@@ -40,8 +40,11 @@ typedef struct {
  * Startup Health Checks — early validation before subsystem init
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static void startup_health_check(const app_settings_t *settings) {
-    if (!settings) return;
+static void
+startup_health_check(const app_settings_t *settings)
+{
+    if (!settings)
+        return;
 
     /* 1. Library path accessibility + 2. SQLite quick_check */
     for (int i = 0; i < settings->library_count; i++) {
@@ -49,23 +52,23 @@ static void startup_health_check(const app_settings_t *settings) {
         struct stat st;
 
         if (stat(path, &st) != 0) {
-            g_warning("Startup: library '%s' is not accessible: %s",
-                      path, strerror(errno));
+            g_warning("Startup: library '%s' is not accessible: %s", path, strerror(errno));
             continue;
         }
 
         const char *data_root = app_settings_get_library_data_path(settings, i);
-        g_autofree char *db_path = g_build_filename(data_root,
-                                                     "quadrature.sqlite", NULL);
+        g_autofree char *db_path = g_build_filename(data_root, "quadrature.sqlite", NULL);
 
         if (stat(db_path, &st) != 0)
-            continue;  /* DB doesn't exist yet — first run for this library */
+            continue; /* DB doesn't exist yet — first run for this library */
 
         sqlite3 *db = NULL;
         if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
             g_critical("Startup: cannot open database %s: %s",
-                       db_path, db ? sqlite3_errmsg(db) : "unknown error");
-            if (db) sqlite3_close(db);
+                       db_path,
+                       db ? sqlite3_errmsg(db) : "unknown error");
+            if (db)
+                sqlite3_close(db);
             continue;
         }
 
@@ -100,17 +103,17 @@ static void startup_health_check(const app_settings_t *settings) {
         if (!pg_conninfos[i] || pg_conninfos[i][0] == '\0')
             continue;
 
-        g_autofree char *conninfo = g_strdup_printf(
-            "%s connect_timeout=2", pg_conninfos[i]);
+        g_autofree char *conninfo = g_strdup_printf("%s connect_timeout=2", pg_conninfos[i]);
 
         PGconn *conn = PQconnectdb(conninfo);
         if (PQstatus(conn) != CONNECTION_OK)
             g_warning("Startup: %s PostgreSQL unreachable — "
-                      "MB resolution will be disabled", pg_labels[i]);
+                      "MB resolution will be disabled",
+                      pg_labels[i]);
         PQfinish(conn);
     }
 #else
-    (void)settings;  /* HTTP-only build — no PG check */
+    (void)settings; /* HTTP-only build — no PG check */
 #endif
 }
 
@@ -118,7 +121,9 @@ static void startup_health_check(const app_settings_t *settings) {
  * Signal Handling — graceful shutdown on SIGINT/SIGTERM
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static gboolean on_unix_signal(gpointer user_data) {
+static gboolean
+on_unix_signal(gpointer user_data)
+{
     GApplication *app = G_APPLICATION(user_data);
     g_message("Received signal, shutting down gracefully...");
     g_application_quit(app);
@@ -137,7 +142,9 @@ static gboolean on_unix_signal(gpointer user_data) {
  * On fatal init failure, calls g_application_quit() — on_shutdown still
  * runs to clean up whatever was constructed.
  */
-static void on_startup(GtkApplication *gtkapp, gpointer data) {
+static void
+on_startup(GtkApplication *gtkapp, gpointer data)
+{
     AppData *d = data;
 
     adw_init();
@@ -148,18 +155,18 @@ static void on_startup(GtkApplication *gtkapp, gpointer data) {
     int lib_count = d->settings ? d->settings->library_count : 0;
     library_cache_source_t *sources = NULL;
     char **dbpaths = NULL;
-    char **names   = NULL;
+    char **names = NULL;
 
     if (lib_count > 0) {
         sources = g_new0(library_cache_source_t, lib_count);
         dbpaths = g_new0(char *, lib_count);
-        names   = g_new0(char *, lib_count);
+        names = g_new0(char *, lib_count);
         for (int i = 0; i < lib_count; i++) {
             const char *data_root = app_settings_get_library_data_path(d->settings, i);
             dbpaths[i] = g_build_filename(data_root, "quadrature.sqlite", NULL);
-            names[i]   = app_settings_get_library_name(d->settings, i);
-            sources[i].db_path      = dbpaths[i];
-            sources[i].music_base   = d->settings->libraries[i].path;
+            names[i] = app_settings_get_library_name(d->settings, i);
+            sources[i].db_path = dbpaths[i];
+            sources[i].music_base = d->settings->libraries[i].path;
             sources[i].display_name = names[i];
             sources[i].bitmap_index = d->settings->libraries[i].library_index;
         }
@@ -185,11 +192,14 @@ static void on_startup(GtkApplication *gtkapp, gpointer data) {
     }
 }
 
-static void on_activate(GtkApplication *gtkapp, gpointer data) {
+static void
+on_activate(GtkApplication *gtkapp, gpointer data)
+{
     AppData *d = data;
 
     /* Startup may have aborted before constructing the pipeline. */
-    if (!d->pipeline) return;
+    if (!d->pipeline)
+        return;
 
     /* Ensure widget types are registered */
     g_type_ensure(UI_TYPE_SPECTRUM);
@@ -208,7 +218,9 @@ static void on_activate(GtkApplication *gtkapp, gpointer data) {
  * deregistered its callbacks from pipeline/cache/indexer, so no UI code
  * will touch these resources during or after teardown.
  */
-static void on_shutdown(GtkApplication *gtkapp, gpointer data) {
+static void
+on_shutdown(GtkApplication *gtkapp, gpointer data)
+{
     (void)gtkapp;
     AppData *d = data;
 
@@ -234,17 +246,27 @@ static void on_shutdown(GtkApplication *gtkapp, gpointer data) {
     g_message("Shutdown complete");
 }
 
-static gint on_local_options(GApplication *gapp, GVariantDict *opts, gpointer user_data) {
-    (void)gapp; (void)user_data;
+static gint
+on_local_options(GApplication *gapp, GVariantDict *opts, gpointer user_data)
+{
+    (void)gapp;
+    (void)user_data;
     if (g_variant_dict_contains(opts, "version")) {
         g_print("quadrature %s\n", QUADRATURE_VERSION);
-        return 0;  /* exit success — startup never fires */
+        return 0; /* exit success — startup never fires */
     }
-    return -1;  /* continue to startup */
+    return -1; /* continue to startup */
 }
 
-int main(int argc, char *argv[]) {
-    AppData data = {0};
+int
+main(int argc, char *argv[])
+{
+    AppData data = { 0 };
+
+    /* Force GTK4's Vulkan renderer — fastest GSK backend on modern GPUs and
+     * skips the GL probe at startup. FALSE = don't override an explicit
+     * GSK_RENDERER from the environment (use `GSK_RENDERER=gl` to fall back). */
+    g_setenv("GSK_RENDERER", "vulkan", FALSE);
 
     data.app = gtk_application_new("org.quadrature.player", G_APPLICATION_NON_UNIQUE);
 
@@ -255,13 +277,13 @@ int main(int argc, char *argv[]) {
     g_application_add_main_option_entries(G_APPLICATION(data.app), option_entries);
 
     g_signal_connect(data.app, "handle-local-options", G_CALLBACK(on_local_options), &data);
-    g_signal_connect(data.app, "startup",  G_CALLBACK(on_startup),  &data);
+    g_signal_connect(data.app, "startup", G_CALLBACK(on_startup), &data);
     g_signal_connect(data.app, "activate", G_CALLBACK(on_activate), &data);
     g_signal_connect(data.app, "shutdown", G_CALLBACK(on_shutdown), &data);
 
     /* Install signal handlers so Ctrl+C triggers orderly shutdown
      * instead of immediate process termination */
-    g_unix_signal_add(SIGINT,  on_unix_signal, data.app);
+    g_unix_signal_add(SIGINT, on_unix_signal, data.app);
     g_unix_signal_add(SIGTERM, on_unix_signal, data.app);
 
     int status = g_application_run(G_APPLICATION(data.app), argc, argv);
