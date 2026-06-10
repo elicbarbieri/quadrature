@@ -24,10 +24,8 @@ device_list_add(audio_device_list_t *list, const audio_device_t *device)
 {
     if (list->count >= list->capacity) {
         int new_cap = list->capacity == 0 ? 8 : list->capacity * 2;
-        audio_device_t *new_devices = g_realloc(list->devices, new_cap * sizeof(audio_device_t));
-        if (!new_devices)
-            return;
-        list->devices = new_devices;
+        /* g_realloc aborts on OOM — no NULL return to guard against. */
+        list->devices = g_realloc(list->devices, new_cap * sizeof(audio_device_t));
         list->capacity = new_cap;
     }
     list->devices[list->count++] = *device;

@@ -212,9 +212,9 @@ All audio callback code is lock-free. Use atomics for UI-to-audio thread communi
 ### Key Source Files
 | File | Purpose |
 |------|---------|
-| `src/audio/audio_pipeline.c` | Core playback engine, metering |
+| `src/audio/pipeline.c` | Core playback engine, metering |
 | `src/audio/audio_ringbuf.c` | Lock-free SPSC ring buffer |
-| `src/audio/audio_spectrum.c` | FFT spectrum analysis thread |
+| `src/audio/spectrum.c` | FFT spectrum analysis thread |
 | `src/ui/channel_strip.c` | Per-channel UI widget |
 | `src/ui/level_meter.c` | Peak/RMS meter widget |
 | `src/ui/spectrum_display.c` | Frequency bar display |

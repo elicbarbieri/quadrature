@@ -40,60 +40,45 @@ typedef struct library_cache library_cache_t;
  * and can be polled by performance dashboards or logging systems.
  */
 typedef enum {
-    AUDIO_EVENT_BUFFER_UNDERRUN,    /**< Audio buffer couldn't provide requested frames */
-    AUDIO_EVENT_DEQUEUE_FAILURE,    /**< PipeWire couldn't provide output buffer */
-    AUDIO_EVENT_SCRUBBER_UNDERFLOW, /**< Rubberband couldn't fill requested frames */
-    AUDIO_EVENT_BUDGET_OVERRUN,     /**< Callback exceeded 50% of period budget */
-    AUDIO_EVENT_INSTANT_ADVANCE,    /**< Track advanced with preloaded next track */
-    AUDIO_EVENT_DEFERRED_ADVANCE,   /**< Track advanced without preload (audible gap) */
-    AUDIO_EVENT_PW_XRUN,            /**< PipeWire buffer underrun/overrun detected */
-    AUDIO_EVENT_PW_ERROR,           /**< PipeWire stream entered ERROR state */
-    AUDIO_EVENT_SCHEDULING_DELAY,   /**< Callback arrived >2x period late */
+    AUDIO_EVENT_BUFFER_UNDERRUN,         /**< Audio buffer couldn't provide requested frames */
+    AUDIO_EVENT_DEQUEUE_FAILURE,         /**< PipeWire couldn't provide output buffer */
+    AUDIO_EVENT_SHUTTLE_SPEED_UNDERFLOW, /**< Rubberband couldn't fill requested frames */
+    AUDIO_EVENT_BUDGET_OVERRUN,          /**< Callback exceeded 50% of period budget */
+    AUDIO_EVENT_INSTANT_ADVANCE,         /**< Track advanced with preloaded next track */
+    AUDIO_EVENT_DEFERRED_ADVANCE,        /**< Track advanced without preload (audible gap) */
+    AUDIO_EVENT_PW_XRUN,                 /**< PipeWire buffer underrun/overrun detected */
+    AUDIO_EVENT_PW_ERROR,                /**< PipeWire stream entered ERROR state */
+    AUDIO_EVENT_SCHEDULING_DELAY,        /**< Callback arrived >2x period late */
 } audio_event_type_t;
 
 /**
  * Performance event recorded by audio pipeline.
- * Union-based storage for space efficiency.
+ *
+ * Context fields are only present for the event types that need them — others
+ * (DEQUEUE_FAILURE, INSTANT/DEFERRED_ADVANCE, PW_XRUN, PW_ERROR) carry only
+ * the common header (timestamp, type, player_id, track_id).
  */
 typedef struct {
-    uint64_t timestamp_ns;   /**< Monotonic timestamp in nanoseconds (from time_ns()) */
-    audio_event_type_t type; /**< Event type */
-    int player_id;           /**< Player that generated event (0-3) */
-    int64_t track_id;        /**< Track ID associated with event */
+    uint64_t timestamp_ns;
+    audio_event_type_t type;
+    int player_id;
+    int64_t track_id;
 
-    /* Context-specific data (union for space efficiency) */
     union {
-        struct { /* BUFFER_UNDERRUN, SCRUBBER_UNDERFLOW */
+        struct { /* BUFFER_UNDERRUN, SHUTTLE_SPEED_UNDERFLOW */
             uint32_t requested_frames;
             uint32_t available_frames;
-            uint32_t scrub_fill; /**< Only for scrubber underflow */
             float speed;
         } underrun;
-
-        struct { /* DEQUEUE_FAILURE */
-            uint32_t queue_size;
-        } dequeue;
 
         struct { /* BUDGET_OVERRUN */
             uint64_t elapsed_ns;
             uint64_t budget_ns;
         } budget;
 
-        struct { /* ZONE_TRANSITION, INSTANT_ADVANCE, DEFERRED_ADVANCE */
-            float speed;
-            uint32_t old_queue_size;
-            uint32_t new_queue_size;
-            uint32_t scrub_fill; /**< For deferred advance */
-        } transition;
-
-        struct { /* PW_XRUN */
-            uint32_t avail_buffers;
-            uint32_t queued_buffers;
-        } pw_xrun;
-
-        struct {                  /* SCHEDULING_DELAY */
-            int64_t deviation_ns; /**< How late the callback arrived (positive = late) */
-            int64_t expected_ns;  /**< Expected callback period */
+        struct { /* SCHEDULING_DELAY */
+            int64_t deviation_ns;
+            int64_t expected_ns;
         } scheduling;
     } data;
 } audio_pipeline_event_t;
@@ -111,6 +96,17 @@ typedef struct {
  */
 typedef void (*audio_track_changed_cb)(int player_id, int64_t track_id, void *user_data);
 
+/**
+ * Callback invoked when a track cannot be decoded (corrupt/unsupported file or
+ * unreachable source). The pipeline has already released the track; the handler
+ * is expected to inform the user and advance past it.
+ *
+ * @param player_id  Player whose track failed
+ * @param track_id   Track ID that failed to decode
+ * @param user_data  User data from set_track_failed_callback
+ */
+typedef void (*audio_track_failed_cb)(int player_id, int64_t track_id, void *user_data);
+
 /* =============================================================================
  * Pipeline Lifecycle
  * ============================================================================= */
@@ -120,11 +116,18 @@ typedef void (*audio_track_changed_cb)(int player_id, int64_t track_id, void *us
  *
  * @param library      Library cache for track_id -> path resolution
  * @param sample_rate  Output sample rate
+ * @param channels     Output channel count (1=mono, 2=stereo, 6=5.1, 8=7.1,
+ *                     12=7.1.4). Must be 1..16. This is the canonical wire
+ *                     format: the decoder down/upmixes every source to it, and
+ *                     all players and cached buffers inherit it.
  * @param pipeline     Output pointer to created pipeline
- * @return QUADRATURE_OK on success
+ * @return QUADRATURE_OK on success, QUADRATURE_ERROR_INVALID_PARAM if channels
+ *         is out of range
  */
-quadrature_result_t
-audio_pipeline_create(library_cache_t *library, uint32_t sample_rate, audio_pipeline_t **pipeline);
+quadrature_result_t audio_pipeline_create(library_cache_t *library,
+                                          uint32_t sample_rate,
+                                          uint32_t channels,
+                                          audio_pipeline_t **pipeline);
 
 void audio_pipeline_destroy(audio_pipeline_t *pipeline);
 
@@ -168,23 +171,29 @@ void audio_pipeline_set_track_changed_callback(audio_pipeline_t *pipeline,
                                                audio_track_changed_cb callback,
                                                void *user_data);
 
+/**
+ * Set track decode-failure callback.
+ *
+ * Called when a track's decode fails, so the UI can surface the error and
+ * skip to the next track.
+ *
+ * @param pipeline   Pipeline instance
+ * @param callback   Callback function (NULL to clear)
+ * @param user_data  User data passed to callback
+ */
+void audio_pipeline_set_track_failed_callback(audio_pipeline_t *pipeline,
+                                              audio_track_failed_cb callback,
+                                              void *user_data);
+
 /* =============================================================================
  * Playback Control
  * ============================================================================= */
 
 quadrature_result_t audio_pipeline_player_play(audio_pipeline_t *pipeline, int player_id);
 quadrature_result_t audio_pipeline_player_stop(audio_pipeline_t *pipeline, int player_id);
-quadrature_result_t
-audio_pipeline_player_seek(audio_pipeline_t *pipeline, int player_id, uint64_t position);
 
-/**
- * Seek a player to an absolute position in seconds.
- * Clamps to [0, length_seconds).
- *
- * @return QUADRATURE_OK on success
- */
 quadrature_result_t
-audio_pipeline_player_seek_seconds(audio_pipeline_t *pipeline, int player_id, double seconds);
+audio_pipeline_player_seek(audio_pipeline_t *pipeline, int player_id, double seconds);
 
 /**
  * Toggle between play and pause.
@@ -209,7 +218,7 @@ quadrature_result_t audio_pipeline_player_toggle_play(audio_pipeline_t *pipeline
  * @return QUADRATURE_OK on success, error if track not cached
  */
 quadrature_result_t
-audio_pipeline_player_set_speed(audio_pipeline_t *pipeline, int player_id, float speed);
+audio_pipeline_set_player_speed(audio_pipeline_t *pipeline, int player_id, float speed);
 
 /**
  * Set shuttle mode for a player.
@@ -224,7 +233,7 @@ audio_pipeline_player_set_speed(audio_pipeline_t *pipeline, int player_id, float
  * @param mode       Shuttle mode
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t *pipeline,
+quadrature_result_t audio_pipeline_set_player_shuttle_mode(audio_pipeline_t *pipeline,
                                                            int player_id,
                                                            shuttle_mode_t mode);
 
@@ -234,10 +243,10 @@ quadrature_result_t audio_pipeline_player_set_shuttle_mode(audio_pipeline_t *pip
  * Single enum replaces the old mutually-exclusive repeat/autoplay booleans.
  * ============================================================================= */
 
-quadrature_result_t audio_pipeline_player_set_end_mode(audio_pipeline_t *pipeline,
+quadrature_result_t audio_pipeline_set_player_end_mode(audio_pipeline_t *pipeline,
                                                        int player_id,
                                                        track_end_mode_t mode);
-track_end_mode_t audio_pipeline_player_get_end_mode(audio_pipeline_t *pipeline, int player_id);
+track_end_mode_t audio_pipeline_get_player_end_mode(audio_pipeline_t *pipeline, int player_id);
 
 /* =============================================================================
  * Device Routing
@@ -346,12 +355,11 @@ typedef struct {
 
     /* Audio health */
     float underrun_rate_pct; /**< Underruns as % of total callbacks (0 = healthy) */
-    float jitter_ms;         /**< Average callback scheduling jitter */
 
     /* Fault events (should be 0 in normal operation) */
-    uint64_t dequeue_failures;    /**< PipeWire couldn't provide output buffer */
-    uint64_t scrubber_underflows; /**< Rubberband couldn't fill requested frames */
-    uint64_t deferred_advances;   /**< Track advance with audible gap (preload miss) */
+    uint64_t dequeue_failures;         /**< PipeWire couldn't provide output buffer */
+    uint64_t shuttle_speed_underflows; /**< Rubberband couldn't fill requested frames */
+    uint64_t deferred_advances;        /**< Track advance with audible gap (preload miss) */
 
     /* Advance quality */
     float advance_hit_rate_pct; /**< Preloaded advances as % of total (100 = perfect) */

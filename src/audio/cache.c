@@ -30,9 +30,9 @@ typedef struct {
 struct audio_buffer {
     int64_t track_id; /* Primary key */
     char *path;       /* Resolved path for decode */
-    float *samples;   /* Interleaved stereo float samples */
+    float *samples;   /* Interleaved float samples; layout = `format` */
     uint64_t num_frames;
-    uint32_t sample_rate;
+    audio_format_t format; /* Sample rate + channel count of `samples` */
     size_t memory_bytes;
     int64_t last_access_us; /* Monotonic timestamp of last use */
 
@@ -42,21 +42,21 @@ struct audio_buffer {
     atomic_bool decode_cancelled;
     atomic_bool decode_failed;
 
-    /* Per-track loudness envelope (computed during decode) */
-    float loudness[LOUDNESS_BINS];
-    atomic_bool loudness_ready;
+    /* Per-track waveform_rms envelope (computed during decode) */
+    float waveform_rms[WAVEFORM_RMS_BINS];
+    atomic_bool waveform_rms_ready;
 
     /* Internal (do not access directly) */
     void *_lru_link;
 };
 
 struct audio_cache {
-    GHashTable *buffers; /* int64_t* track_id -> audio_buffer_t* */
+    GHashTable *buffers; /* track_id (GSIZE_TO_POINTER) -> audio_buffer_t* */
     GQueue lru;
     GMutex lock;
 
     library_cache_t *library; /* For track_id -> path resolution */
-    uint32_t sample_rate;
+    audio_format_t format;    /* Format all decoded buffers conform to */
     size_t memory_used;
     size_t memory_limit;
 
@@ -76,42 +76,28 @@ struct audio_cache {
     guint sweep_timer_id;
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Hash Table Key Helpers
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-static int64_t *
-make_track_id_key(int64_t track_id)
-{
-    int64_t *key = g_new(int64_t, 1);
-    *key = track_id;
-    return key;
-}
-
-static void
-free_track_id_key(gpointer key)
-{
-    g_free(key);
-}
+/* Both hash tables key on track_id stored directly in the pointer slot via
+ * GSIZE_TO_POINTER (track_ids are positive sqlite rowids; 64-bit-target only),
+ * so there is no separate key allocation and no key-destroy function. */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Buffer Management
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static audio_buffer_t *
-buffer_new(int64_t track_id, const char *path, uint32_t sample_rate)
+buffer_new(int64_t track_id, const char *path, audio_format_t format)
 {
     audio_buffer_t *b = g_new0(audio_buffer_t, 1);
     b->track_id = track_id;
     b->path = g_strdup(path);
-    b->sample_rate = sample_rate;
+    b->format = format;
 
     atomic_store(&b->lock_count, 0);
     atomic_store(&b->decode_complete, false);
     atomic_store(&b->decode_cancelled, false);
     atomic_store(&b->decode_failed, false);
-    memset(b->loudness, 0, sizeof(b->loudness));
-    atomic_store(&b->loudness_ready, false);
+    memset(b->waveform_rms, 0, sizeof(b->waveform_rms));
+    atomic_store(&b->waveform_rms_ready, false);
 
     return b;
 }
@@ -141,6 +127,19 @@ touch_buffer(audio_cache_t *cache, audio_buffer_t *buffer)
     }
 }
 
+/*
+ * A buffer is "in use" — and thus must not be reclaimed — while it is locked or
+ * while its decode is still in flight. A failed decode leaves a zero-byte
+ * tombstone (decode_failed, !decode_complete) that IS reclaimable once unlocked:
+ * it exists only so callers can observe AUDIO_CACHE_FAILED.
+ */
+static inline bool
+buffer_in_use(const audio_buffer_t *b)
+{
+    return atomic_load(&b->lock_count) > 0
+           || (!atomic_load(&b->decode_complete) && !atomic_load(&b->decode_failed));
+}
+
 static void
 evict_lru(audio_cache_t *cache)
 {
@@ -157,7 +156,7 @@ evict_lru(audio_cache_t *cache)
         scanned++;
 
         /* Skip locked or still-decoding buffers in place */
-        if (atomic_load(&buffer->lock_count) > 0 || !atomic_load(&buffer->decode_complete)) {
+        if (buffer_in_use(buffer)) {
             cursor = prev;
             continue;
         }
@@ -169,7 +168,7 @@ evict_lru(audio_cache_t *cache)
                 buffer->track_id,
                 buffer->memory_bytes / (1024.0 * 1024.0));
 
-        g_hash_table_remove(cache->buffers, &buffer->track_id);
+        g_hash_table_remove(cache->buffers, GSIZE_TO_POINTER(buffer->track_id));
         g_queue_delete_link(&cache->lru, cursor);
         buffer_free(buffer);
 
@@ -193,14 +192,16 @@ decode_worker(gpointer data, gpointer user_data)
         "audio_cache: decoding track %" G_GINT64_FORMAT " (%s)", buffer->track_id, buffer->path);
 
     ffmpeg_decoder_t dec;
-    quadrature_result_t r = ffmpeg_decoder_open(&dec, buffer->path, buffer->sample_rate);
+    quadrature_result_t r = ffmpeg_decoder_open(
+        &dec, buffer->path, buffer->format.sample_rate, buffer->format.channels);
     if (r != QUADRATURE_OK) {
         g_critical("audio_cache: cannot open %s", buffer->path);
         atomic_store(&buffer->decode_failed, true);
         goto cleanup;
     }
 
-    uint64_t total_frames = ffmpeg_decoder_duration(&dec);
+    ffmpeg_decoder_metadata_t meta = ffmpeg_decoder_metadata(&dec);
+    uint64_t total_frames = meta.duration_frames;
     if (total_frames == 0) {
         g_critical("audio_cache: cannot determine duration for %s", buffer->path);
         ffmpeg_decoder_close(&dec);
@@ -209,8 +210,10 @@ decode_worker(gpointer data, gpointer user_data)
     }
 
     /* Add 10% buffer for resampler flush */
+    const size_t bpf = audio_format_bytes_per_frame(&buffer->format);
+    const size_t spf = audio_format_samples_per_frame(&buffer->format);
     size_t buffer_frames = total_frames + total_frames / 10;
-    size_t buffer_size = buffer_frames * 2 * sizeof(float);
+    size_t buffer_size = buffer_frames * bpf;
 
     buffer->samples = g_malloc(buffer_size);
     buffer->memory_bytes = buffer_size;
@@ -218,15 +221,16 @@ decode_worker(gpointer data, gpointer user_data)
     /* Decode loop — accumulates per-bin RMS energy for waveform display.
      * RMS reveals energy density (vs peak which saturates on compressed audio). */
     uint64_t decoded = 0;
-    double bin_energy[LOUDNESS_BINS]; /* sum of squares — double to avoid float precision loss */
-    int bin_counts[LOUDNESS_BINS];    /* sample count per bin */
+    double
+        bin_energy[WAVEFORM_RMS_BINS]; /* sum of squares — double to avoid float precision loss */
+    int bin_counts[WAVEFORM_RMS_BINS]; /* sample count per bin */
     memset(bin_energy, 0, sizeof(bin_energy));
     memset(bin_counts, 0, sizeof(bin_counts));
 
     /* Pre-compute bin boundaries — monotonic scan replaces per-sample division */
-    uint64_t bin_edges[LOUDNESS_BINS + 1];
-    for (int b = 0; b <= LOUDNESS_BINS; b++)
-        bin_edges[b] = (uint64_t)b * total_frames / LOUDNESS_BINS;
+    uint64_t bin_edges[WAVEFORM_RMS_BINS + 1];
+    for (int b = 0; b <= WAVEFORM_RMS_BINS; b++)
+        bin_edges[b] = (uint64_t)b * total_frames / WAVEFORM_RMS_BINS;
     int cur_bin = 0;
 
     while (!atomic_load(&buffer->decode_cancelled)) {
@@ -237,7 +241,7 @@ decode_worker(gpointer data, gpointer user_data)
         if (chunk_size == 0)
             break;
 
-        float *out_ptr = buffer->samples + decoded * 2;
+        float *out_ptr = buffer->samples + decoded * spf;
         int frames_read = ffmpeg_decoder_read(&dec, out_ptr, chunk_size);
 
         if (frames_read < 0) {
@@ -252,15 +256,20 @@ decode_worker(gpointer data, gpointer user_data)
         }
 
         /* Accumulate RMS energy per bin.  cur_bin advances monotonically
-         * (amortized O(1) per sample), no per-sample division. */
+         * (amortized O(1) per sample), no per-sample division.
+         * Loudness is per-frame peak across all channels — generalizes from
+         * stereo to any channel count without changing waveform semantics. */
         for (int i = 0; i < frames_read; i++) {
             uint64_t abs_frame = decoded + (uint64_t)i;
-            while (cur_bin < LOUDNESS_BINS - 1 && abs_frame >= bin_edges[cur_bin + 1])
+            while (cur_bin < WAVEFORM_RMS_BINS - 1 && abs_frame >= bin_edges[cur_bin + 1])
                 cur_bin++;
-            float L = out_ptr[i * 2];
-            float R = out_ptr[i * 2 + 1];
-            float sample = fmaxf(fabsf(L), fabsf(R));
-            bin_energy[cur_bin] += (double)(sample * sample);
+            float peak = 0.0f;
+            for (size_t c = 0; c < spf; c++) {
+                float s = fabsf(out_ptr[i * spf + c]);
+                if (s > peak)
+                    peak = s;
+            }
+            bin_energy[cur_bin] += (double)(peak * peak);
             bin_counts[cur_bin] += 1;
         }
 
@@ -281,25 +290,25 @@ decode_worker(gpointer data, gpointer user_data)
 
     /* Compute RMS per bin, then normalize to 0.0–1.0 relative to max RMS */
     {
-        float bin_rms[LOUDNESS_BINS];
-        for (int i = 0; i < LOUDNESS_BINS; i++) {
+        float bin_rms[WAVEFORM_RMS_BINS];
+        for (int i = 0; i < WAVEFORM_RMS_BINS; i++) {
             bin_rms[i] = (bin_counts[i] > 0) ? sqrtf((float)(bin_energy[i] / bin_counts[i])) : 0.0f;
         }
         float max_rms = 0.0f;
-        for (int i = 0; i < LOUDNESS_BINS; i++) {
+        for (int i = 0; i < WAVEFORM_RMS_BINS; i++) {
             if (bin_rms[i] > max_rms)
                 max_rms = bin_rms[i];
         }
         if (max_rms > 0.0f) {
             float inv = 1.0f / max_rms;
-            for (int i = 0; i < LOUDNESS_BINS; i++)
-                buffer->loudness[i] = bin_rms[i] * inv;
+            for (int i = 0; i < WAVEFORM_RMS_BINS; i++)
+                buffer->waveform_rms[i] = bin_rms[i] * inv;
         }
-        atomic_store(&buffer->loudness_ready, true);
+        atomic_store(&buffer->waveform_rms_ready, true);
     }
 
     buffer->num_frames = decoded;
-    buffer->memory_bytes = decoded * 2 * sizeof(float);
+    buffer->memory_bytes = decoded * bpf;
     buffer->last_access_us = g_get_monotonic_time();
     atomic_store(&buffer->decode_complete, true);
 
@@ -326,21 +335,10 @@ decode_worker(gpointer data, gpointer user_data)
         }
 
         /* Calculate audio duration from decoded frames */
-        event->audio_duration_ms = (uint32_t)((decoded * 1000) / buffer->sample_rate);
+        event->audio_duration_ms = (uint32_t)((decoded * 1000) / buffer->format.sample_rate);
 
-        /* Extract file extension */
-        const char *dot = strrchr(buffer->path, '.');
-        if (dot && dot[1]) {
-            g_strlcpy(event->filetype, dot + 1, sizeof(event->filetype));
-            event->filetype[sizeof(event->filetype) - 1] = '\0';
-            /* Lowercase the extension */
-            for (char *p = event->filetype; *p; p++) {
-                if (*p >= 'A' && *p <= 'Z')
-                    *p += 32;
-            }
-        } else {
-            event->filetype[0] = '\0';
-        }
+        /* Codec from ffmpeg (already lowercase, ground truth — not the path) */
+        g_strlcpy(event->codec, meta.codec_name, sizeof(event->codec));
 
         /* Advance ring buffer */
         atomic_store(&cache->event_head, (head + 1) % AUDIO_CACHE_MAX_DECODE_EVENTS);
@@ -365,15 +363,19 @@ cleanup:
         evict_lru(cache);
         g_mutex_unlock(&cache->lock);
     } else {
+        /* Decode failed (or was cancelled) — leave a zero-byte tombstone in the
+         * cache so callers observe AUDIO_CACHE_FAILED instead of crashing on a
+         * vanished buffer. Freeing it here would race lock()/get_locked() and
+         * (use-after-)free a buffer a caller may already hold a lock on. The
+         * tombstone is reclaimed by normal eviction/TTL-sweep once unlocked. */
         g_mutex_lock(&cache->lock);
-        GList *link = buffer->_lru_link;
-        if (link) {
-            g_queue_delete_link(&cache->lru, link);
-        }
-        g_hash_table_remove(cache->buffers, &buffer->track_id);
+        g_free(buffer->samples);
+        buffer->samples = NULL;
+        buffer->num_frames = 0;
+        buffer->memory_bytes = 0;
+        buffer->last_access_us = g_get_monotonic_time();
+        atomic_store(&buffer->decode_failed, true);
         g_mutex_unlock(&cache->lock);
-        buffer_free(buffer);
-        buffer = NULL;
     }
 
     g_free(task);
@@ -402,16 +404,23 @@ audio_buffer_get_num_frames(const audio_buffer_t *buf)
     return buf ? buf->num_frames : 0;
 }
 
-const float *
-audio_buffer_get_loudness(const audio_buffer_t *buf)
+audio_format_t
+audio_buffer_get_format(const audio_buffer_t *buf)
 {
-    return (buf && atomic_load(&buf->loudness_ready)) ? buf->loudness : NULL;
+    g_assert(buf != NULL);
+    return buf->format;
+}
+
+const float *
+audio_buffer_get_waveform_rms(const audio_buffer_t *buf)
+{
+    return (buf && atomic_load(&buf->waveform_rms_ready)) ? buf->waveform_rms : NULL;
 }
 
 bool
-audio_buffer_is_loudness_ready(const audio_buffer_t *buf)
+audio_buffer_is_waveform_rms_ready(const audio_buffer_t *buf)
 {
-    return buf ? atomic_load(&buf->loudness_ready) : false;
+    return buf ? atomic_load(&buf->waveform_rms_ready) : false;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -434,7 +443,7 @@ sweep_timer_cb(gpointer data)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 quadrature_result_t
-audio_cache_create(library_cache_t *library, uint32_t sample_rate, audio_cache_t **out)
+audio_cache_create(library_cache_t *library, audio_format_t format, audio_cache_t **out)
 {
     if (!out)
         return QUADRATURE_ERROR_INVALID_PARAM;
@@ -444,32 +453,25 @@ audio_cache_create(library_cache_t *library, uint32_t sample_rate, audio_cache_t
     g_mutex_init(&cache->event_lock);
 
     cache->library = library; /* May be NULL for testing */
-    cache->sample_rate = sample_rate;
+    cache->format = format;
     cache->memory_limit = AUDIO_CACHE_DEFAULT_MEMORY_LIMIT;
     cache->memory_used = 0;
     cache->unlock_delay_ms
-        = audio_cache_compute_unlock_delay(APP_SETTINGS_DEFAULT_QUANTUM, sample_rate);
+        = audio_cache_compute_unlock_delay(APP_SETTINGS_DEFAULT_QUANTUM, format.sample_rate);
 
     /* Initialize decode events ring buffer */
     memset(cache->decode_events, 0, sizeof(cache->decode_events));
     atomic_store(&cache->event_head, 0);
     atomic_store(&cache->event_count, 0);
 
-    /* Use int64 hash/equal for track_id-based lookup */
-    cache->buffers = g_hash_table_new_full(g_int64_hash,
-                                           g_int64_equal,
-                                           free_track_id_key, /* key is separate allocation */
-                                           NULL               /* value freed manually */
-    );
+    /* track_id stored directly in the key pointer (GSIZE_TO_POINTER) — no key
+     * allocation, so direct hash/equal and a NULL key-destroy. */
+    cache->buffers = g_hash_table_new(g_direct_hash, g_direct_equal); /* value freed manually */
 
     g_queue_init(&cache->lru);
 
-    /* Delayed unlock tracking */
-    cache->pending_unlocks = g_hash_table_new_full(g_int64_hash,
-                                                   g_int64_equal,
-                                                   free_track_id_key,
-                                                   NULL /* GSource IDs stored as GINT_TO_POINTER */
-    );
+    /* Delayed unlock tracking (value = GSource ID via GUINT_TO_POINTER) */
+    cache->pending_unlocks = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     GError *error = NULL;
     cache->decode_pool
@@ -565,11 +567,20 @@ audio_cache_load(audio_cache_t *cache, int64_t track_id)
         return QUADRATURE_ERROR_INVALID_PARAM;
 
     g_mutex_lock(&cache->lock);
-    audio_buffer_t *existing = g_hash_table_lookup(cache->buffers, &track_id);
+    audio_buffer_t *existing = g_hash_table_lookup(cache->buffers, GSIZE_TO_POINTER(track_id));
     if (existing) {
-        touch_buffer(cache, existing);
-        g_mutex_unlock(&cache->lock);
-        return QUADRATURE_OK;
+        /* A failed tombstone left by a prior attempt blocks a fresh decode.
+         * Drop it (when unlocked) and fall through to re-decode so the caller
+         * gets a real retry; a locked one is still being observed, leave it. */
+        if (atomic_load(&existing->decode_failed) && atomic_load(&existing->lock_count) == 0) {
+            g_queue_delete_link(&cache->lru, existing->_lru_link);
+            g_hash_table_remove(cache->buffers, GSIZE_TO_POINTER(track_id));
+            buffer_free(existing);
+        } else {
+            touch_buffer(cache, existing);
+            g_mutex_unlock(&cache->lock);
+            return QUADRATURE_OK;
+        }
     }
     g_mutex_unlock(&cache->lock);
 
@@ -585,11 +596,11 @@ audio_cache_load(audio_cache_t *cache, int64_t track_id)
         return QUADRATURE_ERROR_FILE_NOT_FOUND;
     }
 
-    audio_buffer_t *buffer = buffer_new(track_id, resolved_path, cache->sample_rate);
+    audio_buffer_t *buffer = buffer_new(track_id, resolved_path, cache->format);
     g_free(resolved_path);
 
     g_mutex_lock(&cache->lock);
-    g_hash_table_insert(cache->buffers, make_track_id_key(track_id), buffer);
+    g_hash_table_insert(cache->buffers, GSIZE_TO_POINTER(track_id), buffer);
     g_queue_push_head(&cache->lru, buffer);
     buffer->_lru_link = cache->lru.head;
     g_mutex_unlock(&cache->lock);
@@ -606,7 +617,7 @@ audio_cache_load(audio_cache_t *cache, int64_t track_id)
 
         g_mutex_lock(&cache->lock);
         g_queue_delete_link(&cache->lru, buffer->_lru_link);
-        g_hash_table_remove(cache->buffers, &track_id);
+        g_hash_table_remove(cache->buffers, GSIZE_TO_POINTER(track_id));
         g_mutex_unlock(&cache->lock);
 
         buffer_free(buffer);
@@ -625,7 +636,7 @@ audio_cache_cancel_load(audio_cache_t *cache, int64_t track_id)
     g_assert(track_id > 0);
 
     g_mutex_lock(&cache->lock);
-    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, &track_id);
+    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, GSIZE_TO_POINTER(track_id));
     if (buffer && !atomic_load(&buffer->decode_complete)) {
         atomic_store(&buffer->decode_cancelled, true);
     }
@@ -660,18 +671,19 @@ audio_cache_cancel_all_loads(audio_cache_t *cache)
  * PRECONDITION: Track must already be in cache (via audio_cache_load()).
  * Crashes if track_id is not found - this indicates a caller bug.
  *
- * @return AUDIO_CACHE_LOCK_READY if buffer is ready for use
- *         AUDIO_CACHE_LOCK_LOADING if decode is in progress (call wait_ready())
- *         AUDIO_CACHE_LOCK_FAILED if decode failed
+ * @return AUDIO_CACHE_READY if buffer is ready for use
+ *         AUDIO_CACHE_LOADING if decode is in progress (poll get_status())
+ *         AUDIO_CACHE_FAILED if decode failed
+ *         (never AUDIO_CACHE_NOT_FOUND — a missing track crashes, see above)
  */
-audio_cache_lock_result_t
+audio_cache_status_t
 audio_cache_lock(audio_cache_t *cache, int64_t track_id)
 {
     g_assert(cache != NULL);
     g_assert(track_id > 0);
 
     g_mutex_lock(&cache->lock);
-    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, &track_id);
+    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, GSIZE_TO_POINTER(track_id));
     if (!buffer) {
         g_mutex_unlock(&cache->lock);
         g_error("audio_cache_lock: track %" G_GINT64_FORMAT " not in cache - "
@@ -680,13 +692,13 @@ audio_cache_lock(audio_cache_t *cache, int64_t track_id)
     }
     atomic_fetch_add(&buffer->lock_count, 1);
 
-    audio_cache_lock_result_t result;
+    audio_cache_status_t result;
     if (atomic_load(&buffer->decode_failed)) {
-        result = AUDIO_CACHE_LOCK_FAILED;
+        result = AUDIO_CACHE_FAILED;
     } else if (atomic_load(&buffer->decode_complete)) {
-        result = AUDIO_CACHE_LOCK_READY;
+        result = AUDIO_CACHE_READY;
     } else {
-        result = AUDIO_CACHE_LOCK_LOADING;
+        result = AUDIO_CACHE_LOADING;
     }
 
     g_debug("audio_cache: locked track %" G_GINT64_FORMAT " (lock_count=%d, status=%d)",
@@ -699,19 +711,20 @@ audio_cache_lock(audio_cache_t *cache, int64_t track_id)
 }
 
 /**
- * Unlock a track to allow LRU eviction.
+ * Synchronously drop one eviction lock. Shared by the immediate path of
+ * audio_cache_unlock() and the deferred timer callback.
  *
  * PRECONDITION: Track must be in cache and have lock_count > 0.
  * Crashes on underflow (more unlocks than locks) - this indicates a caller bug.
  */
-void
-audio_cache_unlock(audio_cache_t *cache, int64_t track_id)
+static void
+cache_unlock_now(audio_cache_t *cache, int64_t track_id)
 {
     g_assert(cache != NULL);
     g_assert(track_id > 0);
 
     g_mutex_lock(&cache->lock);
-    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, &track_id);
+    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, GSIZE_TO_POINTER(track_id));
     if (!buffer) {
         g_mutex_unlock(&cache->lock);
         g_error("audio_cache_unlock: track %" G_GINT64_FORMAT " not in cache", track_id);
@@ -741,10 +754,10 @@ delayed_unlock_callback(gpointer user_data)
     delayed_unlock_data_t *data = user_data;
 
     /* Remove from pending unlocks */
-    g_hash_table_remove(data->cache->pending_unlocks, &data->track_id);
+    g_hash_table_remove(data->cache->pending_unlocks, GSIZE_TO_POINTER(data->track_id));
 
     /* Perform the actual unlock */
-    audio_cache_unlock(data->cache, data->track_id);
+    cache_unlock_now(data->cache, data->track_id);
 
     g_debug("audio_cache: delayed unlock completed for track %" G_GINT64_FORMAT, data->track_id);
 
@@ -753,26 +766,38 @@ delayed_unlock_callback(gpointer user_data)
 }
 
 /**
- * Schedule an unlock after AUDIO_CACHE_UNLOCK_DELAY_MS.
- * Use when transitioning away from a playing track to ensure audio callback
- * finishes reading before eviction is allowed.
+ * Drop one eviction lock, immediately or deferred.
+ *
+ * delay_ms == AUDIO_CACHE_UNLOCK_IMMEDIATE (0): unlock synchronously now.
+ * delay_ms == AUDIO_CACHE_UNLOCK_DEFERRED (-1): defer by the cache's
+ *   quantum-derived safe delay — use when transitioning away from a playing
+ *   track so the audio callback finishes reading before eviction is allowed.
+ * delay_ms > 0: defer by exactly that many milliseconds.
  *
  * PRECONDITION: Track must be in cache with lock_count > 0.
  */
 void
-audio_cache_unlock_delayed(audio_cache_t *cache, int64_t track_id)
+audio_cache_unlock(audio_cache_t *cache, int64_t track_id, int delay_ms)
 {
     g_assert(cache != NULL);
     g_assert(track_id > 0);
 
+    if (delay_ms == AUDIO_CACHE_UNLOCK_IMMEDIATE) {
+        cache_unlock_now(cache, track_id);
+        return;
+    }
+
+    guint resolved_ms
+        = (delay_ms == AUDIO_CACHE_UNLOCK_DEFERRED) ? cache->unlock_delay_ms : (guint)delay_ms;
+
     /* Cancel any existing pending unlock for this track */
-    gpointer existing = g_hash_table_lookup(cache->pending_unlocks, &track_id);
+    gpointer existing = g_hash_table_lookup(cache->pending_unlocks, GSIZE_TO_POINTER(track_id));
     if (existing) {
         guint source_id = GPOINTER_TO_UINT(existing);
         if (source_id > 0) {
             g_source_remove(source_id);
         }
-        g_hash_table_remove(cache->pending_unlocks, &track_id);
+        g_hash_table_remove(cache->pending_unlocks, GSIZE_TO_POINTER(track_id));
     }
 
     /* Schedule delayed unlock */
@@ -780,20 +805,21 @@ audio_cache_unlock_delayed(audio_cache_t *cache, int64_t track_id)
     data->cache = cache;
     data->track_id = track_id;
 
-    guint source_id = g_timeout_add(cache->unlock_delay_ms, delayed_unlock_callback, data);
+    guint source_id = g_timeout_add(resolved_ms, delayed_unlock_callback, data);
     g_hash_table_insert(
-        cache->pending_unlocks, make_track_id_key(track_id), GUINT_TO_POINTER(source_id));
+        cache->pending_unlocks, GSIZE_TO_POINTER(track_id), GUINT_TO_POINTER(source_id));
 
     g_debug("audio_cache: scheduled delayed unlock for track %" G_GINT64_FORMAT " (%u ms)",
             track_id,
-            cache->unlock_delay_ms);
+            resolved_ms);
 }
 
 void
 audio_cache_set_quantum(audio_cache_t *cache, uint32_t quantum_frames)
 {
     g_assert(cache != NULL);
-    cache->unlock_delay_ms = audio_cache_compute_unlock_delay(quantum_frames, cache->sample_rate);
+    cache->unlock_delay_ms
+        = audio_cache_compute_unlock_delay(quantum_frames, cache->format.sample_rate);
     g_message("audio_cache: unlock delay updated to %u ms (quantum=%u)",
               cache->unlock_delay_ms,
               quantum_frames);
@@ -820,7 +846,7 @@ audio_cache_get_locked(audio_cache_t *cache, int64_t track_id)
     g_assert(track_id > 0);
 
     g_mutex_lock(&cache->lock);
-    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, &track_id);
+    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, GSIZE_TO_POINTER(track_id));
 
     if (!buffer) {
         g_mutex_unlock(&cache->lock);
@@ -859,7 +885,7 @@ audio_cache_get_status(audio_cache_t *cache, int64_t track_id)
         return AUDIO_CACHE_NOT_FOUND;
 
     g_mutex_lock(&cache->lock);
-    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, &track_id);
+    audio_buffer_t *buffer = g_hash_table_lookup(cache->buffers, GSIZE_TO_POINTER(track_id));
 
     if (!buffer) {
         g_mutex_unlock(&cache->lock);
@@ -901,7 +927,7 @@ audio_cache_sweep_stale(audio_cache_t *cache, int64_t max_age_us)
         audio_buffer_t *buffer = link->data;
 
         /* Skip locked (in-use) or still-decoding buffers */
-        if (atomic_load(&buffer->lock_count) > 0 || !atomic_load(&buffer->decode_complete)) {
+        if (buffer_in_use(buffer)) {
             link = prev;
             continue;
         }
@@ -916,7 +942,7 @@ audio_cache_sweep_stale(audio_cache_t *cache, int64_t max_age_us)
                 buffer->memory_bytes / (1024.0 * 1024.0));
 
         cache->memory_used -= buffer->memory_bytes;
-        g_hash_table_remove(cache->buffers, &buffer->track_id);
+        g_hash_table_remove(cache->buffers, GSIZE_TO_POINTER(buffer->track_id));
         g_queue_delete_link(&cache->lru, link);
         buffer_free(buffer);
 

@@ -32,6 +32,9 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests)
 #define TEST_TRACK_ID_3 1003
 #define TEST_TRACK_ID_4 1004
 
+/* Test format: stereo @ 48 kHz */
+#define TEST_FORMAT ((audio_format_t){ .sample_rate = 48000, .channels = 2 })
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Test: Lifecycle, Null Safety, and Memory Configuration
  *
@@ -47,10 +50,10 @@ Test(audio_cache, lifecycle_memory_config)
     audio_cache_t *cache = NULL;
 
     /* Create with NULL out pointer returns error */
-    cr_assert_eq(audio_cache_create(NULL, 48000, NULL), QUADRATURE_ERROR_INVALID_PARAM);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, NULL), QUADRATURE_ERROR_INVALID_PARAM);
 
     /* Create with default limit (NULL library for testing) */
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
     cr_assert_not_null(cache);
     cr_assert_eq(audio_cache_get_memory_used(cache), 0);
     audio_cache_destroy(cache);
@@ -69,7 +72,7 @@ Test(audio_cache, lifecycle_memory_config)
 Test(audio_cache, status_queries_parameter_validation)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     /* Status for unknown track ID */
     cr_assert_eq(audio_cache_get_status(cache, 999999), AUDIO_CACHE_NOT_FOUND);
@@ -108,7 +111,7 @@ Test(audio_cache, buffer_accessor_null_safety)
 Test(audio_cache, cancel_empty_cache)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     /* Operations on empty cache should not crash */
     audio_cache_cancel_load(cache, 999999);
@@ -124,7 +127,7 @@ Test(audio_cache, cancel_empty_cache)
  * Test: Lock/Unlock API Contract
  *
  * Lock/unlock require the track to be loaded first. Calling them on an
- * unloaded track crashes via g_error (see src/audio/audio_cache.c:640,675).
+ * unloaded track crashes via g_error (see src/audio/cache.c:640,675).
  * The non-crashing surface is covered here; the crash contracts are
  * enforced by the death tests further down.
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -132,7 +135,7 @@ Test(audio_cache, cancel_empty_cache)
 Test(audio_cache, lock_unlock_api_contract)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     /* Cache should be functional after creation */
     cr_assert_eq(audio_cache_get_memory_used(cache), 0);
@@ -156,28 +159,28 @@ Test(audio_cache, lock_unlock_api_contract)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Invariant: audio_cache_lock() requires the track to have been loaded.
- * Enforced by g_error at src/audio/audio_cache.c:640. */
+ * Enforced by g_error at src/audio/cache.c:640. */
 Test(audio_cache, death_lock_unloaded_track, .signal = SIGTRAP)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
     (void)audio_cache_lock(cache, 12345); /* never loaded → g_error */
 }
 
 /* Invariant: audio_cache_unlock() on a track not in cache aborts.
- * Enforced by g_error at src/audio/audio_cache.c:675. */
+ * Enforced by g_error at src/audio/cache.c:675. */
 Test(audio_cache, death_unlock_unloaded_track, .signal = SIGTRAP)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
-    audio_cache_unlock(cache, 12345);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
+    audio_cache_unlock(cache, 12345, AUDIO_CACHE_UNLOCK_IMMEDIATE);
 }
 
-/* Invariant: track_id must be > 0. Enforced by g_assert at audio_cache.c:634. */
+/* Invariant: track_id must be > 0. Enforced by g_assert at cache.c:634. */
 Test(audio_cache, death_lock_rejects_zero_track_id, .signal = SIGABRT)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
     (void)audio_cache_lock(cache, 0);
 }
 
@@ -192,7 +195,7 @@ Test(audio_cache, death_lock_rejects_zero_track_id, .signal = SIGABRT)
 Test(audio_cache, decode_events_query)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     /* Decode events should be empty on fresh cache */
     audio_cache_decode_event_t events[10];
@@ -245,7 +248,7 @@ status_query_thread(void *arg)
 Test(audio_cache, concurrent_status_queries)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     pthread_t threads[CONCURRENT_THREADS];
     concurrent_test_ctx_t contexts[CONCURRENT_THREADS];
@@ -280,7 +283,7 @@ Test(audio_cache, concurrent_status_queries)
 Test(audio_cache, load_request_parameter_validation)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     /* Cancel is always safe on empty cache */
     audio_cache_cancel_load(cache, 999999);
@@ -304,7 +307,7 @@ Test(audio_cache, load_request_parameter_validation)
 Test(audio_cache, sweep_stale_empty)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     /* Sweep on empty cache should not crash */
     audio_cache_sweep_stale(cache, 60 * G_USEC_PER_SEC);
@@ -340,7 +343,7 @@ cache_read_thread(void *arg)
 Test(audio_cache, concurrent_cache_reads)
 {
     audio_cache_t *cache = NULL;
-    cr_assert_eq(audio_cache_create(NULL, 48000, &cache), QUADRATURE_OK);
+    cr_assert_eq(audio_cache_create(NULL, TEST_FORMAT, &cache), QUADRATURE_OK);
 
     pthread_t threads[CONCURRENT_THREADS];
     concurrent_test_ctx_t contexts[CONCURRENT_THREADS];
@@ -394,7 +397,7 @@ Test(audio_cache, unlock_delay_computation)
 Test(audio_cache, set_quantum_updates_delay)
 {
     audio_cache_t *cache = NULL;
-    audio_cache_create(NULL, 48000, &cache);
+    audio_cache_create(NULL, TEST_FORMAT, &cache);
     cr_assert_not_null(cache);
 
     /* Update to larger quantum — verify no crash and cache still functional */

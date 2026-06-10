@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 
 #define SAMPLE_RATE 48000
+#define CHANNELS    2 /* canonical wire format; bump for 5.1 (6) / 7.1 (8) */
 
 typedef struct {
     GtkApplication *app;
@@ -185,7 +186,8 @@ on_startup(GtkApplication *gtkapp, gpointer data)
     g_free(names);
     g_free(sources);
 
-    if (audio_pipeline_create(d->library_cache, SAMPLE_RATE, &d->pipeline) != QUADRATURE_OK) {
+    if (audio_pipeline_create(d->library_cache, SAMPLE_RATE, CHANNELS, &d->pipeline)
+        != QUADRATURE_OK) {
         g_critical("Failed to create audio pipeline");
         g_application_quit(G_APPLICATION(gtkapp));
         return;

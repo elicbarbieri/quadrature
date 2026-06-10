@@ -200,6 +200,41 @@ on_track_changed(int player_id, int64_t track_id, void *user_data)
     }
 }
 
+/**
+ * Track decode-failure callback — fired by the audio pipeline (on the main
+ * thread) when a track cannot be decoded. Surfaces an error toast and skips to
+ * the next track so a single bad file does not stall playback.
+ */
+static void
+on_track_failed(int player_id, int64_t track_id, void *user_data)
+{
+    UiWindow *w = UI_WINDOW(user_data);
+    if (!w || player_id < 0 || player_id >= MAX_CHANNELS)
+        return;
+
+    const char *title = NULL, *artist = NULL, *album = NULL;
+    if (w->library_cache) {
+        const library_track_info_t *track = library_cache_get_track(w->library_cache, track_id);
+        if (track) {
+            title = track->title;
+            artist = track->artist_display;
+            album = track->album_title;
+        }
+    }
+
+    char *msg = g_strdup_printf("Decoding failed for %s by %s on %s",
+                                title ? title : "Unknown Track",
+                                artist ? artist : "Unknown Artist",
+                                album ? album : "Unknown Album");
+    g_warning("Channel %d: %s", player_id + 1, msg);
+    ui_window_show_toast(w, msg, TOAST_ERROR, 5000);
+    g_free(msg);
+
+    /* Skip past the bad track. */
+    if (w->channels[player_id])
+        ui_channel_strip_next_track(w->channels[player_id]);
+}
+
 /* Navigate action handler - triggered by nav bar buttons */
 static void
 on_navigate_action(GSimpleAction *action, GVariant *param, gpointer data)
@@ -1233,6 +1268,7 @@ ui_window_dispose(GObject *obj)
      * can't invoke on_track_changed on our disposed widget */
     if (w->pipeline) {
         audio_pipeline_set_track_changed_callback(w->pipeline, NULL, NULL);
+        audio_pipeline_set_track_failed_callback(w->pipeline, NULL, NULL);
     }
 
     /* Clear cache ready callback so warming-complete idle can't call us */
@@ -1586,6 +1622,7 @@ ui_window_new(GtkApplication *app,
     /* Register track changed callback for auto-advance notification */
     if (pipeline) {
         audio_pipeline_set_track_changed_callback(pipeline, on_track_changed, w);
+        audio_pipeline_set_track_failed_callback(pipeline, on_track_failed, w);
     }
 
     if (w->indexer) {

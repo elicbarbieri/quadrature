@@ -64,7 +64,7 @@ struct _UiChannelStrip {
     /* Seek bar */
     GtkWidget *seek_row;
     GtkWidget *waveform;
-    int64_t waveform_track_id; /* Track whose loudness is currently displayed */
+    int64_t waveform_track_id; /* Track whose waveform_rms is currently displayed */
 
     /* Metrics column labels */
     GtkWidget *metrics_column;
@@ -550,7 +550,7 @@ static void
 set_end_mode_and_sync_buttons(UiChannelStrip *s, track_end_mode_t mode)
 {
     if (s->pipeline)
-        audio_pipeline_player_set_end_mode(s->pipeline, s->channel_id, mode);
+        audio_pipeline_set_player_end_mode(s->pipeline, s->channel_id, mode);
     if (s->repeat_btn)
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->repeat_btn), mode == TRACK_END_REPEAT);
     if (s->autoplay_btn)
@@ -639,7 +639,7 @@ on_seek(UiWaveformSeekBar *waveform, double value, gpointer data)
     (void)waveform;
     UiChannelStrip *s = UI_CHANNEL_STRIP(data);
     if (s->length_seconds > 0.0) {
-        audio_pipeline_player_seek_seconds(s->pipeline, s->channel_id, value * s->length_seconds);
+        audio_pipeline_player_seek(s->pipeline, s->channel_id, value * s->length_seconds);
     } else if (s->ui_length_seconds > 0.0) {
         s->deferred_seek_frac = value;
         s->has_deferred_seek = TRUE;
@@ -675,7 +675,7 @@ do_skip(UiChannelStrip *s, int seconds)
     if (target > d.length_seconds)
         target = d.length_seconds;
 
-    audio_pipeline_player_seek_seconds(s->pipeline, s->channel_id, target);
+    audio_pipeline_player_seek(s->pipeline, s->channel_id, target);
 }
 
 static void
@@ -718,7 +718,7 @@ on_shuttle_value_changed(GtkRange *r, gpointer data)
     /* Convert slider value to mapped speed and set playback speed */
     if (s->pipeline) {
         float speed = ui_shuttle_value_to_speed(slider_value, s->shuttle_mode);
-        audio_pipeline_player_set_speed(s->pipeline, s->channel_id, speed);
+        audio_pipeline_set_player_speed(s->pipeline, s->channel_id, speed);
     }
 }
 
@@ -748,7 +748,7 @@ on_shuttle_mode_clicked(GtkButton *btn, gpointer data)
     update_shuttle_mode_button(s);
 
     if (s->pipeline)
-        audio_pipeline_player_set_shuttle_mode(s->pipeline, s->channel_id, s->shuttle_mode);
+        audio_pipeline_set_player_shuttle_mode(s->pipeline, s->channel_id, s->shuttle_mode);
 
     /* OFF locks the slider at unity; other modes follow QUEUED/ON_AIR sensitivity. */
     gboolean off = (s->shuttle_mode == SHUTTLE_MODE_OFF);
@@ -760,7 +760,7 @@ on_shuttle_mode_clicked(GtkButton *btn, gpointer data)
     double current = gtk_range_get_value(GTK_RANGE(s->shuttle_scale));
     update_shuttle_label(s, current);
     if (s->pipeline)
-        audio_pipeline_player_set_speed(
+        audio_pipeline_set_player_speed(
             s->pipeline, s->channel_id, ui_shuttle_value_to_speed(current, s->shuttle_mode));
 }
 
@@ -784,7 +784,7 @@ on_shuttle_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gp
         gtk_range_set_value(GTK_RANGE(s->shuttle_scale), 0.0);
 
         if (s->pipeline) {
-            audio_pipeline_player_set_speed(s->pipeline, s->channel_id, 1.0f);
+            audio_pipeline_set_player_speed(s->pipeline, s->channel_id, 1.0f);
         }
 
         update_shuttle_label(s, 0.0);
@@ -908,7 +908,7 @@ update_album_display(UiChannelStrip *s)
         /* Next track preview - query engine for end-of-track mode */
         gboolean repeat
             = s->pipeline
-              && audio_pipeline_player_get_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT;
+              && audio_pipeline_get_player_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT;
 
         if (repeat) {
             next_loop = marquee_setup_label(s->next_track_scroll, s->next_track_label, "Repeating");
@@ -1213,7 +1213,7 @@ on_next_track_label_clicked(GtkGestureClick *g, int n, double x, double y, gpoin
 
     /* Don't auto-advance when in repeat mode */
     if (s->pipeline
-        && audio_pipeline_player_get_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT)
+        && audio_pipeline_get_player_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT)
         return;
 
     ui_channel_strip_next_track(s);
@@ -1622,7 +1622,7 @@ ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline)
 
     /* Apply deferred seek when real buffer arrives */
     if (disp.length_seconds > 0.0 && s->has_deferred_seek) {
-        audio_pipeline_player_seek_seconds(
+        audio_pipeline_player_seek(
             s->pipeline, s->channel_id, s->deferred_seek_frac * disp.length_seconds);
         s->has_deferred_seek = FALSE;
     }
@@ -1739,17 +1739,17 @@ ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline)
     /* Waveform seek bar — redraw every frame while playing or animating
      * so bar colors track the playhead position. */
     if (s->waveform) {
-        /* Check if loudness data became available for current track.
+        /* Check if waveform_rms data became available for current track.
          * Read the player's buffer pointer directly — it's locked while playing,
-         * and loudness data is immutable once loudness_ready is set. */
+         * and waveform_rms data is immutable once waveform_rms_ready is set. */
         if (s->current_track_id > 0 && s->current_track_id != s->waveform_track_id && s->pipeline) {
             audio_buffer_t *buf = atomic_load(&s->pipeline->players[s->channel_id].buffer);
             if (buf && audio_buffer_get_track_id(buf) == s->current_track_id
-                && audio_buffer_is_loudness_ready(buf)) {
-                const float *loudness = audio_buffer_get_loudness(buf);
-                if (loudness) {
-                    ui_waveform_seek_bar_set_loudness(
-                        UI_WAVEFORM_SEEK_BAR(s->waveform), loudness, LOUDNESS_BINS);
+                && audio_buffer_is_waveform_rms_ready(buf)) {
+                const float *waveform_rms = audio_buffer_get_waveform_rms(buf);
+                if (waveform_rms) {
+                    ui_waveform_seek_bar_set_waveform_rms(
+                        UI_WAVEFORM_SEEK_BAR(s->waveform), waveform_rms, WAVEFORM_RMS_BINS);
                     s->waveform_track_id = s->current_track_id;
                 }
             }
@@ -1779,7 +1779,11 @@ ui_channel_strip_update(UiChannelStrip *s, audio_pipeline_t *pipeline)
             s->spectrum_decay_frames = SPECTRUM_DECAY_FRAMES;
         }
         if (s->spectrum_decay_frames > 0) {
-            uint32_t gen = atomic_load(&pipeline->players[s->channel_id].spectrum_generation);
+            /* Acquire pairs with the spectrum's release fetch-add: when this
+             * read sees a new generation, the bar writes for that batch are
+             * visible to the get_player_spectrum() call below. */
+            uint32_t gen = atomic_load_explicit(
+                &pipeline->players[s->channel_id].spectrum_generation, memory_order_acquire);
             if (gen != s->last_spectrum_gen || !playing) {
                 float left[SPECTRUM_BARS], right[SPECTRUM_BARS];
                 audio_pipeline_get_player_spectrum(
@@ -1833,7 +1837,7 @@ ui_channel_strip_load_track(UiChannelStrip *s, const PlaybackIntent *intent)
     update_display(s);
     update_button_sensitivity(s, s->prev_player_state);
 
-    /* Clear waveform for new track (will re-animate when loudness arrives) */
+    /* Clear waveform for new track (will re-animate when waveform_rms arrives) */
     if (s->waveform)
         ui_waveform_seek_bar_clear(UI_WAVEFORM_SEEK_BAR(s->waveform));
     s->waveform_track_id = 0;
@@ -2226,7 +2230,7 @@ ui_channel_strip_next_track(UiChannelStrip *s)
         return FALSE;
 
     gboolean repeat
-        = audio_pipeline_player_get_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT;
+        = audio_pipeline_get_player_end_mode(s->pipeline, s->channel_id) == TRACK_END_REPEAT;
 
     /* Get next track ID */
     int64_t next_id = library_cache_get_next_track_id(s->library, s->current_track_id);

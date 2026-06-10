@@ -2,12 +2,11 @@
  * Quadrature Rate Processor
  *
  * Variable-speed playback with user-controlled mode selection:
- *   - Passthrough: speed ≈ 1.0 (direct copy, zero CPU) - always active
- *   - Rubberband: pitch-preserved time stretching (default mode, 0.5x-4.0x)
- *   - Turntable: pitch shifts with speed (pitched mode, 0.5x-2.0x)
+ *   - OFF (passthrough): direct copy, zero CPU
+ *   - PITCHED (turntable): pitch shifts with speed, like vinyl
+ *   - KEYLOCK (rubberband): pitch-preserved time stretch
  *
- * Mode is controlled via pitched_mode flag (atomic, lock-free).
- * Crossfade handles smooth transitions when switching modes.
+ * Mode is an atomic shuttle_mode_t; a short crossfade masks switches.
  *
  * ## Rubberband Integration
  *
@@ -35,12 +34,9 @@
 #define RUBBERBAND_MIN 0.5f /* Pitch-preserved mode min */
 #define RUBBERBAND_MAX 4.0f /* Pitch-preserved mode max */
 
-/* Crossfade for smooth zone transitions (prevents clicks) */
+/* Crossfade smooths mode transitions (prevents clicks) */
 #define CROSSFADE_MS         10 /* 10ms crossfade */
 #define CROSSFADE_MIN_FRAMES 64 /* Clamp so very low sample rates still fade */
-#define ZONE_PASSTHROUGH     0
-#define ZONE_TURNTABLE       1
-#define ZONE_RUBBERBAND      2
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Simple Ring Buffer for Rubberband Output
@@ -50,18 +46,20 @@
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
-    float *buffer;      /* Interleaved stereo samples */
+    float *buffer;      /* Interleaved samples (channels set at init) */
     uint32_t capacity;  /* Total frames capacity */
+    uint32_t channels;  /* Channels per frame (interleave stride) */
     uint32_t write_idx; /* Write position (frames) */
     uint32_t read_idx;  /* Read position (frames) */
     uint32_t count;     /* Frames currently in buffer */
 } rb_ring_t;
 
 static void
-rb_ring_init(rb_ring_t *r, uint32_t capacity)
+rb_ring_init(rb_ring_t *r, uint32_t capacity, uint32_t channels)
 {
-    r->buffer = calloc(capacity * 2, sizeof(float));
+    r->buffer = calloc((size_t)capacity * channels, sizeof(float));
     r->capacity = capacity;
+    r->channels = channels;
     r->write_idx = 0;
     r->read_idx = 0;
     r->count = 0;
@@ -102,13 +100,16 @@ rb_ring_write(rb_ring_t *r, const float *data, uint32_t frames)
     if (frames == 0)
         return;
 
+    const uint32_t ch = r->channels;
+    const size_t fsz = (size_t)ch * sizeof(float);
+
     /* Split into at most two memcpy's — libc memcpy uses best available SIMD */
     uint32_t first = r->capacity - r->write_idx;
     if (first > frames)
         first = frames;
-    memcpy(&r->buffer[r->write_idx * 2], data, first * 2 * sizeof(float));
+    memcpy(&r->buffer[(size_t)r->write_idx * ch], data, first * fsz);
     if (frames > first)
-        memcpy(r->buffer, data + first * 2, (frames - first) * 2 * sizeof(float));
+        memcpy(r->buffer, data + (size_t)first * ch, (frames - first) * fsz);
     r->write_idx = (r->write_idx + frames) % r->capacity;
     r->count += frames;
 }
@@ -121,12 +122,15 @@ rb_ring_read(rb_ring_t *r, float *data, uint32_t frames)
     if (frames == 0)
         return 0;
 
+    const uint32_t ch = r->channels;
+    const size_t fsz = (size_t)ch * sizeof(float);
+
     uint32_t first = r->capacity - r->read_idx;
     if (first > frames)
         first = frames;
-    memcpy(data, &r->buffer[r->read_idx * 2], first * 2 * sizeof(float));
+    memcpy(data, &r->buffer[(size_t)r->read_idx * ch], first * fsz);
     if (frames > first)
-        memcpy(data + first * 2, r->buffer, (frames - first) * 2 * sizeof(float));
+        memcpy(data + (size_t)first * ch, r->buffer, (frames - first) * fsz);
     r->read_idx = (r->read_idx + frames) % r->capacity;
     r->count -= frames;
     return frames;
@@ -136,17 +140,20 @@ rb_ring_read(rb_ring_t *r, float *data, uint32_t frames)
  * Rate Processor Structure
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-struct audio_scrubber {
+struct audio_shuttle_speed {
     /* Control state (UI thread writes, audio thread reads) */
     _Atomic float speed;      /* Playback speed: 1.0 = normal */
-    _Atomic int64_t position; /* Current position in samples */
     _Atomic int shuttle_mode; /* shuttle_mode_t: OFF, KEYLOCK, PITCHED */
+
+    /* Playhead is now external — see audio_seek_position_t passed to
+     * audio_shuttle_speed_process(). The engine reads it at process entry
+     * and writes back as it consumes samples. */
 
     /* Rubberband state (pre-allocated on mode change, NOT in RT callback) */
     RubberBandState rb_state;
-    float *rb_input[2];  /* Deinterleaved input buffers */
-    float *rb_output[2]; /* Deinterleaved output buffers */
-    double rb_ratio;     /* Current time ratio (1/speed) */
+    float **rb_input;  /* Deinterleaved input, one buffer per channel (format.channels) */
+    float **rb_output; /* Deinterleaved output, one buffer per channel */
+    double rb_ratio;   /* Current time ratio (1/speed) */
     bool rb_initialized;
     bool rb_primed;              /* Start padding fed, delay discarded */
     _Atomic bool rb_ready;       /* Set by UI thread after init+prime; checked by RT */
@@ -165,10 +172,11 @@ struct audio_scrubber {
     float *crossfade_buffer;   /* Previous output for crossfading */
     uint32_t crossfade_frames; /* Frames remaining in crossfade */
     uint32_t crossfade_length; /* Total crossfade length */
-    int prev_zone;             /* 0=passthrough, 1=turntable, 2=rubberband */
+    shuttle_mode_t prev_mode;  /* Mode last processed — drives crossfade on change */
 
-    /* Configuration */
-    uint32_t sample_rate;
+    /* Wire format — fixed at construction. Channels parameterizes every
+     * memcpy/memset stride and the rubberband channel count. */
+    audio_format_t format;
 
     /* Scrubber RT stat (atomic — written in callback, read from UI) */
     atomic_uint_fast64_t stats_underflows; /* Rubberband couldn't fill requested frames */
@@ -179,24 +187,31 @@ struct audio_scrubber {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void
-rubberband_cleanup(audio_scrubber_t *s)
+rubberband_cleanup(audio_shuttle_speed_t *s)
 {
     if (s->rb_state) {
         rubberband_delete(s->rb_state);
         s->rb_state = NULL;
     }
-    free(s->rb_input[0]);
-    free(s->rb_input[1]);
-    free(s->rb_output[0]);
-    free(s->rb_output[1]);
-    s->rb_input[0] = s->rb_input[1] = NULL;
-    s->rb_output[0] = s->rb_output[1] = NULL;
+    const uint32_t ch = s->format.channels;
+    if (s->rb_input) {
+        for (uint32_t c = 0; c < ch; c++)
+            free(s->rb_input[c]);
+        free(s->rb_input);
+        s->rb_input = NULL;
+    }
+    if (s->rb_output) {
+        for (uint32_t c = 0; c < ch; c++)
+            free(s->rb_output[c]);
+        free(s->rb_output);
+        s->rb_output = NULL;
+    }
     s->rb_initialized = false;
     s->rb_primed = false;
 }
 
 static void
-rubberband_prime(audio_scrubber_t *s)
+rubberband_prime(audio_shuttle_speed_t *s)
 {
     if (!s->rb_state || s->rb_primed)
         return;
@@ -211,8 +226,8 @@ rubberband_prime(audio_scrubber_t *s)
         uint32_t pad_frames = (start_pad < s->buffer_capacity) ? start_pad : s->buffer_capacity;
 
         /* Clear input buffers (silence) */
-        memset(s->rb_input[0], 0, pad_frames * sizeof(float));
-        memset(s->rb_input[1], 0, pad_frames * sizeof(float));
+        for (uint32_t c = 0; c < s->format.channels; c++)
+            memset(s->rb_input[c], 0, pad_frames * sizeof(float));
 
         /* Feed silence in chunks */
         uint32_t fed = 0;
@@ -230,7 +245,7 @@ rubberband_prime(audio_scrubber_t *s)
 }
 
 static void
-ensure_rubberband(audio_scrubber_t *s, float speed)
+ensure_rubberband(audio_shuttle_speed_t *s, float speed)
 {
     double new_ratio = 1.0 / (double)fabsf(speed);
 
@@ -262,7 +277,7 @@ ensure_rubberband(audio_scrubber_t *s, float speed)
                              | RubberBandOptionTransientsMixed | RubberBandOptionSmoothingOn
                              | RubberBandOptionWindowShort | RubberBandOptionPitchHighConsistency;
 
-    s->rb_state = rubberband_new(s->sample_rate, 2, opts, new_ratio, 1.0);
+    s->rb_state = rubberband_new(s->format.sample_rate, s->format.channels, opts, new_ratio, 1.0);
     if (!s->rb_state)
         return;
 
@@ -271,19 +286,29 @@ ensure_rubberband(audio_scrubber_t *s, float speed)
     /* Set max process size for RT safety (prevents internal reallocation) */
     rubberband_set_max_process_size(s->rb_state, WORK_BUFFER_FRAMES);
 
-    /* Pre-allocate deinterleaved buffers */
-    s->rb_input[0] = malloc(WORK_BUFFER_FRAMES * sizeof(float));
-    s->rb_input[1] = malloc(WORK_BUFFER_FRAMES * sizeof(float));
-    s->rb_output[0] = malloc(WORK_BUFFER_FRAMES * sizeof(float));
-    s->rb_output[1] = malloc(WORK_BUFFER_FRAMES * sizeof(float));
-
-    if (!s->rb_input[0] || !s->rb_input[1] || !s->rb_output[0] || !s->rb_output[1]) {
+    /* Pre-allocate one deinterleaved buffer per channel. calloc the pointer
+     * arrays so a mid-loop failure leaves cleanup with NULLs to free safely. */
+    const uint32_t ch = s->format.channels;
+    s->rb_input = calloc(ch, sizeof(float *));
+    s->rb_output = calloc(ch, sizeof(float *));
+    if (!s->rb_input || !s->rb_output) {
+        rubberband_cleanup(s);
+        return;
+    }
+    bool alloc_ok = true;
+    for (uint32_t c = 0; c < ch; c++) {
+        s->rb_input[c] = malloc(WORK_BUFFER_FRAMES * sizeof(float));
+        s->rb_output[c] = malloc(WORK_BUFFER_FRAMES * sizeof(float));
+        if (!s->rb_input[c] || !s->rb_output[c])
+            alloc_ok = false;
+    }
+    if (!alloc_ok) {
         rubberband_cleanup(s);
         return;
     }
 
     /* Initialize output ring buffer */
-    rb_ring_init(&s->rb_ring, RB_RING_BUFFER_SIZE);
+    rb_ring_init(&s->rb_ring, RB_RING_BUFFER_SIZE, s->format.channels);
 
     s->rb_initialized = true;
     s->rb_primed = false;
@@ -294,48 +319,53 @@ ensure_rubberband(audio_scrubber_t *s, float speed)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 quadrature_result_t
-audio_scrubber_create(uint32_t sample_rate, audio_scrubber_t **out)
+audio_shuttle_speed_create(audio_format_t format, audio_shuttle_speed_t **out)
 {
     if (!out)
         return QUADRATURE_ERROR_INVALID_PARAM;
 
-    audio_scrubber_t *s = calloc(1, sizeof(audio_scrubber_t));
+    /* Channel-agnostic: rubberband, deinterleave buffers, and the hermite/
+     * crossfade loops all iterate format.channels. Bound the count so the
+     * per-channel allocations stay sane (covers mono..7.1.4). */
+    g_assert(format.channels >= 1 && format.channels <= 16);
+
+    audio_shuttle_speed_t *s = calloc(1, sizeof(audio_shuttle_speed_t));
     if (!s)
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
 
-    s->sample_rate = sample_rate;
+    s->format = format;
     s->fractional_position = 0.0;
-    s->prev_zone = ZONE_PASSTHROUGH;
+    s->prev_mode = SHUTTLE_MODE_OFF;
 
     /* Calculate crossfade length in frames */
-    s->crossfade_length = (sample_rate * CROSSFADE_MS) / 1000;
+    s->crossfade_length = (format.sample_rate * CROSSFADE_MS) / 1000;
     if (s->crossfade_length < CROSSFADE_MIN_FRAMES)
         s->crossfade_length = CROSSFADE_MIN_FRAMES;
     s->crossfade_frames = 0;
 
     /* Pre-allocate work buffers */
+    const size_t bpf = audio_format_bytes_per_frame(&s->format);
     s->buffer_capacity = WORK_BUFFER_FRAMES;
-    s->work_buffer = malloc(s->buffer_capacity * 2 * sizeof(float));
-    s->crossfade_buffer = malloc(s->buffer_capacity * 2 * sizeof(float));
+    s->work_buffer = malloc((size_t)s->buffer_capacity * bpf);
+    s->crossfade_buffer = malloc((size_t)s->buffer_capacity * bpf);
     if (!s->work_buffer || !s->crossfade_buffer) {
         free(s->work_buffer);
         free(s->crossfade_buffer);
         free(s);
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
-    memset(s->crossfade_buffer, 0, s->buffer_capacity * 2 * sizeof(float));
+    memset(s->crossfade_buffer, 0, (size_t)s->buffer_capacity * bpf);
 
     /* Initialize atomics */
     atomic_store(&s->speed, 1.0f);
-    atomic_store(&s->position, 0);
 
     /* Rubberband is pre-allocated on mode change (not in RT callback) */
     s->rb_initialized = false;
     s->rb_primed = false;
     atomic_store(&s->rb_ready, false);
     s->rb_state = NULL;
-    s->rb_input[0] = s->rb_input[1] = NULL;
-    s->rb_output[0] = s->rb_output[1] = NULL;
+    s->rb_input = NULL;
+    s->rb_output = NULL;
 
     atomic_store(&s->stats_underflows, 0);
 
@@ -344,7 +374,7 @@ audio_scrubber_create(uint32_t sample_rate, audio_scrubber_t **out)
 }
 
 void
-audio_scrubber_destroy(audio_scrubber_t *s)
+audio_shuttle_speed_destroy(audio_shuttle_speed_t *s)
 {
     if (!s)
         return;
@@ -358,7 +388,7 @@ audio_scrubber_destroy(audio_scrubber_t *s)
 }
 
 void
-audio_scrubber_flush(audio_scrubber_t *s)
+audio_shuttle_speed_flush(audio_shuttle_speed_t *s)
 {
     g_assert(s != NULL);
 
@@ -378,15 +408,16 @@ audio_scrubber_flush(audio_scrubber_t *s)
         rb_ring_clear(&s->rb_ring);
     }
 
-    /* Reset high-precision position and crossfade state */
-    s->fractional_position = (double)atomic_load(&s->position);
+    /* Reset crossfade scratch. Fractional position resyncs to the (now
+     * external) playhead on the next process() call via the mismatch check. */
     s->crossfade_frames = 0;
-    s->prev_zone = ZONE_PASSTHROUGH;
+    s->prev_mode = SHUTTLE_MODE_OFF;
 
+    const size_t bpf = audio_format_bytes_per_frame(&s->format);
     if (s->work_buffer)
-        memset(s->work_buffer, 0, s->buffer_capacity * 2 * sizeof(float));
+        memset(s->work_buffer, 0, (size_t)s->buffer_capacity * bpf);
     if (s->crossfade_buffer)
-        memset(s->crossfade_buffer, 0, s->buffer_capacity * 2 * sizeof(float));
+        memset(s->crossfade_buffer, 0, (size_t)s->buffer_capacity * bpf);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -394,7 +425,7 @@ audio_scrubber_flush(audio_scrubber_t *s)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 void
-audio_scrubber_set_speed(audio_scrubber_t *s, float speed)
+audio_shuttle_speed_set_speed(audio_shuttle_speed_t *s, float speed)
 {
     g_assert(s != NULL);
     if (speed < -4.0f)
@@ -405,37 +436,36 @@ audio_scrubber_set_speed(audio_scrubber_t *s, float speed)
 }
 
 void
-audio_scrubber_set_position(audio_scrubber_t *s, int64_t position)
+audio_shuttle_speed_set_mode(audio_shuttle_speed_t *s, shuttle_mode_t mode)
 {
     g_assert(s != NULL);
-    atomic_store(&s->position, position);
+    /* Pure atomic store. No allocation, no DSP setup. Safe from any thread.
+     * Caller MUST have already called audio_shuttle_speed_prepare_mode(mode)
+     * at least once on the UI/main thread if `mode` needs allocation
+     * (currently: KEYLOCK). Otherwise the RT path outputs silence until the
+     * resources are prepared. */
+    atomic_store(&s->shuttle_mode, (int)mode);
 }
 
 void
-audio_scrubber_set_shuttle_mode(audio_scrubber_t *s, shuttle_mode_t mode)
+audio_shuttle_speed_prepare_mode(audio_shuttle_speed_t *s, shuttle_mode_t mode)
 {
     g_assert(s != NULL);
+    /* UI/main thread only — may allocate. Idempotent: re-preparing an
+     * already-prepared mode is a fast no-op. */
+    if (mode != SHUTTLE_MODE_KEYLOCK)
+        return; /* Only KEYLOCK needs allocation today (rubberband state). */
 
-    shuttle_mode_t old_mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
-    atomic_store(&s->shuttle_mode, (int)mode);
+    float speed = atomic_load(&s->speed);
+    if (fabsf(speed) < SPEED_STOPPED_EPSILON)
+        speed = 1.0f; /* Default ratio for stopped state */
 
-    /*
-     * Pre-allocate rubberband on UI thread when switching TO keylock mode.
-     * This avoids malloc + unbounded rubberband_prime() in the RT callback.
-     * Once allocated, rubberband stays alive (reusable across mode toggles).
-     */
-    if (mode == SHUTTLE_MODE_KEYLOCK && old_mode != SHUTTLE_MODE_KEYLOCK) {
-        float speed = atomic_load(&s->speed);
-        if (fabsf(speed) < 0.01f)
-            speed = 1.0f; /* Default ratio for stopped state */
-
-        ensure_rubberband(s, speed);
-        if (s->rb_initialized && !s->rb_primed) {
-            rubberband_prime(s);
-        }
-        /* Signal RT path that rubberband is ready */
-        atomic_store(&s->rb_ready, s->rb_initialized && s->rb_primed);
+    ensure_rubberband(s, speed);
+    if (s->rb_initialized && !s->rb_primed) {
+        rubberband_prime(s);
     }
+    /* Signal RT path that rubberband is ready */
+    atomic_store(&s->rb_ready, s->rb_initialized && s->rb_primed);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -443,47 +473,24 @@ audio_scrubber_set_shuttle_mode(audio_scrubber_t *s, shuttle_mode_t mode)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 float
-audio_scrubber_get_speed(const audio_scrubber_t *s)
+audio_shuttle_speed_get_speed(const audio_shuttle_speed_t *s)
 {
     g_assert(s != NULL);
-    return atomic_load(&s->speed);
-}
-
-int64_t
-audio_scrubber_get_position(const audio_scrubber_t *s)
-{
-    g_assert(s != NULL);
-    return atomic_load(&s->position);
+    return atomic_load_explicit(&s->speed, memory_order_relaxed);
 }
 
 shuttle_mode_t
-audio_scrubber_get_shuttle_mode(const audio_scrubber_t *s)
+audio_shuttle_speed_get_mode(const audio_shuttle_speed_t *s)
 {
     g_assert(s != NULL);
-    return (shuttle_mode_t)atomic_load(&s->shuttle_mode);
+    return (shuttle_mode_t)atomic_load_explicit(&s->shuttle_mode, memory_order_relaxed);
 }
 
 uint64_t
-audio_scrubber_get_underflows(const audio_scrubber_t *s)
+audio_shuttle_speed_get_underflows(const audio_shuttle_speed_t *s)
 {
     g_assert(s != NULL);
     return atomic_load_explicit(&s->stats_underflows, memory_order_relaxed);
-}
-
-int
-audio_scrubber_get_zone(const audio_scrubber_t *s)
-{
-    g_assert(s != NULL);
-
-    shuttle_mode_t mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
-
-    if (mode == SHUTTLE_MODE_OFF) {
-        return ZONE_PASSTHROUGH;
-    } else if (mode == SHUTTLE_MODE_PITCHED) {
-        return ZONE_TURNTABLE;
-    } else {
-        return ZONE_RUBBERBAND;
-    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -507,22 +514,25 @@ cubic_hermite(float y0, float y1, float y2, float y3, float t)
 /* ═══════════════════════════════════════════════════════════════════════════
  * Rubberband Processing
  *
- * Pitch-preserved time stretching for extreme speeds (<0.8x or >1.2x).
- * Uses R2 engine with output ring buffer to handle variable output sizes.
+ * Pitch-preserved time stretch (KEYLOCK mode). The R2 engine emits variable
+ * output sizes, so we accumulate into a ring buffer and pull fixed blocks.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static uint32_t
-process_rubberband(
-    audio_scrubber_t *s, const float *samples, uint64_t num_frames, float *output, uint32_t frames)
+process_rubberband(audio_shuttle_speed_t *s,
+                   const float *samples,
+                   uint64_t num_frames,
+                   float *output,
+                   uint32_t frames)
 {
     /* RT-safe: only proceed if UI thread has finished init + prime */
     if (!atomic_load_explicit(&s->rb_ready, memory_order_acquire)) {
-        memset(output, 0, frames * 2 * sizeof(float));
+        memset(output, 0, (size_t)frames * audio_format_bytes_per_frame(&s->format));
         return frames;
     }
 
     /* Update ratio if speed changed (RT-safe: no allocation) */
-    float speed = fabsf(atomic_load(&s->speed));
+    float speed = fabsf(atomic_load_explicit(&s->speed, memory_order_relaxed));
     ensure_rubberband(s, speed);
 
 /*
@@ -535,6 +545,7 @@ process_rubberband(
      * exhaust the cap, the shortfall is zero-padded below.
      */
 #define MAX_RB_ITERATIONS 8
+    const uint32_t ch = s->format.channels;
     int rb_iters = 0;
     while (rb_ring_available(&s->rb_ring) < frames && rb_iters < MAX_RB_ITERATIONS) {
         rb_iters++;
@@ -553,17 +564,15 @@ process_rubberband(
         uint32_t available = (src_pos < num_frames) ? (uint32_t)(num_frames - src_pos) : 0;
         uint32_t to_read = (required < available) ? required : available;
 
-        /* Deinterleave source into rubberband input buffers */
-        for (uint32_t i = 0; i < to_read; i++) {
-            s->rb_input[0][i] = samples[(src_pos + i) * 2];
-            s->rb_input[1][i] = samples[(src_pos + i) * 2 + 1];
-        }
+        /* Deinterleave source into per-channel rubberband input buffers */
+        for (uint32_t i = 0; i < to_read; i++)
+            for (uint32_t c = 0; c < ch; c++)
+                s->rb_input[c][i] = samples[(size_t)(src_pos + i) * ch + c];
 
         /* Zero-pad if we ran out of source data */
-        for (uint32_t i = to_read; i < required; i++) {
-            s->rb_input[0][i] = 0.0f;
-            s->rb_input[1][i] = 0.0f;
-        }
+        for (uint32_t i = to_read; i < required; i++)
+            for (uint32_t c = 0; c < ch; c++)
+                s->rb_input[c][i] = 0.0f;
 
         /* Process through rubberband */
         rubberband_process(s->rb_state, (const float *const *)s->rb_input, required, 0);
@@ -596,8 +605,8 @@ process_rubberband(
             /* Interleave and soft-limit into work buffer */
             for (int i = 0; i < usable_count; i++) {
                 int src_i = usable_start + i;
-                s->work_buffer[i * 2] = soft_limit(s->rb_output[0][src_i]);
-                s->work_buffer[i * 2 + 1] = soft_limit(s->rb_output[1][src_i]);
+                for (uint32_t c = 0; c < ch; c++)
+                    s->work_buffer[(size_t)i * ch + c] = soft_limit(s->rb_output[c][src_i]);
             }
 
             /* Write to ring buffer */
@@ -617,7 +626,9 @@ process_rubberband(
     /* Zero-pad if not enough (shouldn't happen in normal operation) */
     if (got < frames) {
         atomic_fetch_add_explicit(&s->stats_underflows, 1, memory_order_relaxed);
-        memset(output + got * 2, 0, (frames - got) * 2 * sizeof(float));
+        const size_t spf = audio_format_samples_per_frame(&s->format);
+        const size_t bpf = audio_format_bytes_per_frame(&s->format);
+        memset(output + (size_t)got * spf, 0, (size_t)(frames - got) * bpf);
     }
 
     return frames;
@@ -631,76 +642,66 @@ process_rubberband(
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 uint32_t
-audio_scrubber_process(audio_scrubber_t *s,
-                       const float *samples,
-                       uint64_t num_frames,
-                       float *output,
-                       uint32_t frames,
-                       uint64_t *out_position)
+audio_shuttle_speed_process(audio_shuttle_speed_t *s,
+                            audio_seek_position_t *pos,
+                            const float *samples,
+                            uint64_t num_frames,
+                            float *output,
+                            uint32_t frames)
 {
-    if (!s || !samples || !output || frames == 0)
+    if (!s || !pos || !samples || !output || frames == 0)
         return 0;
 
-    float speed = atomic_load(&s->speed);
-    int64_t int_position = atomic_load(&s->position);
+    const uint32_t ch = s->format.channels;
+    float speed = atomic_load_explicit(&s->speed, memory_order_relaxed);
+    uint64_t playhead = audio_seek_position_get(pos);
 
     /* Sync fractional position if integer position was externally changed (seek) */
-    int64_t expected_int = (int64_t)s->fractional_position;
-    if (expected_int != int_position) {
-        s->fractional_position = (double)int_position;
+    if ((uint64_t)s->fractional_position != playhead) {
+        s->fractional_position = (double)playhead;
         /* Ring buffer already cleared by flush with proper locking */
     }
 
-    /* Clamp position */
-    if (s->fractional_position < 0.0)
-        s->fractional_position = 0.0;
+    /* Clamp playhead to [0, num_frames-1]. Lower bound is structural — fractional
+     * advance can't go negative from a non-negative start under any speed. */
     if (s->fractional_position >= (double)num_frames) {
         s->fractional_position = (double)(num_frames - 1);
     }
 
     /* Handle stopped state (speed near zero) */
-    if (fabsf(speed) < 0.01f) {
-        memset(output, 0, frames * 2 * sizeof(float));
-        int_position = (int64_t)s->fractional_position;
-        atomic_store(&s->position, int_position);
-        if (out_position)
-            *out_position = (uint64_t)int_position;
+    if (fabsf(speed) < SPEED_STOPPED_EPSILON) {
+        memset(output, 0, (size_t)frames * audio_format_bytes_per_frame(&s->format));
+        audio_seek_position_set(pos, (uint64_t)s->fractional_position);
         return frames;
     }
 
-    /* Determine current zone based on shuttle mode only */
+    /* Mode selects the DSP path directly; a crossfade on any change masks the
+     * discontinuity between paths. */
     float rate = fabsf(speed);
-    shuttle_mode_t mode = (shuttle_mode_t)atomic_load(&s->shuttle_mode);
-    int current_zone;
+    shuttle_mode_t mode
+        = (shuttle_mode_t)atomic_load_explicit(&s->shuttle_mode, memory_order_relaxed);
 
-    if (mode == SHUTTLE_MODE_OFF) {
-        current_zone = ZONE_PASSTHROUGH;
-    } else if (mode == SHUTTLE_MODE_PITCHED) {
-        current_zone = ZONE_TURNTABLE;
-    } else {
-        current_zone = ZONE_RUBBERBAND;
-    }
-
-    /* Detect zone transition - start crossfade */
-    if (current_zone != s->prev_zone && s->crossfade_frames == 0) {
+    if (mode != s->prev_mode && s->crossfade_frames == 0)
         s->crossfade_frames = s->crossfade_length;
-    }
 
     /* ═══════════════════════════════════════════════════════════════════════
-     * DIRECT PASSTHROUGH: No processing at exactly 1.0x speed
+     * SHUTTLE_MODE_OFF — direct copy, no rate processing.
      * ═══════════════════════════════════════════════════════════════════════ */
-    if (current_zone == ZONE_PASSTHROUGH) {
-        int64_t pos = (int64_t)s->fractional_position;
+    if (mode == SHUTTLE_MODE_OFF) {
+        uint64_t src_frame = (uint64_t)s->fractional_position;
         uint32_t copy_frames = frames;
-        uint64_t avail = (pos >= 0 && (uint64_t)pos < num_frames) ? num_frames - (uint64_t)pos : 0;
+        uint64_t avail = (src_frame < num_frames) ? num_frames - src_frame : 0;
         if (copy_frames > avail)
             copy_frames = (uint32_t)avail;
 
+        const size_t spf = audio_format_samples_per_frame(&s->format);
+        const size_t bpf = audio_format_bytes_per_frame(&s->format);
+
         if (copy_frames > 0) {
-            memcpy(output, samples + pos * 2, copy_frames * 2 * sizeof(float));
+            memcpy(output, samples + (size_t)src_frame * spf, (size_t)copy_frames * bpf);
         }
         if (copy_frames < frames) {
-            memset(output + copy_frames * 2, 0, (frames - copy_frames) * 2 * sizeof(float));
+            memset(output + (size_t)copy_frames * spf, 0, (size_t)(frames - copy_frames) * bpf);
         }
 
         s->fractional_position += (double)copy_frames;
@@ -708,22 +709,20 @@ audio_scrubber_process(audio_scrubber_t *s,
     }
 
     /* ═══════════════════════════════════════════════════════════════════════
-     * TURNTABLE ZONE: Cubic Hermite interpolation varispeed (pitched mode)
-     *
-     * When pitched_mode is ON, use high-quality cubic interpolation.
-     * Pitch shifts with speed (like vinyl). Quality range: 0.5x-2.0x.
+     * SHUTTLE_MODE_PITCHED — cubic-hermite varispeed; pitch shifts with speed,
+     * like vinyl.
      * ═══════════════════════════════════════════════════════════════════════ */
-    if (current_zone == ZONE_TURNTABLE) {
+    if (mode == SHUTTLE_MODE_PITCHED) {
         uint32_t process_frames = frames;
         if (process_frames > s->buffer_capacity)
             process_frames = s->buffer_capacity;
 
-        double pos = s->fractional_position;
+        double fpos = s->fractional_position;
         double step = (double)rate;
 
         for (uint32_t i = 0; i < process_frames; i++) {
-            int64_t idx = (int64_t)pos;
-            double frac = pos - (double)idx;
+            int64_t idx = (int64_t)fpos;
+            double frac = fpos - (double)idx;
 
             /* Clamp index to safe range for 4-sample window [idx-1 .. idx+2].
              * Eliminates per-sample branching in get_sample_safe. */
@@ -732,43 +731,37 @@ audio_scrubber_process(audio_scrubber_t *s,
             if (idx >= (int64_t)num_frames - 2)
                 idx = (int64_t)num_frames - 3;
 
-            /* Read 4 contiguous stereo pairs directly — no bounds checks needed */
-            const float *p = samples + (idx - 1) * 2;
-            output[i * 2] = cubic_hermite(p[0], p[2], p[4], p[6], (float)frac);
-            output[i * 2 + 1] = cubic_hermite(p[1], p[3], p[5], p[7], (float)frac);
+            /* Read 4 contiguous frames directly — no bounds checks needed. Each
+             * channel interpolates over its own samples at stride `ch`. */
+            const float *p = samples + (size_t)(idx - 1) * ch;
+            for (uint32_t c = 0; c < ch; c++)
+                output[(size_t)i * ch + c]
+                    = cubic_hermite(p[c], p[ch + c], p[2 * ch + c], p[3 * ch + c], (float)frac);
 
-            pos += step;
+            fpos += step;
         }
         /* Bounds check once after loop — only matters at track edges */
-        if (pos < 0.0)
-            pos = 0.0;
-        if (pos >= (double)num_frames)
-            pos = (double)(num_frames - 1);
+        if (fpos < 0.0)
+            fpos = 0.0;
+        if (fpos >= (double)num_frames)
+            fpos = (double)(num_frames - 1);
 
         /* Zero remaining frames if any */
-        for (uint32_t i = process_frames; i < frames; i++) {
-            output[i * 2] = 0.0f;
-            output[i * 2 + 1] = 0.0f;
-        }
+        for (uint32_t i = process_frames; i < frames; i++)
+            for (uint32_t c = 0; c < ch; c++)
+                output[(size_t)i * ch + c] = 0.0f;
 
-        s->fractional_position = pos;
+        s->fractional_position = fpos;
         goto apply_crossfade;
     }
 
     /* ═══════════════════════════════════════════════════════════════════════
-     * RUBBERBAND ZONE: Pitch-preserved time stretching (default mode)
-     *
-     * When pitched_mode is OFF (default), use librubberband R2 engine.
-     * Pitch is preserved across all speeds. Range: 0.5x-4.0x.
+     * SHUTTLE_MODE_KEYLOCK — pitch-preserved time stretch via rubberband.
      * ═══════════════════════════════════════════════════════════════════════ */
-
-    /* Process through rubberband */
     process_rubberband(s, samples, num_frames, output, frames);
 
-    /* Fall through to crossfade application */
-
 apply_crossfade:
-    /* Apply crossfade if transitioning between zones */
+    /* Apply crossfade if transitioning between modes */
     if (s->crossfade_frames > 0) {
         uint32_t fade_samples = (s->crossfade_frames < frames) ? s->crossfade_frames : frames;
 
@@ -778,9 +771,10 @@ apply_crossfade:
 
         for (uint32_t i = 0; i < fade_samples; i++) {
             float old_gain = 1.0f - new_gain;
-            output[i * 2] = output[i * 2] * new_gain + s->crossfade_buffer[i * 2] * old_gain;
-            output[i * 2 + 1]
-                = output[i * 2 + 1] * new_gain + s->crossfade_buffer[i * 2 + 1] * old_gain;
+            for (uint32_t c = 0; c < ch; c++) {
+                size_t k = (size_t)i * ch + c;
+                output[k] = output[k] * new_gain + s->crossfade_buffer[k] * old_gain;
+            }
             new_gain += gain_step;
         }
         s->crossfade_frames -= fade_samples;
@@ -788,15 +782,14 @@ apply_crossfade:
 
     /* Save output for potential future crossfade */
     uint32_t save_frames = (frames < s->buffer_capacity) ? frames : s->buffer_capacity;
-    memcpy(s->crossfade_buffer, output, save_frames * 2 * sizeof(float));
+    memcpy(s->crossfade_buffer,
+           output,
+           (size_t)save_frames * audio_format_bytes_per_frame(&s->format));
 
-    s->prev_zone = current_zone;
+    s->prev_mode = mode;
 
-    /* Update atomic position for external readers */
-    int_position = (int64_t)s->fractional_position;
-    atomic_store(&s->position, int_position);
+    /* Write back the new playhead for external readers */
+    audio_seek_position_set(pos, (uint64_t)s->fractional_position);
 
-    if (out_position)
-        *out_position = (uint64_t)int_position;
     return frames;
 }

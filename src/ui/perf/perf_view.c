@@ -24,7 +24,7 @@
  * Direct ring-buffer readers
  *
  * Perf view reads audio internals directly (via src/audio/internal.h) rather
- * than through wrapper APIs in audio_pipeline.c. These helpers are the
+ * than through wrapper APIs in pipeline.c. These helpers are the
  * ring-buffer snapshotting routines, kept here so perf-specific concerns
  * live with perf code.
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -34,11 +34,10 @@ perf_budget_max_pct(audio_pipeline_t *pipeline, int player_id)
 {
     const budget_rb_t *rb = pipeline->players[player_id].budget_rb;
     uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
-    uint32_t available = write_pos < BUDGET_RB_CAPACITY ? write_pos : BUDGET_RB_CAPACITY;
-    if (!available)
+    uint32_t start;
+    uint32_t window = telemetry_ring_window(write_pos, BUDGET_RB_CAPACITY, 100, &start); /* ~1s */
+    if (!window)
         return 0.0;
-    uint32_t window = available < 100 ? available : 100; /* ~1 second */
-    uint32_t start = write_pos - window;
     uint16_t mx = 0;
     for (uint32_t i = 0; i < window; i++) {
         uint16_t v = rb->samples[(start + i) & (BUDGET_RB_CAPACITY - 1)];
@@ -56,10 +55,8 @@ perf_read_latency_samples(audio_pipeline_t *pipeline,
 {
     const latency_rb_t *rb = pipeline->players[player_id].latency_rb;
     uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
-    uint32_t total = write_pos < LATENCY_RB_CAPACITY ? write_pos : LATENCY_RB_CAPACITY;
-    if (total > max_samples)
-        total = max_samples;
-    uint32_t start = write_pos - total;
+    uint32_t start;
+    uint32_t total = telemetry_ring_window(write_pos, LATENCY_RB_CAPACITY, max_samples, &start);
     for (uint32_t i = 0; i < total; i++)
         out[i] = rb->samples[(start + i) & (LATENCY_RB_CAPACITY - 1)];
     return total;
@@ -74,10 +71,8 @@ perf_read_interval_samples(audio_pipeline_t *pipeline,
 {
     const interval_rb_t *rb = pipeline->players[player_id].interval_rb;
     uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
-    uint32_t total = write_pos < INTERVAL_RB_CAPACITY ? write_pos : INTERVAL_RB_CAPACITY;
-    if (total > max_samples)
-        total = max_samples;
-    uint32_t start = write_pos - total;
+    uint32_t start;
+    uint32_t total = telemetry_ring_window(write_pos, INTERVAL_RB_CAPACITY, max_samples, &start);
     for (uint32_t i = 0; i < total; i++)
         out[i] = rb->samples[(start + i) & (INTERVAL_RB_CAPACITY - 1)];
     if (out_write_pos)
@@ -391,7 +386,7 @@ update_dashboard(gpointer data)
                 type_name = "Dequeue Failure";
                 severity = 2;
                 break;
-            case AUDIO_EVENT_SCRUBBER_UNDERFLOW:
+            case AUDIO_EVENT_SHUTTLE_SPEED_UNDERFLOW:
                 type_name = "Scrubber Underflow";
                 severity = 1;
                 break;
@@ -424,7 +419,7 @@ update_dashboard(gpointer data)
             int ch = ev->player_id >= 0 ? ev->player_id + 1 : 0;
             switch (ev->type) {
             case AUDIO_EVENT_BUFFER_UNDERRUN:
-            case AUDIO_EVENT_SCRUBBER_UNDERFLOW:
+            case AUDIO_EVENT_SHUTTLE_SPEED_UNDERFLOW:
                 snprintf(tooltip,
                          sizeof(tooltip),
                          "%s\nCh%d | Track %" G_GINT64_FORMAT "\nReq: %u  Avail: %u  Speed: %.2f",

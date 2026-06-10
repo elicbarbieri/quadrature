@@ -10,16 +10,15 @@
 #include <string.h>
 
 quadrature_result_t
-spectrum_init(spectrum_state_t *s, int num_bars, int sample_rate)
+spectrum_init(spectrum_state_t *s, uint32_t sample_rate)
 {
     g_assert(s != NULL);
-    g_assert(num_bars > 0 && num_bars <= 64);
     g_assert(sample_rate > 0);
 
     memset(s, 0, sizeof(*s));
     s->sample_rate = sample_rate;
 
-    s->plan = cava_init(num_bars, (unsigned int)sample_rate, 2, 1, 0.30, 50, 10000);
+    s->plan = cava_init(SPECTRUM_BARS, sample_rate, 2, 1, 0.30, 50, 10000);
     if (!s->plan || s->plan->status != 0) {
         g_critical("spectrum_init: cava_init failed: %s",
                    s->plan ? s->plan->error_message : "allocation failed");
@@ -32,7 +31,7 @@ spectrum_init(spectrum_state_t *s, int num_bars, int sample_rate)
 
     s->input_buffer_size = FFT_SAMPLES * 2 * 2;
     s->input_buffer = calloc(s->input_buffer_size, sizeof(double));
-    s->output_bars = calloc((size_t)num_bars * 2, sizeof(double));
+    s->output_bars = calloc((size_t)SPECTRUM_BARS * 2, sizeof(double));
     if (!s->input_buffer || !s->output_bars) {
         spectrum_cleanup(s);
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
@@ -51,7 +50,7 @@ spectrum_set_refresh_hz(spectrum_state_t *s, double hz)
     if (hz > 165.0)
         hz = 165.0;
     int samples_per_frame = (int)((double)s->sample_rate / hz);
-    atomic_store(&s->fft_threshold, samples_per_frame * 2);
+    atomic_store_explicit(&s->fft_threshold, samples_per_frame * 2, memory_order_relaxed);
 }
 
 void
@@ -96,12 +95,14 @@ spectrum_process(spectrum_state_t *s,
     s->input_buffer_fill += to_read;
 
     /* Run FFT when enough samples accumulated for one display frame. */
-    size_t threshold = (size_t)atomic_load(&s->fft_threshold);
+    size_t threshold = (size_t)atomic_load_explicit(&s->fft_threshold, memory_order_relaxed);
     if (s->input_buffer_fill >= threshold) {
         cava_execute(s->input_buffer, (int)s->input_buffer_fill, s->output_bars, s->plan);
         s->input_buffer_fill = 0;
 
-        /* Write clamped stereo results atomically */
+        /* Bar writes are relaxed; the trailing release-bump of `generation`
+         * publishes the whole batch. UI readers that need a coherent batch
+         * snapshot acquire-load `generation` first. */
         for (int b = 0; b < SPECTRUM_BARS; b++) {
             float left = (float)s->output_bars[b];
             float right = (float)s->output_bars[SPECTRUM_BARS + b];
@@ -113,10 +114,10 @@ spectrum_process(spectrum_state_t *s,
                 right = 0.0f;
             if (right > 1.0f)
                 right = 1.0f;
-            atomic_store(&bars[b], left);
-            atomic_store(&bars[SPECTRUM_BARS + b], right);
+            atomic_store_explicit(&bars[b], left, memory_order_relaxed);
+            atomic_store_explicit(&bars[SPECTRUM_BARS + b], right, memory_order_relaxed);
         }
         if (generation)
-            atomic_fetch_add(generation, 1);
+            atomic_fetch_add_explicit(generation, 1, memory_order_release);
     }
 }

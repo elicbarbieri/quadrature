@@ -136,7 +136,7 @@ void ui_spectrum_set_bars(UiSpectrum *s, const float *left, const float *right, 
  *
  * Loudness-over-time bar visualization that renders behind the seek bar.
  * Bars before playback position are blue (played), after are gray (unplayed).
- * Grow-out animation when loudness data first becomes available.
+ * Grow-out animation when waveform_rms data first becomes available.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 #define UI_TYPE_WAVEFORM_SEEK_BAR (ui_waveform_seek_bar_get_type())
@@ -146,7 +146,7 @@ GtkWidget *ui_waveform_seek_bar_new(void);
 GtkAdjustment *ui_waveform_seek_bar_get_adjustment(UiWaveformSeekBar *w);
 gboolean ui_waveform_seek_bar_is_dragging(UiWaveformSeekBar *w);
 void ui_waveform_seek_bar_set_playback_position(UiWaveformSeekBar *w, double value);
-void ui_waveform_seek_bar_set_loudness(UiWaveformSeekBar *w, const float *bins, int count);
+void ui_waveform_seek_bar_set_waveform_rms(UiWaveformSeekBar *w, const float *bins, int count);
 void ui_waveform_seek_bar_clear(UiWaveformSeekBar *w);
 gboolean ui_waveform_seek_bar_is_animating(UiWaveformSeekBar *w);
 

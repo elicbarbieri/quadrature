@@ -33,6 +33,7 @@ ReportHook(PRE_ALL)(struct criterion_test_set *tests)
 
 /* Test sample rate */
 #define TEST_SAMPLE_RATE 48000
+#define TEST_CHANNELS    2
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Test: Lifecycle and Null Safety
@@ -49,7 +50,7 @@ Test(audio_pipeline, lifecycle_null_safety)
     audio_pipeline_t *pipeline = NULL;
 
     /* --- Null safety for create --- */
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, NULL),
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, NULL),
                  QUADRATURE_ERROR_INVALID_PARAM);
 
     /* Destroy null is safe */
@@ -63,7 +64,7 @@ Test(audio_pipeline, lifecycle_null_safety)
     cr_assert_float_eq(disp.length_seconds, 0.0, 1e-9);
 
     /* --- Create pipeline --- */
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
     cr_assert_not_null(pipeline);
 
     audio_pipeline_destroy(pipeline);
@@ -81,7 +82,7 @@ Test(audio_pipeline, lifecycle_null_safety)
 Test(audio_pipeline, player_id_bounds_checking)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     /* --- Test invalid player IDs --- */
     int invalid_ids[] = { -1, -100, 4, 5, 100, 1000 };
@@ -129,7 +130,7 @@ Test(audio_pipeline, player_id_bounds_checking)
 Test(audio_pipeline, initial_player_state)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     for (int id = 0; id < 4; id++) {
         audio_player_display_t d;
@@ -156,21 +157,21 @@ Test(audio_pipeline, initial_player_state)
 Test(audio_pipeline, end_mode_control)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     /* Default is AUTOPLAY */
-    cr_assert_eq(audio_pipeline_player_get_end_mode(pipeline, 0), TRACK_END_AUTOPLAY);
+    cr_assert_eq(audio_pipeline_get_player_end_mode(pipeline, 0), TRACK_END_AUTOPLAY);
 
     /* Set all three modes on player 0 */
-    cr_assert_eq(audio_pipeline_player_set_end_mode(pipeline, 0, TRACK_END_REPEAT), QUADRATURE_OK);
-    cr_assert_eq(audio_pipeline_player_get_end_mode(pipeline, 0), TRACK_END_REPEAT);
+    cr_assert_eq(audio_pipeline_set_player_end_mode(pipeline, 0, TRACK_END_REPEAT), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_get_player_end_mode(pipeline, 0), TRACK_END_REPEAT);
 
-    cr_assert_eq(audio_pipeline_player_set_end_mode(pipeline, 0, TRACK_END_STOP), QUADRATURE_OK);
-    cr_assert_eq(audio_pipeline_player_get_end_mode(pipeline, 0), TRACK_END_STOP);
+    cr_assert_eq(audio_pipeline_set_player_end_mode(pipeline, 0, TRACK_END_STOP), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_get_player_end_mode(pipeline, 0), TRACK_END_STOP);
 
     /* Each player holds its own mode */
     for (int id = 0; id < 4; id++) {
-        cr_assert_eq(audio_pipeline_player_set_end_mode(pipeline, id, TRACK_END_REPEAT),
+        cr_assert_eq(audio_pipeline_set_player_end_mode(pipeline, id, TRACK_END_REPEAT),
                      QUADRATURE_OK);
     }
 
@@ -190,7 +191,7 @@ Test(audio_pipeline, end_mode_control)
 Test(audio_pipeline, spectrum_output)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     float left[24], right[24];
 
@@ -242,7 +243,7 @@ Test(audio_pipeline, spectrum_output)
 Test(audio_pipeline, smooth_position_query)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     for (int id = 0; id < 4; id++) {
         audio_player_display_t d;
@@ -285,7 +286,7 @@ Test(audio_pipeline, smooth_position_query)
 Test(audio_pipeline, device_routing)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     /* Set device for player 0 */
     cr_assert_eq(audio_pipeline_set_player_device(pipeline, 0, "hw:0"), QUADRATURE_OK);
@@ -307,16 +308,16 @@ Test(audio_pipeline, device_routing)
  * 2. set_shuttle_mode returns error when no track loaded
  *
  * Note: Speed/shuttle control requires a buffer to be loaded first.
- * This is by design - the scrubber operates on the buffer.
+ * This is by design - the shuttle_speed operates on the buffer.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 Test(audio_pipeline, speed_control_requires_track)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     /* set_speed fails without loaded track (returns INTERNAL error) */
-    quadrature_result_t result = audio_pipeline_player_set_speed(pipeline, 0, 2.0f);
+    quadrature_result_t result = audio_pipeline_set_player_speed(pipeline, 0, 2.0f);
     cr_assert_neq(result, QUADRATURE_OK, "set_speed should fail without loaded track");
 
     audio_pipeline_destroy(pipeline);
@@ -363,7 +364,7 @@ pipeline_query_thread(void *arg)
 Test(audio_pipeline, concurrent_queries)
 {
     audio_pipeline_t *pipeline = NULL;
-    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, &pipeline), QUADRATURE_OK);
+    cr_assert_eq(audio_pipeline_create(NULL, TEST_SAMPLE_RATE, TEST_CHANNELS, &pipeline), QUADRATURE_OK);
 
     pthread_t threads[PIPELINE_THREADS];
     pipeline_thread_ctx_t contexts[PIPELINE_THREADS];

@@ -132,10 +132,10 @@ typedef struct {
     atomic_uint_fast64_t callback_count_for_budget;
 
     /* Fault event counters (should be 0 in normal operation) */
-    atomic_uint_fast64_t budget_overruns;     /* Callbacks exceeding 50% budget */
-    atomic_uint_fast64_t dequeue_failures;    /* PipeWire couldn't provide output buffer */
-    atomic_uint_fast64_t scrubber_underflows; /* Rubberband couldn't fill requested frames */
-    atomic_uint_fast64_t deferred_advances;   /* Track advance with audible gap (preload miss) */
+    atomic_uint_fast64_t budget_overruns;          /* Callbacks exceeding 50% budget */
+    atomic_uint_fast64_t dequeue_failures;         /* PipeWire couldn't provide output buffer */
+    atomic_uint_fast64_t shuttle_speed_underflows; /* Rubberband couldn't fill requested frames */
+    atomic_uint_fast64_t deferred_advances; /* Track advance with audible gap (preload miss) */
 
     /* Advance quality tracking */
     atomic_uint_fast64_t instant_advances; /* Preloaded track advances (no gap) */

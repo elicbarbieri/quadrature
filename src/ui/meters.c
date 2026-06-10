@@ -161,7 +161,7 @@ ui_spectrum_set_bars(UiSpectrum *s, const float *left, const float *right, int c
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * WaveformSeekBar — self-contained seek widget with loudness visualization
+ * WaveformSeekBar — self-contained seek widget with waveform_rms visualization
  *
  * Single custom GtkWidget that renders waveform bars + playhead AND handles
  * input (click-to-seek, playhead drag). All positioning uses graphene_rect_t
@@ -223,7 +223,7 @@ struct _UiWaveformSeekBar {
     double playback_value; /* actual playback position, updated even during drag */
 
     /* Loudness data */
-    float loudness[WAVEFORM_MAX_BINS];
+    float waveform_rms[WAVEFORM_MAX_BINS];
     int num_bins;
     gboolean has_data;
 
@@ -488,7 +488,7 @@ ui_waveform_seek_bar_snapshot(GtkWidget *widget, GtkSnapshot *snap)
         float x = i * step;
         int bin = MIN((i * w->num_bins) / bar_count, w->num_bins - 1);
 
-        float val = fmaxf(w->loudness[bin], WAVEFORM_MIN_BAR_H);
+        float val = fmaxf(w->waveform_rms[bin], WAVEFORM_MIN_BAR_H);
         float bar_h = fmaxf(max_h * val * w->anim_progress, 0.5f);
 
         /* Base color: only the drag_fill/play_fill lerp varies per bar.
@@ -613,7 +613,7 @@ static void
 ui_waveform_seek_bar_init(UiWaveformSeekBar *w)
 {
     /* Loudness data */
-    memset(w->loudness, 0, sizeof(w->loudness));
+    memset(w->waveform_rms, 0, sizeof(w->waveform_rms));
     w->num_bins = 0;
     w->has_data = FALSE;
 
@@ -686,14 +686,14 @@ ui_waveform_seek_bar_set_playback_position(UiWaveformSeekBar *w, double value)
 }
 
 void
-ui_waveform_seek_bar_set_loudness(UiWaveformSeekBar *w, const float *bins, int count)
+ui_waveform_seek_bar_set_waveform_rms(UiWaveformSeekBar *w, const float *bins, int count)
 {
     g_return_if_fail(UI_IS_WAVEFORM_SEEK_BAR(w));
     if (!bins || count <= 0)
         return;
 
     int n = MIN(count, WAVEFORM_MAX_BINS);
-    memcpy(w->loudness, bins, n * sizeof(float));
+    memcpy(w->waveform_rms, bins, n * sizeof(float));
     w->num_bins = n;
     w->has_data = TRUE;
 

@@ -117,11 +117,14 @@ target_include_directories(quadrature_headers INTERFACE ${CMAKE_SOURCE_DIR}/incl
 # === quadrature_engine ======================================================
 
 add_library(quadrature_engine STATIC
-    src/audio/audio_pipeline.c
-    src/audio/audio_cache.c
-    src/audio/audio_scrub.c
-    src/audio/audio_spectrum.c
-    src/audio/audio_devices.c
+    src/audio/pipeline.c
+    src/audio/player.c
+    src/audio/telemetry.c
+    src/audio/decoder.c
+    src/audio/cache.c
+    src/audio/shuttle_speed.c
+    src/audio/spectrum.c
+    src/audio/devices.c
     src/audio/cavacore.c
     src/core/perf_dashboard.c
     src/database/db.c
@@ -329,7 +332,7 @@ if(BUILD_TESTS)
 
     unit_test(test_audio_pipeline INCLUDES ${S}/audio ${S}/database LIBS quadrature_engine)
     unit_test(test_audio_cache    INCLUDES ${S}/audio ${S}/database LIBS quadrature_engine)
-    unit_test(test_audio_scrubber INCLUDES ${S}/audio ${S}/database LIBS quadrature_engine)
+    unit_test(test_audio_shuttle_speed INCLUDES ${S}/audio ${S}/database LIBS quadrature_engine)
 
     unit_test(test_indexer             INCLUDES ${S}/indexer ${S}/database LIBS quadrature_indexer_core)
     unit_test(test_indexer_integration INCLUDES ${S}/indexer ${S}/database LIBS quadrature_indexer_core quadrature_engine)

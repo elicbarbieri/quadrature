@@ -30,7 +30,7 @@
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 
-/* Note: FFmpeg is still used for decoding, but scrubbing now uses rubberband */
+/* Note: FFmpeg is still used for decoding, but shuttling now uses rubberband */
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,14 +41,21 @@ extern "C" {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Budget ring buffer capacity: 10-min @ ~10ms intervals = 60,000 entries */
-#define BUDGET_RB_CAPACITY     65536 /* must be power-of-2 */
+#define BUDGET_RB_CAPACITY 65536 /* must be power-of-2 */
 
-#define LOUDNESS_BINS          1024
-#define DECODE_BUFFER_FRAMES   4096
-#define SPECTRUM_BARS          24
-#define FFT_SAMPLES            2048
-#define SCRUB_SPEED_MULTIPLIER 3
-#define MAX_AUDIO_PLAYERS      4
+#define WAVEFORM_RMS_BINS  1024
+#define SPECTRUM_BARS      24
+#define FFT_SAMPLES        2048
+#define MAX_AUDIO_PLAYERS  4
+
+/* Telemetry ring buffers (budget/latency/interval) sample on this cadence —
+ * one entry every ~10ms while audio is streaming. */
+#define RINGBUF_SAMPLE_INTERVAL_NS 10000000ULL /* 10 ms */
+
+/* Playback speed below this magnitude is treated as stopped: the shuttle
+ * engine emits silence and the player is considered not actively playing for
+ * UI purposes (no smooth-position interpolation). */
+#define SPEED_STOPPED_EPSILON 0.01f
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Forward Declarations
@@ -58,54 +65,90 @@ typedef struct audio_player audio_player_t;
 typedef struct audio_pipeline audio_pipeline_t;
 typedef struct audio_cache audio_cache_t;
 typedef struct audio_buffer audio_buffer_t;
-typedef struct audio_scrubber audio_scrubber_t;
+typedef struct audio_shuttle_speed audio_shuttle_speed_t;
 typedef struct library_cache library_cache_t;
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Budget Ring Buffer
+ * Audio Format
  *
- * Lock-free ring buffer recording per-callback budget utilization in centipercent
- * (0-10000 = 0.00%-100.00%). Written by the audio thread at ~10ms intervals,
- * read by the UI thread.
+ * Single source of truth for the wire format of PCM audio flowing through
+ * the pipeline. All sample buffers are interleaved float32; layout is
+ * (sample_rate, channels). Replaces hardcoded "2" channel constants —
+ * makes 5.1 / 7.1 / 7.1.4-bed (Atmos) a configuration change rather than a
+ * codebase grep.
+ *
+ * Invariant: player.format == shuttle_speed.format == buffer.format whenever a
+ * buffer is loaded into a player. Mismatch is an assertion failure today;
+ * a future conversion stage will replace the assert with a downmix/upmix.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
-    uint16_t samples[BUDGET_RB_CAPACITY]; /* 0-10000 = centipercent; written by audio thread */
-    uint64_t last_write_ns;               /* audio-thread-only; no sync needed */
-    atomic_uint write_pos;                /* release-store after each write */
-} budget_rb_t;
+    uint32_t sample_rate; /* Hz */
+    uint32_t channels;    /* 1 (mono), 2 (stereo), 6 (5.1), 8 (7.1), 12 (7.1.4) ... */
+} audio_format_t;
+
+static inline size_t
+audio_format_bytes_per_frame(const audio_format_t *f)
+{
+    return (size_t)f->channels * sizeof(float);
+}
+
+static inline size_t
+audio_format_samples_per_frame(const audio_format_t *f)
+{
+    return (size_t)f->channels;
+}
+
+static inline bool
+audio_format_equal(const audio_format_t *a, const audio_format_t *b)
+{
+    return a->sample_rate == b->sample_rate && a->channels == b->channels;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Latency Ring Buffer
+ * Telemetry Ring Buffers
  *
- * Lock-free ring buffer recording per-callback latency in µs (capped at 65535).
- * Written by the audio thread at ~10ms intervals, read by the UI thread.
+ * Lock-free SPSC rings: the audio thread pushes one sample per ~10ms window via
+ * TELEMETRY_RING_PUSH (telemetry.c); the UI thread snapshots via
+ * telemetry_ring_window (below). All three share the same shape — a typed
+ * sample array, an audio-thread-only last_write_ns, and a release-published
+ * write_pos — so one macro stamps out the type. Capacity must be power-of-2.
+ *
+ *   budget_rb_t   — per-callback budget utilization, centipercent (0-10000).
+ *   latency_rb_t  — per-callback processing latency, µs (capped at 65535).
+ *   interval_rb_t — peak |scheduling deviation| within the window, raw ns (>=0).
+ *                   Unit scaling (ns → µs) is left to the reader (perf UI).
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#define LATENCY_RB_CAPACITY 65536 /* must be power-of-2 */
+#define LATENCY_RB_CAPACITY  65536 /* must be power-of-2 */
+#define INTERVAL_RB_CAPACITY 8192  /* must be power-of-2; ~82s at 10ms */
 
-typedef struct {
-    uint16_t samples[LATENCY_RB_CAPACITY]; /* µs, capped at 65535 */
-    uint64_t last_write_ns;                /* audio-thread-only; no sync needed */
-    atomic_uint write_pos;                 /* release-store after each write */
-} latency_rb_t;
+#define TELEMETRY_RING_TYPE(Name, ElemType, Capacity)                                              \
+    typedef struct {                                                                               \
+        ElemType samples[Capacity];                                                                \
+        uint64_t last_write_ns; /* audio-thread-only; no sync needed */                            \
+        atomic_uint write_pos;  /* release-store after each write */                               \
+    } Name
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Callback Interval Ring Buffer
- *
- * Lock-free ring buffer recording peak absolute scheduling deviation in raw
- * nanoseconds. Each sample is the peak |deviation| within a ~10ms sampling
- * window. Always >= 0. Written by the audio thread with zero conversion;
- * unit scaling (ns → µs) is performed by the reader (perf UI).
- * ═══════════════════════════════════════════════════════════════════════════ */
+TELEMETRY_RING_TYPE(budget_rb_t, uint16_t, BUDGET_RB_CAPACITY);
+TELEMETRY_RING_TYPE(latency_rb_t, uint16_t, LATENCY_RB_CAPACITY);
+TELEMETRY_RING_TYPE(interval_rb_t, int64_t, INTERVAL_RB_CAPACITY);
 
-#define INTERVAL_RB_CAPACITY 8192 /* must be power-of-2; ~82s at 10ms */
-
-typedef struct {
-    int64_t samples[INTERVAL_RB_CAPACITY]; /* raw ns, always >= 0 */
-    uint64_t last_write_ns;                /* audio-thread-only; no sync needed */
-    atomic_uint write_pos;                 /* release-store after each write */
-} interval_rb_t;
+/* Snapshot the readable window of a telemetry ring. Given the acquire-loaded
+ * write_pos, returns the most recent min(write_pos, capacity, max_count) samples
+ * and writes their masked start index to *out_start. Capacity must be power-of-2;
+ * callers index `samples[(start + i) & (capacity - 1)]`. */
+static inline uint32_t
+telemetry_ring_window(uint32_t write_pos,
+                      uint32_t capacity,
+                      uint32_t max_count,
+                      uint32_t *out_start)
+{
+    uint32_t avail = write_pos < capacity ? write_pos : capacity;
+    uint32_t count = avail < max_count ? avail : max_count;
+    *out_start = write_pos - count;
+    return count;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Per-Player Spectrum State (cavacore FFT)
@@ -121,7 +164,7 @@ typedef struct {
     double *output_bars;  /* cavacore output (num_bars * 2) */
     size_t input_buffer_size;
     size_t input_buffer_fill;
-    int sample_rate;           /* Cached for threshold recomputation */
+    uint32_t sample_rate;      /* Cached for threshold recomputation; matches audio_format_t */
     _Atomic int fft_threshold; /* Stereo-interleaved samples per FFT; tuned to display Hz */
 } spectrum_state_t;
 
@@ -139,23 +182,35 @@ typedef struct {
     AVFrame *frame;
     AVPacket *packet;
     int stream_index;
-    int64_t stream_start_time;
-    double time_base;
-    int source_sample_rate;
-    int output_sample_rate;
-    int output_channels;
-    bool eof;
+    double time_base;       /* stream time_base, for duration() */
+    int output_sample_rate; /* target rate; swr resamples to this */
 } ffmpeg_decoder_t;
+
+/**
+ * Decoded-source metadata, all from ffmpeg (ground truth — never the file
+ * extension). Populated from the open decoder; copy out before close.
+ */
+typedef struct {
+    char codec_name[16];      /* e.g. "flac", "aac", "alac", "mp3", "pcm_s24le" */
+    uint64_t duration_frames; /* total length in frames at the OUTPUT sample rate */
+    uint32_t sample_rate;     /* source sample rate, Hz (pre-resample) */
+    uint32_t channels;        /* source channel count (pre-downmix) */
+    int64_t bit_rate;         /* source bitrate, bits/sec; 0 if unknown */
+    uint32_t bit_depth;       /* source bits per sample; 0 if compressed/unknown */
+} ffmpeg_decoder_metadata_t;
 
 /**
  * Open an audio file for decoding.
  *
- * @param dec    Decoder state (zero-initialized)
- * @param path   Path to audio file
- * @param rate   Target output sample rate
+ * @param dec       Decoder state (zero-initialized)
+ * @param path      Path to audio file
+ * @param rate      Target output sample rate
+ * @param channels  Target output channel count (output is interleaved float32
+ *                  in the default layout for this count; source is down/upmixed)
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t ffmpeg_decoder_open(ffmpeg_decoder_t *dec, const char *path, uint32_t rate);
+quadrature_result_t
+ffmpeg_decoder_open(ffmpeg_decoder_t *dec, const char *path, uint32_t rate, uint32_t channels);
 
 /**
  * Read decoded frames into buffer.
@@ -168,28 +223,15 @@ quadrature_result_t ffmpeg_decoder_open(ffmpeg_decoder_t *dec, const char *path,
 int ffmpeg_decoder_read(ffmpeg_decoder_t *dec, float *buffer, size_t max_frames);
 
 /**
- * Seek to a position in samples.
- *
- * @param dec       Decoder state
- * @param position  Target position in samples (at output sample rate)
- * @return QUADRATURE_OK on success
- */
-quadrature_result_t ffmpeg_decoder_seek(ffmpeg_decoder_t *dec, uint64_t position);
-
-/**
- * Flush decoder buffers (call after seek).
- */
-void ffmpeg_decoder_flush(ffmpeg_decoder_t *dec);
-
-/**
  * Close decoder and free resources.
  */
 void ffmpeg_decoder_close(ffmpeg_decoder_t *dec);
 
 /**
- * Get total duration in frames (at output sample rate).
+ * Read all source metadata (codec, duration, rate, channels, bitrate, depth)
+ * from the open decoder. Returns by value; valid for an open decoder only.
  */
-uint64_t ffmpeg_decoder_duration(ffmpeg_decoder_t *dec);
+ffmpeg_decoder_metadata_t ffmpeg_decoder_metadata(const ffmpeg_decoder_t *dec);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Time Utilities
@@ -253,48 +295,90 @@ soft_limit(float x)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Audio Scrubber (Variable-Speed Playback)
+ * Audio Shuttle Speed (Variable-Speed Playback Engine)
  *
- * User-controlled mode selection for variable-speed playback:
- *   - Passthrough (speed ≈ 1.0): Direct copy, zero CPU - always active
- *   - Rubberband (default): Pitch-preserved time stretching, 0.5x-4.0x
- *   - Turntable (pitched mode): Pitch shifts with speed, 0.5x-2.0x
+ * shuttle_mode selects the DSP path:
+ *   - OFF: direct memcpy, zero CPU
+ *   - PITCHED: cubic-hermite interp; pitch shifts with speed (turntable)
+ *   - KEYLOCK: librubberband time-stretch; pitch preserved
  *
- * Mode is controlled via pitched_mode flag. Crossfade handles smooth
- * transitions when switching modes while playing.
+ * A short crossfade hides clicks when the mode changes. The playhead lives in
+ * audio_seek_position_t (below), passed in per process() call.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Lifecycle */
-quadrature_result_t audio_scrubber_create(uint32_t sample_rate, audio_scrubber_t **out);
-void audio_scrubber_destroy(audio_scrubber_t *s);
+/* ═══════════════════════════════════════════════════════════════════════════
+ * audio_seek_position_t — the playhead
+ *
+ * Atomic int64 wrapped in a struct so the API is unambiguous. UI thread can
+ * seek and read it directly. audio_shuttle_speed_process() reads it at start
+ * and writes it back as it consumes samples — the engine is one consumer of
+ * the playhead, not its owner.
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Control API (UI thread, atomic-safe) */
-void audio_scrubber_set_speed(audio_scrubber_t *s, float speed); /* -4.0 to +4.0 */
-void audio_scrubber_set_position(audio_scrubber_t *s, int64_t position);
-void audio_scrubber_set_shuttle_mode(audio_scrubber_t *s, shuttle_mode_t mode);
+typedef struct {
+    atomic_uint_fast64_t value; /* Source-frame units; matches num_frames / length_samples. */
+} audio_seek_position_t;
+
+static inline void
+audio_seek_position_init(audio_seek_position_t *p, uint64_t initial)
+{
+    atomic_store(&p->value, initial);
+}
+
+static inline uint64_t
+audio_seek_position_get(const audio_seek_position_t *p)
+{
+    return atomic_load(&p->value);
+}
+
+static inline void
+audio_seek_position_set(audio_seek_position_t *p, uint64_t v)
+{
+    atomic_store(&p->value, v);
+}
+
+/* Lifecycle */
+quadrature_result_t audio_shuttle_speed_create(audio_format_t format, audio_shuttle_speed_t **out);
+void audio_shuttle_speed_destroy(audio_shuttle_speed_t *s);
+
+/* Control API (atomic stores; no allocation, no DSP setup) */
+void audio_shuttle_speed_set_speed(audio_shuttle_speed_t *s, float speed); /* -4.0 to +4.0 */
+void audio_shuttle_speed_set_mode(audio_shuttle_speed_t *s, shuttle_mode_t mode);
+
+/* Allocate/prime DSP resources for a mode. UI/main thread only — may malloc.
+ * Idempotent. Currently only SHUTTLE_MODE_KEYLOCK needs preparation
+ * (rubberband state); other modes are a no-op. Caller MUST invoke this
+ * before set_mode(mode) to avoid silence on the RT path. */
+void audio_shuttle_speed_prepare_mode(audio_shuttle_speed_t *s, shuttle_mode_t mode);
 
 /* Query API (thread-safe) */
-float audio_scrubber_get_speed(const audio_scrubber_t *s);
-int64_t audio_scrubber_get_position(const audio_scrubber_t *s);
-shuttle_mode_t audio_scrubber_get_shuttle_mode(const audio_scrubber_t *s);
+float audio_shuttle_speed_get_speed(const audio_shuttle_speed_t *s);
+shuttle_mode_t audio_shuttle_speed_get_mode(const audio_shuttle_speed_t *s);
 
 /* Stats query (thread-safe) */
-uint64_t audio_scrubber_get_underflows(const audio_scrubber_t *s);
-int audio_scrubber_get_zone(const audio_scrubber_t *s);
+uint64_t audio_shuttle_speed_get_underflows(const audio_shuttle_speed_t *s);
 
-/* Audio thread - unified playback at variable speed */
-uint32_t audio_scrubber_process(audio_scrubber_t *s,
-                                const float *samples,
-                                uint64_t num_frames,
-                                float *output,
-                                uint32_t frames,
-                                uint64_t *out_position);
+/*
+ * Audio thread — unified playback at variable speed.
+ *
+ * The playhead is read from `*pos` at entry and written back as the engine
+ * consumes samples (one atomic store at end). External readers (UI seek bar)
+ * can `audio_seek_position_get(pos)` at any time.
+ */
+uint32_t audio_shuttle_speed_process(audio_shuttle_speed_t *s,
+                                     audio_seek_position_t *pos,
+                                     const float *samples,
+                                     uint64_t num_frames,
+                                     float *output,
+                                     uint32_t frames);
 
 /**
- * Flush all internal scrubber buffers.
- * Call after seek to prevent stale audio from playing.
+ * Flush all internal shuttle_speed buffers.
+ * Call after seek to prevent stale audio from playing. Fractional position is
+ * resynced on the next process() call via its mismatch detection — flush only
+ * needs to clear DSP scratch state (ring buffers, crossfade, zone).
  */
-void audio_scrubber_flush(audio_scrubber_t *s);
+void audio_shuttle_speed_flush(audio_shuttle_speed_t *s);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Position Snapshot (Seqlock Pattern)
@@ -316,15 +400,63 @@ typedef struct {
  *
  * Individual audio player with buffer-based playback and PipeWire output.
  * All playback happens from decoded PCM buffers - no streaming fallback.
+ *
+ * ─── Threading model ──────────────────────────────────────────────────────
+ *
+ *   RT thread (PipeWire callback)         — on_process(), on_monitor_process()
+ *   UI thread (GTK main loop)             — set_player_track, play/pause, seek
+ *   Worker pool                           — audio cache decode threads
+ *
+ * Cross-thread coordination uses C11 atomics with deliberate memory ordering.
+ * Categories of atomic fields below:
+ *
+ *   • Counters / stats (stats_*, callback_sample_count, length_samples,
+ *     stream_generation) — relaxed everywhere. No ordering relation to other
+ *     data; UI reads them as "best effort current value."
+ *
+ *   • Identifiers (current_track_id, next_track_id, end_mode,
+ *     advance_old_track_id, pending_buffer_track_id) — relaxed in principle.
+ *     Some sites still use default seq_cst out of legacy; on x86 this is the
+ *     same `mov`, on ARM a fractionally heavier `ldar`. Not worth churn.
+ *
+ *   • Publication pointers (buffer, next_buffer) — release on store, acquire
+ *     on load. The buffer's contents (samples, num_frames, format) must be
+ *     visible the moment the RT thread observes the pointer.
+ *
+ *   • State machine (state) — managed via CAS for transitions; default seq_cst
+ *     is retained because the state machine is small and the CAS cost is
+ *     already absorbed by the RMW.
+ *
+ *   • Seqlock (position_seq + position_snap) — single writer (RT thread; UI
+ *     callers take the PW thread-loop lock and write via the same helper).
+ *     Trailing store is release; readers acquire-load and retry on odd seq.
+ *
+ *   • Spectrum (spectrum_bars + spectrum_generation) — bars are relaxed;
+ *     `generation` is release on the writer (publishes the batch) and
+ *     acquire on the reader (gate before reading bars).
+ *
+ *   • RT flags (pw_stream_state, device_error, streams_active,
+ *     reconnect_attempted) — release/acquire where the value gates entry into
+ *     other state; relaxed when used as a pure boolean signal.
+ *
+ * On x86-TSO, atomic loads of any order ≤ acquire compile to plain `mov`.
+ * Atomic stores compile to `mov` for relaxed/release; only seq_cst stores
+ * and RMWs carry a fence. On ARMv8, relaxed is `ldr`/`str`, acquire/release
+ * are `ldar`/`stlr`, and seq_cst stores carry a `dmb ish`. The orderings
+ * chosen here are the minimum that the synchronization actually requires.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 struct audio_player {
     int player_id;
     audio_pipeline_t *pipeline; /* Back-reference for perf access */
 
+    /* Wire format negotiated with PipeWire. Fixed for player lifetime;
+     * reconfiguration tears down and recreates the streams. All sample math
+     * (frame strides, memsets, shuttle_speed I/O) reads from this. */
+    audio_format_t format;
+
     /* Playback state (atomic for real-time safety) */
     atomic_int state; /* CHANNEL_STOPPED, CHANNEL_PLAYING, CHANNEL_PAUSED, CHANNEL_ERROR */
-    atomic_uint_fast64_t position_samples;
     atomic_uint_fast64_t length_samples;
     atomic_int end_mode; /* track_end_mode_t — default TRACK_END_AUTOPLAY */
 
@@ -339,10 +471,14 @@ struct audio_player {
     /* Buffer playback (ALWAYS present when ready to play) */
     /* Atomic for thread-safe access from audio callback */
     _Atomic(audio_buffer_t *) buffer;
-    uint64_t current_frame;
 
-    /* Rate processor for variable-speed playback (ALWAYS attached) */
-    audio_scrubber_t *scrubber;
+    /* Playhead — atomic, shared between UI (seek bar) and audio thread.
+     * The shuttle engine reads/writes during process(). The sole source of
+     * truth for "where is playback right now". */
+    audio_seek_position_t seek_position;
+
+    /* Variable-speed playback engine (ALWAYS attached) */
+    audio_shuttle_speed_t *shuttle_speed;
 
     /* Position snapshot for smooth UI interpolation (seqlock pattern) */
     atomic_uint position_seq;          /* Seqlock sequence (odd = writing) */
@@ -352,7 +488,7 @@ struct audio_player {
     atomic_uint_fast64_t callback_sample_count;
 
     /* RT timing for fault diagnostics */
-    uint64_t prev_scrubber_underflows; /* Snapshot for delta detection */
+    uint64_t prev_shuttle_speed_underflows; /* Snapshot for delta detection */
 
     /* PipeWire stream state (updated by state_changed callback) */
     atomic_int pw_stream_state; /* enum pw_stream_state */
@@ -363,6 +499,7 @@ struct audio_player {
     atomic_uint_fast64_t stats_cb_time_max_ns;    /* Peak processing time */
     atomic_uint_fast64_t stats_budget_overruns;   /* Callbacks exceeding 50% of period budget */
     atomic_uint_fast64_t stats_dequeue_failures;  /* pw_stream_dequeue_buffer returned NULL */
+    atomic_uint_fast64_t stats_buffer_underruns;  /* PLAYING state with no buffer loaded */
     atomic_uint_fast64_t stats_deferred_advances; /* Silence gap — no preloaded buffer */
     atomic_uint_fast64_t stats_instant_advances;  /* Gapless buffer swap in RT callback */
 
@@ -405,6 +542,47 @@ struct audio_player {
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Player (Internal API — src/audio/player.c)
+ *
+ * One channel: its PipeWire streams, RT callback, DSP engine, and lifecycle.
+ * The pipeline (src/audio/pipeline.c) owns the array of players and drives them
+ * through this narrow surface.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Generation-checked idle callback payload.
+ *
+ * player_reconnect_idle / player_deactivate_idle run on the GTK main thread and
+ * take the PW lock. If player_recreate_stream() ran between scheduling and
+ * execution, the idle would operate on replaced streams → stale/dangerous.
+ * Capture stream_generation at schedule time; the idle skips if it changed.
+ */
+typedef struct {
+    audio_player_t *player;
+    unsigned int generation; /* stream_generation at schedule time */
+} player_idle_data_t;
+
+/** Initialize a player in-place (dormant — no streams until a device is set). */
+quadrature_result_t player_init(audio_player_t *p, int id, audio_format_t format);
+
+/** Tear down a player's streams/DSP and unlock its tracks via `cache` (may be NULL). */
+void player_destroy(audio_player_t *p, audio_cache_t *cache);
+
+/** Recreate a player's streams on a new target device. PW thread-loop lock held by caller. */
+quadrature_result_t
+player_recreate_stream(audio_player_t *p, uint32_t sample_rate, const char *target_device);
+
+/** GLib idle: reconnect a player's streams after a transient device error. */
+gboolean player_reconnect_idle(gpointer data);
+
+/** Publish a position snapshot (seqlock writer). Caller holds the PW lock off the RT thread. */
+void player_update_position_snap(
+    audio_player_t *p, uint64_t position, float speed, bool playing, uint64_t sample_count);
+
+/** Flush a player's DSP/buffer scratch state (call after seek/stop). */
+void audio_player_flush_all(audio_player_t *p);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Audio Pipeline Event Types
  * 
  * Note: Types defined in public header (quadrature/audio.h).
@@ -414,13 +592,48 @@ struct audio_player {
 #define AUDIO_EVENT_RING_SIZE 512 /* Power of 2, large enough for RT events */
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Audio Telemetry (src/audio/telemetry.c)
+ *
+ * RT-safe diagnostics plumbing shared between the audio callback and the perf
+ * UI. publish_event / record_callback are lock-free (atomics only, no alloc)
+ * and callable from the PipeWire RT thread.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Publish one event into the lock-free SPSC ring. RT-safe. Pass-by-value so
+ * callsites read as publish(pl, (E){...}).
+ */
+void audio_pipeline_publish_event(audio_pipeline_t *pl, audio_pipeline_event_t event);
+
+/**
+ * Record one callback's timing into the budget/latency/interval rings and emit
+ * any derived fault events (scheduling delay, budget overrun). RT-safe; called
+ * once per on_process() after the audio has been rendered.
+ *
+ * @param frame_count     Frames produced this callback (for budget math)
+ * @param cb_start        Callback entry timestamp (time_ns())
+ * @param has_interval    Whether a previous-callback timestamp was available
+ * @param interval_dev_ns Signed deviation of the callback interval from nominal
+ */
+void audio_telemetry_record_callback(audio_player_t *p,
+                                     uint32_t frame_count,
+                                     uint64_t cb_start,
+                                     bool has_interval,
+                                     int64_t interval_dev_ns);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Audio Pipeline (Internal Definition)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 struct audio_pipeline {
     audio_player_t players[MAX_AUDIO_PLAYERS];
-    uint32_t sample_rate;
-    uint64_t ns_per_frame; /* 1000000000 / sample_rate, pre-computed at init */
+
+    /* Canonical wire format. Single source of truth for the entire subsystem:
+     *   cache decodes to this format; every player starts in this format;
+     *   every buffer's format equals this (enforced at buffer-load asserts).
+     * Established once in audio_pipeline_create and never mutated. */
+    audio_format_t format;
+    uint64_t ns_per_frame; /* 1e9 / format.sample_rate, pre-computed at init */
 
     /* PipeWire shared context */
     struct pw_thread_loop *loop;
@@ -447,6 +660,10 @@ struct audio_pipeline {
     void (*track_changed_callback)(int player_id, int64_t track_id, void *user_data);
     void *track_changed_user_data;
 
+    /* Track decode-failure callback */
+    void (*track_failed_callback)(int player_id, int64_t track_id, void *user_data);
+    void *track_failed_user_data;
+
     /* Auto-advance timeout (runs on main thread) */
     guint advance_timeout_id;
 
@@ -458,14 +675,6 @@ struct audio_pipeline {
     /* Performance dashboard (for aggregated view, not written to directly) */
     perf_dashboard_t *perf;
 
-    /* Pipeline statistics (atomic for thread-safe reads) */
-    atomic_uint_fast64_t stats_callback_count;
-    atomic_uint_fast64_t stats_underrun_count;
-    atomic_uint_fast64_t stats_callback_time_sum_us;
-    atomic_uint_fast64_t stats_callback_time_max_us;
-    atomic_uint_fast64_t stats_track_changes;
-    atomic_uint_fast64_t stats_instant_advances;
-
     atomic_bool system_active;
 };
 
@@ -476,30 +685,21 @@ struct audio_pipeline {
  * FFT processing runs inline in the PipeWire monitor callback.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Initialize a player's spectrum state (cava plan + accumulation buffers).
- * Called from player_init().
- */
-quadrature_result_t spectrum_init(spectrum_state_t *s, int num_bars, int sample_rate);
+/* Initialize a player's spectrum state (cava plan + accumulation buffers). */
+quadrature_result_t spectrum_init(spectrum_state_t *s, uint32_t sample_rate);
 
-/**
- * Destroy a player's spectrum state.
- * Called from player_destroy().
- */
+/* Destroy a player's spectrum state. */
 void spectrum_cleanup(spectrum_state_t *s);
 
-/**
- * Process audio samples through cavacore FFT.
- * Called from the PipeWire monitor callback.
- * Writes results to player->spectrum_bars[] atomically.
- *
- * @param s       Per-player spectrum state
- * @param in      Interleaved stereo float samples
- * @param frames  Number of frames (samples / 2)
- * @param bars    Atomic spectrum_bars array to write results
- */
+/* Set the FFT display refresh rate (clamped to [30, 165] Hz). */
 void spectrum_set_refresh_hz(spectrum_state_t *s, double hz);
 
+/*
+ * Run the cavacore FFT over interleaved stereo `in` (`frames` frames) from the
+ * PipeWire monitor callback. On each completed display frame, writes SPECTRUM_BARS
+ * stereo magnitudes into `bars` (relaxed) then bumps `generation` (release) to
+ * publish the batch to UI readers.
+ */
 void spectrum_process(spectrum_state_t *s,
                       const float *in,
                       uint32_t frames,
@@ -588,7 +788,10 @@ audio_cache_compute_unlock_delay(uint32_t quantum_frames, uint32_t sample_rate)
     return delay < AUDIO_CACHE_UNLOCK_DELAY_MIN_MS ? AUDIO_CACHE_UNLOCK_DELAY_MIN_MS : delay;
 }
 
-/* Cache Status */
+/* Cache status — the single enum describing a track's decode state, returned by
+ * both audio_cache_get_status() (pure query) and audio_cache_lock() (acquire +
+ * report). NOT_FOUND is only ever returned by get_status(); lock() crashes on a
+ * missing track since that is a caller bug (load() must precede lock()). */
 typedef enum {
     AUDIO_CACHE_NOT_FOUND, /* Track ID not in cache */
     AUDIO_CACHE_LOADING,   /* Decode in progress */
@@ -604,14 +807,14 @@ typedef struct {
     int64_t track_id;
     uint64_t file_size;          /* File size in bytes */
     uint32_t audio_duration_ms;  /* Track length in milliseconds */
-    char filetype[8];            /* File extension (e.g., "mp3", "flac") */
+    char codec[16];              /* ffmpeg codec name (e.g. "flac", "aac", "alac") */
     uint32_t decode_duration_ms; /* How long decode took */
     uint64_t timestamp_ms;       /* When load() was called (monotonic) */
 } audio_cache_decode_event_t;
 
 /* Cache Lifecycle */
 quadrature_result_t
-audio_cache_create(library_cache_t *library, uint32_t sample_rate, audio_cache_t **out);
+audio_cache_create(library_cache_t *library, audio_format_t format, audio_cache_t **out);
 void audio_cache_destroy(audio_cache_t *cache);
 
 /* Loading API (Background Decoding) */
@@ -619,17 +822,22 @@ quadrature_result_t audio_cache_load(audio_cache_t *cache, int64_t track_id);
 void audio_cache_cancel_load(audio_cache_t *cache, int64_t track_id);
 void audio_cache_cancel_all_loads(audio_cache_t *cache);
 
-/* Lock result for audio_cache_lock() */
-typedef enum {
-    AUDIO_CACHE_LOCK_READY,   /* Buffer available now */
-    AUDIO_CACHE_LOCK_LOADING, /* Decode in progress, call wait_ready() */
-    AUDIO_CACHE_LOCK_FAILED   /* Decode failed or track not found */
-} audio_cache_lock_result_t;
-
 /* Lock/Unlock API (Eviction Protection) */
-audio_cache_lock_result_t audio_cache_lock(audio_cache_t *cache, int64_t track_id);
-void audio_cache_unlock(audio_cache_t *cache, int64_t track_id);
-void audio_cache_unlock_delayed(audio_cache_t *cache, int64_t track_id);
+
+/* Lock a track against LRU eviction and report its decode status. Returns the
+ * shared audio_cache_status_t (never NOT_FOUND — see that enum's note). */
+audio_cache_status_t audio_cache_lock(audio_cache_t *cache, int64_t track_id);
+
+/* delay_ms argument to audio_cache_unlock():
+ *   AUDIO_CACHE_UNLOCK_IMMEDIATE (0)  — drop the lock synchronously now.
+ *   AUDIO_CACHE_UNLOCK_DEFERRED (-1)  — defer by the cache's quantum-derived
+ *                                       safe delay; use when transitioning away
+ *                                       from a playing track so the RT callback
+ *                                       finishes reading before eviction.
+ *   > 0                               — defer by exactly this many milliseconds. */
+#define AUDIO_CACHE_UNLOCK_IMMEDIATE 0
+#define AUDIO_CACHE_UNLOCK_DEFERRED  (-1)
+void audio_cache_unlock(audio_cache_t *cache, int64_t track_id, int delay_ms);
 void audio_cache_set_quantum(audio_cache_t *cache, uint32_t quantum_frames);
 
 /* Buffer Access (For Locked Tracks) */
@@ -642,8 +850,9 @@ audio_cache_status_t audio_cache_get_status(audio_cache_t *cache, int64_t track_
 int64_t audio_buffer_get_track_id(const audio_buffer_t *buf);
 const float *audio_buffer_get_samples(const audio_buffer_t *buf);
 uint64_t audio_buffer_get_num_frames(const audio_buffer_t *buf);
-const float *audio_buffer_get_loudness(const audio_buffer_t *buf);
-bool audio_buffer_is_loudness_ready(const audio_buffer_t *buf);
+audio_format_t audio_buffer_get_format(const audio_buffer_t *buf);
+const float *audio_buffer_get_waveform_rms(const audio_buffer_t *buf);
+bool audio_buffer_is_waveform_rms_ready(const audio_buffer_t *buf);
 
 /* Cache Management */
 /** Evict unlocked buffers not accessed within max_age_us microseconds. */
