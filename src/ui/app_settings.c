@@ -715,39 +715,6 @@ app_settings_get_channel_gpio(const app_settings_t *settings, int channel)
 
 /* Axia GPIO credentials */
 
-void
-app_settings_set_axia_username(app_settings_t *settings, const char *username)
-{
-    g_return_if_fail(settings);
-    g_free(settings->axia_username);
-
-    if (username && username[0] != '\0') {
-        settings->axia_username = g_strdup(username);
-    } else {
-        settings->axia_username = NULL;
-    }
-}
-
-const char *
-app_settings_get_axia_username(const app_settings_t *settings)
-{
-    g_return_val_if_fail(settings, NULL);
-    return settings->axia_username;
-}
-
-void
-app_settings_set_axia_password(app_settings_t *settings, const char *password)
-{
-    g_return_if_fail(settings);
-    g_free(settings->axia_password);
-
-    if (password && password[0] != '\0') {
-        settings->axia_password = g_strdup(password);
-    } else {
-        settings->axia_password = NULL;
-    }
-}
-
 const char *
 app_settings_get_axia_password(const app_settings_t *settings)
 {

@@ -1390,13 +1390,6 @@ perf_stacked_area_chart_set_data(PerfStackedAreaChart *chart,
 }
 
 void
-perf_stacked_area_chart_set_y_max(PerfStackedAreaChart *chart, double max_mb)
-{
-    g_return_if_fail(PERF_IS_STACKED_AREA_CHART(chart));
-    chart->y_max = max_mb;
-}
-
-void
 perf_stacked_area_chart_set_hover(PerfStackedAreaChart *chart, double interval_ms, const char *unit)
 {
     g_return_if_fail(PERF_IS_STACKED_AREA_CHART(chart));
@@ -1695,14 +1688,5 @@ perf_timeline_chart_add_event(PerfTimelineChart *chart,
     chart->event_write = (chart->event_write + 1) % PERF_TIMELINE_MAX_EVENTS;
     chart->event_count++;
 
-    perf_chart_queue_redraw(PERF_CHART(chart));
-}
-
-void
-perf_timeline_chart_clear(PerfTimelineChart *chart)
-{
-    g_return_if_fail(PERF_IS_TIMELINE_CHART(chart));
-    chart->event_count = 0;
-    chart->event_write = 0;
     perf_chart_queue_redraw(PERF_CHART(chart));
 }

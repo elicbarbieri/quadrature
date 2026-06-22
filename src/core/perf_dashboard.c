@@ -58,26 +58,6 @@ perf_timeseries_add(perf_timeseries_t *ts, double value)
     g_mutex_unlock(&ts->lock);
 }
 
-void
-perf_get_timeseries(perf_timeseries_t *ts, double *out, size_t *count)
-{
-    g_mutex_lock(&ts->lock);
-    unsigned int write_idx = atomic_load(&ts->write_index);
-    size_t n = write_idx < PERF_TIMESERIES_SIZE ? write_idx : PERF_TIMESERIES_SIZE;
-
-    /* Copy in chronological order */
-    if (write_idx < PERF_TIMESERIES_SIZE) {
-        memcpy(out, ts->values, n * sizeof(double));
-    } else {
-        unsigned int start = write_idx % PERF_TIMESERIES_SIZE;
-        size_t tail_size = PERF_TIMESERIES_SIZE - start;
-        memcpy(out, &ts->values[start], tail_size * sizeof(double));
-        memcpy(&out[tail_size], ts->values, start * sizeof(double));
-    }
-    *count = n;
-    g_mutex_unlock(&ts->lock);
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * Lifecycle
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -146,77 +126,6 @@ perf_dashboard_set_audio_cache(perf_dashboard_t *d, void *cache)
 {
     if (d)
         d->audio_cache = cache;
-}
-
-void
-perf_dashboard_set_library_cache(perf_dashboard_t *d, void *library_cache)
-{
-    if (d)
-        d->library_cache = library_cache;
-}
-
-void
-perf_dashboard_set_artwork_mgr(perf_dashboard_t *d, void *artwork_mgr)
-{
-    if (d)
-        d->artwork_mgr = artwork_mgr;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Querying
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-void
-perf_get_histogram_stats(const perf_histogram_t *h, perf_hist_stats_t *out)
-{
-    if (!h || !out)
-        return;
-    memset(out, 0, sizeof(*out));
-
-    out->count = atomic_load_explicit(&h->count, memory_order_relaxed);
-    if (out->count == 0)
-        return;
-
-    out->min = atomic_load_explicit(&h->min, memory_order_relaxed);
-    out->max = atomic_load_explicit(&h->max, memory_order_relaxed);
-
-    uint64_t sum = atomic_load_explicit(&h->sum, memory_order_relaxed);
-    out->mean = sum / out->count;
-
-    /* Copy bucket counts */
-    uint64_t total = 0;
-    for (int i = 0; i < PERF_HIST_BUCKETS; i++) {
-        out->bucket_counts[i] = atomic_load_explicit(&h->buckets[i], memory_order_relaxed);
-        total += out->bucket_counts[i];
-    }
-
-    /* Calculate percentiles by scanning buckets */
-    uint64_t p50_target = total * 50 / 100;
-    uint64_t p90_target = total * 90 / 100;
-    uint64_t p99_target = total * 99 / 100;
-
-    uint64_t cumulative = 0;
-    bool found_p50 = false, found_p90 = false, found_p99 = false;
-
-    for (int i = 0; i < PERF_HIST_BUCKETS; i++) {
-        cumulative += out->bucket_counts[i];
-
-        /* Bucket upper bound in microseconds */
-        uint64_t bucket_max_us = (i == 0) ? 1000 : ((1ULL << i) * 1000);
-
-        if (!found_p50 && cumulative >= p50_target) {
-            out->p50 = bucket_max_us;
-            found_p50 = true;
-        }
-        if (!found_p90 && cumulative >= p90_target) {
-            out->p90 = bucket_max_us;
-            found_p90 = true;
-        }
-        if (!found_p99 && cumulative >= p99_target) {
-            out->p99 = bucket_max_us;
-            found_p99 = true;
-        }
-    }
 }
 
 /* PipeWire queue depth sampling (called from ~1s timer) */

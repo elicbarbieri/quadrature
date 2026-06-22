@@ -370,9 +370,6 @@ const char *filter_bar_get_search_text(const FilterBarState *fb);
 /** Get current search mode (Default or Metadata). */
 FilterSearchMode filter_bar_get_search_mode(const FilterBarState *fb);
 
-/** Get selected roles bitmask (0 = no filter / all roles). */
-uint32_t filter_bar_get_selected_roles_mask(const FilterBarState *fb);
-
 /**
  * Get GIDs of all selected roles as a NULL-terminated array.
  * Caller must g_free the returned array (not the strings — they are static).
@@ -580,7 +577,6 @@ gboolean library_unified_detail_go_back(GtkWidget *view);
 void library_unified_detail_reload(GtkWidget *view);
 void library_unified_detail_set_library_mask(GtkWidget *view, uint32_t mask);
 void library_unified_detail_clear_nav(GtkWidget *view);
-DetailState library_unified_detail_get_state(GtkWidget *view);
 int64_t library_unified_detail_get_current_entity_id(GtkWidget *view);
 GtkWidget *library_unified_detail_get_track_list(GtkWidget *view);
 
@@ -598,12 +594,7 @@ void library_view_clear_filters(GtkWidget *view);
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 GtkWidget *errors_view_new(quadrature_db_t *db);
-void errors_view_set_db(GtkWidget *view, quadrature_db_t *db);
 void errors_view_refresh(GtkWidget *view);
-void errors_view_set_callbacks(GtkWidget *view,
-                               void (*on_path)(const char *path, gpointer data),
-                               gpointer user_data);
-size_t errors_view_get_count(GtkWidget *view);
 void errors_view_set_path_filter(GtkWidget *view, const char *path_filter);
 
 G_END_DECLS

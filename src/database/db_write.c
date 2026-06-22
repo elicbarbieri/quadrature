@@ -219,16 +219,25 @@ merge_duplicate_artist(quadrature_db_t *db,
     return new_id;
 }
 
-int64_t
+quadrature_result_t
 db_get_or_create_artist(quadrature_db_t *db,
                         const char *name,
                         const char *sort_name,
-                        const char *musicbrainz_id)
+                        const char *musicbrainz_id,
+                        int64_t *out_artist_id)
 {
+    if (!db || !out_artist_id)
+        return QUADRATURE_ERROR_INVALID_PARAM;
+
     /* Fast path when caller has no MB data — simpler stmts, fewer lookups. */
     bool has_mb = (sort_name && *sort_name) || (musicbrainz_id && *musicbrainz_id);
-    if (!has_mb)
-        return artist_get_or_create_plain(db, name);
+    if (!has_mb) {
+        int64_t plain_id = artist_get_or_create_plain(db, name);
+        if (plain_id < 0)
+            return QUADRATURE_ERROR_INTERNAL;
+        *out_artist_id = plain_id;
+        return QUADRATURE_OK;
+    }
 
     if (!name || !*name)
         name = "Unknown Artist";
@@ -257,9 +266,7 @@ db_get_or_create_artist(quadrature_db_t *db,
                 sqlite3_step(db->update_artist_sort_name);
                 sqlite3_reset(db->update_artist_sort_name);
             }
-            if (need_unlock)
-                db_unlock(db);
-            return id;
+            goto done;
         }
     }
 
@@ -278,9 +285,7 @@ db_get_or_create_artist(quadrature_db_t *db,
     if (id >= 0) {
         /* Rename in-place: apply canonical MB name/MBID/sort_name */
         rename_artist_inplace(db, id, name, musicbrainz_id, sort_name);
-        if (need_unlock)
-            db_unlock(db);
-        return id;
+        goto done;
     }
 
     // Step 3: Normalized lookup — strips spaces and hyphens so "2 Mex" matches
@@ -303,9 +308,7 @@ db_get_or_create_artist(quadrature_db_t *db,
             if (rc == SQLITE_CONSTRAINT || rc == SQLITE_CONSTRAINT_UNIQUE) {
                 id = merge_duplicate_artist(db, id, name, musicbrainz_id);
             }
-            if (need_unlock)
-                db_unlock(db);
-            return id;
+            goto done;
         }
     }
 
@@ -331,9 +334,13 @@ db_get_or_create_artist(quadrature_db_t *db,
         sqlite3_reset(db->insert_artist_fts_replace);
     }
 
+done:
     if (need_unlock)
         db_unlock(db);
-    return id;
+    if (id < 0)
+        return QUADRATURE_ERROR_INTERNAL;
+    *out_artist_id = id;
+    return QUADRATURE_OK;
 }
 
 quadrature_result_t
@@ -428,22 +435,16 @@ db_clear_errors_for_path(quadrature_db_t *db, const char *path_prefix)
 
     db_lock(db);
 
+    /* An empty prefix binds LIKE '%', matching every row (path is NOT NULL),
+     * so a single statement serves both the filtered and unfiltered cases. */
     sqlite3_stmt *stmt;
-    int rc;
-    if (path_prefix && *path_prefix) {
-        rc = sqlite3_prepare_v2(
-            db->db, "DELETE FROM indexer_errors WHERE path LIKE ? || '%'", -1, &stmt, NULL);
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, path_prefix, -1, SQLITE_STATIC);
-        }
-    } else {
-        rc = sqlite3_prepare_v2(db->db, "DELETE FROM indexer_errors", -1, &stmt, NULL);
-    }
-
+    int rc = sqlite3_prepare_v2(
+        db->db, "DELETE FROM indexer_errors WHERE path LIKE ?1 || '%'", -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         db_unlock(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
+    sqlite3_bind_text(stmt, 1, path_prefix ? path_prefix : "", -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);

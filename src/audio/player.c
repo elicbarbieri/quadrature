@@ -92,18 +92,6 @@ typedef enum {
     EOT_STOPPED,  /* terminal: nothing left to play */
 } eot_outcome_t;
 
-static void
-emit_advance_event(audio_player_t *p, audio_event_type_t type, uint64_t cb_start, int64_t track_id)
-{
-    audio_pipeline_publish_event(p->pipeline,
-                                 (audio_pipeline_event_t){
-                                     .timestamp_ns = cb_start,
-                                     .type = type,
-                                     .player_id = p->player_id,
-                                     .track_id = track_id,
-                                 });
-}
-
 /*
  * Atomically swap the player onto a preloaded next buffer.
  *
@@ -193,7 +181,13 @@ on_track_end(audio_player_t *p, uint64_t cb_start)
         int64_t next_track_id = atomic_load(&p->next_track_id);
         swap_to_next_buffer(p, next, next_track_id);
         atomic_fetch_add_explicit(&p->stats_instant_advances, 1, memory_order_relaxed);
-        emit_advance_event(p, AUDIO_EVENT_INSTANT_ADVANCE, cb_start, old_track_id);
+        audio_pipeline_publish_event(p->pipeline,
+                                     (audio_pipeline_event_t){
+                                         .timestamp_ns = cb_start,
+                                         .type = AUDIO_EVENT_INSTANT_ADVANCE,
+                                         .player_id = p->player_id,
+                                         .track_id = old_track_id,
+                                     });
         if (mode == TRACK_END_STOP) {
             atomic_store(&p->state, CHANNEL_STOPPED);
             return EOT_STOPPED;
@@ -207,8 +201,13 @@ on_track_end(audio_player_t *p, uint64_t cb_start)
         atomic_store_explicit(&p->buffer, NULL, memory_order_release);
         atomic_store(&p->advance_pending, true);
         atomic_fetch_add_explicit(&p->stats_deferred_advances, 1, memory_order_relaxed);
-        emit_advance_event(
-            p, AUDIO_EVENT_DEFERRED_ADVANCE, cb_start, atomic_load(&p->current_track_id));
+        audio_pipeline_publish_event(p->pipeline,
+                                     (audio_pipeline_event_t){
+                                         .timestamp_ns = cb_start,
+                                         .type = AUDIO_EVENT_DEFERRED_ADVANCE,
+                                         .player_id = p->player_id,
+                                         .track_id = atomic_load(&p->current_track_id),
+                                     });
         if (mode == TRACK_END_STOP) {
             atomic_store(&p->state, CHANNEL_STOPPED);
         }

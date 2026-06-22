@@ -179,8 +179,6 @@ void perf_dashboard_set_audio_pipeline(perf_dashboard_t *d, void *pipeline);
 void perf_dashboard_set_audio_cache(perf_dashboard_t *d, void *cache);
 
 /* Querying (UI Thread) */
-void perf_get_histogram_stats(const perf_histogram_t *h, perf_hist_stats_t *out);
-void perf_get_timeseries(perf_timeseries_t *ts, double *out, size_t *count);
 void perf_timeseries_add(perf_timeseries_t *ts, double value);
 void perf_sample_pw_queue_depth(perf_dashboard_t *d);
 
@@ -193,10 +191,6 @@ void perf_memory_multi_add(perf_memory_multi_t *mm,
                            const double *artwork_atlas_mb,
                            int lib_count);
 void perf_memory_multi_get(perf_memory_multi_t *mm, int series_idx, double *out, size_t *count);
-
-/* Component registration */
-void perf_dashboard_set_library_cache(perf_dashboard_t *d, void *library_cache);
-void perf_dashboard_set_artwork_mgr(perf_dashboard_t *d, void *artwork_mgr);
 
 #ifdef __cplusplus
 }

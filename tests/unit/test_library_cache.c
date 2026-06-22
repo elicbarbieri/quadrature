@@ -73,8 +73,8 @@ setup_test_data(void)
     cr_assert_not_null(test_db);
 
     cr_assert_eq(db_begin_transaction(test_db), QUADRATURE_OK);
-    int64_t test_artist_id = db_get_or_create_artist(test_db, "Test Artist", NULL, NULL);
-    int64_t another_artist_id = db_get_or_create_artist(test_db, "Another Artist", NULL, NULL);
+    int64_t test_artist_id = test_goc_artist(test_db, "Test Artist", NULL, NULL);
+    int64_t another_artist_id = test_goc_artist(test_db, "Another Artist", NULL, NULL);
     cr_assert(test_artist_id > 0);
     cr_assert(another_artist_id > 0);
 

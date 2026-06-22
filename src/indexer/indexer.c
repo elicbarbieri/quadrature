@@ -429,13 +429,6 @@ get_data_root(const indexer_t *idx)
     return idx->data_root;
 }
 
-/** Get library root (where audio files live). */
-static const char *
-get_library_root(const indexer_t *idx)
-{
-    return idx->library_root;
-}
-
 static void
 set_phase(indexer_t *idx, indexer_phase_t phase)
 {
@@ -451,7 +444,6 @@ set_current_path(indexer_t *idx, const char *path)
     pthread_mutex_lock(&idx->lock);
     if (path) {
         g_strlcpy(idx->current_path, path, INDEXER_PATH_MAX);
-        idx->current_path[INDEXER_PATH_MAX - 1] = '\0';
     } else {
         idx->current_path[0] = '\0';
     }
@@ -935,7 +927,8 @@ phase_scan(indexer_t *idx, work_queue_t *queue)
     g_message("Scanning library root: %s", idx->library_root);
 
     // Initialize scan generation for error mark-and-sweep persistence
-    idx->scan_generation = db_get_next_error_generation(idx->db);
+    idx->scan_generation = 1;
+    db_get_next_error_generation(idx->db, &idx->scan_generation);
 
     // Build hashmap of absolute path -> album_mtime from DB (paged)
     // Keys are owned (g_free) since we reconstruct absolute paths from relative DB paths.
@@ -990,15 +983,19 @@ phase_scan(indexer_t *idx, work_queue_t *queue)
     if (g_hash_table_size(album_mtimes) > 0 && !atomic_load(&idx->cancel_flag)) {
         g_message("Pruning %u orphan album(s) (deleted from disk)",
                   g_hash_table_size(album_mtimes));
-        db_begin_batch(idx->db);
+        if (db_begin_batch(idx->db) != QUADRATURE_OK)
+            g_warning("orphan prune: failed to begin batch transaction");
         GHashTableIter iter;
         gpointer key, value;
         g_hash_table_iter_init(&iter, album_mtimes);
         while (g_hash_table_iter_next(&iter, &key, &value)) {
             db_album_mtime_t *cached = value;
-            db_delete_album(idx->db, cached->album_id);
+            if (db_delete_album(idx->db, cached->album_id) != QUADRATURE_OK)
+                g_warning("orphan prune: failed to delete album %" G_GINT64_FORMAT,
+                          cached->album_id);
         }
-        db_commit_batch(idx->db);
+        if (db_commit_batch(idx->db) != QUADRATURE_OK)
+            g_critical("orphan prune: batch commit failed; orphan deletions may be lost");
     }
 
     // Cleanup
@@ -1077,8 +1074,8 @@ get_or_create_artist_cached(artist_cache_t *cache, quadrature_db_t *db, const ch
     }
     g_free(key);
 
-    int64_t id = db_get_or_create_artist(db, name, NULL, NULL);
-    if (id > 0) {
+    int64_t id = -1;
+    if (db_get_or_create_artist(db, name, NULL, NULL, &id) == QUADRATURE_OK && id > 0) {
         char *k2 = g_utf8_casefold(name, -1);
         gint64 *v = g_new(gint64, 1);
         *v = id;
@@ -1458,12 +1455,14 @@ phase2_parse_track_credits(metadata_writer_ctx_t *ctx,
     size_t w = 0;
     for (size_t k = 0; k < n; k++) {
         const char *mbid = mbids_aligned && mbids[k][0] ? mbids[k] : NULL;
-        int64_t aid;
+        int64_t aid = 0;
         if (mbid) {
             /* Use MB-aware path so the MBID lands on the artist row. Bypasses
              * the name-keyed artist_cache (it's not MBID-aware), which is fine
              * for the tiny number of feat.-credit tracks per album. */
-            aid = db_get_or_create_artist(ctx->idx->db, credits[k].name, NULL, mbid);
+            if (db_get_or_create_artist(ctx->idx->db, credits[k].name, NULL, mbid, &aid)
+                != QUADRATURE_OK)
+                aid = 0;
         } else {
             aid = get_or_create_artist_cached(ctx->artist_cache, ctx->idx->db, credits[k].name);
         }
@@ -1501,10 +1500,12 @@ write_album_to_db(metadata_writer_ctx_t *ctx, metadata_result_t *mr)
     quadrature_db_t *db = idx->db;
 
     /* Use MB-aware artist creation when Picard tags provide ALBUMARTISTID */
-    int64_t artist_id;
+    int64_t artist_id = -1;
     if (mr->album_mb_artist_id && mr->album_mb_artist_id[0]) {
-        artist_id = db_get_or_create_artist(
-            db, mr->album_artist, mr->album_artist, mr->album_mb_artist_id);
+        if (db_get_or_create_artist(
+                db, mr->album_artist, mr->album_artist, mr->album_mb_artist_id, &artist_id)
+            != QUADRATURE_OK)
+            artist_id = -1;
     } else {
         artist_id = get_or_create_artist_cached(ctx->artist_cache, db, mr->album_artist);
     }
@@ -1628,7 +1629,9 @@ metadata_db_writer_thread(gpointer data)
     size_t albums_since_checkpoint = 0;
 
     // Start first batch transaction
-    db_begin_batch(idx->db);
+    if (db_begin_batch(idx->db) != QUADRATURE_OK)
+        g_warning("metadata writer: failed to begin batch transaction; "
+                  "writes will run in autocommit (slower)");
 
     for (;;) {
         // Pop from queue with 100ms timeout to allow cancel checks
@@ -1663,16 +1666,20 @@ metadata_db_writer_thread(gpointer data)
         }
 
         // Rotate batch transaction: commit current, start new
-        db_commit_batch(idx->db);
+        if (db_commit_batch(idx->db) != QUADRATURE_OK)
+            g_critical("metadata writer: batch commit failed; up to %u albums may be lost",
+                       batch->len);
 
         // Periodic WAL checkpoint to prevent unbounded WAL growth
         albums_since_checkpoint += batch->len;
         if (albums_since_checkpoint >= 500) {
-            db_checkpoint(idx->db);
+            if (db_checkpoint(idx->db) != QUADRATURE_OK)
+                g_warning("metadata writer: periodic WAL checkpoint failed");
             albums_since_checkpoint = 0;
         }
 
-        db_begin_batch(idx->db);
+        if (db_begin_batch(idx->db) != QUADRATURE_OK)
+            g_warning("metadata writer: failed to begin next batch transaction");
 
         g_ptr_array_set_size(batch, 0);
         notify_progress_throttled(idx);
@@ -1691,7 +1698,8 @@ metadata_db_writer_thread(gpointer data)
     }
 
     // Final commit
-    db_commit_batch(idx->db);
+    if (db_commit_batch(idx->db) != QUADRATURE_OK)
+        g_critical("metadata writer: final batch commit failed; trailing albums may be lost");
 
     // Drain any remaining items on cancellation
     if (atomic_load(&idx->cancel_flag)) {
@@ -1886,33 +1894,6 @@ rotate_atlas_files(const char *artwork_dir, int thumb_size, int keep_count)
     g_ptr_array_unref(paths);
 }
 
-/* Find path of the newest timestamped atlas for this library/size. Caller must g_free(). */
-static char *
-find_latest_existing_atlas(const char *artwork_dir, int thumb_size)
-{
-    GDir *dir = g_dir_open(artwork_dir, 0, NULL);
-    if (!dir)
-        return NULL;
-
-    char prefix[32];
-    snprintf(prefix, sizeof(prefix), "%dpx-artwork-", thumb_size);
-
-    char *latest = NULL;
-    const char *name;
-    while ((name = g_dir_read_name(dir))) {
-        if (!g_str_has_prefix(name, prefix) || !g_str_has_suffix(name, ".atlas"))
-            continue;
-        char *full = g_build_filename(artwork_dir, name, NULL);
-        if (!latest || strcmp(full, latest) > 0) {
-            g_free(latest);
-            latest = full;
-        } else
-            g_free(full);
-    }
-    g_dir_close(dir);
-    return latest;
-}
-
 static void
 phase_artwork(indexer_t *idx, processed_album_t *albums, size_t album_count)
 {
@@ -1928,7 +1909,7 @@ phase_artwork(indexer_t *idx, processed_album_t *albums, size_t album_count)
     g_mkdir_with_parents(artwork_dir, 0755);
 
     /* Use existing atlas path for incremental update, or generate new if none exists */
-    char *existing_path = find_latest_existing_atlas(artwork_dir, idx->art_size);
+    char *existing_path = artwork_find_latest_atlas(artwork_dir, idx->art_size);
     char atlas_path[INDEXER_PATH_MAX];
     if (existing_path) {
         g_strlcpy(atlas_path, existing_path, sizeof(atlas_path));
@@ -2137,7 +2118,10 @@ phase_finalize(indexer_t *idx, processed_album_t *albums, size_t album_count)
             sizes[i] = albums[i].dir_size;
         }
 
-        db_set_album_mtimes_batch(idx->db, ids, mtimes, sizes, album_count);
+        if (db_set_album_mtimes_batch(idx->db, ids, mtimes, sizes, album_count) != QUADRATURE_OK)
+            g_warning("phase_finalize: mtime batch update failed; %zu albums will be "
+                      "re-scanned next run",
+                      album_count);
 
         g_free(ids);
         g_free(mtimes);
@@ -2145,10 +2129,12 @@ phase_finalize(indexer_t *idx, processed_album_t *albums, size_t album_count)
     }
 
     // Prune orphan artists left behind by artist name normalization/splitting
-    db_prune_orphan_artists(idx->db);
+    if (db_prune_orphan_artists(idx->db) != QUADRATURE_OK)
+        g_warning("phase_finalize: orphan-artist prune failed");
 
     // WAL checkpoint
-    db_checkpoint(idx->db);
+    if (db_checkpoint(idx->db) != QUADRATURE_OK)
+        g_warning("phase_finalize: WAL checkpoint failed; WAL may grow unbounded");
 }
 
 // =============================================================================
@@ -2337,6 +2323,159 @@ check_disk_space(const char *data_root,
     return QUADRATURE_OK;
 }
 
+/* Phase 5+6: fingerprint + MusicBrainz resolve (concurrent, background, non-blocking
+ * for UI). No-op when mb_resolve is disabled.
+ *
+ * Backend selection happens inside mb_resolver_create():
+ *   pg_conninfo present  → PG backend (self-hosted MB mirror)
+ *   pg_conninfo empty    → HTTP backend (public musicbrainz.org / api.acoustid.org)
+ * Either path is valid; we only skip when mb_resolve is disabled outright. */
+static void
+phase_resolve(indexer_t *idx)
+{
+    if (!idx->mb_resolve) {
+        g_message("Phase 4+5: MusicBrainz resolve disabled (enable in settings)");
+        return;
+    }
+
+    set_phase(idx, INDEXER_PHASE_FINGERPRINT);
+    /* Reset artwork counters so stale Phase 3 totals don't appear as initial resolve state */
+    atomic_store(&idx->albums_total, 0);
+    atomic_store(&idx->albums_processed, 0);
+    atomic_store(&idx->fingerprint_total, 0);
+    atomic_store(&idx->fingerprint_processed, 0);
+    /* Force-notify so UI sees phase change before mb_resolver_create blocks on PG.
+     * Reset throttle timer to bypass the 100ms gate — this is a one-time transition. */
+    idx->last_progress_time = 0;
+    notify_progress_throttled(idx);
+    g_message("Phase 4+5: starting MusicBrainz resolve");
+    mb_resolver_options_t opts = {
+        .pg_conninfo = idx->pg_conninfo,
+        .acoustid_pg_conninfo = idx->acoustid_pg_conninfo,
+        .acoustid_index_url = idx->acoustid_index_url,
+        .mb_solr_url = idx->mb_solr_url,
+        .library_root = idx->library_root,
+        .data_root = get_data_root(idx),
+    };
+    mb_resolver_t *resolver = NULL;
+    quadrature_result_t res
+        = mb_resolver_create(&resolver, idx->db, &opts, on_mb_resolver_progress, idx);
+    if (res != QUADRATURE_OK) {
+        g_warning("Phase 4: mb_resolver_create failed (err=%d) — check PG connection", res);
+        atomic_store(&idx->mb_pg_error, 1);
+    } else {
+        res = mb_resolver_run(resolver);
+        if (res != QUADRATURE_OK) {
+            g_warning("Phase 4: mb_resolver_run returned error %d", res);
+        }
+        mb_resolver_destroy(resolver);
+    }
+    // MB resolve may orphan Phase 2 artists that were replaced by corrected
+    // MusicBrainz entries — prune them before artist art/bio phases run.
+    if (db_prune_orphan_artists(idx->db) != QUADRATURE_OK)
+        g_warning("phase_resolve: orphan-artist prune failed");
+
+    // MB enrichment now in DB — reload cache so UI reflects resolved metadata
+    notify_event(idx, INDEXER_LIBRARY_UPDATED);
+}
+
+/* Phase 7: artist art (fanart.tv) + album covers. No-op when fetch_artist_art is off. */
+static void
+phase_artist_art(indexer_t *idx)
+{
+    if (!idx->fetch_artist_art)
+        return;
+
+    set_phase(idx, INDEXER_PHASE_ARTIST_ART);
+    atomic_store(&idx->artist_art_total, 0);
+    atomic_store(&idx->artist_art_processed, 0);
+    atomic_store(&idx->artist_art_downloaded, 0);
+    atomic_store(&idx->album_covers_downloaded, 0);
+    atomic_store(&idx->fanart_error, 0);
+    idx->last_progress_time = 0;
+    notify_progress_throttled(idx);
+
+    char *artwork_dir = g_strdup_printf("%s/artwork", get_data_root(idx));
+    char *atlas_dir = g_build_filename(g_get_user_data_dir(), "quadrature", "atlas", NULL);
+    char *atlas_path = g_build_filename(atlas_dir, "artists.atlas", NULL);
+    char *atlas_lock_path = g_build_filename(atlas_dir, "artists.atlas.lock", NULL);
+
+    artist_art_config_t art_config = {
+        .personal_api_key = idx->fanart_api_key,
+        .artwork_dir = artwork_dir,
+        .db = idx->db,
+        .cancel_flag = &idx->cancel_flag,
+        .rate_limit_ms = 500,
+        .art_thumb_size = idx->art_size,
+        .atlas_path = atlas_path,
+        .atlas_lock_path = atlas_lock_path,
+        .other_artwork_dirs = (const char *const *)idx->other_artwork_dirs,
+        .other_artwork_dirs_count = idx->other_artwork_dirs_count,
+        .http_errors = &idx->artist_art_http_errors,
+        .album_artwork_dir = artwork_dir,
+        .album_thumb_size = idx->art_size,
+    };
+
+    g_message("Phase 7: starting artist art fetch (fanart.tv)");
+    quadrature_result_t art_res = artist_art_fetch_all(&art_config, on_artist_art_progress, idx);
+
+    if (art_res != QUADRATURE_OK) {
+        g_warning("Phase 7: artist_art_fetch_all returned error %d", art_res);
+        atomic_store(&idx->fanart_error, 1);
+    }
+    g_free(artwork_dir);
+    g_free(atlas_path);
+    g_free(atlas_lock_path);
+    g_free(atlas_dir);
+    // Artist atlas updated — reload so new artist thumbnails appear
+    notify_event(idx, INDEXER_ARTWORK_UPDATED);
+}
+
+/* Phase 8: artist bios (Wikipedia via Wikidata). No-op when fetch_artist_bios is off. */
+static void
+phase_artist_bios(indexer_t *idx)
+{
+    if (!idx->fetch_artist_bios)
+        return;
+
+    set_phase(idx, INDEXER_PHASE_ARTIST_BIO);
+    atomic_store(&idx->artist_bio_total, 0);
+    atomic_store(&idx->artist_bio_processed, 0);
+    atomic_store(&idx->artist_bio_fetched, 0);
+    idx->last_progress_time = 0;
+    notify_progress_throttled(idx);
+
+    artist_bio_config_t bio_config = {
+        .db = idx->db,
+        .library_root = get_data_root(idx),
+        .cancel_flag = &idx->cancel_flag,
+        .rate_limit_ms = 250,
+        .http_errors = &idx->artist_bio_http_errors,
+    };
+
+    g_message("Phase 8: starting artist bio fetch (Wikipedia)");
+    quadrature_result_t bio_res = artist_bio_fetch_all(&bio_config, on_artist_bio_progress, idx);
+
+    if (bio_res != QUADRATURE_OK)
+        g_warning("Phase 8: artist_bio_fetch_all returned error %d", bio_res);
+}
+
+/* Shared resource teardown for both the success and cancellation exits of the worker. */
+static void
+indexer_worker_teardown(indexer_t *idx,
+                        processed_album_t *processed,
+                        size_t processed_count,
+                        work_queue_t *queue)
+{
+    processed_albums_free(processed, processed_count);
+    work_queue_free(queue);
+    change_tracker_destroy(idx->change_tracker);
+    idx->change_tracker = NULL;
+    db_close(idx->db);
+    idx->db = NULL;
+    atomic_store(&idx->running, 0);
+}
+
 static void *
 indexer_worker(void *arg)
 {
@@ -2410,106 +2549,12 @@ indexer_worker(void *arg)
     notify_event(idx, INDEXER_ARTWORK_UPDATED);
 
     // Phase 5+6: FINGERPRINT + RESOLVE (concurrent, background, non-blocking for UI)
-    //
-    // Backend selection happens inside mb_resolver_create():
-    //   pg_conninfo present  → PG backend (self-hosted MB mirror)
-    //   pg_conninfo empty    → HTTP backend (public musicbrainz.org / api.acoustid.org)
-    // Either path is valid; we only skip when mb_resolve is disabled outright.
-    if (!idx->mb_resolve) {
-        g_message("Phase 4+5: MusicBrainz resolve disabled (enable in settings)");
-    } else {
-        set_phase(idx, INDEXER_PHASE_FINGERPRINT);
-        /* Reset artwork counters so stale Phase 3 totals don't appear as initial resolve state */
-        atomic_store(&idx->albums_total, 0);
-        atomic_store(&idx->albums_processed, 0);
-        atomic_store(&idx->fingerprint_total, 0);
-        atomic_store(&idx->fingerprint_processed, 0);
-        /* Force-notify so UI sees phase change before mb_resolver_create blocks on PG.
-         * Reset throttle timer to bypass the 100ms gate — this is a one-time transition. */
-        idx->last_progress_time = 0;
-        notify_progress_throttled(idx);
-        g_message("Phase 4+5: starting MusicBrainz resolve");
-        mb_resolver_options_t opts = {
-            .pg_conninfo = idx->pg_conninfo,
-            .acoustid_pg_conninfo = idx->acoustid_pg_conninfo,
-            .acoustid_index_url = idx->acoustid_index_url,
-            .mb_solr_url = idx->mb_solr_url,
-            .library_root = get_library_root(idx),
-            .data_root = get_data_root(idx),
-        };
-        mb_resolver_t *resolver = NULL;
-        quadrature_result_t res
-            = mb_resolver_create(&resolver, idx->db, &opts, on_mb_resolver_progress, idx);
-        if (res != QUADRATURE_OK) {
-            g_warning("Phase 4: mb_resolver_create failed (err=%d) — check PG connection", res);
-            atomic_store(&idx->mb_pg_error, 1);
-        } else {
-            res = mb_resolver_run(resolver);
-            if (res != QUADRATURE_OK) {
-                g_warning("Phase 4: mb_resolver_run returned error %d", res);
-            }
-            mb_resolver_destroy(resolver);
-        }
-        // MB resolve may orphan Phase 2 artists that were replaced by corrected
-        // MusicBrainz entries — prune them before artist art/bio phases run.
-        db_prune_orphan_artists(idx->db);
-
-        // MB enrichment now in DB — reload cache so UI reflects resolved metadata
-        notify_event(idx, INDEXER_LIBRARY_UPDATED);
-    }
+    phase_resolve(idx);
     if (atomic_load(&idx->cancel_flag))
         goto cancelled;
 
-    // =========================================================================
-    // Phase 7: Artist Art (fanart.tv)
-    // =========================================================================
-
-    if (idx->fetch_artist_art) {
-        set_phase(idx, INDEXER_PHASE_ARTIST_ART);
-        atomic_store(&idx->artist_art_total, 0);
-        atomic_store(&idx->artist_art_processed, 0);
-        atomic_store(&idx->artist_art_downloaded, 0);
-        atomic_store(&idx->album_covers_downloaded, 0);
-        atomic_store(&idx->fanart_error, 0);
-        idx->last_progress_time = 0;
-        notify_progress_throttled(idx);
-
-        char *artwork_dir = g_strdup_printf("%s/artwork", get_data_root(idx));
-        char *atlas_dir = g_build_filename(g_get_user_data_dir(), "quadrature", "atlas", NULL);
-        char *atlas_path = g_build_filename(atlas_dir, "artists.atlas", NULL);
-        char *atlas_lock_path = g_build_filename(atlas_dir, "artists.atlas.lock", NULL);
-
-        artist_art_config_t art_config = {
-            .personal_api_key = idx->fanart_api_key,
-            .artwork_dir = artwork_dir,
-            .db = idx->db,
-            .cancel_flag = &idx->cancel_flag,
-            .rate_limit_ms = 500,
-            .art_thumb_size = idx->art_size,
-            .atlas_path = atlas_path,
-            .atlas_lock_path = atlas_lock_path,
-            .other_artwork_dirs = (const char *const *)idx->other_artwork_dirs,
-            .other_artwork_dirs_count = idx->other_artwork_dirs_count,
-            .http_errors = &idx->artist_art_http_errors,
-            .album_artwork_dir = artwork_dir,
-            .album_thumb_size = idx->art_size,
-        };
-
-        g_message("Phase 7: starting artist art fetch (fanart.tv)");
-        quadrature_result_t art_res
-            = artist_art_fetch_all(&art_config, on_artist_art_progress, idx);
-
-        if (art_res != QUADRATURE_OK) {
-            g_warning("Phase 7: artist_art_fetch_all returned error %d", art_res);
-            atomic_store(&idx->fanart_error, 1);
-        }
-        g_free(artwork_dir);
-        g_free(atlas_path);
-        g_free(atlas_lock_path);
-        g_free(atlas_dir);
-        // Artist atlas updated — reload so new artist thumbnails appear
-        notify_event(idx, INDEXER_ARTWORK_UPDATED);
-    }
+    // Phase 7: Artist Art (fanart.tv) + album covers
+    phase_artist_art(idx);
     if (atomic_load(&idx->cancel_flag))
         goto cancelled;
 
@@ -2525,33 +2570,8 @@ indexer_worker(void *arg)
     if (atomic_load(&idx->cancel_flag))
         goto cancelled;
 
-    // =========================================================================
     // Phase 8: Artist Bios (Wikipedia via Wikidata)
-    // =========================================================================
-
-    if (idx->fetch_artist_bios) {
-        set_phase(idx, INDEXER_PHASE_ARTIST_BIO);
-        atomic_store(&idx->artist_bio_total, 0);
-        atomic_store(&idx->artist_bio_processed, 0);
-        atomic_store(&idx->artist_bio_fetched, 0);
-        idx->last_progress_time = 0;
-        notify_progress_throttled(idx);
-
-        artist_bio_config_t bio_config = {
-            .db = idx->db,
-            .library_root = get_data_root(idx),
-            .cancel_flag = &idx->cancel_flag,
-            .rate_limit_ms = 250,
-            .http_errors = &idx->artist_bio_http_errors,
-        };
-
-        g_message("Phase 8: starting artist bio fetch (Wikipedia)");
-        quadrature_result_t bio_res
-            = artist_bio_fetch_all(&bio_config, on_artist_bio_progress, idx);
-
-        if (bio_res != QUADRATURE_OK)
-            g_warning("Phase 8: artist_bio_fetch_all returned error %d", bio_res);
-    }
+    phase_artist_bios(idx);
     if (atomic_load(&idx->cancel_flag))
         goto cancelled;
 
@@ -2563,24 +2583,12 @@ indexer_worker(void *arg)
               errors);
     notify_event(idx, INDEXER_COMPLETED);
 
-    processed_albums_free(processed, processed_count);
-    work_queue_free(&queue);
-    change_tracker_destroy(idx->change_tracker);
-    idx->change_tracker = NULL;
-    db_close(idx->db);
-    idx->db = NULL;
-    atomic_store(&idx->running, 0);
+    indexer_worker_teardown(idx, processed, processed_count, &queue);
     return NULL;
 
 cancelled:
     notify_event(idx, INDEXER_CANCELLED);
-    processed_albums_free(processed, processed_count);
-    work_queue_free(&queue);
-    change_tracker_destroy(idx->change_tracker);
-    idx->change_tracker = NULL;
-    db_close(idx->db);
-    idx->db = NULL;
-    atomic_store(&idx->running, 0);
+    indexer_worker_teardown(idx, processed, processed_count, &queue);
     return NULL;
 }
 
@@ -2617,7 +2625,7 @@ indexer_create(indexer_t **out, const indexer_config_t *config)
         idx->fanart_api_key = config->fanart_api_key ? g_strdup(config->fanart_api_key) : NULL;
         if (config->other_library_roots && config->other_library_roots_count > 0) {
             idx->other_artwork_dirs_count = config->other_library_roots_count;
-            idx->other_artwork_dirs = calloc(idx->other_artwork_dirs_count, sizeof(char *));
+            idx->other_artwork_dirs = g_new0(char *, idx->other_artwork_dirs_count);
             for (size_t i = 0; i < idx->other_artwork_dirs_count; i++) {
                 idx->other_artwork_dirs[i]
                     = g_strdup_printf("%s/artwork", config->other_library_roots[i]);
@@ -2712,12 +2720,6 @@ indexer_cancel(indexer_t *idx)
 {
     if (idx)
         atomic_store(&idx->cancel_flag, 1);
-}
-
-bool
-indexer_is_running(const indexer_t *idx)
-{
-    return idx && atomic_load(&idx->running);
 }
 
 void

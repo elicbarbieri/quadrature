@@ -1908,13 +1908,6 @@ ui_channel_strip_set_device_name(UiChannelStrip *s, const char *device_name)
         update_visual_state(s);
 }
 
-int
-ui_channel_strip_get_channel_id(UiChannelStrip *s)
-{
-    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), -1);
-    return s->channel_id;
-}
-
 gboolean
 ui_channel_strip_has_track(UiChannelStrip *s)
 {
@@ -2123,13 +2116,6 @@ ui_channel_strip_set_focused(UiChannelStrip *s, gboolean focused)
 }
 
 gboolean
-ui_channel_strip_get_focused(UiChannelStrip *s)
-{
-    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), FALSE);
-    return s->focused;
-}
-
-gboolean
 ui_channel_strip_is_active(UiChannelStrip *s)
 {
     g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), FALSE);
@@ -2140,13 +2126,6 @@ ui_channel_strip_is_active(UiChannelStrip *s)
 /* ===============================================================================
  * Track Context API
  * =============================================================================== */
-
-int64_t
-ui_channel_strip_get_current_track_id(UiChannelStrip *s)
-{
-    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), 0);
-    return s->current_track_id;
-}
 
 /* ===============================================================================
  * Track Navigation API
@@ -2279,18 +2258,4 @@ ui_channel_strip_next_track(UiChannelStrip *s)
     }
 
     return TRUE;
-}
-
-gboolean
-ui_channel_strip_can_go_previous(UiChannelStrip *s)
-{
-    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), FALSE);
-    return can_go_previous(s);
-}
-
-gboolean
-ui_channel_strip_can_go_next(UiChannelStrip *s)
-{
-    g_return_val_if_fail(UI_IS_CHANNEL_STRIP(s), FALSE);
-    return can_go_next(s);
 }

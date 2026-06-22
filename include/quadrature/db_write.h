@@ -24,17 +24,22 @@ extern "C" {
  * ============================================================================= */
 
 /**
- * Get or create artist. Returns artist_id (0 or -1 on error).
+ * Get or create artist; writes the resolved artist_id to *out_artist_id.
  *
  * Pass NULL for sort_name and musicbrainz_id to use the fast Phase 2 path
  * (name-only lookup/insert). Pass a non-NULL musicbrainz_id (and optionally
  * sort_name) for the full MB-aware dedup path: MBID lookup → name lookup →
  * normalized name lookup → insert, with in-place rename to canonical values.
+ *
+ * Returns QUADRATURE_OK on success (out_artist_id set to a positive rowid),
+ * QUADRATURE_ERROR_INVALID_PARAM for NULL db/out, or QUADRATURE_ERROR_INTERNAL
+ * if the underlying SQLite operation fails.
  */
-int64_t db_get_or_create_artist(quadrature_db_t *db,
-                                const char *name,
-                                const char *sort_name,
-                                const char *musicbrainz_id);
+quadrature_result_t db_get_or_create_artist(quadrature_db_t *db,
+                                            const char *name,
+                                            const char *sort_name,
+                                            const char *musicbrainz_id,
+                                            int64_t *out_artist_id);
 
 /**
  * Delete artists with no entries in track_artists. Handles the

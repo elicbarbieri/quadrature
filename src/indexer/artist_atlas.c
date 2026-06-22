@@ -64,24 +64,6 @@ mbid_parse(const char *str, uint8_t out[ARTIST_ATLAS_UUID_SIZE])
     return byte_idx == 16 && str[36] == '\0';
 }
 
-void
-mbid_format(const uint8_t uuid[ARTIST_ATLAS_UUID_SIZE], char out[37])
-{
-    static const int dash_positions[] = { 8, 12, 16, 20 };
-    int dash_idx = 0;
-    int pos = 0;
-    for (int i = 0; i < 16; i++) {
-        if (dash_idx < 4 && i == dash_positions[dash_idx]) {
-            out[pos++] = '-';
-            dash_idx++;
-        }
-        static const char hex[] = "0123456789abcdef";
-        out[pos++] = hex[uuid[i] >> 4];
-        out[pos++] = hex[uuid[i] & 0x0f];
-    }
-    out[pos] = '\0';
-}
-
 // =============================================================================
 // Artist Atlas Builder
 // =============================================================================
@@ -584,14 +566,6 @@ artist_atlas_reader_lookup(const artist_atlas_reader_t *reader, const uint8_t uu
     return uuid_binary_search(reader->uuid_keys, reader->header->art_count, uuid);
 }
 
-bool
-artist_atlas_reader_is_no_art(const artist_atlas_reader_t *reader, const uint8_t uuid[16])
-{
-    if (!reader || !reader->header || reader->header->no_art_count == 0)
-        return false;
-    return uuid_binary_search(reader->no_art_uuids, reader->header->no_art_count, uuid) >= 0;
-}
-
 const uint8_t *
 artist_atlas_reader_get_pixels(const artist_atlas_reader_t *reader, int32_t index)
 {
@@ -616,16 +590,4 @@ uint8_t
 artist_atlas_reader_get_channels(const artist_atlas_reader_t *reader)
 {
     return reader && reader->header ? reader->header->channels : 0;
-}
-
-uint32_t
-artist_atlas_reader_get_art_count(const artist_atlas_reader_t *reader)
-{
-    return reader && reader->header ? reader->header->art_count : 0;
-}
-
-uint32_t
-artist_atlas_reader_get_no_art_count(const artist_atlas_reader_t *reader)
-{
-    return reader && reader->header ? reader->header->no_art_count : 0;
 }

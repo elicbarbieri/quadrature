@@ -232,10 +232,3 @@ library_monitor_stop(LibraryMonitor *self)
         g_clear_object(&self->vol_monitor);
     }
 }
-
-void
-library_monitor_check_now(LibraryMonitor *self)
-{
-    g_return_if_fail(LIBRARY_IS_MONITOR(self));
-    check_all_libraries(self);
-}

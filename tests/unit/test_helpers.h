@@ -43,6 +43,16 @@ test_cleanup_db(const char *path)
 /* Fixture helpers — thin wrappers over the reconciler so tests can populate
  * a synthetic DB state without running the full indexer. */
 
+/** Get/create an artist, returning the id directly (db_get_or_create_artist
+ * uses an out-param; tests want the id as a return value). Returns -1 on error. */
+static inline int64_t
+test_goc_artist(quadrature_db_t *db, const char *name, const char *sort, const char *mbid)
+{
+    int64_t id = -1;
+    db_get_or_create_artist(db, name, sort, mbid, &id);
+    return id;
+}
+
 /** Create or fetch an album at `path` with title + artist_id. */
 static inline int64_t
 test_insert_album(

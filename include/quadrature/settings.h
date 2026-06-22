@@ -193,27 +193,6 @@ const char *app_settings_get_channel_gpio(const app_settings_t *settings, int ch
 void app_settings_set_channel_gpio(app_settings_t *settings, int channel, const char *address);
 
 /**
- * Set Axia Livewire+ GPIO username (global for all channels).
- * @param settings Settings structure
- * @param username Username (NULL to clear)
- */
-void app_settings_set_axia_username(app_settings_t *settings, const char *username);
-
-/**
- * Get Axia Livewire+ GPIO username.
- * @param settings Settings structure
- * @return Username (NULL if not configured), do not free
- */
-const char *app_settings_get_axia_username(const app_settings_t *settings);
-
-/**
- * Set Axia Livewire+ GPIO password (global for all channels).
- * @param settings Settings structure
- * @param password Password (NULL to clear)
- */
-void app_settings_set_axia_password(app_settings_t *settings, const char *password);
-
-/**
  * Get Axia Livewire+ GPIO password.
  * @param settings Settings structure
  * @return Password (NULL if not configured), do not free

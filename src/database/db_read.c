@@ -7,6 +7,7 @@
 
 // Forward declarations for helpers used before their definition
 static char *build_fts_query(const char *input);
+static void fill_track_from_row(sqlite3_stmt *stmt, db_track_t *t, bool borrow);
 
 // =============================================================================
 // Track Read Operations
@@ -27,30 +28,7 @@ db_get_track(quadrature_db_t *db, int64_t id, db_track_t **out)
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         db_track_t *track = g_new0(db_track_t, 1);
-        track->id = sqlite3_column_int64(stmt, 0);
-        const char *title = (const char *)sqlite3_column_text(stmt, 1);
-        const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-        const char *album = (const char *)sqlite3_column_text(stmt, 3);
-        const char *path = (const char *)sqlite3_column_text(stmt, 4);
-        track->title = title ? g_strdup(title) : g_strdup("Unknown");
-        track->artist = artist ? g_strdup(artist) : g_strdup("Unknown Artist");
-        const char *artist_display = (const char *)sqlite3_column_text(stmt, 13);
-        track->artist_display = artist_display ? g_strdup(artist_display) : NULL;
-        track->album = album ? g_strdup(album) : g_strdup("Unknown Album");
-        track->path = path ? g_strdup(path) : g_strdup("");
-        track->duration_ms = sqlite3_column_int(stmt, 5);
-        track->track_num = sqlite3_column_int(stmt, 6);
-        track->disc_num = sqlite3_column_int(stmt, 7);
-        if (track->disc_num == 0)
-            track->disc_num = 1;
-        track->year = sqlite3_column_int(stmt, 8);
-        track->album_id = sqlite3_column_int64(stmt, 9);
-        track->artist_id = sqlite3_column_int64(stmt, 10);
-        const char *genre = (const char *)sqlite3_column_text(stmt, 11);
-        track->genre = genre ? g_strdup(genre) : NULL;
-        const char *album_path = (const char *)sqlite3_column_text(stmt, 12);
-        track->album_path = album_path ? g_strdup(album_path) : NULL;
-
+        fill_track_from_row(stmt, track, false);
         *out = track;
         res = QUADRATURE_OK;
     }
@@ -404,6 +382,14 @@ db_tracks_free(db_track_t *tracks, size_t count)
 // Positional & MBID Bridge Queries (for credits navigation)
 // =============================================================================
 
+/* Resolve a single (release_mbid, disc_num, track_num) → track id. Shared by the
+ * one-shot and batch position lookups. */
+static const char *const SQL_TRACK_BY_POSITION
+    = "SELECT t.id FROM tracks t"
+      " JOIN albums al ON t.album_id = al.id"
+      " WHERE al.musicbrainz_release_id = ? AND t.disc_num = ? AND t.track_num = ?"
+      " LIMIT 1";
+
 quadrature_result_t
 db_get_track_by_position(quadrature_db_t *db,
                          const char *release_mbid,
@@ -419,15 +405,7 @@ db_get_track_by_position(quadrature_db_t *db,
     db_lock(db);
 
     sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(
-        db->db,
-        "SELECT t.id FROM tracks t"
-        " JOIN albums al ON t.album_id = al.id"
-        " WHERE al.musicbrainz_release_id = ? AND t.disc_num = ? AND t.track_num = ?"
-        " LIMIT 1",
-        -1,
-        &stmt,
-        NULL);
+    int rc = sqlite3_prepare_v2(db->db, SQL_TRACK_BY_POSITION, -1, &stmt, NULL);
 
     if (rc != SQLITE_OK) {
         db_unlock(db);
@@ -465,15 +443,7 @@ db_resolve_track_positions_batch(quadrature_db_t *db,
     db_lock(db);
 
     sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(
-        db->db,
-        "SELECT t.id FROM tracks t"
-        " JOIN albums al ON t.album_id = al.id"
-        " WHERE al.musicbrainz_release_id = ? AND t.disc_num = ? AND t.track_num = ?"
-        " LIMIT 1",
-        -1,
-        &stmt,
-        NULL);
+    int rc = sqlite3_prepare_v2(db->db, SQL_TRACK_BY_POSITION, -1, &stmt, NULL);
 
     if (rc != SQLITE_OK) {
         db_unlock(db);
@@ -683,11 +653,11 @@ db_free_album_mtimes(db_album_mtime_t *albums, size_t count)
 // Indexer Error Read Operations (simplified path-based)
 // =============================================================================
 
-int64_t
-db_get_next_error_generation(quadrature_db_t *db)
+quadrature_result_t
+db_get_next_error_generation(quadrature_db_t *db, int64_t *out_generation)
 {
-    if (!db)
-        return 1;
+    if (!db || !out_generation)
+        return QUADRATURE_ERROR_INVALID_PARAM;
 
     db_lock(db);
 
@@ -699,7 +669,7 @@ db_get_next_error_generation(quadrature_db_t *db)
                                 NULL);
     if (rc != SQLITE_OK) {
         db_unlock(db);
-        return 1;
+        return QUADRATURE_ERROR_INTERNAL;
     }
 
     int64_t gen = 1;
@@ -708,7 +678,8 @@ db_get_next_error_generation(quadrature_db_t *db)
     sqlite3_finalize(stmt);
 
     db_unlock(db);
-    return gen;
+    *out_generation = gen;
+    return QUADRATURE_OK;
 }
 
 quadrature_result_t
@@ -719,25 +690,16 @@ db_get_error_count(quadrature_db_t *db, const char *path_prefix, size_t *count)
 
     db_lock(db);
 
+    /* An empty prefix binds LIKE '%', matching every row (path is NOT NULL),
+     * so a single statement serves both the filtered and unfiltered cases. */
     sqlite3_stmt *stmt;
-    int rc;
-    if (path_prefix && *path_prefix) {
-        rc = sqlite3_prepare_v2(db->db,
-                                "SELECT COUNT(*) FROM indexer_errors WHERE path LIKE ? || '%'",
-                                -1,
-                                &stmt,
-                                NULL);
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, path_prefix, -1, SQLITE_STATIC);
-        }
-    } else {
-        rc = sqlite3_prepare_v2(db->db, "SELECT COUNT(*) FROM indexer_errors", -1, &stmt, NULL);
-    }
-
+    int rc = sqlite3_prepare_v2(
+        db->db, "SELECT COUNT(*) FROM indexer_errors WHERE path LIKE ?1 || '%'", -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         db_unlock(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
+    sqlite3_bind_text(stmt, 1, path_prefix ? path_prefix : "", -1, SQLITE_STATIC);
 
     sqlite3_step(stmt);
     *count = sqlite3_column_int64(stmt, 0);
@@ -769,39 +731,24 @@ db_get_errors_page(quadrature_db_t *db,
         return QUADRATURE_ERROR_OUT_OF_MEMORY;
     }
 
+    /* An empty prefix binds LIKE '%', matching every row (path is NOT NULL),
+     * so a single statement serves both the filtered and unfiltered cases. */
     sqlite3_stmt *stmt;
-    int rc;
-    if (path_prefix && *path_prefix) {
-        rc = sqlite3_prepare_v2(db->db,
+    int rc = sqlite3_prepare_v2(db->db,
                                 "SELECT id, path, message, created_at FROM indexer_errors "
                                 "WHERE path LIKE ?1 || '%' "
                                 "ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
                                 -1,
                                 &stmt,
                                 NULL);
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, path_prefix, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(stmt, 2, (int64_t)limit);
-            sqlite3_bind_int64(stmt, 3, (int64_t)offset);
-        }
-    } else {
-        rc = sqlite3_prepare_v2(db->db,
-                                "SELECT id, path, message, created_at FROM indexer_errors "
-                                "ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
-                                -1,
-                                &stmt,
-                                NULL);
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, (int64_t)limit);
-            sqlite3_bind_int64(stmt, 2, (int64_t)offset);
-        }
-    }
-
     if (rc != SQLITE_OK) {
         g_free(results);
         db_unlock(db);
         return QUADRATURE_ERROR_INTERNAL;
     }
+    sqlite3_bind_text(stmt, 1, path_prefix ? path_prefix : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, (int64_t)limit);
+    sqlite3_bind_int64(stmt, 3, (int64_t)offset);
 
     size_t i = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && i < limit) {
@@ -888,6 +835,41 @@ build_fts_query(const char *input)
 // ID-Only Filtered Queries (for cache-resolved filtering)
 // =============================================================================
 
+/* Append an OR-chain of genre LIKE predicates, one per genre filter, into an
+ * already-opened "(" group. genre_expr is the SQL expression for the genre
+ * column (e.g. "LOWER(_t.genre)" or "t.genre"). Binds are supplied separately
+ * via sql_bind_genres() in matching order. */
+static void
+append_genre_like_or(GString *sql, size_t genre_count, const char *genre_expr)
+{
+    for (size_t gi = 0; gi < genre_count; gi++) {
+        if (gi > 0)
+            g_string_append(sql, " OR ");
+        g_string_append_printf(sql, "';' || %s || ';' LIKE '%%;' || ? || ';%%'", genre_expr);
+    }
+}
+
+/* Drain every row of a single-int64-column statement into a g_new() array that
+ * grows geometrically from init_cap. Does not finalize the statement. */
+static void
+collect_int64_ids(sqlite3_stmt *stmt, size_t init_cap, int64_t **out_ids, size_t *out_count)
+{
+    size_t cap = init_cap;
+    int64_t *ids = g_new(int64_t, cap);
+    size_t n = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (n >= cap) {
+            cap *= 2;
+            ids = g_renew(int64_t, ids, cap);
+        }
+        ids[n++] = sqlite3_column_int64(stmt, 0);
+    }
+
+    *out_ids = ids;
+    *out_count = n;
+}
+
 static quadrature_result_t
 get_artist_ids(quadrature_db_t *db,
                const db_id_query_opts_t *opts,
@@ -921,11 +903,7 @@ get_artist_ids(quadrature_db_t *db,
         sql_append_year_or(sql_str, opts->filters->year_mask, "_al.year");
         g_string_append(sql_str,
                         ") AND EXISTS (SELECT 1 FROM tracks _t WHERE _t.album_id = _al.id AND (");
-        for (size_t gi = 0; gi < opts->filters->genre_count; gi++) {
-            if (gi > 0)
-                g_string_append(sql_str, " OR ");
-            g_string_append(sql_str, "';' || LOWER(_t.genre) || ';' LIKE '%;' || ? || ';%'");
-        }
+        append_genre_like_or(sql_str, opts->filters->genre_count, "LOWER(_t.genre)");
         g_string_append(sql_str, ")))");
     } else {
         if (has_genre) {
@@ -933,11 +911,7 @@ get_artist_ids(quadrature_db_t *db,
                             " AND EXISTS (SELECT 1 FROM track_artists _ta"
                             " JOIN tracks _t ON _t.id = _ta.track_id"
                             " WHERE _ta.artist_id = a.id AND (");
-            for (size_t gi = 0; gi < opts->filters->genre_count; gi++) {
-                if (gi > 0)
-                    g_string_append(sql_str, " OR ");
-                g_string_append(sql_str, "';' || LOWER(_t.genre) || ';' LIKE '%;' || ? || ';%'");
-            }
+            append_genre_like_or(sql_str, opts->filters->genre_count, "LOWER(_t.genre)");
             g_string_append(sql_str, "))");
         }
         if (has_year) {
@@ -968,23 +942,11 @@ get_artist_ids(quadrature_db_t *db,
     if (has_genre)
         pidx = sql_bind_genres(stmt, pidx, opts->filters);
 
-    size_t cap = 256;
-    int64_t *ids = g_new(int64_t, cap);
-    size_t n = 0;
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (n >= cap) {
-            cap *= 2;
-            ids = g_renew(int64_t, ids, cap);
-        }
-        ids[n++] = sqlite3_column_int64(stmt, 0);
-    }
+    collect_int64_ids(stmt, 256, out_ids, out_count);
     sqlite3_finalize(stmt);
     db_unlock(db);
     g_free(fts_query);
 
-    *out_ids = ids;
-    *out_count = n;
     return QUADRATURE_OK;
 }
 
@@ -1024,11 +986,7 @@ get_album_ids(quadrature_db_t *db,
     if (has_genre) {
         g_string_append(sql_str,
                         " AND EXISTS (SELECT 1 FROM tracks _t WHERE _t.album_id = al.id AND (");
-        for (size_t gi = 0; gi < opts->filters->genre_count; gi++) {
-            if (gi > 0)
-                g_string_append(sql_str, " OR ");
-            g_string_append(sql_str, "';' || LOWER(_t.genre) || ';' LIKE '%;' || ? || ';%'");
-        }
+        append_genre_like_or(sql_str, opts->filters->genre_count, "LOWER(_t.genre)");
         g_string_append(sql_str, "))");
     }
 
@@ -1052,23 +1010,11 @@ get_album_ids(quadrature_db_t *db,
     if (has_genre)
         pidx = sql_bind_genres(stmt, pidx, opts->filters);
 
-    size_t cap = 256;
-    int64_t *ids = g_new(int64_t, cap);
-    size_t n = 0;
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (n >= cap) {
-            cap *= 2;
-            ids = g_renew(int64_t, ids, cap);
-        }
-        ids[n++] = sqlite3_column_int64(stmt, 0);
-    }
+    collect_int64_ids(stmt, 256, out_ids, out_count);
     sqlite3_finalize(stmt);
     db_unlock(db);
     g_free(fts_query);
 
-    *out_ids = ids;
-    *out_count = n;
     return QUADRATURE_OK;
 }
 
@@ -1101,11 +1047,7 @@ get_track_ids(quadrature_db_t *db,
 
     if (filters && filters->genre_count > 0) {
         g_string_append(sql_str, " AND (");
-        for (size_t gi = 0; gi < filters->genre_count; gi++) {
-            if (gi > 0)
-                g_string_append(sql_str, " OR ");
-            g_string_append(sql_str, "';' || t.genre || ';' LIKE '%;' || ? || ';%'");
-        }
+        append_genre_like_or(sql_str, filters->genre_count, "t.genre");
         g_string_append_c(sql_str, ')');
     }
     if (filters && filters->year_mask) {
@@ -1134,23 +1076,11 @@ get_track_ids(quadrature_db_t *db,
         pidx = sql_bind_genres(stmt, pidx, filters);
     sqlite3_bind_int64(stmt, pidx, limit > 0 ? (int64_t)limit : 100);
 
-    size_t cap = 64;
-    int64_t *ids = g_new(int64_t, cap);
-    size_t n = 0;
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (n >= cap) {
-            cap *= 2;
-            ids = g_renew(int64_t, ids, cap);
-        }
-        ids[n++] = sqlite3_column_int64(stmt, 0);
-    }
+    collect_int64_ids(stmt, 64, out_ids, out_count);
     sqlite3_finalize(stmt);
     db_unlock(db);
     g_free(q);
 
-    *out_ids = ids;
-    *out_count = n;
     return QUADRATURE_OK;
 }
 

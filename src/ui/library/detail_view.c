@@ -2086,13 +2086,6 @@ library_unified_detail_clear_nav(GtkWidget *view)
         nav_clear(ud);
 }
 
-DetailState
-library_unified_detail_get_state(GtkWidget *view)
-{
-    UnifiedDetailData *ud = g_object_get_data(G_OBJECT(view), UNIFIED_DATA_KEY);
-    return ud ? ud->state : DETAIL_STATE_ALBUM;
-}
-
 int64_t
 library_unified_detail_get_current_entity_id(GtkWidget *view)
 {

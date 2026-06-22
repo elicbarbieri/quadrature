@@ -338,36 +338,6 @@ copy_art_from_other_library(const char *const *other_dirs,
 // =============================================================================
 
 /**
- * Find the newest timestamped album atlas in artwork_dir for the given thumb size.
- * Returns heap-allocated path, or NULL if none found. Caller must g_free().
- */
-static char *
-find_album_atlas(const char *artwork_dir, int thumb_size)
-{
-    GDir *dir = g_dir_open(artwork_dir, 0, NULL);
-    if (!dir)
-        return NULL;
-
-    char prefix[32];
-    snprintf(prefix, sizeof(prefix), "%dpx-artwork-", thumb_size);
-
-    char *latest = NULL;
-    const char *name;
-    while ((name = g_dir_read_name(dir))) {
-        if (!g_str_has_prefix(name, prefix) || !g_str_has_suffix(name, ".atlas"))
-            continue;
-        char *full = g_build_filename(artwork_dir, name, NULL);
-        if (!latest || strcmp(full, latest) > 0) {
-            g_free(latest);
-            latest = full;
-        } else
-            g_free(full);
-    }
-    g_dir_close(dir);
-    return latest;
-}
-
-/**
  * Build a lookup map of release_group_id → album_id for albums that:
  *   1. Have a musicbrainz_release_group_id in the DB
  *   2. Are NOT present in the current album atlas (or have fallback placeholder art)
@@ -401,7 +371,7 @@ build_missing_album_map(quadrature_db_t *db,
     // Load existing album atlas — the reader exposes has_no_art() via sorted
     // no_art_ids section (v3) or memcmp-derived set (v2 backward compat).
     // Albums with real artwork are in the sorted album_ids array.
-    char *atlas_path = find_album_atlas(artwork_dir, thumb_size);
+    char *atlas_path = artwork_find_latest_atlas(artwork_dir, thumb_size);
     artwork_atlas_reader_t *reader = NULL;
     if (atlas_path) {
         reader = artwork_atlas_reader_open(atlas_path);

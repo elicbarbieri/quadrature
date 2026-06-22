@@ -36,11 +36,13 @@ include/quadrature/       # Flat public headers (no subdirectories)
 
 src/
   audio/                  # Pipeline, ring buffer, spectrum analyzer
-  core/                   # Engine, config, logging
-  database/               # SQLite music library (v4 schema with album hashing)
+  core/                   # Perf system monitor + shared internal types
+  database/               # SQLite music library (read/write, reconciler, migrations)
+  library/                # Warm in-memory library cache + search
+  controller/             # Channel control sources (generic API + Axia/Livewire backend)
   cli/                    # quadrature-cli unified entry point (main.c) + subcommands
-  indexer/                # Four-phase queue-based indexer
-    musicbrainz/          # MusicBrainz/AcoustID resolution (phases 4-5)
+  indexer/                # Queue-based indexer (scan → metadata → finalize → artwork + enrichment)
+    musicbrainz/          # MusicBrainz/AcoustID resolution
   ui/                     # GTK4 widgets (.c/.h source files)
     library/              # Library browser widgets
     perf/                 # Performance dashboard widgets
@@ -57,7 +59,7 @@ tests/unit/               # Criterion tests
 - Constants/macros: `UPPER_CASE`
 - Types: suffix `_t` (e.g., `audio_pipeline_t`)
 - All public functions return `quadrature_result_t`
-- Logging: LOG_ERROR_MSG/LOG_WARN_MSG/LOG_INFO_MSG/LOG_DEBUG_MSG
+- Logging: GLib functions directly — `g_message` (info), `g_warning` (recoverable), `g_critical` (errors / data loss), `g_debug`. Each `.c` sets `#define G_LOG_DOMAIN "quadrature"` at the top.
 
 ## Key Patterns
 
@@ -83,7 +85,7 @@ audio_pipeline_destroy(pipeline);
 ```c
 quadrature_result_t res = some_function();
 if (res != QUADRATURE_OK) {
-    LOG_ERROR_MSG("Operation failed: %d", res);
+    g_warning("Operation failed: %d", res);
     return res;
 }
 ```
@@ -145,10 +147,11 @@ See `docs/architecture/LIBRARY_CACHE.md` → "Pointer Lifetimes & UI Safety" for
 
 ### Indexer Architecture
 
-Four-phase queue-based design (~100-200 lines core logic):
+Queue-based design. The worker (`indexer_worker`) runs the core phases in order, then
+optional enrichment phases. Each phase is a `phase_*(idx)` helper:
 
 ```
-PHASE 1 - SCAN (fast, single-threaded):
+SCAN (fast, single-threaded):
   1. db_get_album_mtimes_page() → build GHashTable of path → (album_id, last_updated_at)
   2. Walk directories recursively:
      - stat(dir) to get current mtime
@@ -157,23 +160,26 @@ PHASE 1 - SCAN (fast, single-threaded):
      - If mtime differs or missing: queue (dir_path, files) for processing
   Should complete in <1 second for unchanged libraries.
 
-PHASE 2 - METADATA (parallel, GThreadPool):
+METADATA (parallel, GThreadPool):
   Process queued directories:
   - Extract metadata from audio files (FFmpeg)
   - Build folder_album_context
-  - Write tracks/albums to DB
+  - Write tracks/albums to DB (dedicated writer thread, batched transactions)
   - Track which albums were successfully processed
 
-PHASE 3 - ARTWORK (parallel, GThreadPool):
-  For each album in work queue:
-  - Extract/resize album art
-  - Write to atlas
-  Pure image processing - no DB mtime logic.
-
-PHASE 4 - FINALIZE (single-threaded):
+FINALIZE (single-threaded — runs BEFORE artwork, for durability):
   - db_set_album_mtimes_batch() for all successfully processed albums
-  - Update error flags for albums with issues
+  - Prune orphan artists/errors
   - WAL checkpoint
+  → emits LIBRARY_UPDATED: metadata usable, UI browsable
+
+ARTWORK (parallel, GThreadPool):
+  Extract/resize album art, write to atlas. Pure image processing, no DB mtime logic.
+
+Enrichment (optional, gated by settings; each a no-op when disabled):
+  - RESOLVE       — Chromaprint fingerprint + MusicBrainz/AcoustID resolution
+  - ARTIST_ART    — fetch artist images from fanart.tv + album covers
+  - ARTIST_BIO    — fetch artist bios from Wikipedia
 ```
 
 **Key DB APIs:**

@@ -446,21 +446,12 @@ album_update_canonical(quadrature_db_t *db,
 
     sqlite3_stmt *s = db->reconcile_update_album;
     sqlite3_reset(s);
-    if (title)
-        sqlite3_bind_text(s, 1, title, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(s, 1);
+    bind_text_or_null(s, 1, title);
     sqlite3_bind_int64(s, 2, artist_id);
     sqlite3_bind_int(s, 3, is_comp ? 1 : 0);
     sqlite3_bind_int(s, 4, year);
-    if (rid)
-        sqlite3_bind_text(s, 5, rid, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(s, 5);
-    if (rgid)
-        sqlite3_bind_text(s, 6, rgid, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(s, 6);
+    bind_text_or_null(s, 5, rid);
+    bind_text_or_null(s, 6, rgid);
     sqlite3_bind_int(s, 7, mb_status);
     sqlite3_bind_int64(s, 8, mb_resolved);
     sqlite3_bind_int64(s, 9, cur->id);
@@ -539,23 +530,14 @@ track_update_canonical(quadrature_db_t *db,
 
     sqlite3_stmt *s = db->reconcile_update_track;
     sqlite3_reset(s);
-    if (title)
-        sqlite3_bind_text(s, 1, title, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(s, 1);
+    bind_text_or_null(s, 1, title);
     sqlite3_bind_int(s, 2, track_num);
     sqlite3_bind_int(s, 3, disc_num);
     sqlite3_bind_int(s, 4, (int)duration_ms);
     sqlite3_bind_int(s, 5, year);
     sqlite3_bind_int64(s, 6, mtime);
-    if (genre)
-        sqlite3_bind_text(s, 7, genre, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(s, 7);
-    if (artist_display)
-        sqlite3_bind_text(s, 8, artist_display, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(s, 8);
+    bind_text_or_null(s, 7, genre);
+    bind_text_or_null(s, 8, artist_display);
     sqlite3_bind_int64(s, 9, cur->id);
     sqlite3_step(s);
     sqlite3_reset(s);
@@ -655,6 +637,108 @@ replace_track_artists(quadrature_db_t *db,
  * Per-album reconcile (runs inside the batch loop; no lock, no txn boundary)
  * ========================================================================== */
 
+/* Insert a brand-new track (+ its artists); bumps summary + fts dirty flag. */
+static void
+reconcile_track_insert(quadrature_db_t *db,
+                       int64_t album_id,
+                       const desired_track_t *dt,
+                       reconcile_summary_t *summary,
+                       bool *tracks_fts_dirty)
+{
+    int64_t new_id = insert_track(db, album_id, dt);
+    if (new_id <= 0)
+        return;
+    if ((dt->present_fields & DESIRED_TRACK_ARTISTS) && dt->artist_count > 0)
+        replace_track_artists(db, new_id, dt->artists, dt->artist_count);
+    summary->tracks_inserted++;
+    *tracks_fts_dirty = true;
+}
+
+/* Update an existing track toward the desired state, honoring the user-edit
+ * freeze for TAGS-sourced writes onto resolved albums. Returns true if anything
+ * actually changed. */
+static bool
+reconcile_track_update(quadrature_db_t *db,
+                       current_track_t *ct,
+                       const desired_track_t *dt,
+                       const current_album_t *cur_album,
+                       const desired_album_state_t *desired,
+                       const reconcile_policy_t *policy,
+                       reconcile_summary_t *summary,
+                       bool *tracks_fts_dirty)
+{
+    desired_track_t dt_local = *dt;
+    if (desired->source == RECONCILE_SOURCE_TAGS && policy->respect_user_edits
+        && cur_album->mb_status == MB_STATUS_RESOLVED) {
+        dt_local.present_fields &= ~(DESIRED_TRACK_TITLE | DESIRED_TRACK_ARTISTS);
+    }
+
+    /* Artist display pre-compute (needed to diff even when we won't write it). */
+    char *new_display = NULL;
+    if (dt_local.present_fields & DESIRED_TRACK_ARTISTS)
+        new_display = build_artist_display(dt_local.artists, dt_local.artist_count);
+
+    /* Genre merge (replace-mode goes through as-is). */
+    char *merged_genre = NULL;
+    if (dt_local.present_fields & DESIRED_TRACK_GENRE_MERGE)
+        merged_genre = merge_genre_strings(ct->genre, dt_local.genre);
+
+    bool changed = track_update_canonical(db,
+                                          ct,
+                                          &dt_local,
+                                          policy,
+                                          desired->source,
+                                          new_display,
+                                          &merged_genre,
+                                          tracks_fts_dirty,
+                                          &summary->track_titles_changed,
+                                          &summary->track_positions_changed,
+                                          &summary->track_genres_changed);
+
+    /* Artists replacement (diff against pre-loaded current set). */
+    if (dt_local.present_fields & DESIRED_TRACK_ARTISTS) {
+        if (!artist_credits_equal(ct->artists, dt_local.artists, dt_local.artist_count)) {
+            replace_track_artists(db, ct->id, dt_local.artists, dt_local.artist_count);
+            summary->track_artists_changed++;
+            changed = true;
+        }
+    }
+
+    g_free(new_display);
+    g_free(merged_genre);
+    return changed;
+}
+
+/* Delete current tracks whose path is absent from the desired set (Phase 2). */
+static void
+prune_missing_tracks(quadrature_db_t *db,
+                     const album_tracks_t *cur_bucket,
+                     const desired_album_state_t *d_local,
+                     reconcile_summary_t *summary,
+                     bool *tracks_fts_dirty)
+{
+    GHashTable *want = g_hash_table_new(g_str_hash, g_str_equal);
+    for (size_t i = 0; i < d_local->track_count; i++)
+        if (d_local->tracks[i].path)
+            g_hash_table_add(want, (gpointer)d_local->tracks[i].path);
+
+    GHashTableIter it;
+    gpointer k, v;
+    g_hash_table_iter_init(&it, cur_bucket->by_path);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        current_track_t *ct = v;
+        if (g_hash_table_contains(want, (const char *)k))
+            continue;
+        sqlite3_reset(db->reconcile_delete_track_by_id);
+        sqlite3_bind_int64(db->reconcile_delete_track_by_id, 1, ct->id);
+        sqlite3_step(db->reconcile_delete_track_by_id);
+        sqlite3_reset(db->reconcile_delete_track_by_id);
+        summary->tracks_deleted++;
+        *tracks_fts_dirty = true;
+    }
+    g_hash_table_destroy(want);
+}
+
 static void
 reconcile_one(quadrature_db_t *db,
               int64_t album_id,
@@ -688,84 +772,16 @@ reconcile_one(quadrature_db_t *db,
         current_track_t *ct
             = cur_bucket ? g_hash_table_lookup(cur_bucket->by_path, dt->path) : NULL;
 
-        if (!ct) {
-            int64_t new_id = insert_track(db, album_id, dt);
-            if (new_id <= 0)
-                continue;
-            if ((dt->present_fields & DESIRED_TRACK_ARTISTS) && dt->artist_count > 0)
-                replace_track_artists(db, new_id, dt->artists, dt->artist_count);
-            summary.tracks_inserted++;
-            tracks_fts_dirty = true;
-            continue;
-        }
-
-        desired_track_t dt_local = *dt;
-        if (desired->source == RECONCILE_SOURCE_TAGS && policy->respect_user_edits
-            && cur_album->mb_status == MB_STATUS_RESOLVED) {
-            dt_local.present_fields &= ~(DESIRED_TRACK_TITLE | DESIRED_TRACK_ARTISTS);
-        }
-
-        /* Artist display pre-compute (needed to diff even when we won't write it). */
-        char *new_display = NULL;
-        if (dt_local.present_fields & DESIRED_TRACK_ARTISTS)
-            new_display = build_artist_display(dt_local.artists, dt_local.artist_count);
-
-        /* Genre merge (replace-mode goes through as-is). */
-        char *merged_genre = NULL;
-        if (dt_local.present_fields & DESIRED_TRACK_GENRE_MERGE)
-            merged_genre = merge_genre_strings(ct->genre, dt_local.genre);
-
-        bool changed = track_update_canonical(db,
-                                              ct,
-                                              &dt_local,
-                                              policy,
-                                              desired->source,
-                                              new_display,
-                                              &merged_genre,
-                                              &tracks_fts_dirty,
-                                              &summary.track_titles_changed,
-                                              &summary.track_positions_changed,
-                                              &summary.track_genres_changed);
-
-        /* Artists replacement (diff against pre-loaded current set). */
-        if (dt_local.present_fields & DESIRED_TRACK_ARTISTS) {
-            if (!artist_credits_equal(ct->artists, dt_local.artists, dt_local.artist_count)) {
-                replace_track_artists(db, ct->id, dt_local.artists, dt_local.artist_count);
-                summary.track_artists_changed++;
-                changed = true;
-            }
-        }
-
-        g_free(new_display);
-        g_free(merged_genre);
-
-        if (changed)
+        if (!ct)
+            reconcile_track_insert(db, album_id, dt, &summary, &tracks_fts_dirty);
+        else if (reconcile_track_update(
+                     db, ct, dt, cur_album, desired, policy, &summary, &tracks_fts_dirty))
             summary.tracks_updated++;
     }
 
     /* --- Prune missing tracks (Phase 2 only) --- */
-    if (policy->prune_missing_tracks && cur_bucket) {
-        GHashTable *want = g_hash_table_new(g_str_hash, g_str_equal);
-        for (size_t i = 0; i < d_local.track_count; i++)
-            if (d_local.tracks[i].path)
-                g_hash_table_add(want, (gpointer)d_local.tracks[i].path);
-
-        GHashTableIter it;
-        gpointer k, v;
-        g_hash_table_iter_init(&it, cur_bucket->by_path);
-        while (g_hash_table_iter_next(&it, &k, &v)) {
-            current_track_t *ct = v;
-            if (g_hash_table_contains(want, (const char *)k))
-                continue;
-            sqlite3_reset(db->reconcile_delete_track_by_id);
-            sqlite3_bind_int64(db->reconcile_delete_track_by_id, 1, ct->id);
-            sqlite3_step(db->reconcile_delete_track_by_id);
-            sqlite3_reset(db->reconcile_delete_track_by_id);
-            summary.tracks_deleted++;
-            tracks_fts_dirty = true;
-        }
-        g_hash_table_destroy(want);
-    }
+    if (policy->prune_missing_tracks && cur_bucket)
+        prune_missing_tracks(db, cur_bucket, &d_local, &summary, &tracks_fts_dirty);
 
     /* --- Album-level field updates --- */
     summary.album_fields_changed

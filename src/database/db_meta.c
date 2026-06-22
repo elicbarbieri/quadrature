@@ -386,10 +386,7 @@ db_meta_upsert_link_type(quadrature_meta_db_t *db,
 
     sqlite3_bind_text(stmt, 1, link_type_gid, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
-    if (description)
-        sqlite3_bind_text(stmt, 3, description, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 3);
+    bind_text_or_null(stmt, 3, description);
 
     int rc = sqlite3_step(stmt);
     sqlite3_reset(stmt);
@@ -417,14 +414,8 @@ db_meta_upsert_artist(quadrature_meta_db_t *db,
 
     sqlite3_bind_text(stmt, 1, artist_mbid, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
-    if (sort_name)
-        sqlite3_bind_text(stmt, 3, sort_name, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 3);
-    if (artist_type)
-        sqlite3_bind_text(stmt, 4, artist_type, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 4);
+    bind_text_or_null(stmt, 3, sort_name);
+    bind_text_or_null(stmt, 4, artist_type);
 
     int rc = sqlite3_step(stmt);
     sqlite3_reset(stmt);
@@ -455,14 +446,8 @@ db_meta_insert_recording_link(quadrature_meta_db_t *db,
     sqlite3_bind_text(stmt, 1, recording_mbid, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, artist_mbid, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, link_type_gid, -1, SQLITE_STATIC);
-    if (entity0_credit)
-        sqlite3_bind_text(stmt, 4, entity0_credit, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 4);
-    if (attributes)
-        sqlite3_bind_text(stmt, 5, attributes, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 5);
+    bind_text_or_null(stmt, 4, entity0_credit);
+    bind_text_or_null(stmt, 5, attributes);
 
     int rc = sqlite3_step(stmt);
     sqlite3_reset(stmt);
@@ -605,31 +590,12 @@ db_meta_upsert_release(quadrature_meta_db_t *db,
 
     int p = 1;
     sqlite3_bind_text(stmt, p++, release_mbid, -1, SQLITE_STATIC);
-
-    if (release_date)
-        sqlite3_bind_text(stmt, p++, release_date, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, p++);
-    if (release_type)
-        sqlite3_bind_text(stmt, p++, release_type, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, p++);
-    if (label)
-        sqlite3_bind_text(stmt, p++, label, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, p++);
-    if (catalog_number)
-        sqlite3_bind_text(stmt, p++, catalog_number, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, p++);
-    if (barcode)
-        sqlite3_bind_text(stmt, p++, barcode, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, p++);
-    if (genres)
-        sqlite3_bind_text(stmt, p++, genres, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, p++);
+    bind_text_or_null(stmt, p++, release_date);
+    bind_text_or_null(stmt, p++, release_type);
+    bind_text_or_null(stmt, p++, label);
+    bind_text_or_null(stmt, p++, catalog_number);
+    bind_text_or_null(stmt, p++, barcode);
+    bind_text_or_null(stmt, p++, genres);
 
     int rc = sqlite3_step(stmt);
     sqlite3_reset(stmt);
@@ -735,34 +701,20 @@ db_meta_get_credits_by_artist(quadrature_meta_db_t *db,
     *count = 0;
 
     sqlite3_stmt *stmt = NULL;
-    if (link_type_gid_filter) {
-        sqlite3_prepare_v2(db->db,
-                           "SELECT r.release_mbid, r.disc_num, r.track_num,"
-                           "       lt.name, rl.attributes"
-                           " FROM recording_links rl"
-                           " JOIN recordings r ON r.recording_mbid = rl.recording_mbid"
-                           " JOIN link_types lt ON lt.link_type_gid = rl.link_type_gid"
-                           " WHERE rl.artist_mbid = ? AND rl.link_type_gid = ?"
-                           " ORDER BY r.release_mbid, r.disc_num, r.track_num",
-                           -1,
-                           &stmt,
-                           NULL);
-        sqlite3_bind_text(stmt, 1, artist_mbid, -1, SQLITE_STATIC);
+    char *sql = g_strdup_printf("SELECT r.release_mbid, r.disc_num, r.track_num,"
+                                "       lt.name, rl.attributes"
+                                " FROM recording_links rl"
+                                " JOIN recordings r ON r.recording_mbid = rl.recording_mbid"
+                                " JOIN link_types lt ON lt.link_type_gid = rl.link_type_gid"
+                                " WHERE rl.artist_mbid = ?%s"
+                                " ORDER BY r.release_mbid, r.disc_num, r.track_num",
+                                link_type_gid_filter ? " AND rl.link_type_gid = ?" : "");
+    sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL);
+    g_free(sql);
+
+    sqlite3_bind_text(stmt, 1, artist_mbid, -1, SQLITE_STATIC);
+    if (link_type_gid_filter)
         sqlite3_bind_text(stmt, 2, link_type_gid_filter, -1, SQLITE_STATIC);
-    } else {
-        sqlite3_prepare_v2(db->db,
-                           "SELECT r.release_mbid, r.disc_num, r.track_num,"
-                           "       lt.name, rl.attributes"
-                           " FROM recording_links rl"
-                           " JOIN recordings r ON r.recording_mbid = rl.recording_mbid"
-                           " JOIN link_types lt ON lt.link_type_gid = rl.link_type_gid"
-                           " WHERE rl.artist_mbid = ?"
-                           " ORDER BY r.release_mbid, r.disc_num, r.track_num",
-                           -1,
-                           &stmt,
-                           NULL);
-        sqlite3_bind_text(stmt, 1, artist_mbid, -1, SQLITE_STATIC);
-    }
 
     GArray *rows = g_array_new(FALSE, TRUE, sizeof(db_meta_artist_credit_t));
 

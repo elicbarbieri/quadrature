@@ -206,8 +206,9 @@ ffmpeg_decoder_metadata(const ffmpeg_decoder_t *dec)
     m.sample_rate = (uint32_t)dec->codec_ctx->sample_rate;
     m.channels = (uint32_t)dec->codec_ctx->ch_layout.nb_channels;
     m.bit_rate = dec->codec_ctx->bit_rate ? dec->codec_ctx->bit_rate : dec->fmt_ctx->bit_rate;
-    m.bit_depth
-        = dec->codec_ctx->bits_per_raw_sample > 0 ? (uint32_t)dec->codec_ctx->bits_per_raw_sample : 0;
+    m.bit_depth = dec->codec_ctx->bits_per_raw_sample > 0
+                      ? (uint32_t)dec->codec_ctx->bits_per_raw_sample
+                      : 0;
 
     return m;
 }

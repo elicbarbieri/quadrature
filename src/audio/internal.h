@@ -123,11 +123,11 @@ audio_format_equal(const audio_format_t *a, const audio_format_t *b)
 #define LATENCY_RB_CAPACITY  65536 /* must be power-of-2 */
 #define INTERVAL_RB_CAPACITY 8192  /* must be power-of-2; ~82s at 10ms */
 
-#define TELEMETRY_RING_TYPE(Name, ElemType, Capacity)                                              \
-    typedef struct {                                                                               \
-        ElemType samples[Capacity];                                                                \
-        uint64_t last_write_ns; /* audio-thread-only; no sync needed */                            \
-        atomic_uint write_pos;  /* release-store after each write */                               \
+#define TELEMETRY_RING_TYPE(Name, ElemType, Capacity)                   \
+    typedef struct {                                                    \
+        ElemType samples[Capacity];                                     \
+        uint64_t last_write_ns; /* audio-thread-only; no sync needed */ \
+        atomic_uint write_pos;  /* release-store after each write */    \
     } Name
 
 TELEMETRY_RING_TYPE(budget_rb_t, uint16_t, BUDGET_RB_CAPACITY);

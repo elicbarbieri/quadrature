@@ -16,7 +16,7 @@
 #include "quadrature/database.h"
 #include "quadrature/library.h"
 #include "quadrature/metadata.h"
-#include "quadrature/gpio.h"
+#include "quadrature/controller.h"
 #include "../audio/internal.h" /* For audio_devices and perf access */
 #include <string.h>
 
@@ -1250,12 +1250,12 @@ ui_window_dispose(GObject *obj)
 
     /* ── 1. Deregister external callbacks that reference this window ─────── */
 
-    /* Stop all GPIO handlers */
+    /* Stop all channel control sources */
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (w->gpio_handlers[i]) {
-            axia_gpio_stop(w->gpio_handlers[i]);
-            axia_gpio_destroy(w->gpio_handlers[i]);
-            w->gpio_handlers[i] = NULL;
+        if (w->controllers[i]) {
+            controller_stop(w->controllers[i]);
+            controller_destroy(w->controllers[i]);
+            w->controllers[i] = NULL;
         }
     }
 
@@ -1718,13 +1718,6 @@ ui_window_set_focused_channel(UiWindow *w, int ch)
 
     if (ch >= 0 && ch < MAX_CHANNELS && w->channels[ch])
         ui_channel_strip_set_focused(w->channels[ch], TRUE);
-}
-
-int
-ui_window_get_focused_channel(UiWindow *w)
-{
-    g_return_val_if_fail(UI_IS_WINDOW(w), -1);
-    return w->focused_channel;
 }
 
 void

@@ -333,9 +333,9 @@ device_enum_done(GObject *src, GAsyncResult *res, gpointer data)
             const char *gpio = app_settings_get_channel_gpio(w->settings, i);
             gtk_editable_set_text(GTK_EDITABLE(w->gpio_entries[i]), gpio ? gpio : "");
 
-            /* Initialize GPIO handler if address is configured */
+            /* Initialize the control source if an address is configured */
             if (gpio && gpio[0] != '\0') {
-                restart_gpio_handler(w, i);
+                restart_controller(w, i);
             }
         }
 

@@ -50,13 +50,6 @@ ui_selection_group_add(SelectionGroup *g, GtkListBox *list)
 }
 
 void
-ui_selection_group_remove(SelectionGroup *g, GtkListBox *list)
-{
-    g_signal_handlers_disconnect_by_func(list, on_group_row_selected, g);
-    g_ptr_array_remove(g->lists, list);
-}
-
-void
 ui_selection_group_free(SelectionGroup *g)
 {
     if (!g)
@@ -121,20 +114,6 @@ make_library_badge_label(library_cache_t *cache, int lib_idx, int max_chars)
 
     GtkWidget *badge = gtk_label_new(truncated);
     gtk_widget_add_css_class(badge, "library-badge");
-    return badge;
-}
-
-GtkWidget *
-ui_create_library_badge(library_cache_t *cache, int library_index)
-{
-    if (!cache || library_index < 0)
-        return NULL;
-    if (library_cache_get_library_count(cache) <= 1)
-        return NULL;
-
-    GtkWidget *badge = make_library_badge_label(cache, library_index, 8);
-    if (badge)
-        gtk_label_set_xalign(GTK_LABEL(badge), 0.0f);
     return badge;
 }
 
@@ -358,36 +337,6 @@ ui_list_box_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_da
         d->cbs = data->cbs;
         g_idle_add(row_activate_idle, d);
     }
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * List View Loading States
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-void
-ui_list_view_set_loading(GtkWidget *list, gboolean loading)
-{
-    g_assert(list != NULL);
-    ui_toggle_css(list, "loading", loading);
-}
-
-void
-ui_list_view_set_empty(GtkWidget *list, const char *message)
-{
-    g_assert(list != NULL);
-    g_object_set_data_full(
-        G_OBJECT(list), "empty-message", message ? g_strdup(message) : NULL, g_free);
-    gtk_widget_add_css_class(list, "empty");
-}
-
-void
-ui_list_view_set_error(GtkWidget *list, const char *message, GCallback retry_cb)
-{
-    g_assert(list != NULL);
-    g_object_set_data_full(
-        G_OBJECT(list), "error-message", message ? g_strdup(message) : NULL, g_free);
-    g_object_set_data(G_OBJECT(list), "retry-callback", retry_cb);
-    gtk_widget_add_css_class(list, "error");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

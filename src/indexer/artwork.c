@@ -69,6 +69,37 @@ get_art_priority(const char *filename)
     return -1;
 }
 
+/**
+ * Find the newest timestamped atlas ("{thumb_size}px-artwork-*.atlas") in
+ * artwork_dir. Lexicographic max works because the timestamp suffix is
+ * zero-padded and monotonic. Returns a heap path (caller g_free()s) or NULL.
+ */
+char *
+artwork_find_latest_atlas(const char *artwork_dir, int thumb_size)
+{
+    GDir *dir = g_dir_open(artwork_dir, 0, NULL);
+    if (!dir)
+        return NULL;
+
+    char prefix[32];
+    snprintf(prefix, sizeof(prefix), "%dpx-artwork-", thumb_size);
+
+    char *latest = NULL;
+    const char *name;
+    while ((name = g_dir_read_name(dir))) {
+        if (!g_str_has_prefix(name, prefix) || !g_str_has_suffix(name, ".atlas"))
+            continue;
+        char *full = g_build_filename(artwork_dir, name, NULL);
+        if (!latest || strcmp(full, latest) > 0) {
+            g_free(latest);
+            latest = full;
+        } else
+            g_free(full);
+    }
+    g_dir_close(dir);
+    return latest;
+}
+
 // -----------------------------------------------------------------------------
 // Artwork Discovery (file-local)
 // -----------------------------------------------------------------------------
@@ -463,28 +494,6 @@ artwork_atlas_reader_lookup(const artwork_atlas_reader_t *reader, int64_t album_
     return -1;
 }
 
-bool
-artwork_atlas_reader_has_no_art(const artwork_atlas_reader_t *reader, int64_t album_id)
-{
-    if (!reader || !reader->no_art_ids || reader->no_art_count == 0)
-        return false;
-    return bsearch(
-               &album_id, reader->no_art_ids, reader->no_art_count, sizeof(int64_t), compare_int64)
-           != NULL;
-}
-
-uint32_t
-artwork_atlas_reader_get_no_art_count(const artwork_atlas_reader_t *reader)
-{
-    return reader ? reader->no_art_count : 0;
-}
-
-size_t
-artwork_atlas_reader_get_count(const artwork_atlas_reader_t *reader)
-{
-    return reader ? reader->header.count : 0;
-}
-
 uint32_t
 artwork_atlas_reader_get_pixel_stride(const artwork_atlas_reader_t *reader)
 {
@@ -501,14 +510,6 @@ uint8_t
 artwork_atlas_reader_get_channels(const artwork_atlas_reader_t *reader)
 {
     return reader ? reader->header.channels : 0;
-}
-
-int64_t
-artwork_atlas_reader_get_album_id_at(const artwork_atlas_reader_t *reader, size_t index)
-{
-    if (!reader || !reader->album_ids || index >= reader->header.count)
-        return -1;
-    return reader->album_ids[index];
 }
 
 const uint8_t *
@@ -1034,35 +1035,6 @@ artwork_atlas_process_album(artwork_atlas_builder_t *builder,
     return QUADRATURE_OK;
 }
 
-quadrature_result_t
-artwork_atlas_add_cached_pixels(artwork_atlas_builder_t *builder,
-                                int64_t album_id,
-                                const void *pixel_data,
-                                size_t pixel_size)
-{
-    if (!builder || !pixel_data || pixel_size != builder->pixel_stride) {
-        return QUADRATURE_ERROR_INVALID_PARAM;
-    }
-
-    uint8_t *data_copy = g_malloc(pixel_size);
-    memcpy(data_copy, pixel_data, pixel_size);
-
-    g_mutex_lock(&builder->entries_lock);
-    if (builder->entry_count >= builder->entry_capacity) {
-        builder->entry_capacity *= 2;
-        builder->entries
-            = g_realloc(builder->entries, builder->entry_capacity * sizeof(atlas_build_entry_t));
-    }
-    atlas_build_entry_t *entry = &builder->entries[builder->entry_count++];
-    entry->album_id = album_id;
-    entry->pixel_data = data_copy;
-    builder->dirty = true;
-    g_mutex_unlock(&builder->entries_lock);
-
-    atomic_fetch_add(&builder->processed_count, 1);
-    return QUADRATURE_OK;
-}
-
 void
 artwork_atlas_builder_get_progress(artwork_atlas_builder_t *builder,
                                    size_t *processed_out,
@@ -1084,22 +1056,6 @@ artwork_atlas_builder_get_profile(artwork_atlas_builder_t *builder, artwork_atla
     out->find_ns = atomic_load(&builder->prof_find_ns);
     out->resize_ns = atomic_load(&builder->prof_resize_ns);
     out->fallback_count = atomic_load(&builder->prof_fallback_count);
-}
-
-bool
-artwork_atlas_builder_is_cancelled(artwork_atlas_builder_t *builder)
-{
-    if (!builder)
-        return true;
-    return atomic_load(&builder->cancel_flag) != 0;
-}
-
-void
-artwork_atlas_builder_cancel(artwork_atlas_builder_t *builder)
-{
-    if (!builder)
-        return;
-    atomic_store(&builder->cancel_flag, 1);
 }
 
 quadrature_result_t

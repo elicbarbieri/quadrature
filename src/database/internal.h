@@ -112,6 +112,17 @@ struct quadrature_db {
 void db_lock(quadrature_db_t *db);
 void db_unlock(quadrature_db_t *db);
 
+/* Bind text with SQLITE_STATIC, or SQL NULL when val is a NULL pointer. The
+ * bound buffer must outlive the step (caller-owned). */
+static inline void
+bind_text_or_null(sqlite3_stmt *stmt, int idx, const char *val)
+{
+    if (val)
+        sqlite3_bind_text(stmt, idx, val, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, idx);
+}
+
 // Statement preparation
 void db_prepare_stmts(quadrature_db_t *db);
 void db_finalize_stmts(quadrature_db_t *db);

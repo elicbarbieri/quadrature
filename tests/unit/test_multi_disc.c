@@ -266,7 +266,8 @@ Test(multi_disc, db_track_disc_num_basic)
     quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = -1;
+    cr_assert_eq(db_get_or_create_artist(db, "Test Artist", NULL, NULL, &artist_id), QUADRATURE_OK);
     int64_t album_id = test_insert_album(db, "/music/album", "Album", artist_id, 2024);
     test_insert_track_full(
         db, album_id, "/music/album/cd1/track1.mp3", "Track 1", 1, 1, 180000, NULL, NULL, NULL, 0);
@@ -296,7 +297,8 @@ Test(multi_disc, db_track_disc_num_default)
     quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = -1;
+    cr_assert_eq(db_get_or_create_artist(db, "Test Artist", NULL, NULL, &artist_id), QUADRATURE_OK);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
     int64_t track_id = test_insert_track_full(db,
                                               album_id,
@@ -326,7 +328,8 @@ Test(multi_disc, db_track_disc_num_update)
     quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = -1;
+    cr_assert_eq(db_get_or_create_artist(db, "Test Artist", NULL, NULL, &artist_id), QUADRATURE_OK);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
     int64_t track_id = test_insert_track_full(
         db, album_id, "/music/track.mp3", "Original Title", 5, 3, 180000, NULL, NULL, NULL, 0);
@@ -357,7 +360,8 @@ Test(multi_disc, db_track_multi_disc_same_track_num)
     quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = -1;
+    cr_assert_eq(db_get_or_create_artist(db, "Test Artist", NULL, NULL, &artist_id), QUADRATURE_OK);
     int64_t album_id = test_insert_album(db, "/music/album", "Double Album", artist_id, 2024);
     int64_t tid_d1t1 = test_insert_track_full(
         db, album_id, "/music/album/cd1/01.mp3", "Opening", 1, 1, 180000, NULL, NULL, NULL, 0);
@@ -410,7 +414,8 @@ Test(multi_disc, db_track_high_disc_numbers)
     quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = -1;
+    cr_assert_eq(db_get_or_create_artist(db, "Test Artist", NULL, NULL, &artist_id), QUADRATURE_OK);
     int64_t album_id = test_insert_album(db, "/music/boxset", "Complete Works", artist_id, 2024);
 
     int64_t disc15_tid = 0;

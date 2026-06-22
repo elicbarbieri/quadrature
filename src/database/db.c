@@ -127,15 +127,7 @@ static const stmt_entry_t PREPARED_STMTS[] = {
     STMT(delete_artist, "DELETE FROM artists WHERE id = ?"),
 
     /* ── Cached reads ──────────────────────────────────────────────────── */
-    STMT(read_track_by_id,
-         "SELECT t.id, t.title, a.name, al.title, t.path, t.duration_ms, t.track_num, "
-         "       t.disc_num, t.year, t.album_id, ta.artist_id, t.genre, al.path, "
-         "       t.artist_display "
-         "FROM tracks t "
-         "LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.position = 0 "
-         "LEFT JOIN artists a ON a.id = ta.artist_id "
-         "LEFT JOIN albums al ON t.album_id = al.id "
-         "WHERE t.id = ?"),
+    STMT(read_track_by_id, "SELECT " TRACK_SELECT_COLS TRACK_SELECT_FROM " WHERE t.id = ?"),
     STMT(read_album_by_id,
          "SELECT al.id, al.title, a.name, al.artist_id, al.year, "
          "  (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS track_count, "

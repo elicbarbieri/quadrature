@@ -99,6 +99,16 @@ create_artist_button(int64_t artist_id, const char *name, RowCallbacks *callback
     return btn;
 }
 
+GtkWidget *
+create_subtitle_label(const char *text)
+{
+    GtkWidget *lbl = gtk_label_new(text ? text : "");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(lbl, "library-row-subtitle");
+    return lbl;
+}
+
 static void
 on_overflow_btn_clicked(GtkButton *button, gpointer user_data)
 {

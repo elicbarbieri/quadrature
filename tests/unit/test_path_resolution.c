@@ -68,7 +68,7 @@ insert_album_track(quadrature_db_t *db,
                    const char *track_path,
                    const char *track_title)
 {
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = test_goc_artist(db, "Test Artist", NULL, NULL);
     cr_assert(artist_id > 0);
 
     int64_t album_id = test_insert_album(db, album_path, album_title, artist_id, 2024);

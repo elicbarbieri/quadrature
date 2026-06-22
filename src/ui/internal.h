@@ -13,7 +13,7 @@
 #include "quadrature/indexer.h"
 #include "quadrature/metadata.h"
 #include "quadrature/settings.h"
-#include "quadrature/gpio.h"
+#include "quadrature/controller.h"
 #include "quadrature/ui.h"
 
 G_BEGIN_DECLS
@@ -171,7 +171,6 @@ ui_channel_strip_new(int channel_id, audio_pipeline_t *pipeline, library_cache_t
 void ui_channel_strip_update(UiChannelStrip *strip, audio_pipeline_t *pipeline);
 void ui_channel_strip_set_spectrum_visible(UiChannelStrip *strip, gboolean visible);
 void ui_channel_strip_set_device_name(UiChannelStrip *strip, const char *device_name);
-int ui_channel_strip_get_channel_id(UiChannelStrip *strip);
 /* Minimal track descriptor for load/display operations.
  * Borrows its string fields from the caller; fields remain valid only for the
  * duration of the call. Cache owners must dup them before storing. */
@@ -192,19 +191,13 @@ DeviceState ui_channel_strip_get_device_state(UiChannelStrip *strip);
 void ui_channel_strip_set_mode(UiChannelStrip *strip, ChannelMode mode);
 ChannelMode ui_channel_strip_get_mode(UiChannelStrip *strip);
 void ui_channel_strip_set_focused(UiChannelStrip *strip, gboolean focused);
-gboolean ui_channel_strip_get_focused(UiChannelStrip *strip);
 gboolean ui_channel_strip_is_active(UiChannelStrip *strip);
 
 gboolean ui_channel_strip_has_track(UiChannelStrip *strip);
 
-/* Track context query - uses LibraryCache for album context */
-int64_t ui_channel_strip_get_current_track_id(UiChannelStrip *strip);
-
 /* Track navigation */
 gboolean ui_channel_strip_previous_track(UiChannelStrip *strip);
 gboolean ui_channel_strip_next_track(UiChannelStrip *strip);
-gboolean ui_channel_strip_can_go_previous(UiChannelStrip *strip);
-gboolean ui_channel_strip_can_go_next(UiChannelStrip *strip);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * TransportBar Widget
@@ -236,7 +229,6 @@ GtkWidget *ui_window_new(GtkApplication *app,
 void ui_window_navigate_to(UiWindow *win, const char *view);
 void ui_window_set_spectrum_visible(UiWindow *win, gboolean visible);
 void ui_window_set_focused_channel(UiWindow *win, int channel);
-int ui_window_get_focused_channel(UiWindow *win);
 void ui_window_clear_focus(UiWindow *win);
 
 /* Toast notifications */
@@ -329,7 +321,6 @@ G_DECLARE_FINAL_TYPE(LibraryMonitor, library_monitor, LIBRARY, MONITOR, GObject)
 LibraryMonitor *library_monitor_new(library_cache_t *cache, app_settings_t *settings);
 void library_monitor_start(LibraryMonitor *self);
 void library_monitor_stop(LibraryMonitor *self);
-void library_monitor_check_now(LibraryMonitor *self);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * ProportionalBox Widget
@@ -408,6 +399,9 @@ void quadrature_overflow_box_clear_all(QuadratureOverflowBox *self);
 GtkWidget *create_artist_button(int64_t artist_id, const char *name, RowCallbacks *callbacks);
 GtkWidget *create_artist_overflow_button(const GPtrArray *artists, RowCallbacks *callbacks);
 
+/* Left-aligned, ellipsized "library-row-subtitle" label (text may be NULL/""). */
+GtkWidget *create_subtitle_label(const char *text);
+
 void on_artist_button_clicked(GtkButton *button, gpointer user_data);
 void on_album_button_clicked(GtkButton *button, gpointer user_data);
 void on_credit_mbid_navigate(GtkButton *button, gpointer user_data);
@@ -447,7 +441,6 @@ typedef struct _SelectionGroup SelectionGroup;
 
 SelectionGroup *ui_selection_group_new(void);
 void ui_selection_group_add(SelectionGroup *group, GtkListBox *list);
-void ui_selection_group_remove(SelectionGroup *group, GtkListBox *list);
 void ui_selection_group_free(SelectionGroup *group);
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -488,8 +481,6 @@ void ui_smooth_scroll_attach(GtkScrolledWindow *sw);
  * Functions for creating consistent list rows from LibraryCache data.
  * All row creation functions store entity IDs for handler access.
  * ═══════════════════════════════════════════════════════════════════════════ */
-
-GtkWidget *ui_create_library_badge(library_cache_t *cache, int library_index);
 
 typedef enum {
     BADGE_ENTITY_ARTIST,
@@ -663,14 +654,6 @@ GtkWidget *ui_create_album_detail_card(const library_album_info_t *album,
                                        RowCallbacks *artist_cbs);
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * List View Loading States
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-void ui_list_view_set_loading(GtkWidget *list, gboolean loading);
-void ui_list_view_set_empty(GtkWidget *list, const char *message);
-void ui_list_view_set_error(GtkWidget *list, const char *message, GCallback retry_cb);
-
-/* ═══════════════════════════════════════════════════════════════════════════
  * UiWindow Struct Definition (shared with search/, libraries/, settings/)
  *
  * Placed at end of header so all types it references (IndexerController,
@@ -824,8 +807,8 @@ struct _UiWindow {
     GtkStringList *device_models[MAX_CHANNELS]; /* Per-channel (filtered) */
     int device_model_map[MAX_CHANNELS][64];     /* model index → device_names index (-1 = "None") */
 
-    /* Axia GPIO handlers (one per channel) */
-    axia_gpio_t *gpio_handlers[MAX_CHANNELS];
+    /* Channel control sources (one per channel) */
+    controller_t *controllers[MAX_CHANNELS];
     GtkStringList *format_model;
     GtkStringList *quantum_model;
     char **device_names;

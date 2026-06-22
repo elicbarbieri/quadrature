@@ -324,7 +324,7 @@ Test(mb_resolve, full_resolve)
     quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(NULL, false, &db), QUADRATURE_OK);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = test_goc_artist(db, "Test Artist", NULL, NULL);
     cr_assert_gt(artist_id, 0LL, "failed to create artist");
 
     int64_t album_id = test_insert_album(db, "/fake/test", "Test Album", artist_id, 2020);

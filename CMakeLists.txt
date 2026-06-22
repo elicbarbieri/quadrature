@@ -195,14 +195,14 @@ if(QUADRATURE_USE_LIBPQ)
     target_link_libraries(quadrature_indexer_core PRIVATE PkgConfig::LIBPQ anl)
 endif()
 
-# === quadrature_gpio ========================================================
+# === quadrature_controller ==================================================
 
-add_library(quadrature_gpio STATIC
-    src/gpio/axia_gpio.c
-    src/gpio/axia_protocol.c
+add_library(quadrature_controller STATIC
+    src/controller/controller.c
+    src/controller/axia.c
 )
-target_include_directories(quadrature_gpio PUBLIC ${CMAKE_SOURCE_DIR}/src/gpio)
-target_link_libraries(quadrature_gpio PUBLIC quadrature_headers PkgConfig::GLIB Threads::Threads)
+target_include_directories(quadrature_controller PUBLIC ${CMAKE_SOURCE_DIR}/src/controller)
+target_link_libraries(quadrature_controller PUBLIC quadrature_headers PkgConfig::GLIB Threads::Threads)
 
 # === quadrature-cli =========================================================
 
@@ -269,7 +269,7 @@ if(BUILD_UI)
         src/ui/libraries/indexer_bridge.c
         src/ui/settings/settings_view.c
         src/ui/settings/device_settings.c
-        src/ui/settings/gpio_bridge.c
+        src/ui/settings/controller_bridge.c
         src/ui/library/filter_bar.c
         src/ui/library/views.c
         src/ui/library/lazy_list.c
@@ -294,7 +294,7 @@ if(BUILD_UI)
     )
     target_link_libraries(quadrature PRIVATE
         quadrature_indexer_core
-        quadrature_gpio
+        quadrature_controller
         PkgConfig::GTK4
         PkgConfig::LIBADWAITA
     )
@@ -347,8 +347,10 @@ if(BUILD_TESTS)
     unit_test(test_metadata_search        INCLUDES ${S}/indexer ${S}/indexer/musicbrainz ${S}/database
         LIBS quadrature_indexer_core quadrature_engine)
 
-    unit_test(test_axia_gpio INCLUDES ${S}/gpio
-        LIBS quadrature_gpio PkgConfig::GLIB Threads::Threads)
+    unit_test(test_axia_protocol INCLUDES ${S}/controller
+        LIBS quadrature_controller PkgConfig::GLIB Threads::Threads)
+    unit_test(test_controller INCLUDES ${S}/controller
+        LIBS quadrature_controller PkgConfig::GLIB Threads::Threads)
 endif()
 
 # === Install ================================================================

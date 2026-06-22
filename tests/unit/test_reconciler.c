@@ -38,7 +38,8 @@ build_untagged_album(quadrature_db_t *db,
     cr_assert_eq(db_begin_transaction(db), QUADRATURE_OK);
 
     /* Artist */
-    int64_t artist_id = db_get_or_create_artist(db, artist_name, NULL, NULL);
+    int64_t artist_id = -1;
+    db_get_or_create_artist(db, artist_name, NULL, NULL, &artist_id);
     cr_assert_gt(artist_id, 0);
     if (artist_id_out)
         *artist_id_out = artist_id;

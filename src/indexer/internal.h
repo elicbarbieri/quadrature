@@ -301,6 +301,12 @@ quadrature_result_t artwork_find(const char *album_dir, char *art_path, size_t p
  */
 quadrature_result_t artwork_find_bytes(const char *album_dir, uint8_t **data_out, size_t *size_out);
 
+/**
+ * Find the newest timestamped atlas ("{thumb_size}px-artwork-*.atlas") in
+ * artwork_dir. Returns a heap path (caller g_free()s) or NULL if none.
+ */
+char *artwork_find_latest_atlas(const char *artwork_dir, int thumb_size);
+
 // =============================================================================
 // Artwork Atlas Format
 //
@@ -434,22 +440,6 @@ void artwork_atlas_builder_get_progress(artwork_atlas_builder_t *builder,
                                         size_t *errors_out);
 
 /**
- * Check if cancellation was requested (thread-safe).
- *
- * @param builder The atlas builder handle
- * @return true if cancelled
- */
-bool artwork_atlas_builder_is_cancelled(artwork_atlas_builder_t *builder);
-
-/**
- * Request cancellation (thread-safe).
- * Workers should check is_cancelled periodically.
- *
- * @param builder The atlas builder handle
- */
-void artwork_atlas_builder_cancel(artwork_atlas_builder_t *builder);
-
-/**
  * Finish building and write the atlas file.
  * Must be called after all worker threads have finished.
  * Sorts entries by album_id and writes atomically.
@@ -466,15 +456,6 @@ quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t *builde
  * @param builder The atlas builder handle (may be NULL)
  */
 void artwork_atlas_builder_destroy(artwork_atlas_builder_t *builder);
-
-/**
- * Add pre-generated raw pixel data to the atlas (for preserved entries).
- * pixel_data must be exactly pixel_stride bytes (thumb_size * thumb_size * channels).
- */
-quadrature_result_t artwork_atlas_add_cached_pixels(artwork_atlas_builder_t *builder,
-                                                    int64_t album_id,
-                                                    const void *pixel_data,
-                                                    size_t pixel_size);
 
 /**
  * Per-album profiling stats accumulated by the builder (thread-safe reads).
@@ -505,20 +486,13 @@ void artwork_atlas_reader_close(artwork_atlas_reader_t *reader);
 /** Binary search for album_id.  Returns index (≥0) or -1 if not found.  O(log n). */
 int32_t artwork_atlas_reader_lookup(const artwork_atlas_reader_t *reader, int64_t album_id);
 
-size_t artwork_atlas_reader_get_count(const artwork_atlas_reader_t *reader);
 uint32_t artwork_atlas_reader_get_pixel_stride(const artwork_atlas_reader_t *reader);
 uint32_t artwork_atlas_reader_get_thumb_size(const artwork_atlas_reader_t *reader);
 uint8_t artwork_atlas_reader_get_channels(const artwork_atlas_reader_t *reader);
-int64_t artwork_atlas_reader_get_album_id_at(const artwork_atlas_reader_t *reader, size_t index);
 
 /** Zero-copy pointer to raw pixel data at index (into mmap). Valid until reader is closed. */
 const uint8_t *artwork_atlas_reader_get_pixels_at(const artwork_atlas_reader_t *reader,
                                                   size_t index);
-
-/** Check if an album is in the known-no-artwork set (O(log n) binary search). */
-bool artwork_atlas_reader_has_no_art(const artwork_atlas_reader_t *reader, int64_t album_id);
-
-uint32_t artwork_atlas_reader_get_no_art_count(const artwork_atlas_reader_t *reader);
 
 /** Total mmap'd file size in bytes (for stats/diagnostics). */
 size_t artwork_atlas_reader_get_file_size(const artwork_atlas_reader_t *reader);
@@ -636,7 +610,6 @@ int32_t artist_atlas_reader_lookup(const artist_atlas_reader_t *reader, const ui
 /**
  * Check if an artist is in the known-no-artwork set.
  */
-bool artist_atlas_reader_is_no_art(const artist_atlas_reader_t *reader, const uint8_t uuid[16]);
 
 /**
  * Get raw pixel data at the given index (zero-copy into mmap).
@@ -649,16 +622,6 @@ const uint8_t *artist_atlas_reader_get_pixels(const artist_atlas_reader_t *reade
 uint32_t artist_atlas_reader_get_thumb_size(const artist_atlas_reader_t *reader);
 uint32_t artist_atlas_reader_get_pixel_stride(const artist_atlas_reader_t *reader);
 uint8_t artist_atlas_reader_get_channels(const artist_atlas_reader_t *reader);
-
-/**
- * Get the number of artwork entries.
- */
-uint32_t artist_atlas_reader_get_art_count(const artist_atlas_reader_t *reader);
-
-/**
- * Get the number of no-art entries.
- */
-uint32_t artist_atlas_reader_get_no_art_count(const artist_atlas_reader_t *reader);
 
 // =============================================================================
 // CRC32 (atlas file integrity)
@@ -712,12 +675,6 @@ atlas_crc32(const uint8_t *data, size_t len)
  * into 16-byte binary form. Returns true on success.
  */
 bool mbid_parse(const char *str, uint8_t out[16]);
-
-/**
- * Format a 16-byte binary UUID into a 36-char string (plus NUL terminator).
- * out must be at least 37 bytes.
- */
-void mbid_format(const uint8_t uuid[16], char out[37]);
 
 // =============================================================================
 // Artist Art (fanart.tv)

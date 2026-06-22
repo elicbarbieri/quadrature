@@ -756,12 +756,6 @@ filter_bar_get_search_mode(const FilterBarState *fb)
     return fb->search_mode;
 }
 
-uint32_t
-filter_bar_get_selected_roles_mask(const FilterBarState *fb)
-{
-    return fb->selected_roles_mask;
-}
-
 const char **
 filter_bar_get_selected_role_gids(const FilterBarState *fb, int *count_out)
 {

@@ -531,14 +531,6 @@ errors_view_new(quadrature_db_t *db)
 }
 
 void
-errors_view_set_db(GtkWidget *view, quadrature_db_t *db)
-{
-    ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
-    g_assert(vd != NULL);
-    vd->db = db;
-}
-
-void
 errors_view_refresh(GtkWidget *view)
 {
     ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
@@ -562,31 +554,6 @@ errors_view_refresh(GtkWidget *view)
     gtk_label_set_text(GTK_LABEL(vd->subtitle_label), buf);
 
     build_root_model(vd);
-}
-
-void
-errors_view_set_callbacks(GtkWidget *view,
-                          void (*on_path)(const char *path, gpointer data),
-                          gpointer user_data)
-{
-    ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
-    g_assert(vd != NULL);
-
-    vd->on_navigate_to_path = on_path;
-    vd->user_data = user_data;
-}
-
-size_t
-errors_view_get_count(GtkWidget *view)
-{
-    ErrorsViewData *vd = g_object_get_data(G_OBJECT(view), ERRORS_VIEW_DATA_KEY);
-    g_assert(vd != NULL);
-    if (!vd->db)
-        return 0;
-
-    size_t count = 0;
-    db_get_error_count(vd->db, vd->path_filter, &count);
-    return count;
 }
 
 void

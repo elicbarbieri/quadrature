@@ -244,24 +244,6 @@ perf_grouped_hist_new(const char *title, const char *unit, int num_groups, int n
 }
 
 void
-perf_grouped_hist_set_group(PerfGroupedHist *hist,
-                            int group,
-                            const char *label,
-                            const GdkRGBA *color)
-{
-    g_return_if_fail(PERF_IS_GROUPED_HIST(hist));
-    if (group < 0 || group >= GROUPED_HIST_MAX_GROUPS)
-        return;
-
-    if (label) {
-        g_strlcpy(hist->group_labels[group], label, sizeof(hist->group_labels[group]));
-        hist->group_labels[group][sizeof(hist->group_labels[group]) - 1] = '\0';
-    }
-    if (color)
-        hist->group_colors[group] = *color;
-}
-
-void
 perf_grouped_hist_set_data(PerfGroupedHist *hist,
                            int group,
                            const uint32_t *bucket_counts,
@@ -275,19 +257,6 @@ perf_grouped_hist_set_data(PerfGroupedHist *hist,
 
     int n = (count > GROUPED_HIST_MAX_BUCKETS) ? GROUPED_HIST_MAX_BUCKETS : count;
     memcpy(hist->data[group], bucket_counts, n * sizeof(uint32_t));
-    gtk_widget_queue_draw(GTK_WIDGET(hist));
-}
-
-void
-perf_grouped_hist_set_num_buckets(PerfGroupedHist *hist, int num_buckets)
-{
-    g_return_if_fail(PERF_IS_GROUPED_HIST(hist));
-    if (num_buckets < 1)
-        num_buckets = 1;
-    if (num_buckets > GROUPED_HIST_MAX_BUCKETS)
-        num_buckets = GROUPED_HIST_MAX_BUCKETS;
-    hist->num_buckets = num_buckets;
-    memset(hist->data, 0, sizeof(hist->data));
     gtk_widget_queue_draw(GTK_WIDGET(hist));
 }
 

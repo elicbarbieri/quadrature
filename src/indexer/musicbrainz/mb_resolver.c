@@ -185,8 +185,11 @@ mb_credits_to_track_artists(quadrature_db_t *db,
         }
 
         if (artist_id == 0) {
-            artist_id
-                = db_get_or_create_artist(db, credits[i].name, credits[i].sort_name, credits[i].id);
+            if (db_get_or_create_artist(
+                    db, credits[i].name, credits[i].sort_name, credits[i].id, &artist_id)
+                != QUADRATURE_OK)
+                g_warning("mb_resolver: failed to get/create artist '%s'; credit left unlinked",
+                          credits[i].name ? credits[i].name : "(null)");
 
             // Populate cache
             if (artist_cache && credits[i].id && credits[i].id[0] && artist_id > 0) {
@@ -969,8 +972,14 @@ resolve_album_prepare(mb_resolver_t *ctx,
                 album_artist_id = (int64_t)GPOINTER_TO_SIZE(cached);
         }
         if (album_artist_id == 0) {
-            album_artist_id = db_get_or_create_artist(
-                ctx->db, release->artists[0].name, release->artists[0].sort_name, mbid);
+            if (db_get_or_create_artist(ctx->db,
+                                        release->artists[0].name,
+                                        release->artists[0].sort_name,
+                                        mbid,
+                                        &album_artist_id)
+                != QUADRATURE_OK)
+                g_warning("mb_resolver: failed to get/create album artist '%s'",
+                          release->artists[0].name ? release->artists[0].name : "(null)");
             if (artist_cache && mbid && mbid[0] && album_artist_id > 0)
                 g_hash_table_insert(
                     artist_cache, g_strdup(mbid), GSIZE_TO_POINTER((gsize)album_artist_id));
@@ -982,8 +991,13 @@ resolve_album_prepare(mb_resolver_t *ctx,
                 album_artist_id = (int64_t)GPOINTER_TO_SIZE(cached);
         }
         if (album_artist_id == 0) {
-            album_artist_id = db_get_or_create_artist(
-                ctx->db, "Various Artists", "Various Artists", VA_MUSICBRAINZ_ID);
+            if (db_get_or_create_artist(ctx->db,
+                                        "Various Artists",
+                                        "Various Artists",
+                                        VA_MUSICBRAINZ_ID,
+                                        &album_artist_id)
+                != QUADRATURE_OK)
+                g_warning("mb_resolver: failed to get/create 'Various Artists' stub");
             if (artist_cache && album_artist_id > 0)
                 g_hash_table_insert(artist_cache,
                                     g_strdup(VA_MUSICBRAINZ_ID),

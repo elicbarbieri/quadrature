@@ -241,14 +241,6 @@ indexer_scan(indexer_t *indexer, const char *library_root, const char *data_root
 void indexer_cancel(indexer_t *indexer);
 
 /**
- * Check if indexer is running.
- *
- * @param indexer Indexer instance
- * @return true if running
- */
-bool indexer_is_running(const indexer_t *indexer);
-
-/**
  * Wait for current scan to complete.
  *
  * @param indexer Indexer instance

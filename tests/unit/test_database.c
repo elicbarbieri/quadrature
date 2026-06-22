@@ -132,7 +132,7 @@ Test(database, transaction_rollback)
     quadrature_db_t *db = NULL;
     db_open(NULL, false, &db);
 
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = test_goc_artist(db, "Test Artist", NULL, NULL);
     int64_t album_id = test_insert_album(db, "/music", "Album", artist_id, 2024);
     test_insert_track_full(
         db, album_id, "/music/committed.mp3", "Committed", 1, 1, 100000, NULL, NULL, NULL, 0);
@@ -191,13 +191,12 @@ Test(database, artist_normalized_rename_preserves_id)
     db_open(NULL, false, &db);
 
     /* Phase 2: create via simple name (no MBID) */
-    int64_t id_phase2 = db_get_or_create_artist(db, "2 Mex", NULL, NULL);
+    int64_t id_phase2 = test_goc_artist(db, "2 Mex", NULL, NULL);
     cr_assert_gt(id_phase2, 0, "Phase 2 artist should be created");
     cr_assert_eq(count_artists(db), 1, "Should have exactly 1 artist");
 
     /* Phase 4: resolve via MB — name differs by space but normalizes the same */
-    int64_t id_phase4
-        = db_get_or_create_artist(db, "2Mex", "2Mex", "696c9bcb-1234-5678-abcd-000000000001");
+    int64_t id_phase4 = test_goc_artist(db, "2Mex", "2Mex", "696c9bcb-1234-5678-abcd-000000000001");
     cr_assert_gt(id_phase4, 0, "MB artist should be found/created");
     cr_assert_eq(
         id_phase4, id_phase2, "Normalized rename should return original id (no orphan created)");
@@ -212,8 +211,8 @@ Test(database, artist_mb_lookup_by_mbid_is_idempotent)
     quadrature_db_t *db = NULL;
     db_open(NULL, false, &db);
 
-    int64_t id1 = db_get_or_create_artist(db, "Madlib", "Madlib", "some-mbid-aaa");
-    int64_t id2 = db_get_or_create_artist(db, "Madlib", "Madlib", "some-mbid-aaa");
+    int64_t id1 = test_goc_artist(db, "Madlib", "Madlib", "some-mbid-aaa");
+    int64_t id2 = test_goc_artist(db, "Madlib", "Madlib", "some-mbid-aaa");
     cr_assert_eq(id1, id2, "Same MBID should always return the same artist_id");
     cr_assert_eq(count_artists(db), 1, "One artist row for repeated MBID lookup");
 
@@ -226,10 +225,10 @@ Test(database, artist_mb_exact_nocase_rename)
     quadrature_db_t *db = NULL;
     db_open(NULL, false, &db);
 
-    int64_t id_phase2 = db_get_or_create_artist(db, "ac/dc", NULL, NULL);
+    int64_t id_phase2 = test_goc_artist(db, "ac/dc", NULL, NULL);
     cr_assert_gt(id_phase2, 0);
 
-    int64_t id_mb = db_get_or_create_artist(db, "AC/DC", "AC/DC", "mbid-acdc-001");
+    int64_t id_mb = test_goc_artist(db, "AC/DC", "AC/DC", "mbid-acdc-001");
     cr_assert_eq(id_mb, id_phase2, "NOCASE rename should preserve artist_id");
     cr_assert_eq(count_artists(db), 1);
 
@@ -243,8 +242,8 @@ Test(database, prune_orphan_artists_removes_unreferenced)
     db_open(NULL, false, &db);
 
     /* Create two artists */
-    int64_t orphan_id = db_get_or_create_artist(db, "OrphanArtist", NULL, NULL);
-    int64_t linked_id = db_get_or_create_artist(db, "LinkedArtist", NULL, NULL);
+    int64_t orphan_id = test_goc_artist(db, "OrphanArtist", NULL, NULL);
+    int64_t linked_id = test_goc_artist(db, "LinkedArtist", NULL, NULL);
     cr_assert_gt(orphan_id, 0);
     cr_assert_gt(linked_id, 0);
 
@@ -282,8 +281,8 @@ Test(database, prune_orphan_artists_preserves_album_artist)
     quadrature_db_t *db = NULL;
     db_open(NULL, false, &db);
 
-    int64_t orphan_id = db_get_or_create_artist(db, "TrueOrphan", NULL, NULL);
-    int64_t album_artist_id = db_get_or_create_artist(db, "AlbumOnlyArtist", NULL, NULL);
+    int64_t orphan_id = test_goc_artist(db, "TrueOrphan", NULL, NULL);
+    int64_t album_artist_id = test_goc_artist(db, "AlbumOnlyArtist", NULL, NULL);
     cr_assert_gt(orphan_id, 0);
     cr_assert_gt(album_artist_id, 0);
 
@@ -374,7 +373,7 @@ Test(database, idempotent_reopen)
     /* Open, write data, close */
     quadrature_db_t *db = NULL;
     cr_assert_eq(db_open(path, false, &db), QUADRATURE_OK);
-    int64_t artist_id = db_get_or_create_artist(db, "Migration Test Artist", NULL, NULL);
+    int64_t artist_id = test_goc_artist(db, "Migration Test Artist", NULL, NULL);
     cr_assert_gt(artist_id, 0);
     db_close(db);
 
@@ -383,7 +382,7 @@ Test(database, idempotent_reopen)
     cr_assert_eq(db_open(path, false, &db), QUADRATURE_OK);
 
     /* Data intact */
-    int64_t artist_id2 = db_get_or_create_artist(db, "Migration Test Artist", NULL, NULL);
+    int64_t artist_id2 = test_goc_artist(db, "Migration Test Artist", NULL, NULL);
     cr_assert_eq(artist_id, artist_id2);
 
     /* Version still correct */
@@ -448,9 +447,9 @@ test_prune_albums(quadrature_db_t *db, const int64_t *ids, size_t count)
 static void
 build_prune_fixture(quadrature_db_t *db, int64_t *disc_out, int64_t *ram_out, int64_t *sect_out)
 {
-    int64_t dp = db_get_or_create_artist(
-        db, "Daft Punk", "Daft Punk", "056e4f3e-d505-4dad-8ec1-d04f521cbb56");
-    int64_t gf = db_get_or_create_artist(db, "Golden Features", NULL, NULL);
+    int64_t dp
+        = test_goc_artist(db, "Daft Punk", "Daft Punk", "056e4f3e-d505-4dad-8ec1-d04f521cbb56");
+    int64_t gf = test_goc_artist(db, "Golden Features", NULL, NULL);
 
     int64_t disc_id = test_insert_album(db, "DaftPunk/Discovery", "Discovery", dp, 2001);
     int64_t ram_id = test_insert_album(db, "DaftPunk/RAM", "Random Access Memories", dp, 2013);
@@ -629,7 +628,7 @@ Test(database, mtime_batch_writes_size)
     db_open(NULL, false, &db);
 
     /* Create an artist and album */
-    int64_t artist_id = db_get_or_create_artist(db, "Test Artist", NULL, NULL);
+    int64_t artist_id = test_goc_artist(db, "Test Artist", NULL, NULL);
     cr_assert_gt(artist_id, 0);
 
     int64_t album_id = test_insert_album(db, "test/album", "Test Album", artist_id, 2024);

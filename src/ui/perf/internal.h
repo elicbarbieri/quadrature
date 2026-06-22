@@ -111,7 +111,6 @@ void perf_stacked_area_chart_set_data(PerfStackedAreaChart *chart,
                                       int series,
                                       const double *values,
                                       size_t count);
-void perf_stacked_area_chart_set_y_max(PerfStackedAreaChart *chart, double max_mb);
 void perf_stacked_area_chart_set_hover(PerfStackedAreaChart *chart,
                                        double interval_ms,
                                        const char *unit);
@@ -133,7 +132,6 @@ void perf_timeline_chart_add_event(PerfTimelineChart *chart,
                                    int severity,
                                    const char *type,
                                    const char *tooltip);
-void perf_timeline_chart_clear(PerfTimelineChart *chart);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * PerfGroupedHist Widget — Grouped bar histogram
@@ -144,15 +142,10 @@ G_DECLARE_FINAL_TYPE(PerfGroupedHist, perf_grouped_hist, PERF, GROUPED_HIST, Gtk
 
 GtkWidget *
 perf_grouped_hist_new(const char *title, const char *unit, int num_groups, int num_buckets);
-void perf_grouped_hist_set_group(PerfGroupedHist *hist,
-                                 int group,
-                                 const char *label,
-                                 const GdkRGBA *color);
 void perf_grouped_hist_set_data(PerfGroupedHist *hist,
                                 int group,
                                 const uint32_t *bucket_counts,
                                 int count);
-void perf_grouped_hist_set_num_buckets(PerfGroupedHist *hist, int num_buckets);
 void perf_grouped_hist_set_bucket_label(PerfGroupedHist *hist, int bucket, const char *label);
 void perf_grouped_hist_set_group_visible(PerfGroupedHist *hist, int group, gboolean visible);
 void perf_grouped_hist_set_log_scale(PerfGroupedHist *hist, gboolean log_scale);

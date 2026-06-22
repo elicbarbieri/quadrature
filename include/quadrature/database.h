@@ -312,10 +312,13 @@ quadrature_result_t db_end_read(quadrature_db_t *db);
  * ============================================================================= */
 
 /**
- * Get the next scan generation number (MAX(scan_generation) + 1).
- * Returns 1 for an empty indexer_errors table.
+ * Get the next scan generation number (MAX(scan_generation) + 1), written to
+ * *out_generation (1 for an empty indexer_errors table).
+ *
+ * Returns QUADRATURE_OK on success, QUADRATURE_ERROR_INVALID_PARAM for NULL
+ * db/out, or QUADRATURE_ERROR_INTERNAL if the query fails to prepare.
  */
-int64_t db_get_next_error_generation(quadrature_db_t *db);
+quadrature_result_t db_get_next_error_generation(quadrature_db_t *db, int64_t *out_generation);
 
 quadrature_result_t db_get_error_count(quadrature_db_t *db, const char *path_prefix, size_t *count);
 quadrature_result_t db_get_errors_page(quadrature_db_t *db,

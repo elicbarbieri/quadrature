@@ -351,10 +351,7 @@ ui_create_album_row_shell(void)
         gtk_box_append(GTK_BOX(primary_artists_box), btn);
         g_object_set_data(G_OBJECT(row), "w-artist-btn", btn);
 
-        GtkWidget *lbl = gtk_label_new("");
-        gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
-        gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
-        gtk_widget_add_css_class(lbl, "library-row-subtitle");
+        GtkWidget *lbl = create_subtitle_label("");
         gtk_widget_set_visible(lbl, FALSE);
         gtk_box_append(GTK_BOX(primary_artists_box), lbl);
         g_object_set_data(G_OBJECT(row), "w-artist-label", lbl);
@@ -530,10 +527,7 @@ ui_create_album_row(const library_album_info_t *album,
             gtk_box_append(GTK_BOX(primary_artists_box), btn);
         } else {
             /* Plain label for Various Artists or when no callbacks */
-            GtkWidget *artist_label = gtk_label_new(album->artist_name);
-            gtk_label_set_xalign(GTK_LABEL(artist_label), 0.0);
-            gtk_label_set_ellipsize(GTK_LABEL(artist_label), PANGO_ELLIPSIZE_END);
-            gtk_widget_add_css_class(artist_label, "library-row-subtitle");
+            GtkWidget *artist_label = create_subtitle_label(album->artist_name);
             if (ui_is_various_artists(album->artist_name))
                 gtk_widget_add_css_class(artist_label, "text-dim");
             gtk_box_append(GTK_BOX(primary_artists_box), artist_label);
