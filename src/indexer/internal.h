@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <sys/stat.h>
 
 // =============================================================================
@@ -447,7 +448,10 @@ void artwork_atlas_builder_get_progress(artwork_atlas_builder_t *builder,
  * @param builder The atlas builder handle
  * @return QUADRATURE_OK on success
  */
-quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t *builder);
+/* out_changed (nullable): set true iff the atlas file was actually (re)written;
+ * false when the content was byte-identical to disk or nothing was dirty. */
+quadrature_result_t artwork_atlas_builder_finish(artwork_atlas_builder_t *builder,
+                                                 bool *out_changed);
 
 /**
  * Destroy the atlas builder and free resources.
@@ -577,7 +581,10 @@ quadrature_result_t artist_atlas_builder_add_no_art(artist_atlas_builder_t *buil
 /**
  * Finish building and write the atlas atomically (temp file + rename).
  */
-quadrature_result_t artist_atlas_builder_finish(artist_atlas_builder_t *builder);
+/* out_changed (nullable): set true iff the atlas file was actually (re)written;
+ * false when the freshly-built content was byte-identical to disk. */
+quadrature_result_t artist_atlas_builder_finish(artist_atlas_builder_t *builder,
+                                                bool *out_changed);
 
 /**
  * Destroy the builder and free resources.
@@ -666,6 +673,30 @@ atlas_crc32(const uint8_t *data, size_t len)
     return atlas_crc32_final(atlas_crc32_update(ATLAS_CRC32_INIT, data, len));
 }
 
+/**
+ * Read the trailing 4-byte CRC32 footer of an existing atlas file. Both atlas
+ * writers append the whole-content CRC32 as the last 4 bytes. Returns true and
+ * sets *out_crc on success; false if the file is missing or too short.
+ *
+ * Used by the *_builder_finish functions to skip the rewrite (and the
+ * downstream "artwork-updated" signal) when a freshly-built atlas is
+ * byte-identical to what is already on disk — i.e. nothing actually changed.
+ */
+static inline bool
+atlas_read_existing_crc(const char *path, uint32_t *out_crc)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    bool ok = (fseek(f, -(long)sizeof(uint32_t), SEEK_END) == 0);
+    uint32_t crc = 0;
+    ok = ok && (fread(&crc, sizeof(crc), 1, f) == 1);
+    fclose(f);
+    if (ok)
+        *out_crc = crc;
+    return ok;
+}
+
 // =============================================================================
 // UUID Helpers
 // =============================================================================
@@ -719,8 +750,13 @@ typedef struct {
 
 typedef void (*artist_art_progress_cb)(const artist_art_progress_t *, void *);
 
+/* out_changed (nullable): set true iff the artist atlas was actually rewritten
+ * (new/changed art), so callers can gate UI refresh on a real content change. */
 quadrature_result_t
-artist_art_fetch_all(const artist_art_config_t *config, artist_art_progress_cb cb, void *user_data);
+artist_art_fetch_all(const artist_art_config_t *config,
+                     artist_art_progress_cb cb,
+                     void *user_data,
+                     bool *out_changed);
 
 // =============================================================================
 // Artist Bios (Wikipedia via Wikidata)

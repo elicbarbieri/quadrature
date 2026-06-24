@@ -17,6 +17,7 @@
 
 #include "internal.h"
 #include "quadrature/library.h"
+#include "quadrature/thread_util.h"
 
 #include <adwaita.h>
 #include <errno.h>
@@ -264,6 +265,9 @@ int
 main(int argc, char *argv[])
 {
     AppData data = { 0 };
+
+    /* main() is the GTK/GLib main-loop thread; name it for the profiler. */
+    quad_set_thread_name("ui-main");
 
     /* Force GTK4's Vulkan renderer — fastest GSK backend on modern GPUs and
      * skips the GL probe at startup. FALSE = don't override an explicit

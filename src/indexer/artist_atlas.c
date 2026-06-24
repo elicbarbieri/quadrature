@@ -318,8 +318,11 @@ artist_atlas_builder_add_no_art(artist_atlas_builder_t *builder, const uint8_t u
 }
 
 quadrature_result_t
-artist_atlas_builder_finish(artist_atlas_builder_t *builder)
+artist_atlas_builder_finish(artist_atlas_builder_t *builder, bool *out_changed)
 {
+    if (out_changed)
+        *out_changed = false;
+
     if (!builder)
         return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -377,6 +380,7 @@ artist_atlas_builder_finish(artist_atlas_builder_t *builder)
     }
 
     // Compute and append CRC32 trailing checksum
+    uint32_t final_crc = 0;
     {
         long body_size = ftell(f);
         if (body_size < 0)
@@ -387,14 +391,26 @@ artist_atlas_builder_finish(artist_atlas_builder_t *builder)
             g_free(buf);
             goto write_error;
         }
-        uint32_t crc = atlas_crc32(buf, body_size);
+        final_crc = atlas_crc32(buf, body_size);
         g_free(buf);
         fseek(f, 0, SEEK_END);
-        if (fwrite(&crc, sizeof(crc), 1, f) != 1)
+        if (fwrite(&final_crc, sizeof(final_crc), 1, f) != 1)
             goto write_error;
     }
 
     fclose(f);
+
+    /* Content-hash gate: skip the rewrite (and the downstream "artwork-updated"
+     * signal) when the freshly-built atlas is byte-identical to disk. The
+     * fanart.tv re-fetch path re-adds already-cached art every run, flipping the
+     * dirty flag even when nothing actually changed — this CRC compare absorbs
+     * that so an unchanged library stops triggering UI refreshes. */
+    uint32_t existing_crc;
+    if (atlas_read_existing_crc(builder->atlas_path, &existing_crc) && existing_crc == final_crc) {
+        unlink(builder->temp_path);
+        g_info("artist_atlas: content identical (crc 0x%08X) — skipping rewrite", final_crc);
+        return QUADRATURE_OK;
+    }
 
     // Atomic rename
     if (rename(builder->temp_path, builder->atlas_path) != 0) {
@@ -409,6 +425,8 @@ artist_atlas_builder_finish(artist_atlas_builder_t *builder)
            header.no_art_count,
            header.thumb_size,
            header.thumb_size);
+    if (out_changed)
+        *out_changed = true;
     return QUADRATURE_OK;
 
 write_error:

@@ -18,6 +18,12 @@
         buildDeps = with pkgs; [ cmake pkg-config ninja ];
         uiDeps    = with pkgs; [ gtk4 libadwaita gsettings-desktop-schemas glib ];
         devTools  = with pkgs; [ gdb valgrind criterion ];
+        # Sampling profilers that render in a browser / SVG (no native GL GUI —
+        # works on hybrid-GPU Wayland where Tracy/hotspot's EGL backends fail).
+        # `make debug` keeps frame pointers; see docs/architecture/PROFILING.md.
+        # (speedscope is omitted — broken npm build in current nixpkgs; use the
+        # hosted app at https://speedscope.app instead.)
+        profileTools = with pkgs; [ samply flamegraph ];
 
         mkPackage = preset: pkgs.stdenv.mkDerivation {
           pname = if preset == "release" then "quadrature" else "quadrature-${preset}";
@@ -67,7 +73,7 @@
 
         devShells.default = pkgs.mkShell {
           name = "quadrature-dev";
-          buildInputs = coreDeps ++ buildDeps ++ uiDeps ++ devTools
+          buildInputs = coreDeps ++ buildDeps ++ uiDeps ++ devTools ++ profileTools
             ++ [
               pkgs.dconf
               pkgs.libglvnd

@@ -11,6 +11,7 @@
 #include "internal.h"
 #include "quadrature/library.h"
 #include "quadrature/settings.h"
+#include "quadrature/thread_util.h"
 
 #include <glib.h>
 #include <string.h>
@@ -187,6 +188,8 @@ decode_worker(gpointer data, gpointer user_data)
     audio_cache_t *cache = task->cache;
     audio_buffer_t *buffer = task->buffer;
     bool success = false;
+
+    quad_set_thread_name("decode");
 
     g_debug(
         "audio_cache: decoding track %" G_GINT64_FORMAT " (%s)", buffer->track_id, buffer->path);

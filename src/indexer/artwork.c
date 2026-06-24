@@ -1059,8 +1059,11 @@ artwork_atlas_builder_get_profile(artwork_atlas_builder_t *builder, artwork_atla
 }
 
 quadrature_result_t
-artwork_atlas_builder_finish(artwork_atlas_builder_t *builder)
+artwork_atlas_builder_finish(artwork_atlas_builder_t *builder, bool *out_changed)
 {
+    if (out_changed)
+        *out_changed = false;
+
     if (!builder) {
         return QUADRATURE_ERROR_INVALID_PARAM;
     }
@@ -1145,6 +1148,17 @@ artwork_atlas_builder_finish(artwork_atlas_builder_t *builder)
         return QUADRATURE_ERROR_INTERNAL;
     }
 
+    /* Content-hash gate: if the freshly-built atlas is byte-identical to what's
+     * already on disk (same trailing CRC32), drop the temp file and report no
+     * change — this suppresses the downstream "artwork-updated" signal when the
+     * dirty flag was set but nothing actually differs. */
+    uint32_t existing_crc;
+    if (atlas_read_existing_crc(builder->atlas_path, &existing_crc) && existing_crc == final_crc) {
+        unlink(builder->temp_path);
+        g_info("Atlas finish: content identical (crc 0x%08X) — skipping rewrite", final_crc);
+        return QUADRATURE_OK;
+    }
+
     if (rename(builder->temp_path, builder->atlas_path) != 0) {
         g_warning("Failed to rename atlas file: %s -> %s", builder->temp_path, builder->atlas_path);
         unlink(builder->temp_path);
@@ -1156,6 +1170,8 @@ artwork_atlas_builder_finish(artwork_atlas_builder_t *builder)
            builder->entry_count,
            builder->no_art_count);
 
+    if (out_changed)
+        *out_changed = true;
     return QUADRATURE_OK;
 }
 

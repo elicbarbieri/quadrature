@@ -3,6 +3,7 @@
 #include "internal.h"
 #include "quadrature/audio.h"
 #include "quadrature/settings.h"
+#include "quadrature/thread_util.h"
 #include <glib.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -269,6 +270,11 @@ static void
 on_process(void *userdata)
 {
     audio_player_t *p = (audio_player_t *)userdata;
+
+    /* All players' streams run on the single PipeWire thread-loop thread; name
+     * it (once — the guard means no syscall on the hot path) so the profiler
+     * labels this thread's samples "audio-rt". */
+    quad_set_thread_name("audio-rt");
 
     /* Invariants: PipeWire only invokes us once the stream is connected, which
      * means the player is fully constructed (back-ref + DSP engine wired). */
@@ -629,6 +635,17 @@ on_monitor_process(void *userdata)
     struct spa_data *d = &b->buffer->datas[0];
     float *in = d->data;
     if (!in || d->chunk->size == 0) {
+        pw_stream_queue_buffer(p->monitor_stream, b);
+        return;
+    }
+
+    /* Only run the (expensive) cava/FFTW spectrum pass while this channel is
+     * actually playing. The sink monitor keeps delivering buffers when the
+     * channel is stopped/paused (device silence, or other apps' output), and
+     * running the full FFT on that is wasted CPU on the real-time thread —
+     * profiling showed ~16% of total CPU burned here on an idle player. We
+     * still drain + requeue the buffer so the capture stream doesn't back up. */
+    if (atomic_load(&p->state) != CHANNEL_PLAYING) {
         pw_stream_queue_buffer(p->monitor_stream, b);
         return;
     }

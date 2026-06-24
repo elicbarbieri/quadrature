@@ -588,8 +588,14 @@ download_album_cover(SoupSession *session,
 // =============================================================================
 
 quadrature_result_t
-artist_art_fetch_all(const artist_art_config_t *config, artist_art_progress_cb cb, void *user_data)
+artist_art_fetch_all(const artist_art_config_t *config,
+                     artist_art_progress_cb cb,
+                     void *user_data,
+                     bool *out_changed)
 {
+    if (out_changed)
+        *out_changed = false;
+
     if (!config || !config->artwork_dir || !config->db)
         return QUADRATURE_ERROR_INVALID_PARAM;
 
@@ -1081,9 +1087,16 @@ artist_art_fetch_all(const artist_art_config_t *config, artist_art_progress_cb c
         }
 
         if (dirty) {
-            res = artist_atlas_builder_finish(atlas);
+            bool atlas_changed = false;
+            res = artist_atlas_builder_finish(atlas, &atlas_changed);
             if (res == QUADRATURE_OK) {
-                g_message("Phase 7: global artist atlas updated: %s", config->atlas_path);
+                if (atlas_changed) {
+                    if (out_changed)
+                        *out_changed = true;
+                    g_message("Phase 7: global artist atlas updated: %s", config->atlas_path);
+                } else {
+                    g_message("Phase 7: global artist atlas content unchanged");
+                }
             } else {
                 g_warning("Phase 7: failed to write global artist atlas");
             }

@@ -16,6 +16,7 @@
 
 #include "quadrature/indexer.h"
 #include "quadrature/database.h"
+#include "quadrature/thread_util.h"
 #include "internal.h"
 
 #include <glib.h>
@@ -403,6 +404,8 @@ struct indexer {
     atomic_size_t artist_art_downloaded;
     atomic_size_t album_covers_downloaded; // fanart.tv album covers (triggers atlas rebuild)
     atomic_int fanart_error;
+    bool last_artwork_changed; // whether the most recent phase_artwork rewrote the atlas
+                               // (worker-thread only; gates the artwork-updated signal)
 
     // Artist bio config (Phase 8)
     bool fetch_artist_bios;
@@ -1199,6 +1202,7 @@ metadata_worker(gpointer data, gpointer user_data)
 {
     metadata_work_t *work = data;
     indexer_t *idx = user_data;
+    quad_set_thread_name("index-meta");
     if (atomic_load(&idx->cancel_flag))
         return;
 
@@ -1832,6 +1836,8 @@ artwork_worker(gpointer data, gpointer user_data)
     artwork_work_t *work = data;
     artwork_atlas_builder_t *builder = user_data;
 
+    quad_set_thread_name("index-art");
+
     bool used_fallback = false;
     quadrature_result_t res
         = artwork_atlas_process_album(builder, work->album_id, work->path, &used_fallback);
@@ -1897,6 +1903,10 @@ rotate_atlas_files(const char *artwork_dir, int thumb_size, int keep_count)
 static void
 phase_artwork(indexer_t *idx, processed_album_t *albums, size_t album_count)
 {
+    /* Reset the change flag; set true only if the atlas is actually rewritten.
+     * Early returns below correctly leave it false (nothing changed). */
+    idx->last_artwork_changed = false;
+
     if (!idx->process_artwork)
         return;
 
@@ -1985,7 +1995,7 @@ phase_artwork(indexer_t *idx, processed_album_t *albums, size_t album_count)
     size_t total_to_process = album_count + promoted_ids->len;
 
     if (total_to_process == 0) {
-        artwork_atlas_builder_finish(builder);
+        artwork_atlas_builder_finish(builder, &idx->last_artwork_changed);
         artwork_atlas_builder_destroy(builder);
         g_array_free(promoted_ids, TRUE);
         g_ptr_array_free(promoted_paths, TRUE);
@@ -2052,7 +2062,7 @@ phase_artwork(indexer_t *idx, processed_album_t *albums, size_t album_count)
 
     int64_t finish_start = profile_now_ns();
     if (!atomic_load(&idx->cancel_flag)) {
-        if (artwork_atlas_builder_finish(builder) == QUADRATURE_OK) {
+        if (artwork_atlas_builder_finish(builder, &idx->last_artwork_changed) == QUADRATURE_OK) {
             /* Rotate: keep only the 3 most recent atlas files */
             rotate_atlas_files(artwork_dir, idx->art_size, 3);
 
@@ -2417,7 +2427,9 @@ phase_artist_art(indexer_t *idx)
     };
 
     g_message("Phase 7: starting artist art fetch (fanart.tv)");
-    quadrature_result_t art_res = artist_art_fetch_all(&art_config, on_artist_art_progress, idx);
+    bool artist_atlas_changed = false;
+    quadrature_result_t art_res
+        = artist_art_fetch_all(&art_config, on_artist_art_progress, idx, &artist_atlas_changed);
 
     if (art_res != QUADRATURE_OK) {
         g_warning("Phase 7: artist_art_fetch_all returned error %d", art_res);
@@ -2427,8 +2439,9 @@ phase_artist_art(indexer_t *idx)
     g_free(atlas_path);
     g_free(atlas_lock_path);
     g_free(atlas_dir);
-    // Artist atlas updated — reload so new artist thumbnails appear
-    notify_event(idx, INDEXER_ARTWORK_UPDATED);
+    // Only reload artist thumbnails in the UI if the atlas actually changed.
+    if (artist_atlas_changed)
+        notify_event(idx, INDEXER_ARTWORK_UPDATED);
 }
 
 /* Phase 8: artist bios (Wikipedia via Wikidata). No-op when fetch_artist_bios is off. */
@@ -2481,6 +2494,8 @@ indexer_worker(void *arg)
 {
     indexer_t *idx = arg;
     idx->scan_timestamp = time(NULL);
+
+    quad_set_thread_name("indexer");
 
     // Open per-library database (in data_root, not library_root)
     const char *dr = get_data_root(idx);
@@ -2546,7 +2561,9 @@ indexer_worker(void *arg)
     phase_artwork(idx, processed, processed_count);
     if (atomic_load(&idx->cancel_flag))
         goto cancelled;
-    notify_event(idx, INDEXER_ARTWORK_UPDATED);
+    // Only refresh the UI if the album atlas actually changed (content hash differs)
+    if (idx->last_artwork_changed)
+        notify_event(idx, INDEXER_ARTWORK_UPDATED);
 
     // Phase 5+6: FINGERPRINT + RESOLVE (concurrent, background, non-blocking for UI)
     phase_resolve(idx);
@@ -2565,7 +2582,8 @@ indexer_worker(void *arg)
         g_message("Phase 7b: %zu album covers downloaded — rebuilding album atlas",
                   atomic_load(&idx->album_covers_downloaded));
         phase_artwork(idx, NULL, 0);
-        notify_event(idx, INDEXER_ARTWORK_UPDATED);
+        if (idx->last_artwork_changed)
+            notify_event(idx, INDEXER_ARTWORK_UPDATED);
     }
     if (atomic_load(&idx->cancel_flag))
         goto cancelled;

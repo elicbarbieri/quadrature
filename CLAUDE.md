@@ -16,10 +16,15 @@ Guidance for Claude Code when working with this codebase.
 
 ```bash
 nix develop     # Enter dev environment
-make debug      # Build and run with DEBUG logging
+make debug      # Build and run with DEBUG logging (links the Tracy profiler)
 make test       # Run tests
 make clean      # Clean build
 ```
+
+Profiling: the debug build keeps frame pointers and names its threads, so
+`samply record ./build/dev/quadrature` produces a flamegraph across all threads
+in the Firefox Profiler web UI (no profiler is linked into the app). Full
+details: `docs/architecture/PROFILING.md`.
 
 ## Directory Structure
 

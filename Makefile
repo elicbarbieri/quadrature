@@ -1,17 +1,13 @@
 .DEFAULT_GOAL := help
 .DELETE_ON_ERROR:
-.PHONY: debug asan test test-http valgrind clean db-clean db-nuke help
+.PHONY: debug test test-http valgrind clean db-clean db-nuke help
 
+# Debug build (frame pointers kept). Profile it with `samply record
+# ./build/dev/quadrature` — see docs/architecture/PROFILING.md.
 debug:
 	@cmake --preset=dev
 	@cmake --build --preset=dev
 	@G_MESSAGES_DEBUG=quadrature exec ./build/dev/quadrature
-
-asan:
-	@cmake --preset=asan
-	@cmake --build --preset=asan
-	@G_MESSAGES_DEBUG=quadrature ASAN_OPTIONS=halt_on_error=1:abort_on_error=1 \
-		exec ./build/asan/quadrature
 
 valgrind:
 	@cmake --preset=dev
@@ -66,7 +62,6 @@ db-nuke:
 
 help:
 	@echo "make debug      configure+build dev preset, run with G_MESSAGES_DEBUG"
-	@echo "make asan       same but with AddressSanitizer + UBSan"
 	@echo "make valgrind   dev build under Valgrind"
 	@echo "make test       configure+build dev preset, run ctest"
 	@echo "make test-http  build the HTTP-only preset, run ctest serially"

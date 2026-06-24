@@ -109,6 +109,14 @@ add_compile_definitions(
     QUADRATURE_VERSION="${PROJECT_VERSION}"
 )
 
+# === Profiling (Debug) ======================================================
+# Keep frame pointers in Debug builds so external samplers (samply, perf →
+# Firefox Profiler / speedscope) produce clean, cheap-to-unwind call stacks.
+# -g is already added by the Debug build type. See docs/architecture/PROFILING.md.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-fno-omit-frame-pointer)
+endif()
+
 # === Public headers (INTERFACE) =============================================
 
 add_library(quadrature_headers INTERFACE)
